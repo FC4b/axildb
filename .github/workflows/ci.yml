@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  build:
+    name: build (${{ matrix.label }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Anti-coupling guard: the public workspace must build with NO
+          # private atlas-server checkout present (it never is on a clone).
+          # The only cross-boundary seam is the generic CanonicalPublisher
+          # trait in axil-core.
+          - label: minimal (core)
+            cmd: cargo check -p axil-cli --no-default-features --features core
+          - label: default
+            cmd: cargo check --workspace --all-targets
+          - label: full
+            cmd: cargo check -p axil-cli --no-default-features --features full
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: ${{ matrix.cmd }}
+
+  test:
+    name: test (model-free crates)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Embedding / rerank integration tests download ONNX models at runtime;
+      # they run locally and nightly. PR CI covers the model-free storage
+      # engines, extensions, and adapters for fast, deterministic signal.
+      - name: cargo test (storage + graph + fts + timeseries + ql + scip)
+        run: >
+          cargo test
+          -p axil-core
+          -p axil-graph
+          -p axil-fts
+          -p axil-timeseries
+          -p axil-ql
+          -p axil-scip

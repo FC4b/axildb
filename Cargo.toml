@@ -1,0 +1,104 @@
+[package]
+name = "axildb"
+version = "0.7.11"
+edition = "2021"
+publish = false
+
+[workspace]
+# Phase 17 layout — crates are grouped by extensibility tier.
+# See docs/src/extending/overview.md for the three-tier taxonomy.
+members = [
+    "crates/axil-core",
+    # Tier 1 — Engines (storage substrates, implement the Plugin trait)
+    "crates/engines/axil-vector",
+    "crates/engines/axil-graph",
+    "crates/engines/axil-fts",
+    "crates/engines/axil-timeseries",
+    # Tier 2 — Extensions (capabilities built on Engines)
+    "crates/extensions/axil-memory",
+    "crates/extensions/axil-indexer",
+    "crates/extensions/axil-rerank",
+    "crates/extensions/axil-scip",
+    "crates/extensions/axil-docs",
+    "crates/extensions/axil-checkpoint",
+    "crates/extensions/axil-workspace",
+    # Tier 3 — Adapters (interface to the outside world)
+    "crates/adapters/axil-mcp",
+    "crates/adapters/axil-ql",
+    "crates/adapters/axil-cli",
+    # Workspace-wide tests (not tier-classified)
+    "crates/axil-tests",
+]
+# Benchmark crates live under `benchmarks/` and are intentionally gitignored
+# (see .gitignore). They are not workspace members so clean checkouts still
+# build; developers can `cargo build --manifest-path benchmarks/<name>/Cargo.toml`
+# on demand when the dir is populated locally.
+exclude = [
+    "benchmarks/longmemeval",
+    "benchmarks/convomem",
+    "benchmarks/locomo",
+    "benchmarks/criterion-suite",
+    "benchmarks/vector-latency",
+    "benchmarks/sqlite-compare",
+]
+resolver = "2"
+
+[dependencies]
+axil-core = { path = "crates/axil-core" }
+axil-vector = { path = "crates/engines/axil-vector", optional = true }
+axil-graph = { path = "crates/engines/axil-graph", optional = true }
+axil-memory = { path = "crates/extensions/axil-memory", optional = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tempfile = { workspace = true }
+chrono = { workspace = true }
+
+[features]
+default = []
+vector = ["dep:axil-vector"]
+embed = ["vector", "axil-vector/embed"]
+graph = ["dep:axil-graph"]
+memory = ["dep:axil-memory"]
+
+# Examples that exercise optional plugins must declare the feature they
+# need, so `cargo test --workspace` (default features = none) skips them
+# instead of aborting the whole build on an unresolved optional crate.
+# basic_crud and query_builder need only axil-core — left auto-discovered.
+[[example]]
+name = "vector_search"
+required-features = ["embed"]
+
+[[example]]
+name = "graph_queries"
+required-features = ["graph"]
+
+[[example]]
+name = "agent_memory"
+required-features = ["memory"]
+
+[workspace.package]
+version = "0.7.11"
+edition = "2021"
+license = "PolyForm-Noncommercial-1.0.0"
+repository = "https://github.com/FC4b/axildb"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+anyhow = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+chrono = { version = "0.4", features = ["serde"] }
+redb = "3"
+ulid = "1"
+tempfile = "3"
+parking_lot = "0.12"
+toml = "0.8"
+ort = { version = "=2.0.0-rc.10", default-features = false }
+tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
+rustyline = "15"
+sha2 = "0.10"
+ureq = "3"
+axum = "0.8"
+tower-http = { version = "0.6", features = ["cors"] }
+indicatif = "0.17"

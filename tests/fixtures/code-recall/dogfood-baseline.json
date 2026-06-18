@@ -1,0 +1,47 @@
+{
+  "corpus": {
+    "indexed_files": 234,
+    "indexed_proxies": 2316,
+    "indexed_symbols": 895
+  },
+  "git_commit": "f520c48e867e61aa79d0c93b43edadbcf58e2aec",
+  "indexed_at": "2026-04-26T17:03:05.703724+00:00",
+  "strategies": [
+    {
+      "fp_at_3": 0.20000000298023224,
+      "mean_context_tokens": 3.200000047683716,
+      "mean_raw_tokens_avoided": 560193.8125,
+      "mrr": 0.0,
+      "p50_ms": 5.783082962036133,
+      "p95_ms": 2494.699462890625,
+      "queries": 5,
+      "strategy": "baseline_indexer",
+      "top1_file_hit_rate": 0.0,
+      "top3_symbol_hit_rate": 0.0
+    },
+    {
+      "fp_at_3": 0.800000011920929,
+      "mean_context_tokens": 80.0,
+      "mean_raw_tokens_avoided": 546661.8125,
+      "mrr": 0.20000000298023224,
+      "p50_ms": 5.3842082023620605,
+      "p95_ms": 5.589749813079834,
+      "queries": 5,
+      "strategy": "structural_proxies",
+      "top1_file_hit_rate": 0.20000000298023224,
+      "top3_symbol_hit_rate": 0.20000000298023224
+    },
+    {
+      "fp_at_3": 0.800000011920929,
+      "mean_context_tokens": 80.0,
+      "mean_raw_tokens_avoided": 546661.8125,
+      "mrr": 0.20000000298023224,
+      "p50_ms": 14.816875457763672,
+      "p95_ms": 16.18804168701172,
+      "queries": 5,
+      "strategy": "proxies_plus_pointer_memories",
+      "top1_file_hit_rate": 0.20000000298023224,
+      "top3_symbol_hit_rate": 0.20000000298023224
+    }
+  ]
+}

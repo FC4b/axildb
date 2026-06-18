@@ -1,0 +1,25 @@
+╔══════════════════════════════════════════════════╗
+║  LongMemEval Benchmark for Axil                 ║
+╠══════════════════════════════════════════════════╣
+║  Variant:  s                                     ║
+║  Strategy: recall                                ║
+║  Rerank:   crossencoder                          ║
+║  Top-K:    5                                     ║
+║  Data:     benchmarks/longmemeval/data\longmemeval_s_cleaned.json║
+╚══════════════════════════════════════════════════╝
+
+[1/3] Loading dataset...
+       500 questions loaded, evaluating 150
+[2/3] Loading embedder (bge-small)...
+[axil-vector] CUDA execution provider enabled
+       4 worker thread(s)
+[3/4] Evaluating 150 questions...
+    [timing] db=0.1s prep=0.0s insert=224.5s fts=4.2s sessions=53
+[rerank] CUDA execution provider enabled
+    [timing] db=0.1s prep=0.0s insert=231.3s fts=4.3s sessions=47
+[rerank] CUDA execution provider enabled
+    [timing] db=0.1s prep=0.0s insert=232.6s fts=5.1s sessions=47
+[rerank] CUDA execution provider enabled
+    [timing] db=0.1s prep=0.0s insert=235.5s fts=4.5s sessions=48
+    [timing] query=11.8s total=240.6s
+       1/150[rerank] CUDA execution provider enabled

@@ -1,0 +1,49 @@
+[package]
+name = "axil-vector"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Vector search plugin for Axil (HNSW + embeddings)"
+
+[dependencies]
+axil-core = { path = "../../axil-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+redb = { workspace = true }
+instant-distance = "0.6"
+parking_lot = { workspace = true }
+sha2 = { workspace = true }
+
+# Embedding dependencies (behind feature flag)
+ort = { workspace = true, features = ["download-binaries", "std"], optional = true }
+tokenizers = { workspace = true, optional = true }
+
+# HTTP client for model downloads (replaces external curl dependency)
+ureq = "3"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+tempfile = { workspace = true }
+
+[[bench]]
+name = "vector_benchmarks"
+harness = false
+
+[features]
+default = []
+embed = ["dep:ort", "dep:tokenizers"]
+# CUDA execution provider for ONNX Runtime. Uses `load-dynamic` so we
+# don't statically link ort_sys (avoids MSVC STL symbol mismatches with
+# the cuda-variant prebuilt binaries on older VS Build Tools).
+# Runtime needs CUDA Toolkit 12.x + cuDNN 9.x — ort 2.0-rc.10 bundles
+# ONNX Runtime 1.22, whose CUDA provider links `cudnn64_9.dll` (cuDNN 8
+# is NOT compatible). The EP is registered with `error_on_failure`, so a
+# missing cuDNN fails registration and the embedder falls through to
+# DirectML/CPU instead of silently degrading.
+cuda = ["embed", "ort/cuda", "ort/load-dynamic"]
+# DirectML execution provider — works on any DX12 GPU on Windows 10/11
+# (NVIDIA / AMD / Intel) without CUDA Toolkit or cuDNN. `DirectML.dll`
+# already ships with the OS.
+directml = ["embed", "ort/directml", "ort/load-dynamic"]

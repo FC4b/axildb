@@ -1,0 +1,79 @@
+╔══════════════════════════════════════════════════╗
+║  LongMemEval Benchmark for Axil                 ║
+╠══════════════════════════════════════════════════╣
+║  Variant:  s                                     ║
+║  Strategy: recall-qtc                            ║
+║  Rerank:   off                                   ║
+║  Top-K:    5                                     ║
+║  Data:     benchmarks/longmemeval/data\longmemeval_s_cleaned.json║
+╚══════════════════════════════════════════════════╝
+
+[1/3] Loading dataset...
+       500 questions loaded, evaluating 30
+[2/3] Loading embedder (bge-small)...
+[axil-vector] CUDA execution provider enabled
+       4 worker thread(s)
+[3/4] Evaluating 30 questions...
+    [timing] db=0.1s prep=0.0s insert=412.0s fts=8.7s sessions=53
+    [timing] query=3.3s total=424.1s
+       1/30    [timing] db=0.1s prep=0.0s insert=429.4s fts=14.8s sessions=49
+    [timing] query=3.0s total=447.3s
+    [timing] db=0.2s prep=0.0s insert=458.2s fts=12.6s sessions=45
+    [timing] db=0.2s prep=0.0s insert=458.2s fts=14.2s sessions=50
+    [timing] query=3.5s total=474.4s
+    [timing] query=9.0s total=481.6s
+    [timing] db=0.2s prep=0.0s insert=334.9s fts=8.2s sessions=45
+    [timing] query=21.7s total=365.0s
+    [timing] db=0.2s prep=0.0s insert=415.9s fts=13.5s sessions=50
+    [timing] query=9.5s total=439.1s
+    [timing] db=0.1s prep=0.0s insert=456.6s fts=12.6s sessions=46
+    [timing] db=0.2s prep=0.0s insert=461.7s fts=12.8s sessions=50
+    [timing] query=13.2s total=482.5s
+    [timing] query=16.3s total=490.9s
+    [timing] db=0.1s prep=0.0s insert=354.4s fts=10.2s sessions=50
+    [timing] query=39.9s total=404.5s
+    [timing] db=0.1s prep=0.0s insert=416.5s fts=7.9s sessions=44
+    [timing] query=18.2s total=442.6s
+       10/30    [timing] db=0.1s prep=0.0s insert=460.9s fts=10.4s sessions=50
+    [timing] query=12.4s total=483.8s
+    [timing] db=0.2s prep=0.0s insert=469.6s fts=8.3s sessions=46
+    [timing] query=38.1s total=516.1s
+    [timing] db=0.1s prep=0.0s insert=398.3s fts=8.2s sessions=57
+    [timing] query=22.0s total=428.6s
+    [timing] db=0.1s prep=0.0s insert=403.1s fts=10.3s sessions=50
+    [timing] query=16.8s total=430.3s
+    [timing] db=0.1s prep=0.0s insert=444.5s fts=11.1s sessions=48
+    [timing] query=15.9s total=471.6s
+    [timing] db=0.1s prep=0.0s insert=470.4s fts=10.9s sessions=53
+    [timing] query=20.2s total=501.6s
+    [timing] db=0.2s prep=0.0s insert=447.6s fts=9.4s sessions=50
+    [timing] query=25.0s total=482.2s
+    [timing] db=0.1s prep=0.0s insert=418.6s fts=11.2s sessions=49
+    [timing] query=25.6s total=455.5s
+    [timing] db=0.0s prep=0.0s insert=466.2s fts=10.2s sessions=50
+    [timing] query=11.4s total=487.9s
+    [timing] db=0.1s prep=0.0s insert=443.9s fts=9.3s sessions=50
+    [timing] query=29.9s total=483.2s
+       20/30    [timing] db=0.0s prep=0.0s insert=434.6s fts=7.5s sessions=44
+    [timing] query=18.0s total=460.2s
+    [timing] db=0.2s prep=0.0s insert=429.6s fts=12.4s sessions=52
+    [timing] query=23.1s total=465.4s
+    [timing] db=0.2s prep=0.0s insert=445.1s fts=8.8s sessions=52
+    [timing] query=27.7s total=481.7s
+    [timing] db=0.0s prep=0.0s insert=445.1s fts=9.7s sessions=52
+    [timing] query=7.2s total=462.1s
+    [timing] db=0.0s prep=0.0s insert=436.1s fts=9.4s sessions=51
+    [timing] query=27.8s total=473.5s
+    [timing] db=0.0s prep=0.0s insert=404.2s fts=10.5s sessions=48
+    [timing] query=18.4s total=433.0s
+    [timing] db=0.0s prep=0.0s insert=415.4s fts=13.3s sessions=50
+    [timing] query=13.4s total=442.1s
+    [timing] db=0.0s prep=0.0s insert=447.7s fts=9.6s sessions=53
+    [timing] query=3.9s total=461.2s
+    [timing] db=0.0s prep=0.0s insert=401.4s fts=4.4s sessions=46
+    [timing] query=1.4s total=407.3s
+    [timing] db=0.0s prep=0.0s insert=337.1s fts=4.3s sessions=49
+    [timing] query=1.0s total=342.4s
+       30/30       30/30 done.          
+[4/4] Results:
+

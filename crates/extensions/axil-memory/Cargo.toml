@@ -1,0 +1,17 @@
+[package]
+name = "axil-memory"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Structured agent memory types for Axil — working, semantic, episodic, procedural, preference"
+
+[dependencies]
+axil-core = { path = "../../axil-core" }
+chrono = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

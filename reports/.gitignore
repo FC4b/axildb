@@ -1,0 +1,3 @@
+# Field reports contain project-specific data — don't commit them.
+incoming/*.json
+addressed/*.json

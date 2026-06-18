@@ -1,0 +1,29 @@
+[package]
+name = "axil-indexer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Project indexer for Axil — token-efficient codebase understanding for agents"
+
+[dependencies]
+axil-core = { path = "../../axil-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+toml = { workspace = true }
+regex = "1"
+walkdir = "2"
+ignore = "0.4"
+sha2 = { workspace = true }
+tokio = { workspace = true }
+ort = { workspace = true, features = ["download-binaries", "std"], optional = true }
+tokenizers = { workspace = true, optional = true }
+
+[features]
+default = []
+rerank = ["dep:ort", "dep:tokenizers"]
+
+[dev-dependencies]
+tempfile = { workspace = true }

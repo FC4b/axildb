@@ -1,0 +1,82 @@
+╔══════════════════════════════════════════════════╗
+║  LongMemEval Benchmark for Axil                 ║
+╠══════════════════════════════════════════════════╣
+║  Variant:  s                                     ║
+║  Strategy: recall                                ║
+║  Rerank:   crossencoder                          ║
+║  Top-K:    5                                     ║
+║  Data:     benchmarks/longmemeval/data\longmemeval_s_cleaned.json║
+╚══════════════════════════════════════════════════╝
+
+[1/3] Loading dataset...
+       500 questions loaded, evaluating 30
+[2/3] Loading embedder (bge-small)...
+[axil-vector] CUDA execution provider enabled
+       3 worker thread(s)
+[3/4] Evaluating 30 questions...
+    [timing] db=0.0s prep=0.0s insert=498.2s fts=15.6s sessions=53
+[rerank] CUDA execution provider enabled
+    [timing] db=0.0s prep=0.0s insert=521.4s fts=13.8s sessions=49
+[rerank] CUDA execution provider enabled
+    [timing] db=0.0s prep=0.0s insert=539.9s fts=15.5s sessions=50
+[rerank] CUDA execution provider enabled
+    [timing] query=191.4s total=705.3s
+       1/30    [timing] query=264.9s total=820.4s
+    [timing] query=362.0s total=897.3s
+    [timing] db=0.0s prep=0.0s insert=389.0s fts=20.1s sessions=45
+    [timing] db=0.0s prep=0.0s insert=431.6s fts=14.3s sessions=50
+    [timing] db=0.0s prep=0.0s insert=386.7s fts=14.1s sessions=50
+    [timing] query=270.2s total=679.3s
+    [timing] query=288.7s total=734.5s
+    [timing] query=278.2s total=679.0s
+    [timing] db=0.1s prep=0.0s insert=368.1s fts=21.1s sessions=50
+    [timing] db=0.0s prep=0.0s insert=420.0s fts=11.8s sessions=46
+    [timing] db=0.1s prep=0.0s insert=411.6s fts=12.0s sessions=44
+    [timing] query=280.3s total=669.5s
+    [timing] query=294.7s total=718.3s
+    [timing] query=320.4s total=752.3s
+    [timing] db=0.0s prep=0.0s insert=317.0s fts=21.2s sessions=57
+    [timing] query=238.4s total=576.6s
+       10/30    [timing] db=0.1s prep=0.0s insert=436.1s fts=21.6s sessions=50
+    [timing] db=0.1s prep=0.0s insert=455.3s fts=18.5s sessions=53
+    [timing] db=0.0s prep=0.0s insert=256.4s fts=7.7s sessions=50
+    [timing] query=222.1s total=696.0s
+    [timing] query=284.2s total=742.0s
+    [timing] query=260.9s total=525.1s
+    [timing] db=0.1s prep=0.0s insert=552.5s fts=18.5s sessions=45
+    [timing] db=0.0s prep=0.0s insert=578.4s fts=17.9s sessions=49
+    [timing] db=0.0s prep=0.0s insert=523.9s fts=14.1s sessions=44
+    [timing] query=304.2s total=875.3s
+    [timing] query=279.0s total=875.4s
+    [timing] query=327.7s total=865.8s
+    [timing] db=0.0s prep=0.0s insert=545.3s fts=10.8s sessions=46
+    [timing] db=0.2s prep=0.0s insert=575.4s fts=11.7s sessions=52
+    [timing] db=0.0s prep=0.0s insert=493.8s fts=14.2s sessions=51
+    [timing] query=236.0s total=792.0s
+    [timing] query=247.9s total=835.1s
+    [timing] query=266.9s total=774.9s
+    [timing] db=0.2s prep=0.0s insert=465.4s fts=17.0s sessions=50
+    [timing] db=0.0s prep=0.0s insert=549.1s fts=13.0s sessions=48
+    [timing] query=157.5s total=640.1s
+       20/30    [timing] db=0.0s prep=0.0s insert=503.4s fts=14.1s sessions=50
+    [timing] query=163.5s total=681.0s
+    [timing] db=0.1s prep=0.0s insert=164.5s fts=3.3s sessions=48
+    [timing] query=191.7s total=753.9s
+    [timing] db=0.1s prep=0.0s insert=136.2s fts=2.6s sessions=52
+    [timing] db=0.0s prep=0.0s insert=121.8s fts=2.3s sessions=50
+    [timing] query=147.4s total=315.4s
+    [timing] db=0.2s prep=0.0s insert=83.3s fts=2.2s sessions=53
+    [timing] query=115.9s total=254.8s
+    [timing] query=111.4s total=235.5s
+    [timing] query=144.6s total=230.3s
+    [timing] db=0.0s prep=0.0s insert=141.6s fts=4.1s sessions=50
+    [timing] db=0.0s prep=0.0s insert=142.7s fts=4.0s sessions=52
+    [timing] db=0.0s prep=0.0s insert=87.0s fts=2.1s sessions=49
+    [timing] query=103.9s total=249.5s
+    [timing] query=107.5s total=254.2s
+    [timing] query=107.6s total=196.8s
+    [timing] db=0.0s prep=0.0s insert=76.1s fts=1.5s sessions=46
+    [timing] query=59.5s total=137.0s
+       30/30       30/30 done.          
+[4/4] Results:
+

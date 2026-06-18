@@ -1,0 +1,82 @@
+╔══════════════════════════════════════════════════╗
+║  LongMemEval Benchmark for Axil                 ║
+╠══════════════════════════════════════════════════╣
+║  Variant:  s                                     ║
+║  Strategy: recall-qtc                            ║
+║  Rerank:   crossencoder                          ║
+║  Top-K:    5                                     ║
+║  Data:     benchmarks/longmemeval/data\longmemeval_s_cleaned.json║
+╚══════════════════════════════════════════════════╝
+
+[1/3] Loading dataset...
+       500 questions loaded, evaluating 30
+[2/3] Loading embedder (bge-small)...
+[axil-vector] CUDA execution provider enabled
+       3 worker thread(s)
+[3/4] Evaluating 30 questions...
+    [timing] db=0.1s prep=0.0s insert=472.0s fts=7.9s sessions=53
+[rerank] CUDA execution provider enabled
+    [timing] query=10.4s total=490.4s
+       1/30    [timing] db=0.1s prep=0.0s insert=496.9s fts=15.0s sessions=49
+[rerank] CUDA execution provider enabled
+    [timing] db=0.1s prep=0.0s insert=510.8s fts=14.9s sessions=50
+[rerank] CUDA execution provider enabled
+    [timing] query=46.2s total=558.2s
+    [timing] query=35.7s total=561.5s
+    [timing] db=0.2s prep=0.0s insert=317.8s fts=15.0s sessions=45
+    [timing] query=86.6s total=419.6s
+    [timing] db=0.4s prep=0.0s insert=495.1s fts=17.5s sessions=50
+    [timing] db=0.1s prep=0.0s insert=509.0s fts=16.5s sessions=50
+    [timing] query=40.4s total=553.4s
+    [timing] query=40.7s total=566.4s
+    [timing] db=0.0s prep=0.0s insert=309.5s fts=13.7s sessions=50
+    [timing] query=81.1s total=404.2s
+    [timing] db=0.2s prep=0.0s insert=461.3s fts=13.9s sessions=44
+    [timing] db=0.1s prep=0.0s insert=486.5s fts=13.1s sessions=46
+    [timing] query=42.8s total=518.3s
+    [timing] query=67.6s total=567.2s
+    [timing] db=0.2s prep=0.0s insert=379.5s fts=23.5s sessions=57
+    [timing] query=65.7s total=468.8s
+       10/30    [timing] db=0.0s prep=0.0s insert=412.2s fts=13.6s sessions=50
+    [timing] query=69.1s total=494.9s
+    [timing] db=0.4s prep=0.0s insert=532.9s fts=27.2s sessions=53
+    [timing] db=0.1s prep=0.0s insert=483.9s fts=16.9s sessions=50
+    [timing] query=45.6s total=606.1s
+    [timing] query=52.0s total=552.9s
+    [timing] db=0.0s prep=0.0s insert=326.0s fts=16.9s sessions=49
+    [timing] query=62.0s total=405.0s
+    [timing] db=0.0s prep=0.0s insert=487.3s fts=15.9s sessions=45
+    [timing] query=41.4s total=544.7s
+    [timing] db=0.2s prep=0.0s insert=501.7s fts=8.7s sessions=44
+    [timing] query=52.2s total=562.8s
+    [timing] db=0.0s prep=0.0s insert=353.5s fts=17.0s sessions=52
+    [timing] query=60.8s total=431.3s
+    [timing] db=0.1s prep=0.0s insert=419.2s fts=18.7s sessions=46
+    [timing] query=76.6s total=514.6s
+    [timing] db=0.0s prep=0.0s insert=553.4s fts=15.9s sessions=51
+    [timing] db=0.1s prep=0.0s insert=521.4s fts=16.7s sessions=48
+    [timing] query=72.8s total=642.1s
+    [timing] query=72.6s total=610.8s
+       20/30    [timing] db=0.0s prep=0.0s insert=323.2s fts=18.0s sessions=50
+    [timing] query=69.7s total=410.9s
+    [timing] db=0.0s prep=0.0s insert=555.2s fts=10.8s sessions=50
+    [timing] db=0.1s prep=0.0s insert=535.6s fts=9.1s sessions=48
+    [timing] query=37.8s total=603.7s
+    [timing] query=52.2s total=597.0s
+    [timing] db=0.0s prep=0.0s insert=444.6s fts=17.9s sessions=50
+    [timing] query=91.6s total=554.2s
+    [timing] db=0.1s prep=0.0s insert=494.8s fts=11.7s sessions=52
+    [timing] db=0.2s prep=0.0s insert=489.7s fts=9.4s sessions=53
+    [timing] query=36.4s total=543.0s
+    [timing] query=47.1s total=546.4s
+    [timing] db=0.0s prep=0.0s insert=393.8s fts=21.4s sessions=52
+    [timing] query=72.2s total=487.5s
+    [timing] db=0.1s prep=0.0s insert=534.0s fts=15.2s sessions=50
+    [timing] query=31.8s total=581.1s
+    [timing] db=0.0s prep=0.0s insert=568.6s fts=14.6s sessions=49
+    [timing] query=17.0s total=600.3s
+    [timing] db=0.0s prep=0.0s insert=500.9s fts=12.9s sessions=46
+    [timing] query=42.3s total=556.2s
+       30/30       30/30 done.          
+[4/4] Results:
+

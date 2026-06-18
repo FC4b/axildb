@@ -1,0 +1,18 @@
+[package]
+name = "criterion-suite"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[[bench]]
+name = "combined"
+harness = false
+
+[dependencies]
+axil-core = { path = "../../crates/axil-core" }
+axil-vector = { path = "../../crates/axil-vector" }
+axil-graph = { path = "../../crates/axil-graph" }
+axil-fts = { path = "../../crates/axil-fts" }
+criterion = { version = "0.5", features = ["html_reports"] }
+serde_json = { workspace = true }
+tempfile = { workspace = true }

@@ -1,0 +1,34 @@
+[
+  {
+    "query": "user login flow",
+    "expected": [
+      { "path": "src/auth.rs", "kind": "file" },
+      { "path": "src/auth.rs", "symbol": "login", "kind": "symbol" }
+    ]
+  },
+  {
+    "query": "validate session token",
+    "expected": [
+      { "path": "src/auth.rs", "symbol": "validate_token", "kind": "symbol" }
+    ]
+  },
+  {
+    "query": "vector + FTS + recency scoring blend",
+    "expected": [
+      { "path": "src/scoring.rs", "kind": "file" },
+      { "path": "src/scoring.rs", "symbol": "rank", "kind": "symbol" }
+    ]
+  },
+  {
+    "query": "HNSW vector search backend",
+    "expected": [
+      { "path": "src/vector.rs", "kind": "file" }
+    ]
+  },
+  {
+    "query": "where is the login flow documented",
+    "expected": [
+      { "path": "README.md", "kind": "section" }
+    ]
+  }
+]

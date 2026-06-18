@@ -1,0 +1,16 @@
+[package]
+name = "axil-ql"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "AxilQL — minimal verb-first query language for Axil"
+
+[dependencies]
+axil-core = { path = "../../axil-core" }
+chrono = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

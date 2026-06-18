@@ -1,0 +1,41 @@
+[package]
+name = "axil-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "MCP (Model Context Protocol) server for Axil — JSON-RPC over stdio"
+
+[dependencies]
+axil-core = { path = "../../axil-core" }
+axil-indexer = { path = "../../extensions/axil-indexer" }
+axil-docs = { path = "../../extensions/axil-docs" }
+axil-workspace = { path = "../../extensions/axil-workspace" }
+
+# Optional Tier-2 Extensions — gate so consumers can build a trimmed
+# MCP server binary without pulling them in. Matches axil-cli's pattern.
+axil-checkpoint = { path = "../../extensions/axil-checkpoint", optional = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["io-util", "io-std"] }
+anyhow = { workspace = true }
+chrono = { workspace = true }
+
+# Plugin crates — attached lazily at `McpServer::open` based on companion
+# files present on disk. Optional so non-MCP builds that re-export axil-mcp
+# don't pull the full stack unless they want it.
+axil-vector = { path = "../../engines/axil-vector", optional = true }
+axil-graph = { path = "../../engines/axil-graph", optional = true }
+axil-fts = { path = "../../engines/axil-fts", optional = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[features]
+default = ["vector", "graph", "fts", "checkpoint"]
+vector = ["dep:axil-vector"]
+graph = ["dep:axil-graph"]
+fts = ["dep:axil-fts"]
+checkpoint = ["dep:axil-checkpoint"]
+# Vector with embedder (bge-small/etc.) for plugin-attach parity with CLI.
+embed = ["vector", "axil-vector/embed"]

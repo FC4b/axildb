@@ -1,0 +1,19 @@
+[package]
+name = "vector-latency-bench"
+version = "0.5.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[[bin]]
+name = "vector-latency"
+path = "src/main.rs"
+
+[dependencies]
+axil-core = { path = "../../crates/axil-core" }
+axil-vector = { path = "../../crates/axil-vector" }
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"

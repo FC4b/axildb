@@ -1,0 +1,194 @@
+{
+  "benchmark": "LongMemEval",
+  "variant": "s",
+  "strategy": "recall",
+  "rerank": "crossencoder",
+  "top_k": 5,
+  "total_questions": 30,
+  "overall": {
+    "hit_rate": 0.6666666666666666,
+    "avg_recall": 0.6666666666666666,
+    "avg_precision": 0.13333333333333336
+  },
+  "by_category": {
+    "single-session-user": {
+      "total": 30,
+      "hits": 20,
+      "hit_rate": 0.6666666666666666,
+      "avg_recall": 0.6666666666666666,
+      "avg_precision": 0.13333333333333336
+    }
+  },
+  "misses": [
+    {
+      "question_id": "e47becba",
+      "question_type": "single-session-user",
+      "question_date": "2023/05/30 (Tue) 23:40",
+      "recall": 0.0,
+      "precision": 0.0,
+      "retrieved_sessions": [
+        "session_13",
+        "session_21",
+        "session_14",
+        "session_20",
+        "session_4"
+      ],
+      "answer_sessions": [
+        "session_51"
+      ]
+    },
+    {
+      "question_id": "1e043500",
+      "question_type": "single-session-user",
+      "question_date": "2023/05/30 (Tue) 19:19",
+      "recall": 0.0,
+      "precision": 0.0,
+      "retrieved_sessions": [
+        "session_10",
+        "session_8",
+        "session_12",
+        "session_22",
+        "session_4"
+      ],
+      "answer_sessions": [
+        "session_13"
+      ]
+    },
+    {
+      "question_id": "6ade9755",
+      "question_type": "single-session-user",
+      "question_date": "2023/05/30 (Tue) 21:04",
+      "recall": 0.0,
+      "precision": 0.0,
+      "retrieved_sessions": [
+        "session_2",
+        "session_48",
+        "session_46",
+        "session_49",
+        "session_44"
+      ],
+      "answer_sessions": [
+        "session_50"
+      ]
+    },
+    {
+      "question_id": "6f9b354f",
+      "question_type": "single-session-user",
+      "question_date": "2023/05/30 (Tue) 22:42",
+      "recall": 0.0,
+      "precision": 0.0,
+      "retrieved_sessions": [
+        "session_46",
+        "session_28",
+        "session_43",
+        "session_26",
+        "session_49"
+      ],
+      "answer_sessions": [
+        "session_37"
+      ]
+    },
+    {
+      "question_id": "5d3d2817",
+      "question_type": "single-session-user",
+      "question_date": "2023/05/30 (Tue) 20:08",
+      "recall": 0.0,
+      "precision": 0.0,
+      "retrieved_sessions": [
+        "session_6",
+        "session_19",
+        "session_11",
+        "session_17",
+        "session_3"
+      ],
+      "answer_sessions": [
+        "session_26"
+      ]
+    },
+    {
+      "question_id": "726462e0",
+      "question_type": "single-session-user",
+      "question_date": "2023/05/30 (Tue) 23:15",
+      "recall": 0.0,
+      "precision": 0.0,
+      "retrieved_sessions": [
+        "session_1",
+        "session_16",
+        "session_12",
+        "session_8",
+        "session_4"
+      ],
+      "answer_sessions": [
+        "session_11"
+      ]
+    },
+    {
+      "question_id": "ad7109d1",
+      "question_type": "single-session-user",
+      "question_date": "2023/05/30 (Tue) 21:56",
+      "recall": 0.0,
+      "precision": 0.0,
+      "retrieved_sessions": [
+        "session_11",
+        "session_0",
+        "session_5",
+        "session_37",
+        "session_40"
+      ],
+      "answer_sessions": [
+        "session_16"
+      ]
+    },
+    {
+      "question_id": "6b168ec8",
+      "question_type": "single-session-user",
+      "question_date": "2023/05/30 (Tue) 20:24",
+      "recall": 0.0,
+      "precision": 0.0,
+      "retrieved_sessions": [
+        "session_13",
+        "session_1",
+        "session_9",
+        "session_6",
+        "session_4"
+      ],
+      "answer_sessions": [
+        "session_34"
+      ]
+    },
+    {
+      "question_id": "75499fd8",
+      "question_type": "single-session-user",
+      "question_date": "2023/05/30 (Tue) 20:25",
+      "recall": 0.0,
+      "precision": 0.0,
+      "retrieved_sessions": [
+        "session_4",
+        "session_0",
+        "session_1",
+        "session_2",
+        "session_6"
+      ],
+      "answer_sessions": [
+        "session_26"
+      ]
+    },
+    {
+      "question_id": "0862e8bf",
+      "question_type": "single-session-user",
+      "question_date": "2023/05/30 (Tue) 12:18",
+      "recall": 0.0,
+      "precision": 0.0,
+      "retrieved_sessions": [
+        "session_5",
+        "session_17",
+        "session_0",
+        "session_48",
+        "session_39"
+      ],
+      "answer_sessions": [
+        "session_27"
+      ]
+    }
+  ]
+}

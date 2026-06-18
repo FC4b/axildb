@@ -1,0 +1,25 @@
+[package]
+name = "axil-docs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Dependency documentation memory for Axil (Phase 16)"
+
+[dependencies]
+axil-core = { path = "../../axil-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+thiserror = { workspace = true }
+ureq = { workspace = true, optional = true }
+
+[features]
+default = []
+# Default-off HTTP doc fetcher (Phase 16 P0.5). Offline-first is the
+# default posture; nothing in this crate touches the network unless
+# `web-docs` is explicitly enabled.
+web-docs = ["dep:ureq"]
+
+[dev-dependencies]
+tempfile = { workspace = true }

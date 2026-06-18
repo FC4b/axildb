@@ -1,0 +1,58 @@
+{
+  "benchmark": "LongMemEval",
+  "variant": "s",
+  "strategy": "recall-qtc",
+  "rerank": "off",
+  "top_k": 5,
+  "total_questions": 30,
+  "overall": {
+    "hit_rate": 0.9333333333333333,
+    "avg_recall": 0.9333333333333333,
+    "avg_precision": 0.18666666666666673
+  },
+  "by_category": {
+    "single-session-user": {
+      "total": 30,
+      "hits": 28,
+      "hit_rate": 0.9333333333333333,
+      "avg_recall": 0.9333333333333333,
+      "avg_precision": 0.18666666666666673
+    }
+  },
+  "misses": [
+    {
+      "question_id": "5d3d2817",
+      "question_type": "single-session-user",
+      "question_date": "2023/05/30 (Tue) 20:08",
+      "recall": 0.0,
+      "precision": 0.0,
+      "retrieved_sessions": [
+        "session_44",
+        "session_37",
+        "session_35",
+        "session_40",
+        "session_30"
+      ],
+      "answer_sessions": [
+        "session_26"
+      ]
+    },
+    {
+      "question_id": "726462e0",
+      "question_type": "single-session-user",
+      "question_date": "2023/05/30 (Tue) 23:15",
+      "recall": 0.0,
+      "precision": 0.0,
+      "retrieved_sessions": [
+        "session_41",
+        "session_43",
+        "session_20",
+        "session_31",
+        "session_14"
+      ],
+      "answer_sessions": [
+        "session_11"
+      ]
+    }
+  ]
+}

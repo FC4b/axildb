@@ -1,0 +1,39 @@
+╔══════════════════════════════════════════════════╗
+║  LongMemEval Benchmark for Axil                 ║
+╠══════════════════════════════════════════════════╣
+║  Variant:  s                                     ║
+║  Strategy: recall-qtc                            ║
+║  Rerank:   off                                   ║
+║  Top-K:    5                                     ║
+║  Data:     benchmarks/longmemeval/data\longmemeval_s_cleaned.json║
+╚══════════════════════════════════════════════════╝
+
+[1/3] Loading dataset...
+       500 questions loaded, evaluating 10
+[2/3] Loading embedder (bge-small)...
+[axil-vector] CUDA execution provider enabled
+       3 worker thread(s)
+[3/4] Evaluating 10 questions...
+    [timing] db=0.2s prep=0.0s insert=317.8s fts=5.1s sessions=53
+    [timing] db=0.2s prep=0.0s insert=320.3s fts=4.4s sessions=50
+    [timing] query=3.3s total=326.4s
+       1/10    [timing] db=0.2s prep=0.0s insert=323.4s fts=4.1s sessions=44
+    [timing] query=10.0s total=334.9s
+    [timing] query=10.4s total=338.0s
+    [timing] db=0.0s prep=0.0s insert=311.9s fts=4.6s sessions=45
+    [timing] query=3.0s total=319.5s
+    [timing] db=0.0s prep=0.0s insert=328.7s fts=9.9s sessions=57
+    [timing] db=0.1s prep=0.0s insert=327.0s fts=9.4s sessions=51
+    [timing] query=3.6s total=342.3s
+    [timing] query=15.1s total=351.6s
+    [timing] db=0.0s prep=0.0s insert=291.5s fts=7.9s sessions=50
+    [timing] query=3.1s total=302.5s
+    [timing] db=0.0s prep=0.0s insert=320.9s fts=10.8s sessions=50
+    [timing] db=0.1s prep=0.0s insert=309.8s fts=11.4s sessions=50
+    [timing] query=4.8s total=326.2s
+    [timing] query=7.5s total=339.3s
+    [timing] db=0.1s prep=0.0s insert=141.6s fts=3.4s sessions=46
+    [timing] query=1.1s total=146.2s
+       10/10       10/10 done.          
+[4/4] Results:
+

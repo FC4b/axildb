@@ -1,0 +1,91 @@
+use thiserror::Error;
+
+/// Core error type for all Axil operations.
+#[derive(Debug, Error)]
+pub enum AxilError {
+    /// Storage-layer error (redb).
+    #[error("storage error: {0}")]
+    Storage(#[source] Box<dyn std::error::Error + Send + Sync>),
+
+    /// Record not found.
+    #[error("not found: {0}")]
+    NotFound(String),
+
+    /// Invalid query.
+    #[error("invalid query: {0}")]
+    InvalidQuery(String),
+
+    /// Serialization / deserialization error.
+    #[error("serialization error: {0}")]
+    Serialization(#[source] Box<dyn std::error::Error + Send + Sync>),
+
+    /// Plugin error — preserves the original error source chain.
+    #[error("plugin error: {0}")]
+    Plugin(#[source] Box<dyn std::error::Error + Send + Sync>),
+}
+
+impl AxilError {
+    /// Create a plugin error from a message string.
+    pub fn plugin(msg: impl Into<String>) -> Self {
+        Self::Plugin(Box::new(PluginMessage(msg.into())))
+    }
+}
+
+/// Simple string-based error for plugin messages without an underlying cause.
+#[derive(Debug)]
+struct PluginMessage(String);
+
+impl std::fmt::Display for PluginMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for PluginMessage {}
+
+/// Convenience alias used throughout the crate.
+pub type Result<T> = std::result::Result<T, AxilError>;
+
+// ── From impls ──────────────────────────────────────────────────────
+
+impl From<redb::Error> for AxilError {
+    fn from(e: redb::Error) -> Self {
+        AxilError::Storage(Box::new(e))
+    }
+}
+
+impl From<redb::DatabaseError> for AxilError {
+    fn from(e: redb::DatabaseError) -> Self {
+        AxilError::Storage(Box::new(e))
+    }
+}
+
+impl From<redb::TableError> for AxilError {
+    fn from(e: redb::TableError) -> Self {
+        AxilError::Storage(Box::new(e))
+    }
+}
+
+impl From<redb::TransactionError> for AxilError {
+    fn from(e: redb::TransactionError) -> Self {
+        AxilError::Storage(Box::new(e))
+    }
+}
+
+impl From<redb::StorageError> for AxilError {
+    fn from(e: redb::StorageError) -> Self {
+        AxilError::Storage(Box::new(e))
+    }
+}
+
+impl From<redb::CommitError> for AxilError {
+    fn from(e: redb::CommitError) -> Self {
+        AxilError::Storage(Box::new(e))
+    }
+}
+
+impl From<serde_json::Error> for AxilError {
+    fn from(e: serde_json::Error) -> Self {
+        AxilError::Serialization(Box::new(e))
+    }
+}

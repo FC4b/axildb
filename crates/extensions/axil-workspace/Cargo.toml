@@ -1,0 +1,19 @@
+[package]
+name = "axil-workspace"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Multi-project workspace coordinator for Axil (Phase 14)"
+
+[dependencies]
+axil-core = { path = "../../axil-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+toml = { workspace = true }
+ulid = { workspace = true }
+chrono = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

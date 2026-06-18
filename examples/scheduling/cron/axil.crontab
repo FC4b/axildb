@@ -1,0 +1,10 @@
+# Axil scheduling — copy into `crontab -e` or `crontab /path/to/this/file`.
+
+# Daily brief at 08:00
+0 8 * * * axil brief --window 24h --brief-format markdown > /tmp/axil-daily-brief.md
+
+# Weekly retro Sunday at 08:30
+30 8 * * 0 axil retro --window 7d --save
+
+# Monthly retro on the 1st at 09:00
+0 9 1 * * axil retro --window 30d --save

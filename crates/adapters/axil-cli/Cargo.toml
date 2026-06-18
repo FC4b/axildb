@@ -1,0 +1,112 @@
+[package]
+name = "axil-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "CLI binary for Axil — the primary agent interface"
+
+[[bin]]
+name = "axil"
+path = "src/main.rs"
+
+[dependencies]
+axil-core = { path = "../../axil-core" }
+axil-workspace = { path = "../../extensions/axil-workspace" }
+chrono = { workspace = true }
+clap = { version = "4", features = ["derive", "env"] }
+anyhow = { workspace = true }
+toml = { workspace = true }
+walkdir = "2"
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+indicatif = { workspace = true }
+
+[dependencies.axil-vector]
+path = "../../engines/axil-vector"
+optional = true
+
+[dependencies.axil-graph]
+path = "../../engines/axil-graph"
+optional = true
+
+[dependencies.axil-fts]
+path = "../../engines/axil-fts"
+optional = true
+
+[dependencies.axil-timeseries]
+path = "../../engines/axil-timeseries"
+optional = true
+
+[dependencies.axil-indexer]
+path = "../../extensions/axil-indexer"
+optional = true
+
+[dependencies.axil-scip]
+path = "../../extensions/axil-scip"
+optional = true
+
+[dependencies.axil-docs]
+path = "../../extensions/axil-docs"
+optional = true
+
+[dependencies.axil-checkpoint]
+path = "../../extensions/axil-checkpoint"
+optional = true
+
+[dependencies.axil-memory]
+path = "../../extensions/axil-memory"
+optional = true
+
+[dependencies.axil-ql]
+path = "../axil-ql"
+optional = true
+
+[dependencies.rustyline]
+workspace = true
+optional = true
+
+[dependencies.axil-mcp]
+path = "../axil-mcp"
+optional = true
+
+[dependencies.axum]
+workspace = true
+optional = true
+
+[dependencies.tower-http]
+workspace = true
+optional = true
+
+[dependencies.tempfile]
+workspace = true
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[features]
+default = ["core", "vector", "embed", "graph", "fts", "timeseries", "indexer", "scip", "deps", "checkpoint", "memory", "llm-http", "mcp", "ql", "http"]
+core = []
+vector = ["dep:axil-vector"]
+embed = ["vector", "axil-vector/embed"]
+graph = ["dep:axil-graph"]
+fts = ["dep:axil-fts"]
+timeseries = ["dep:axil-timeseries"]
+indexer = ["dep:axil-indexer"]
+scip = ["dep:axil-scip", "graph"]
+deps = ["dep:axil-docs"]
+checkpoint = ["dep:axil-checkpoint"]
+# Default-off built-in HTTP doc fetcher (Phase 16 Path B). Offline-first
+# is the default posture; implies `deps`.
+web-docs = ["deps", "axil-docs/web-docs"]
+memory = ["dep:axil-memory"]
+llm-http = ["axil-core/llm-http"]
+otel = ["axil-core/otel"]
+mcp = ["dep:axil-mcp"]
+ql = ["dep:axil-ql", "dep:rustyline"]
+rerank = ["indexer", "axil-indexer/rerank"]
+http = ["dep:axum", "dep:tower-http"]
+full = ["vector", "embed", "graph", "fts", "timeseries", "indexer", "scip", "deps", "checkpoint", "rerank", "memory", "llm-http", "mcp", "ql", "http"]

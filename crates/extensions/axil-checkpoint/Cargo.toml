@@ -1,0 +1,17 @@
+[package]
+name = "axil-checkpoint"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Structured session-checkpoint memory for Axil — picks up where the last session left off (Phase 18)"
+
+[dependencies]
+axil-core = { path = "../../axil-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

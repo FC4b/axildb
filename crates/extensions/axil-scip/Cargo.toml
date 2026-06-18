@@ -1,0 +1,20 @@
+[package]
+name = "axil-scip"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "SCIP (Sourcegraph Code Intelligence Protocol) ingest for Axil"
+
+[dependencies]
+axil-core = { path = "../../axil-core" }
+axil-graph = { path = "../../engines/axil-graph" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+prost = "0.13"
+
+[dev-dependencies]
+tempfile = { workspace = true }
+prost = "0.13"

@@ -1,0 +1,23 @@
+{
+  "benchmark": "LongMemEval",
+  "variant": "s",
+  "strategy": "recall-qtc",
+  "rerank": "off",
+  "top_k": 5,
+  "total_questions": 10,
+  "overall": {
+    "hit_rate": 1.0,
+    "avg_recall": 1.0,
+    "avg_precision": 0.19999999999999998
+  },
+  "by_category": {
+    "single-session-user": {
+      "total": 10,
+      "hits": 10,
+      "hit_rate": 1.0,
+      "avg_recall": 1.0,
+      "avg_precision": 0.19999999999999998
+    }
+  },
+  "misses": []
+}
