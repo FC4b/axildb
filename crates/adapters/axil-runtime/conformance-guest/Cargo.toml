@@ -1,0 +1,35 @@
+# A WASM guest that exercises EVERY `axil:plugin` host import across the sandbox
+# boundary — the fixture for the host-ABI conformance suite (Phase 22.10).
+# Unlike the minimal hello reference plugin, this one calls back into Axil
+# (insert/get/recall/relate/fts/embed/config/log) so the host test can assert
+# capability gating, prefix enforcement, marshalling, and fault isolation.
+#
+# Detached from the parent workspace (own `[workspace]`) because it builds for
+# wasm32-wasip2 via `cargo component`, not as a native member.
+[package]
+name = "axil-conformance-guest"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+wit-bindgen-rt = { version = "0.41", features = ["bitflags"] }
+
+[lib]
+crate-type = ["cdylib"]
+
+[package.metadata.component]
+package = "axil:conformance-guest"
+
+[package.metadata.component.target]
+path = "../../../../wit"
+world = "plugin"
+
+[package.metadata.component.dependencies]
+
+[profile.release]
+codegen-units = 1
+opt-level = "s"
+strip = true
