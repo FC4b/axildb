@@ -990,7 +990,7 @@ mod tests {
             .unwrap();
 
         // (1) Surface composition surfaces the deps_status tool.
-        let surfaces = compose_mcp_surface(db.extensions());
+        let surfaces = compose_mcp_surface(&db.extensions());
         assert!(
             surfaces
                 .iter()
@@ -1004,7 +1004,7 @@ mod tests {
             tool: "deps_status".into(),
             params: serde_json::Value::Null,
         };
-        let result = dispatch_mcp(&db, db.extensions(), &call).unwrap();
+        let result = dispatch_mcp(&db, &db.extensions(), &call).unwrap();
         let value = match result {
             Dispatch::Handled(v) => v,
             Dispatch::NotHandled => panic!("dispatch_mcp must route to DocsExtension"),
@@ -1016,7 +1016,7 @@ mod tests {
             tool: "ghost".into(),
             params: serde_json::Value::Null,
         };
-        let result = dispatch_mcp(&db, db.extensions(), &call).unwrap();
+        let result = dispatch_mcp(&db, &db.extensions(), &call).unwrap();
         assert!(matches!(result, Dispatch::NotHandled));
     }
 }

@@ -333,7 +333,7 @@ impl AxilBuilder {
             log_counter: std::sync::atomic::AtomicU64::new(0),
             feedback_store: crate::feedback::FeedbackStore::new(),
             canonical_publisher: self.canonical_publisher,
-            extensions: self.extensions,
+            extensions: std::sync::RwLock::new(self.extensions),
         };
 
         // Backfill `_entities.canonical_id` for rows written before the
@@ -414,8 +414,10 @@ pub struct Axil {
     feedback_store: crate::feedback::FeedbackStore,
     /// Optional Atlas canonical-ID publisher (Phase 14.6 v0.2).
     canonical_publisher: Option<Arc<dyn CanonicalPublisher>>,
-    /// Phase 17 — registered Tier-2 Extensions.
-    extensions: Vec<Arc<dyn Extension>>,
+    /// Registered Tier-2 Extensions. Behind a lock so plugins that need a live
+    /// `Axil` handle (WASM plugins) can register *after* the database is open,
+    /// not only at builder time.
+    extensions: std::sync::RwLock<Vec<Arc<dyn Extension>>>,
 }
 
 impl Axil {
@@ -443,8 +445,48 @@ impl Axil {
     /// Adapters (CLI, MCP, HTTP, …) iterate this to discover the
     /// CLI surfaces, MCP tools, boot blocks, and per-file recall
     /// contributions each Extension provides.
-    pub fn extensions(&self) -> &[Arc<dyn Extension>] {
-        &self.extensions
+    pub fn extensions(&self) -> Vec<Arc<dyn Extension>> {
+        self.extensions
+            .read()
+            .map(|g| g.clone())
+            .unwrap_or_default()
+    }
+
+    /// Register a Tier-2 Extension on an already-open database.
+    ///
+    /// Native Extensions register at builder time via
+    /// [`AxilBuilder::with_extension`]; this is the post-build path for
+    /// Extensions that need a live `Axil` handle to construct — notably WASM
+    /// plugins loaded from `.axil/plugins/`, whose host imports call back into
+    /// *this* database. Enforces the same disjoint-id / disjoint-prefix
+    /// invariants as the builder, but returns an error rather than panicking
+    /// since it runs at runtime, not at programmer-controlled build time.
+    pub fn register_extension(&self, ext: Arc<dyn Extension>) -> Result<()> {
+        let mut exts = self
+            .extensions
+            .write()
+            .map_err(|_| AxilError::plugin("extensions registry lock poisoned"))?;
+        let id = ext.id();
+        if exts.iter().any(|e| e.id() == id) {
+            return Err(AxilError::plugin(format!(
+                "extension id `{id}` is already registered"
+            )));
+        }
+        for prefix in ext.table_prefixes() {
+            for existing in exts.iter() {
+                for existing_prefix in existing.table_prefixes() {
+                    if prefix_overlaps(prefix, existing_prefix) {
+                        return Err(AxilError::plugin(format!(
+                            "extension `{id}` table prefix `{prefix}` overlaps with existing \
+                             extension `{}` prefix `{existing_prefix}`",
+                            existing.id(),
+                        )));
+                    }
+                }
+            }
+        }
+        exts.push(ext);
+        Ok(())
     }
 
     fn insert_record(&self, mut record: Record) -> Result<Record> {
@@ -5452,6 +5494,35 @@ mod tests {
     fn extensions_empty_by_default() {
         let (db, _dir) = temp_db();
         assert!(db.extensions().is_empty());
+    }
+
+    #[test]
+    fn register_extension_post_build() {
+        let (db, _dir) = temp_db();
+        assert!(db.extensions().is_empty());
+
+        db.register_extension(Arc::new(StubExt {
+            id: "rt",
+            prefixes: &["_rt_"],
+        }))
+        .unwrap();
+        assert_eq!(db.extensions().len(), 1);
+        assert_eq!(db.extensions()[0].id(), "rt");
+
+        // Duplicate id is rejected at runtime (error, not panic).
+        let dup = db.register_extension(Arc::new(StubExt {
+            id: "rt",
+            prefixes: &["_other_"],
+        }));
+        assert!(dup.is_err());
+
+        // Overlapping prefix is rejected.
+        let overlap = db.register_extension(Arc::new(StubExt {
+            id: "rt2",
+            prefixes: &["_rt_sub"],
+        }));
+        assert!(overlap.is_err());
+        assert_eq!(db.extensions().len(), 1);
     }
 
     #[test]

@@ -305,7 +305,7 @@ pub fn dispatch(db: &Axil, tool_name: &str, args: &Value) -> ToolCallResult {
         tool: tool_name.to_string(),
         params: args.clone(),
     };
-    match axil_core::dispatch_mcp(db, db.extensions(), &call) {
+    match axil_core::dispatch_mcp(db, &db.extensions(), &call) {
         Ok(axil_core::Dispatch::Handled(value)) => return ToolCallResult::json(&value),
         Ok(axil_core::Dispatch::NotHandled) => {
             // Fall through to hardcoded handlers.

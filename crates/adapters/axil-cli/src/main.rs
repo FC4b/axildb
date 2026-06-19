@@ -13182,7 +13182,7 @@ fn try_deps_extension_dispatch(
     };
     let db = open_with_all_detected(&db_path)?;
     let consumed_stdin = invocation.stdin.is_some();
-    match axil_core::dispatch_cli(&db, db.extensions(), &invocation)? {
+    match axil_core::dispatch_cli(&db, &db.extensions(), &invocation)? {
         axil_core::Dispatch::Handled(output) => {
             // Re-parse the stdout payload as JSON so Output's
             // format-aware printer (Json / Pretty / Table) still
@@ -13298,7 +13298,7 @@ fn run_checkpoint_extension(
 
     let db_path = require_db(db_opt)?;
     let db = open_with_all_detected(&db_path)?;
-    match axil_core::dispatch_cli(&db, db.extensions(), &invocation)? {
+    match axil_core::dispatch_cli(&db, &db.extensions(), &invocation)? {
         axil_core::Dispatch::Handled(output) => {
             if !output.stdout.is_empty() {
                 match serde_json::from_str::<Value>(&output.stdout) {
@@ -13813,7 +13813,7 @@ fn run_extension_dispatch(
     let stdin = read_piped_stdin();
     let invocation = build_extension_invocation(&tokens, Some(&surface), stdin);
 
-    match axil_core::dispatch_cli(&db, db.extensions(), &invocation)
+    match axil_core::dispatch_cli(&db, &db.extensions(), &invocation)
         .map_err(|e| anyhow::anyhow!("{e}"))?
     {
         axil_core::Dispatch::Handled(output) => {
