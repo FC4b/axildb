@@ -115,6 +115,267 @@ pub use host::WasmHost;
 #[cfg(feature = "wasm-host")]
 pub use abi::{Capabilities, PluginState};
 
+#[cfg(feature = "wasm-host")]
+pub use shim::WasmExtension;
+
+/// Makes a loaded `.wasm` component "just another `dyn Extension`" (Phase 22.4):
+/// [`WasmExtension`] implements [`axil_core::Extension`] by calling the guest's
+/// exports across the sandbox boundary, so a loaded plugin registers into
+/// `db.extensions()` and flows through dispatch / dynamic CLI / boot exactly
+/// like a native Extension — with zero per-plugin host code.
+#[cfg(feature = "wasm-host")]
+mod shim {
+    use std::sync::{Mutex, MutexGuard};
+
+    use axil_core::{
+        AxilError, CliArg, CliInvocation, CliOutput, CliSubcommand, CliSurface, Dispatch, Extension,
+        Hit, McpCall, McpSurface, McpTool, RefreshOpts, RefreshReport,
+    };
+    use wasmtime::component::Component;
+    use wasmtime::Store;
+
+    use crate::bindings::axil::plugin::types as wit;
+    use crate::bindings::Plugin;
+    use crate::{PluginState, WasmHost};
+
+    /// The instantiated guest + its store. Wasmtime's `Store` is `!Sync`, so the
+    /// `WasmExtension` wraps this in a `Mutex` to satisfy `Extension: Send + Sync`
+    /// — calls into the guest serialize on the instance lock.
+    struct Instance {
+        store: Store<PluginState>,
+        plugin: Plugin,
+    }
+
+    /// A loaded WASM plugin presented as a native [`Extension`].
+    ///
+    /// Metadata is fetched once at load and cached (Phase 22.0) so the
+    /// borrow-returning trait methods never cross the boundary; handlers call
+    /// the guest on demand under the instance lock.
+    pub struct WasmExtension {
+        inner: Mutex<Instance>,
+        id: String,
+        display_name: String,
+        // Leaked at load so `table_prefixes(&self) -> &[&str]` can serve from
+        // cache. A plugin lives for the process, so this is a bounded one-time leak.
+        prefixes: Vec<&'static str>,
+        cli: Option<CliSurface>,
+        mcp: Option<McpSurface>,
+    }
+
+    impl WasmExtension {
+        /// Instantiate `component` against the host imports and cache its
+        /// metadata — the load gate (a guest that traps here is rejected, not
+        /// surfaced as a runtime error).
+        pub fn load(
+            host: &WasmHost,
+            component: &Component,
+            state: PluginState,
+        ) -> anyhow::Result<Self> {
+            let (mut store, plugin) = host.instantiate(component, state)?;
+            let ext = plugin.axil_plugin_extension();
+            let id = ext.call_id(&mut store)?;
+            let display_name = ext.call_display_name(&mut store)?;
+            let prefixes: Vec<&'static str> = ext
+                .call_table_prefixes(&mut store)?
+                .into_iter()
+                .map(|s| &*Box::leak(s.into_boxed_str()))
+                .collect();
+            let cli = ext.call_cli_commands(&mut store)?.map(cli_surface_from_wit);
+            let mcp = ext.call_mcp_tools(&mut store)?.map(mcp_surface_from_wit);
+            Ok(Self {
+                inner: Mutex::new(Instance { store, plugin }),
+                id,
+                display_name,
+                prefixes,
+                cli,
+                mcp,
+            })
+        }
+
+        fn lock(&self) -> Result<MutexGuard<'_, Instance>, AxilError> {
+            self.inner
+                .lock()
+                .map_err(|_| AxilError::plugin("plugin instance lock poisoned"))
+        }
+    }
+
+    impl Extension for WasmExtension {
+        fn id(&self) -> &str {
+            &self.id
+        }
+        fn display_name(&self) -> &str {
+            &self.display_name
+        }
+        fn table_prefixes(&self) -> &[&str] {
+            &self.prefixes
+        }
+        fn cli_commands(&self) -> Option<CliSurface> {
+            self.cli.clone()
+        }
+        fn mcp_tools(&self) -> Option<McpSurface> {
+            self.mcp.clone()
+        }
+
+        fn boot_block(&self, _db: &axil_core::Axil) -> Option<String> {
+            // Infallible in the trait: a lock/trap/guest error collapses to None.
+            let mut inner = self.lock().ok()?;
+            let Instance { store, plugin } = &mut *inner;
+            plugin
+                .axil_plugin_extension()
+                .call_boot_block(&mut *store)
+                .ok()?
+                .ok()?
+        }
+
+        fn handle_cli(
+            &self,
+            _db: &axil_core::Axil,
+            invocation: &CliInvocation,
+        ) -> Result<Dispatch<CliOutput>, AxilError> {
+            let wit_inv = wit::CliInvocation {
+                command_path: invocation.command_path.clone(),
+                args: invocation.args.clone(),
+                stdin: invocation.stdin.clone(),
+            };
+            let mut inner = self.lock()?;
+            let Instance { store, plugin } = &mut *inner;
+            let res = plugin
+                .axil_plugin_extension()
+                .call_handle_cli(&mut *store, &wit_inv)
+                .map_err(trap_err)?;
+            match res {
+                Ok(wit::DispatchCli::Handled(out)) => Ok(Dispatch::Handled(CliOutput {
+                    exit_code: out.exit_code,
+                    stdout: out.stdout,
+                    stderr: out.stderr,
+                })),
+                Ok(wit::DispatchCli::NotHandled) => Ok(Dispatch::NotHandled),
+                Err(e) => Err(plugin_err(e)),
+            }
+        }
+
+        fn handle_mcp(
+            &self,
+            _db: &axil_core::Axil,
+            call: &McpCall,
+        ) -> Result<Dispatch<serde_json::Value>, AxilError> {
+            let wit_call = wit::McpCall {
+                tool: call.tool.clone(),
+                params: serde_json::to_string(&call.params).unwrap_or_else(|_| "null".into()),
+            };
+            let mut inner = self.lock()?;
+            let Instance { store, plugin } = &mut *inner;
+            let res = plugin
+                .axil_plugin_extension()
+                .call_handle_mcp(&mut *store, &wit_call)
+                .map_err(trap_err)?;
+            match res {
+                Ok(wit::DispatchMcp::Handled(json)) => {
+                    let v = serde_json::from_str(&json)
+                        .map_err(|e| AxilError::plugin(format!("plugin returned invalid JSON: {e}")))?;
+                    Ok(Dispatch::Handled(v))
+                }
+                Ok(wit::DispatchMcp::NotHandled) => Ok(Dispatch::NotHandled),
+                Err(e) => Err(plugin_err(e)),
+            }
+        }
+
+        fn refresh(
+            &self,
+            _db: &axil_core::Axil,
+            opts: RefreshOpts,
+        ) -> Result<RefreshReport, AxilError> {
+            let wit_opts = wit::RefreshOpts {
+                if_stale: opts.if_stale,
+                path: opts.path.map(|p| p.to_string_lossy().into_owned()),
+            };
+            let mut inner = self.lock()?;
+            let Instance { store, plugin } = &mut *inner;
+            let res = plugin
+                .axil_plugin_extension()
+                .call_refresh(&mut *store, &wit_opts)
+                .map_err(trap_err)?;
+            match res {
+                Ok(r) => {
+                    let mut report = RefreshReport::default().with_counts(
+                        r.inspected as usize,
+                        r.stale as usize,
+                        r.refreshed as usize,
+                    );
+                    report.details = r.details;
+                    Ok(report)
+                }
+                Err(e) => Err(plugin_err(e)),
+            }
+        }
+
+        fn recall_for_file(
+            &self,
+            _db: &axil_core::Axil,
+            path: &std::path::Path,
+        ) -> Result<Vec<Hit>, AxilError> {
+            let p = path.to_string_lossy().into_owned();
+            let mut inner = self.lock()?;
+            let Instance { store, plugin } = &mut *inner;
+            let res = plugin
+                .axil_plugin_extension()
+                .call_recall_for_file(&mut *store, &p)
+                .map_err(trap_err)?;
+            match res {
+                Ok(hits) => Ok(hits.into_iter().map(hit_from_wit).collect()),
+                Err(e) => Err(plugin_err(e)),
+            }
+        }
+    }
+
+    fn trap_err(e: anyhow::Error) -> AxilError {
+        AxilError::plugin(format!("wasm trap: {e}"))
+    }
+
+    fn plugin_err(e: wit::PluginError) -> AxilError {
+        use wit::PluginError as P;
+        match e {
+            P::NotFound(m) => AxilError::NotFound(m),
+            P::PermissionDenied(m) => AxilError::plugin(format!("permission denied: {m}")),
+            P::PrefixViolation(m) => AxilError::plugin(format!("prefix violation: {m}")),
+            P::ResourceExhausted(m) => AxilError::plugin(format!("resource exhausted: {m}")),
+            P::Invalid(m) => AxilError::InvalidQuery(m),
+            P::Internal(m) => AxilError::plugin(m),
+        }
+    }
+
+    fn cli_surface_from_wit(s: wit::CliSurface) -> CliSurface {
+        CliSurface::new(s.command, s.about).subcommands(s.subcommands.into_iter().map(|sub| {
+            CliSubcommand::new(sub.name, sub.about).args(sub.args.into_iter().map(|a| {
+                CliArg::new(a.name, a.about)
+                    .required(a.required)
+                    .takes_value(a.takes_value)
+            }))
+        }))
+    }
+
+    fn mcp_surface_from_wit(s: wit::McpSurface) -> McpSurface {
+        McpSurface::new(
+            s.tools
+                .into_iter()
+                .map(|t| {
+                    let schema =
+                        serde_json::from_str(&t.input_schema).unwrap_or(serde_json::Value::Null);
+                    McpTool::new(t.name, t.description, schema)
+                })
+                .collect(),
+        )
+    }
+
+    fn hit_from_wit(h: wit::Hit) -> Hit {
+        let hit = Hit::new(h.table, h.id, h.score);
+        match h.summary {
+            Some(s) => hit.with_summary(s),
+            None => hit,
+        }
+    }
+}
+
 /// Host-side implementation of the `axil:plugin` `host` interface — backs every
 /// capability a plugin may call into Axil with (Phase 22.3), enforcing the
 /// granted capability set and the plugin's declared table prefixes.

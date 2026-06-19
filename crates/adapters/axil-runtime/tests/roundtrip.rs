@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use axil_core::{Axil, AxilConfig};
 use axil_runtime::bindings::axil::plugin::types::{CliInvocation, DispatchCli};
-use axil_runtime::{Capabilities, PluginState, WasmHost};
+use axil_runtime::{Capabilities, PluginState, WasmExtension, WasmHost};
 
 const HELLO_COMPONENT: &[u8] = include_bytes!("fixtures/hello-guest.component.wasm");
 
@@ -60,5 +60,48 @@ fn hello_guest_exports_round_trip() {
             assert!(out.stdout.contains("world"));
         }
         DispatchCli::NotHandled => panic!("expected Handled"),
+    }
+}
+
+#[test]
+fn wasm_extension_behaves_as_a_native_extension() {
+    use axil_core::{dispatch_cli, CliInvocation as CoreInvocation, Dispatch, Extension};
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = Arc::new(Axil::open(dir.path().join("t.axil")).build().unwrap());
+    let state = PluginState::new(
+        Arc::clone(&db),
+        Capabilities::all(),
+        vec!["_hello_".to_string()],
+        AxilConfig::default(),
+    );
+    let host = WasmHost::new().unwrap();
+    let component = host.load_component(HELLO_COMPONENT).unwrap();
+
+    // A loaded `.wasm` is "just another `dyn Extension`".
+    let wasm_ext: Arc<dyn Extension> =
+        Arc::new(WasmExtension::load(&host, &component, state).unwrap());
+
+    // Metadata through the trait (served from the load-time cache).
+    assert_eq!(wasm_ext.id(), "hello");
+    assert_eq!(wasm_ext.display_name(), "Hello Plugin");
+    assert_eq!(wasm_ext.table_prefixes(), &["_hello_"]);
+    assert_eq!(wasm_ext.cli_commands().unwrap().command, "hello");
+    assert_eq!(
+        wasm_ext.boot_block(&db).as_deref(),
+        Some("hello plugin ready")
+    );
+
+    // The generic Phase-17/21 dispatcher routes a CLI call straight into the
+    // guest — zero per-plugin host code, exactly like a native Extension.
+    let exts = vec![Arc::clone(&wasm_ext)];
+    let inv = CoreInvocation::new(vec!["hello".to_string()], vec!["abc".to_string()], None);
+    match dispatch_cli(&db, &exts, &inv).unwrap() {
+        Dispatch::Handled(out) => {
+            assert_eq!(out.exit_code, 0);
+            assert!(out.stdout.contains("hello from wasm"));
+            assert!(out.stdout.contains("abc"));
+        }
+        Dispatch::NotHandled => panic!("the WASM plugin should have handled `hello`"),
     }
 }
