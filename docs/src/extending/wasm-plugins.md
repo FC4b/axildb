@@ -107,4 +107,4 @@ Capabilities: `records.read`, `records.write` (own-prefix only), `recall`, `quer
 
 ## Status
 
-Shipped: the ABI, runtime, host imports, the `WasmExtension` shim, discovery, the `axil ext` commands, and the capability model. Still polish (Phase 22): an ergonomic guest-side SDK macro, load-time ABI-version negotiation, a compiled-module cache, and a conformance/fuzz suite.
+Shipped: the ABI, runtime, host imports, the `WasmExtension` shim, discovery, the `axil ext` commands, the capability model, **load-time ABI-version negotiation** (a clear error when a plugin's `axil:plugin@X.Y.Z` isn't one this host implements — its version shows in `ext list`/`info`), and a **compiled-module cache** (`.axil/plugins/.cache/` — repeat invocations deserialize a precompiled artifact instead of recompiling, ~16× faster). Still polish (Phase 22): an ergonomic guest-side SDK macro and a conformance/fuzz suite.

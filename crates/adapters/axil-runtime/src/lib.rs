@@ -44,6 +44,64 @@ mod host {
     /// a content change self-invalidates the cache without a separate manifest.
     const CACHE_TAG_LEN: usize = 32;
 
+    /// The `axil:plugin` ABI version this host *implements* — the version of the
+    /// WIT world `bindgen!` is generated from (`wit/axil-plugin.wit`). A loaded
+    /// guest declares its own (in its exported `axil:plugin/extension@X.Y.Z`
+    /// interface); [`WasmHost::check_abi`] reconciles the two.
+    pub const HOST_ABI_MAJOR: u64 = 1;
+    /// Minor component of [`HOST_ABI_MAJOR`] — additive features within a major.
+    pub const HOST_ABI_MINOR: u64 = 0;
+
+    /// Major ABI versions this host can load. A breaking change bumps the major;
+    /// the host stays compatible with the previous major (the "N and N-1" promise
+    /// in `wit/axil-plugin.wit`) by bundling its bindings. Today only major 1
+    /// exists, so this is `[1]`; a future host that ships a `@2.0.0` world adds
+    /// `2` here and keeps `1`.
+    pub const SUPPORTED_ABI_MAJORS: &[u64] = &[HOST_ABI_MAJOR];
+
+    /// The `axil:plugin@X.Y.Z` ABI version a component is built against, parsed
+    /// from its exported `axil:plugin/extension@…` interface name.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct AbiVersion {
+        pub major: u64,
+        pub minor: u64,
+        pub patch: u64,
+    }
+
+    impl AbiVersion {
+        /// Parse from a component export name like
+        /// `axil:plugin/extension@1.0.0`. Returns `None` for any other interface.
+        pub(crate) fn from_export_name(name: &str) -> Option<Self> {
+            Self::parse(name.strip_prefix("axil:plugin/extension@")?)
+        }
+
+        /// Parse a bare `major.minor.patch` (patch optional, any
+        /// pre-release/build suffix on the last component ignored).
+        fn parse(v: &str) -> Option<Self> {
+            let mut it = v.split('.');
+            let major = it.next()?.parse().ok()?;
+            let minor = it.next()?.parse().ok()?;
+            // Tolerate `1.0.0+meta` / `1.0` by trimming non-digits off the patch.
+            let patch = it
+                .next()
+                .map(|p| p.split(|c: char| !c.is_ascii_digit()).next().unwrap_or("0"))
+                .unwrap_or("0")
+                .parse()
+                .unwrap_or(0);
+            Some(Self {
+                major,
+                minor,
+                patch,
+            })
+        }
+    }
+
+    impl std::fmt::Display for AbiVersion {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "{}.{}.{}", self.major, self.minor, self.patch)
+        }
+    }
+
     /// The WASM host runtime: owns a configured Wasmtime [`Engine`] shared by
     /// every loaded plugin.
     pub struct WasmHost {
@@ -126,6 +184,55 @@ mod host {
             Ok(component)
         }
 
+        /// The `axil:plugin` ABI version a loaded `component` is built against,
+        /// read from its exported `axil:plugin/extension@…` interface. `None` if
+        /// the component exports no such interface (i.e. it isn't an Axil plugin).
+        pub fn detected_abi(&self, component: &Component) -> Option<AbiVersion> {
+            component
+                .component_type()
+                .exports(&self.engine)
+                .find_map(|(name, _)| AbiVersion::from_export_name(name))
+        }
+
+        /// Reconcile a component's declared `axil:plugin` ABI against what this
+        /// host implements, returning the detected version on success.
+        ///
+        /// This is the load-time **version-negotiation** gate (Phase 22.8): it
+        /// turns the otherwise-cryptic Wasmtime link failure ("expected export
+        /// `axil:plugin/extension@1.0.0`…") that an incompatible world produces
+        /// at instantiation into a precise, actionable error *before* any
+        /// instantiation. The accepted range is the "N and N-1" promise in the
+        /// WIT: a supported major, and — within the host's own major — a minor no
+        /// newer than the host implements (a newer minor may use host imports
+        /// this build doesn't provide).
+        pub fn check_abi(&self, component: &Component) -> Result<AbiVersion> {
+            let Some(v) = self.detected_abi(component) else {
+                anyhow::bail!(
+                    "not an Axil plugin: the component exports no \
+                     `axil:plugin/extension` interface — build it against the \
+                     axil:plugin@{HOST_ABI_MAJOR}.{HOST_ABI_MINOR} WIT (wit/axil-plugin.wit)"
+                );
+            };
+            if !SUPPORTED_ABI_MAJORS.contains(&v.major) {
+                anyhow::bail!(
+                    "plugin ABI mismatch: built against axil:plugin@{v} (major {}), \
+                     but this axil supports major version(s) {:?}. Rebuild the \
+                     plugin against this host's WIT, or upgrade axil.",
+                    v.major,
+                    SUPPORTED_ABI_MAJORS
+                );
+            }
+            if v.major == HOST_ABI_MAJOR && v.minor > HOST_ABI_MINOR {
+                anyhow::bail!(
+                    "plugin ABI too new: built against axil:plugin@{v}, but this \
+                     axil implements axil:plugin@{HOST_ABI_MAJOR}.{HOST_ABI_MINOR}. \
+                     The plugin may use host imports this build doesn't provide — \
+                     upgrade axil."
+                );
+            }
+            Ok(v)
+        }
+
         /// Instantiate a loaded component, wiring the `axil:plugin` host imports
         /// against `state` (Phase 22.4). The returned `Store` + `Plugin` bindings
         /// are what the `WasmExtension` shim drives to call the guest's exports.
@@ -180,7 +287,9 @@ mod host {
 }
 
 #[cfg(feature = "wasm-host")]
-pub use host::WasmHost;
+pub use host::{
+    AbiVersion, WasmHost, HOST_ABI_MAJOR, HOST_ABI_MINOR, SUPPORTED_ABI_MAJORS,
+};
 
 #[cfg(feature = "wasm-host")]
 pub use abi::{Capabilities, PluginState};
@@ -206,7 +315,7 @@ mod shim {
 
     use crate::bindings::axil::plugin::types as wit;
     use crate::bindings::Plugin;
-    use crate::{PluginState, WasmHost};
+    use crate::{AbiVersion, PluginState, WasmHost};
 
     /// The instantiated guest + its store. Wasmtime's `Store` is `!Sync`, so the
     /// `WasmExtension` wraps this in a `Mutex` to satisfy `Extension: Send + Sync`
@@ -230,6 +339,7 @@ mod shim {
         prefixes: Vec<&'static str>,
         cli: Option<CliSurface>,
         mcp: Option<McpSurface>,
+        abi: AbiVersion,
     }
 
     impl WasmExtension {
@@ -241,6 +351,10 @@ mod shim {
             component: &Component,
             state: PluginState,
         ) -> anyhow::Result<Self> {
+            // Version-negotiation gate (22.8): a clean, actionable error for an
+            // incompatible ABI, before the cryptic Wasmtime link failure that
+            // instantiation would otherwise surface.
+            let abi = host.check_abi(component)?;
             let (mut store, plugin) = host.instantiate(component, state)?;
             let ext = plugin.axil_plugin_extension();
             let id = ext.call_id(&mut store)?;
@@ -262,7 +376,14 @@ mod shim {
                 prefixes,
                 cli,
                 mcp,
+                abi,
             })
+        }
+
+        /// The `axil:plugin` ABI version this plugin was built against (for
+        /// `axil ext list`/`info` diagnostics).
+        pub fn abi(&self) -> AbiVersion {
+            self.abi
         }
 
         fn lock(&self) -> Result<MutexGuard<'_, Instance>, AxilError> {
@@ -994,6 +1115,43 @@ mod tests {
         host.load_component_cached(&bytes, &cache).unwrap();
         let body = std::fs::read(&cache).unwrap();
         assert!(body.len() > 64, "stale artifact was rewritten with a real one");
+    }
+
+    #[test]
+    fn abi_version_parses_from_export_name() {
+        let v = AbiVersion::from_export_name("axil:plugin/extension@1.0.0").unwrap();
+        assert_eq!((v.major, v.minor, v.patch), (1, 0, 0));
+        // Tolerates a 2-component version and a build suffix.
+        let v2 = AbiVersion::from_export_name("axil:plugin/extension@2.3").unwrap();
+        assert_eq!((v2.major, v2.minor, v2.patch), (2, 3, 0));
+        let v3 = AbiVersion::from_export_name("axil:plugin/extension@1.0.5+meta").unwrap();
+        assert_eq!((v3.major, v3.minor, v3.patch), (1, 0, 5));
+        // A non-plugin interface name is not a version.
+        assert!(AbiVersion::from_export_name("wasi:cli/run@0.2.3").is_none());
+    }
+
+    #[test]
+    fn check_abi_accepts_a_matching_plugin() {
+        // The hello fixture is built against axil:plugin@1.0.0 — the host's own.
+        let host = WasmHost::new().unwrap();
+        let bytes = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/hello-guest.component.wasm"
+        ))
+        .expect("fixture present");
+        let component = host.load_component(&bytes).unwrap();
+        let v = host.check_abi(&component).expect("1.0.0 is supported");
+        assert_eq!((v.major, v.minor), (HOST_ABI_MAJOR, HOST_ABI_MINOR));
+    }
+
+    #[test]
+    fn check_abi_rejects_a_non_plugin_component() {
+        // An empty component exports no axil:plugin/extension — not a plugin.
+        let host = WasmHost::new().unwrap();
+        let bytes = wat::parse_str("(component)").unwrap();
+        let component = host.load_component(&bytes).unwrap();
+        let err = host.check_abi(&component).unwrap_err().to_string();
+        assert!(err.contains("not an Axil plugin"), "got: {err}");
     }
 
     #[test]

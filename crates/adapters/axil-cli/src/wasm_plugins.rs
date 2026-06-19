@@ -39,6 +39,8 @@ pub struct PluginRecord {
     pub id: Option<String>,
     pub display_name: Option<String>,
     pub prefixes: Vec<String>,
+    /// `axil:plugin` ABI version the plugin was built against (e.g. `"1.0.0"`).
+    pub abi: Option<String>,
     /// Capabilities granted to this plugin (deny-by-default; empty = none).
     pub granted: Vec<String>,
     /// `Some(reason)` if the plugin failed to load (quarantined, not fatal).
@@ -70,6 +72,7 @@ pub fn load_and_register(db: &Arc<Axil>, dir: &Path, config: &AxilConfig) -> Vec
                     id: None,
                     display_name: None,
                     prefixes: Vec::new(),
+                    abi: None,
                     granted: Vec::new(),
                     error: Some(format!("WASM runtime init failed: {e}")),
                 })
@@ -114,6 +117,7 @@ pub fn load_one(
         id: None,
         display_name: None,
         prefixes: Vec::new(),
+        abi: None,
         granted: granted.clone(),
         error: None,
     };
@@ -157,6 +161,7 @@ pub fn load_one(
     rec.id = Some(ext.id().to_string());
     rec.display_name = Some(ext.display_name().to_string());
     rec.prefixes = ext.table_prefixes().iter().map(|s| s.to_string()).collect();
+    rec.abi = Some(ext.abi().to_string());
 
     if register {
         if let Err(e) = db.register_extension(Arc::new(ext)) {
