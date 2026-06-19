@@ -87,22 +87,23 @@ The extensibility surface is split into a **stable outer SPI** and an **unstable
 
 The full stable set is enumerated in one place: the crate-level docs of `axil-core` (`lib.rs`).
 
-## What ships in 1.0 vs. what's next
+## How to extend Axil — compile-time and runtime
 
-The current model is **compile-time** — every Engine, Extension, and Adapter is a Cargo dependency baked into the binary at build time. Within that model, 1.0 ships:
+There are now **two** ways to add an Extension, and you pick by whether you control the build:
+
+**Compile-time (native, in-tree):**
 
 - **One-line built-in registration.** `axil-bundle` is the single registry the CLI, the MCP server, and the workspace audit test all derive their Extension set from. Adding a built-in Extension is one line there, not three hand-wired sites.
-- **Runtime enable/disable, no rebuild.** `axil extensions list` shows every compiled-in Extension and its state; `axil extensions disable <id>` / `enable <id>` toggle it via `[extensions] disabled` in `axil.toml`. A disabled Extension is skipped at registration — its CLI/MCP surface and boot block vanish until re-enabled.
-- **Clean Engine removal.** `axil compact --drop-engine <vector|graph|timeseries|fts>` deletes the orphaned companion file left behind when an Engine is removed (rebuilt without its feature, or disabled).
+- **Runtime enable/disable, no rebuild.** `axil extensions list` shows every compiled-in Extension and its state; `axil extensions disable <id>` / `enable <id>` toggle it via `[extensions] disabled` in `axil.toml`.
+- **Zero CLI code.** A CLI-facing Extension's declared `CliSurface` is dispatched generically — no per-command code in `axil-cli`.
+- **Clean Engine removal.** `axil compact --drop-engine <vector|graph|timeseries|fts>` deletes the orphaned companion file when an Engine is removed.
 
-Still ahead (tracked in the Phase 21–22 extensibility plan):
+**Runtime (WASM, out-of-tree) — the `wasm-host` build:**
 
-- **Dynamic CLI from `CliSurface`** — a CLI-facing Extension needing **zero** code in `axil-cli`: its declared surface is appended to the argument parser at runtime.
-- **WASM runtime Extensions / Adapters** — load Extension and Adapter code from a `.wasm` component at runtime (`axil ext install foo.wasm`), sandboxed and ABI-versioned. Tier 1 stays compile-time because storage Engines need direct access to the master coordinator.
-- **Capability sandboxing** — today every Extension and Adapter has full `Axil` access. A granted-capability model would let a loaded plugin declare (and the host enforce) exactly which host calls it may make.
+- **Drop-in plugins, no rebuild, no fork.** Build any Component-Model language to a `.wasm`, then `axil ext install foo.wasm`. It loads from `.axil/plugins/`, registers into the live database, and its commands/tools/boot-block work exactly like a native Extension — because a loaded plugin *is* "just another `dyn Extension`" (one `WasmExtension` shim across the WIT ABI, `axil:plugin@1.0.0`).
+- **Sandboxed + capability-gated.** Ambient filesystem/network are denied by default (WASI off); CPU is bounded by Wasmtime fuel. A plugin is **deny-by-default** — it can run but cannot call back into Axil until the operator grants capabilities with `axil ext grant <plugin> <cap>` (`[plugins.<key>] capabilities` in `axil.toml`). Record writes are constrained to the plugin's declared table prefixes.
+- **`axil ext install | list | remove | info | grant | revoke`.** One bad `.wasm` is quarantined (reported, never fatal). See [Authoring WASM plugins](wasm-plugins.md).
 
-Until WASM lands, the practical path for an **out-of-tree** third party is:
+The `wasm-host` feature is **off by default** so the standard binary stays small (zero Wasmtime); build with `--features wasm-host` to opt in. Tier 1 (storage Engines) stays compile-time — Engines need direct master-coordinator access and are the storage hot path.
 
-1. Write your Extension or Adapter as its own `axil-X` crate against the stable SPI above.
-2. Register it in a host binary — fork `axil-cli`, or build your own host that calls `Axil::open(...).with_extension(...)`.
-3. Submit it upstream for inclusion in the bundle if the work is generally useful.
+Still ahead (Phase 22 polish): an ergonomic guest SDK (proc-macro), load-time ABI-version negotiation, a compiled-module cache, and a conformance/fuzz suite. None change the contract above.

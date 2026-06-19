@@ -22,6 +22,7 @@
 - [Authoring Engines](./extending/engines.md)
 - [Authoring Extensions](./extending/extensions.md)
 - [Authoring Adapters](./extending/adapters.md)
+- [Authoring WASM Plugins](./extending/wasm-plugins.md)
 
 # CLI Reference
 
