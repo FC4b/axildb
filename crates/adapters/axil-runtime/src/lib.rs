@@ -9,6 +9,22 @@
 //! compiles/validates `.wasm` **components**. The host-ABI implementation
 //! (22.3) and the `WasmExtension` shim (22.4) build directly on `WasmHost`.
 
+/// Generated host + guest bindings for the `axil:plugin@1.0.0` world, produced
+/// from `wit/axil-plugin.wit` at compile time. The host-side imports trait this
+/// generates is what Phase 22.3 implements against a live `Axil`; the guest
+/// proxy is what the `WasmExtension` shim (22.4) calls across the boundary.
+///
+/// Generating these here is also the strongest validation of the WIT: it must
+/// be not just syntactically valid (`wasm-tools`) but codegen-compatible.
+#[cfg(feature = "wasm-host")]
+#[allow(dead_code, clippy::all)] // generated; consumed by 22.3/22.4
+pub mod bindings {
+    wasmtime::component::bindgen!({
+        path: "../../../wit",
+        world: "plugin",
+    });
+}
+
 #[cfg(feature = "wasm-host")]
 mod host {
     use anyhow::Result;
