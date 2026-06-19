@@ -28,8 +28,8 @@ pub mod bindings {
 #[cfg(feature = "wasm-host")]
 mod host {
     use anyhow::Result;
-    use wasmtime::component::Component;
-    use wasmtime::{Config, Engine};
+    use wasmtime::component::{Component, Linker};
+    use wasmtime::{Config, Engine, Store};
 
     /// The WASM host runtime: owns a configured Wasmtime [`Engine`] shared by
     /// every loaded plugin.
@@ -62,6 +62,34 @@ mod host {
         /// or malformed bytes are rejected here, before any instantiation.
         pub fn load_component(&self, bytes: &[u8]) -> Result<Component> {
             Component::new(&self.engine, bytes)
+        }
+
+        /// Instantiate a loaded component, wiring the `axil:plugin` host imports
+        /// against `state` (Phase 22.4). The returned `Store` + `Plugin` bindings
+        /// are what the `WasmExtension` shim drives to call the guest's exports.
+        ///
+        /// `add_to_linker` registers every host import (record CRUD, recall,
+        /// graph, fts, embed, config, log) so the guest's calls back into Axil
+        /// resolve to the [`PluginState`](crate::PluginState) host impl.
+        pub fn instantiate(
+            &self,
+            component: &Component,
+            state: crate::abi::PluginState,
+        ) -> Result<(Store<crate::abi::PluginState>, crate::bindings::Plugin)> {
+            let mut store = Store::new(&self.engine, state);
+            let linker = self.host_linker()?;
+            let plugin = crate::bindings::Plugin::instantiate(&mut store, component, &linker)?;
+            Ok((store, plugin))
+        }
+
+        /// Build a [`Linker`] with every `axil:plugin` host import registered.
+        /// Exposed so the host-import wiring can be verified without a guest
+        /// component (a guest is required for full instantiation, since that
+        /// also binds the guest's exports).
+        pub fn host_linker(&self) -> Result<Linker<crate::abi::PluginState>> {
+            let mut linker = Linker::<crate::abi::PluginState>::new(&self.engine);
+            crate::bindings::Plugin::add_to_linker(&mut linker, |s| s)?;
+            Ok(linker)
         }
     }
 }
@@ -175,6 +203,10 @@ mod abi {
     fn record_to_json(data: &Value) -> String {
         serde_json::to_string(data).unwrap_or_else(|_| "null".to_string())
     }
+
+    // The `types` interface defines only data types, but bindgen still emits an
+    // (empty) Host trait for it that the store data must satisfy.
+    impl crate::bindings::axil::plugin::types::Host for PluginState {}
 
     impl crate::bindings::axil::plugin::host::Host for PluginState {
         fn insert(
@@ -481,6 +513,16 @@ mod tests {
     fn rejects_garbage_bytes() {
         let host = WasmHost::new().unwrap();
         assert!(host.load_component(b"not wasm at all").is_err());
+    }
+
+    #[test]
+    fn host_imports_link_cleanly() {
+        // add_to_linker must register every host import (all 12 functions + the
+        // types Host) without a name clash or missing impl. This is the host
+        // half of the load path; full instantiation additionally requires a
+        // guest that exports the `extension` interface (the hello guest).
+        let host = WasmHost::new().unwrap();
+        assert!(host.host_linker().is_ok());
     }
 }
 
