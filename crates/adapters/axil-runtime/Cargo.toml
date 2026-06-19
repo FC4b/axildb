@@ -23,10 +23,15 @@ wasmtime = { version = "27", optional = true, default-features = false, features
 # the grant (Phase 22.5).
 wasmtime-wasi = { version = "27", optional = true }
 
+# Content-hash key for the compiled-module cache: the `.cwasm` artifact is keyed
+# on the SHA-256 of the source `.wasm`, so a recompile only happens when the
+# plugin bytes change. Pulled in only by `wasm-host`.
+sha2 = { workspace = true, optional = true }
+
 [dev-dependencies]
 wat = "1"
 tempfile = { workspace = true }
 
 [features]
 default = []
-wasm-host = ["dep:wasmtime", "dep:wasmtime-wasi"]
+wasm-host = ["dep:wasmtime", "dep:wasmtime-wasi", "dep:sha2"]

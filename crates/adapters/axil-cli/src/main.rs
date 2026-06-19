@@ -13986,9 +13986,13 @@ fn run_ext(cmd: ExtCommand, db_opt: &Option<PathBuf>, out: &Output) -> Result<i3
                     if p.extension().and_then(|e| e.to_str()) != Some("wasm") {
                         continue;
                     }
-                    let rec = wasm_plugins::load_one(&db, &host, &p, &config, false);
+                    let rec = wasm_plugins::load_one(&db, &host, &p, &config, false, None);
                     if rec.id.as_deref() == Some(id.as_str()) {
                         std::fs::remove_file(&p).context("failed to delete plugin file")?;
+                        // Sweep the orphaned compiled-module cache entry (22.9).
+                        let cache_file =
+                            dir.join(".cache").join(format!("{}.cwasm", wasm_plugins::plugin_key(&p)));
+                        let _ = std::fs::remove_file(&cache_file);
                         removed = Some(p);
                         break;
                     }

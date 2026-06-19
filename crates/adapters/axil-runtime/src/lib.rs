@@ -27,7 +27,10 @@ pub mod bindings {
 
 #[cfg(feature = "wasm-host")]
 mod host {
+    use std::path::Path;
+
     use anyhow::Result;
+    use sha2::{Digest, Sha256};
     use wasmtime::component::{Component, Linker};
     use wasmtime::{Config, Engine, Store};
 
@@ -35,6 +38,11 @@ mod host {
     /// well-behaved plugin; a runaway guest exhausts it and traps. Phase
     /// 22.5/22.9 makes this configurable and refills it per call.
     const DEFAULT_FUEL: u64 = 10_000_000_000;
+
+    /// Bytes of source-content SHA-256 prepended to a cached `.cwasm` artifact.
+    /// The artifact is `[32-byte source hash][wasmtime-serialized component]`, so
+    /// a content change self-invalidates the cache without a separate manifest.
+    const CACHE_TAG_LEN: usize = 32;
 
     /// The WASM host runtime: owns a configured Wasmtime [`Engine`] shared by
     /// every loaded plugin.
@@ -67,6 +75,55 @@ mod host {
         /// or malformed bytes are rejected here, before any instantiation.
         pub fn load_component(&self, bytes: &[u8]) -> Result<Component> {
             Component::new(&self.engine, bytes)
+        }
+
+        /// Like [`load_component`](Self::load_component), but backed by an
+        /// on-disk **compiled-module cache** at `cache_file` (Phase 22.9).
+        ///
+        /// Every `axil <plugin-cmd>` is a fresh process that reloads the plugin
+        /// set; without a cache each invocation Cranelift-compiles every
+        /// installed component from scratch — a real, repeated, user-visible
+        /// cost. The cache stores `[32-byte source SHA-256][serialized
+        /// component]`; a hit deserializes the precompiled artifact (no
+        /// Cranelift), a content change or version drift falls back to a
+        /// recompile that rewrites the file. There is exactly one cache file per
+        /// plugin, so an in-place upgrade overwrites rather than accumulates.
+        ///
+        /// Caching is best-effort: a read/write/deserialize failure only costs a
+        /// recompile, never correctness.
+        ///
+        /// # Safety
+        /// [`Component::deserialize`] is `unsafe` because a precompiled artifact
+        /// is essentially native code. This is sound here because the artifact is
+        /// (a) produced by *this* process from the exact source bytes, (b) stored
+        /// in a directory the host owns, (c) gated on a SHA-256 of the current
+        /// source so a mismatched file is never deserialized, and (d) further
+        /// validated by Wasmtime's own embedded version/config tag (a drift
+        /// returns `Err`, not UB). An attacker who can write the cache dir can
+        /// already replace the `.wasm` itself, so the cache widens no trust
+        /// boundary.
+        pub fn load_component_cached(&self, bytes: &[u8], cache_file: &Path) -> Result<Component> {
+            let want = Sha256::digest(bytes);
+            if let Ok(cached) = std::fs::read(cache_file) {
+                if cached.len() > CACHE_TAG_LEN && cached[..CACHE_TAG_LEN] == want[..] {
+                    // SAFETY: see method docs — self-produced, content-keyed
+                    // artifact; Wasmtime validates its own version tag and errors
+                    // (not UB) on drift, so a stale hit recompiles below.
+                    if let Ok(c) =
+                        unsafe { Component::deserialize(&self.engine, &cached[CACHE_TAG_LEN..]) }
+                    {
+                        return Ok(c);
+                    }
+                }
+            }
+            let component = Component::new(&self.engine, bytes)?;
+            if let Ok(serialized) = component.serialize() {
+                let mut buf = Vec::with_capacity(CACHE_TAG_LEN + serialized.len());
+                buf.extend_from_slice(&want);
+                buf.extend_from_slice(&serialized);
+                let _ = atomic_write(cache_file, &buf);
+            }
+            Ok(component)
         }
 
         /// Instantiate a loaded component, wiring the `axil:plugin` host imports
@@ -106,6 +163,19 @@ mod host {
             crate::bindings::Plugin::add_to_linker(&mut linker, |s| s)?;
             Ok(linker)
         }
+    }
+
+    /// Write `data` to `path` atomically: create the parent dir, write a
+    /// process-unique temp sibling, then rename onto `path` (atomic on POSIX).
+    /// Concurrent `axil` processes therefore never observe a half-written cache
+    /// file — the loser of a rename race just overwrites with identical content.
+    fn atomic_write(path: &Path, data: &[u8]) -> std::io::Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
+        std::fs::write(&tmp, data)?;
+        std::fs::rename(&tmp, path)
     }
 }
 
@@ -886,6 +956,58 @@ mod tests {
         // guest that exports the `extension` interface (the hello guest).
         let host = WasmHost::new().unwrap();
         assert!(host.host_linker().is_ok());
+    }
+
+    #[test]
+    fn module_cache_populates_then_reuses() {
+        // First load compiles + writes the artifact; the second is served from
+        // the cache. We can't observe "no Cranelift" directly, but the file's
+        // presence (with the 32-byte content tag + a serialized body) and a
+        // clean second load prove the round-trip.
+        let host = WasmHost::new().unwrap();
+        let bytes = wat::parse_str("(component)").unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("p.cwasm");
+        assert!(!cache.exists());
+
+        host.load_component_cached(&bytes, &cache).unwrap();
+        let len1 = std::fs::metadata(&cache).unwrap().len();
+        assert!(len1 > 32, "cache artifact carries the content tag + body");
+
+        // Reuse: deserializes from cache, succeeds, file unchanged.
+        host.load_component_cached(&bytes, &cache).unwrap();
+        assert_eq!(std::fs::metadata(&cache).unwrap().len(), len1);
+    }
+
+    #[test]
+    fn module_cache_recompiles_on_content_change() {
+        // A cache file whose content tag doesn't match the source is never
+        // deserialized (the unsafe path is gated on the SHA-256) — it recompiles
+        // and overwrites, so a stale/foreign artifact is self-healing.
+        let host = WasmHost::new().unwrap();
+        let bytes = wat::parse_str("(component)").unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("p.cwasm");
+        std::fs::write(&cache, vec![0u8; 64]).unwrap(); // wrong tag + garbage body
+
+        // Must not touch the unsafe deserialize (tag mismatch); recompiles clean.
+        host.load_component_cached(&bytes, &cache).unwrap();
+        let body = std::fs::read(&cache).unwrap();
+        assert!(body.len() > 64, "stale artifact was rewritten with a real one");
+    }
+
+    #[test]
+    fn module_cache_tolerates_unwritable_dir() {
+        // Best-effort: if the cache can't be written (parent is a *file*, not a
+        // dir), the load still succeeds by compiling — caching never gates
+        // correctness.
+        let host = WasmHost::new().unwrap();
+        let bytes = wat::parse_str("(component)").unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let blocker = dir.path().join("not-a-dir");
+        std::fs::write(&blocker, b"x").unwrap();
+        let cache = blocker.join("p.cwasm"); // parent is a file → create_dir_all fails
+        assert!(host.load_component_cached(&bytes, &cache).is_ok());
     }
 }
 

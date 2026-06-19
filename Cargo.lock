@@ -393,6 +393,7 @@ dependencies = [
  "anyhow",
  "axil-core",
  "serde_json",
+ "sha2",
  "tempfile",
  "wasmtime",
  "wasmtime-wasi",

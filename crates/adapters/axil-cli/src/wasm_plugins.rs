@@ -77,21 +77,30 @@ pub fn load_and_register(db: &Arc<Axil>, dir: &Path, config: &AxilConfig) -> Vec
         }
     };
 
+    // Compiled-module cache lives beside the plugins (`.axil/plugins/.cache/`),
+    // one `.cwasm` per plugin keyed on source content. It turns each subsequent
+    // `axil <plugin-cmd>` from a full Cranelift compile into a deserialize.
+    let cache_dir = dir.join(".cache");
     files
         .into_iter()
-        .map(|file| load_one(db, &host, &file, config, true))
+        .map(|file| load_one(db, &host, &file, config, true, Some(&cache_dir)))
         .collect()
 }
 
 /// Load a single plugin file, optionally registering it into `db`. Used by
 /// `load_and_register` (register = true) and by `axil ext install`/`list`
 /// (register = false — inspect only).
+///
+/// `cache_dir` enables the compiled-module cache (Phase 22.9): `Some(dir)` looks
+/// up / writes `<dir>/<key>.cwasm` instead of recompiling; `None` always
+/// compiles (the one-shot install/inspect gate, where caching buys nothing).
 pub fn load_one(
     db: &Arc<Axil>,
     host: &WasmHost,
     file: &Path,
     config: &AxilConfig,
     register: bool,
+    cache_dir: Option<&Path>,
 ) -> PluginRecord {
     // Capability grants are keyed by the `.wasm` filename stem, resolved from
     // config BEFORE load (the host ABI reads the granted set on the first host
@@ -116,7 +125,11 @@ pub fn load_one(
             return rec;
         }
     };
-    let component = match host.load_component(&bytes) {
+    let loaded = match cache_dir {
+        Some(dir) => host.load_component_cached(&bytes, &dir.join(format!("{key}.cwasm"))),
+        None => host.load_component(&bytes),
+    };
+    let component = match loaded {
         Ok(c) => c,
         Err(e) => {
             rec.error = Some(format!("not a valid component: {e}"));
@@ -158,7 +171,7 @@ pub fn load_one(
 /// `axil ext install` (don't install a `.wasm` that won't load).
 pub fn inspect(db: &Arc<Axil>, file: &Path, config: &AxilConfig) -> Result<PluginRecord> {
     let host = WasmHost::new().context("WASM runtime init failed")?;
-    let rec = load_one(db, &host, file, config, false);
+    let rec = load_one(db, &host, file, config, false, None);
     if let Some(err) = &rec.error {
         anyhow::bail!("{err}");
     }
