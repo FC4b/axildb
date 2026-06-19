@@ -1,19 +1,22 @@
 //! The hello reference plugin — a minimal guest implementing the `axil:plugin`
 //! `extension` world. Compiled to a `.wasm` component (see ../build.sh) and used
 //! as the axil-runtime host's round-trip fixture.
+//!
+//! It uses the [`sdk`] ergonomic layer: implement [`sdk::Plugin`] and override
+//! only the methods the plugin needs — `mcp_tools` / `handle_mcp` / `refresh` /
+//! `recall_for_file` fall back to the trait defaults — then `export_plugin!`
+//! generates the real `Guest` impl and the component export.
 
 #[allow(warnings)]
 mod bindings;
+mod sdk;
 
-use bindings::axil::plugin::types::{
-    CliInvocation, CliOutput, CliSurface, DispatchCli, DispatchMcp, Hit, McpCall, McpSurface,
-    PluginError, RefreshOpts, RefreshReport,
-};
-use bindings::exports::axil::plugin::extension::Guest;
+use bindings::axil::plugin::types::{CliInvocation, CliOutput, CliSurface, DispatchCli, PluginError};
+use sdk::Plugin;
 
 struct Component;
 
-impl Guest for Component {
+impl Plugin for Component {
     fn id() -> String {
         "hello".to_string()
     }
@@ -34,10 +37,6 @@ impl Guest for Component {
         })
     }
 
-    fn mcp_tools() -> Option<McpSurface> {
-        None
-    }
-
     fn handle_cli(invocation: CliInvocation) -> Result<DispatchCli, PluginError> {
         Ok(DispatchCli::Handled(CliOutput {
             exit_code: 0,
@@ -46,26 +45,9 @@ impl Guest for Component {
         }))
     }
 
-    fn handle_mcp(_call: McpCall) -> Result<DispatchMcp, PluginError> {
-        Ok(DispatchMcp::NotHandled)
-    }
-
     fn boot_block() -> Result<Option<String>, PluginError> {
         Ok(Some("hello plugin ready".to_string()))
     }
-
-    fn refresh(_opts: RefreshOpts) -> Result<RefreshReport, PluginError> {
-        Ok(RefreshReport {
-            inspected: 0,
-            stale: 0,
-            refreshed: 0,
-            details: vec![],
-        })
-    }
-
-    fn recall_for_file(_path: String) -> Result<Vec<Hit>, PluginError> {
-        Ok(vec![])
-    }
 }
 
-bindings::export!(Component with_types_in bindings);
+export_plugin!(Component);

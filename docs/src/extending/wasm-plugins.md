@@ -37,17 +37,20 @@ path = "path/to/wit"        # point at Axil's wit/ dir
 world = "plugin"
 ```
 
+The generated `Guest` trait requires all ten methods. The reference guest ships a tiny `sdk` module ([`test-guest/src/sdk.rs`](https://github.com/FC4b/axildb/blob/main/crates/adapters/axil-runtime/test-guest/src/sdk.rs)) that flips that: implement `sdk::Plugin` and override **only what you need** — everything else defaults to "decline / empty" — then `export_plugin!` generates the real `Guest` impl and the component export.
+
 ```rust
 // src/lib.rs
 #[allow(warnings)]
 mod bindings;
+mod sdk;  // the Plugin trait + export_plugin! macro (copy from the reference guest)
+
 use bindings::axil::plugin::types::{CliInvocation, CliOutput, CliSurface, DispatchCli, PluginError};
-use bindings::exports::axil::plugin::extension::Guest;
+use sdk::Plugin;
 
 struct Component;
-impl Guest for Component {
+impl Plugin for Component {
     fn id() -> String { "my-plugin".into() }
-    fn display_name() -> String { "My Plugin".into() }
     fn table_prefixes() -> Vec<String> { vec!["_myplugin_".into()] }
     fn cli_commands() -> Option<CliSurface> {
         Some(CliSurface { command: "my-plugin".into(), about: "...".into(), subcommands: vec![] })
@@ -55,11 +58,13 @@ impl Guest for Component {
     fn handle_cli(inv: CliInvocation) -> Result<DispatchCli, PluginError> {
         Ok(DispatchCli::Handled(CliOutput { exit_code: 0, stdout: format!("hi {:?}", inv.args), stderr: String::new() }))
     }
-    // mcp_tools / handle_mcp / boot_block / refresh / recall_for_file:
-    // return None / NotHandled / empty as needed.
+    // display_name / mcp_tools / handle_mcp / boot_block / refresh /
+    // recall_for_file: omitted — the trait defaults handle them.
 }
-bindings::export!(Component with_types_in bindings);
+export_plugin!(Component);
 ```
+
+> Prefer the raw bindings? Implement `bindings::exports::axil::plugin::extension::Guest` directly (all ten methods) and call `bindings::export!(Component with_types_in bindings)` — the `sdk` layer is optional sugar over exactly that.
 
 Build (needs `cargo-component` + the `wasm32-wasip2` target):
 
@@ -107,4 +112,4 @@ Capabilities: `records.read`, `records.write` (own-prefix only), `recall`, `quer
 
 ## Status
 
-Shipped: the ABI, runtime, host imports, the `WasmExtension` shim, discovery, the `axil ext` commands, the capability model, **load-time ABI-version negotiation** (a clear error when a plugin's `axil:plugin@X.Y.Z` isn't one this host implements — its version shows in `ext list`/`info`), a **compiled-module cache** (`.axil/plugins/.cache/` — repeat invocations deserialize a precompiled artifact instead of recompiling, ~16× faster), and a **host-ABI conformance suite** (a real guest exercises every host import across the boundary, asserting capability gating, prefix enforcement, marshalling, and fault isolation — `crates/adapters/axil-runtime/conformance-guest/`). Still polish (Phase 22): an ergonomic guest-side SDK macro and a fuzz harness.
+Shipped: the ABI, runtime, host imports, the `WasmExtension` shim, discovery, the `axil ext` commands, the capability model, **load-time ABI-version negotiation** (a clear error when a plugin's `axil:plugin@X.Y.Z` isn't one this host implements — its version shows in `ext list`/`info`), a **compiled-module cache** (`.axil/plugins/.cache/` — repeat invocations deserialize a precompiled artifact instead of recompiling, ~16× faster), a **host-ABI conformance suite** (a real guest exercises every host import across the boundary, asserting capability gating, prefix enforcement, marshalling, and fault isolation — `crates/adapters/axil-runtime/conformance-guest/`), and an **ergonomic authoring layer** (the `sdk::Plugin` trait + `export_plugin!` macro — implement only the methods you need). Still polish (Phase 22): packaging that layer as a standalone published crate, and a fuzz harness.
