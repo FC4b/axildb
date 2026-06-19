@@ -667,6 +667,14 @@ enum Command {
     #[command(subcommand)]
     Extensions(ExtensionsCommand),
 
+    /// Catch-all for a command no built-in subcommand claims: routed to
+    /// whichever registered Extension owns it via generic Path-C dispatch
+    /// (`dispatch_cli`). This is what lets a CLI-facing Extension need zero
+    /// code in `axil-cli` — it declares a `CliSurface` + `handle_cli`,
+    /// registers in the bundle, and its command works here automatically.
+    #[command(external_subcommand)]
+    External(Vec<String>),
+
     /// Dependency documentation memory (Phase 16).
     ///
     /// `deps list` resolves the project's dependencies to their exact
@@ -8293,6 +8301,8 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
 
         Command::Extensions(ext_cmd) => run_extensions(ext_cmd, out),
 
+        Command::External(tokens) => run_extension_dispatch(tokens, &db_opt, out),
+
         // ── Report ──────────────────────────────────────────────────
         Command::Report { command: rep_cmd } => {
             let db_path = db_opt;
@@ -13730,6 +13740,104 @@ fn run_session(cmd: SessionCommand, db_path: &Path, out: &Output) -> Result<i32>
 
 // ─── Config commands ────────────────────────────────────────────────────────
 
+/// Build a [`CliInvocation`] from raw external-subcommand tokens, using the
+/// owning Extension's declared [`CliSurface`] to split leading subcommand-path
+/// tokens from arguments. Pure (no DB) so it is unit-testable.
+///
+/// `tokens[0]` is always the top-level command. If the surface declares a
+/// nested subcommand whose name matches `tokens[1]`, that token joins the
+/// command path; everything after is `args`. This reproduces what a bespoke
+/// per-Extension marshaler did, but generically from the declared surface.
+fn build_extension_invocation(
+    tokens: &[String],
+    surface: Option<&axil_core::CliSurface>,
+    stdin: Option<String>,
+) -> axil_core::CliInvocation {
+    let mut command_path: Vec<String> = Vec::new();
+    let mut idx = 0;
+    if let Some(cmd) = tokens.first() {
+        command_path.push(cmd.clone());
+        idx = 1;
+        if let (Some(surface), Some(next)) = (surface, tokens.get(1)) {
+            if surface.subcommands.iter().any(|s| &s.name == next) {
+                command_path.push(next.clone());
+                idx = 2;
+            }
+        }
+    }
+    axil_core::CliInvocation::new(command_path, tokens[idx..].to_vec(), stdin)
+}
+
+/// Read piped stdin if present (non-TTY), so Extensions supporting the `-`
+/// convention work over the generic dispatch path. Returns `None` at a TTY.
+fn read_piped_stdin() -> Option<String> {
+    use std::io::{IsTerminal, Read};
+    if std::io::stdin().is_terminal() {
+        return None;
+    }
+    let mut buf = String::new();
+    match std::io::stdin().read_to_string(&mut buf) {
+        Ok(n) if n > 0 => Some(buf),
+        _ => None,
+    }
+}
+
+/// Generic dispatch for a command no built-in subcommand claimed: route it to
+/// whichever registered Extension owns it. The Extension's command surface is
+/// resolved from the bundle **without** opening the DB, so a genuine typo fails
+/// fast (no DB open) exactly like before; only a real Extension command pays to
+/// open the database and dispatch.
+fn run_extension_dispatch(
+    tokens: Vec<String>,
+    db_opt: &Option<PathBuf>,
+    _out: &Output,
+) -> Result<i32> {
+    let command = tokens
+        .first()
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("no command given"))?;
+
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let config = axil_core::load_config_from(&cwd).unwrap_or_default();
+    let surface = axil_bundle::builtin_extension_surfaces(&config)
+        .into_iter()
+        .find(|s| s.command == command);
+    let Some(surface) = surface else {
+        anyhow::bail!(
+            "unknown command `{command}` — run `axil --help` for built-in commands, \
+             or `axil extensions list` to see loaded Extensions"
+        );
+    };
+
+    let db = open_with_all_detected(&require_db(db_opt)?)?;
+    let stdin = read_piped_stdin();
+    let invocation = build_extension_invocation(&tokens, Some(&surface), stdin);
+
+    match axil_core::dispatch_cli(&db, db.extensions(), &invocation)
+        .map_err(|e| anyhow::anyhow!("{e}"))?
+    {
+        axil_core::Dispatch::Handled(output) => {
+            if !output.stdout.is_empty() {
+                print!("{}", output.stdout);
+                if !output.stdout.ends_with('\n') {
+                    println!();
+                }
+            }
+            if !output.stderr.is_empty() {
+                eprint!("{}", output.stderr);
+                if !output.stderr.ends_with('\n') {
+                    eprintln!();
+                }
+            }
+            Ok(output.exit_code)
+        }
+        axil_core::Dispatch::NotHandled => anyhow::bail!(
+            "command `{command}` is declared by an Extension but it declined to handle \
+             this invocation"
+        ),
+    }
+}
+
 fn run_extensions(cmd: ExtensionsCommand, out: &Output) -> Result<i32> {
     let cwd = std::env::current_dir().context("failed to get current directory")?;
 
@@ -15799,6 +15907,60 @@ fn parse_comma_list(opt: &Option<String>) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod extension_dispatch_tests {
+    use super::*;
+    use axil_core::{CliSubcommand, CliSurface};
+
+    fn checkpoint_surface() -> CliSurface {
+        CliSurface::new("checkpoint", "session checkpoint")
+            .subcommand(CliSubcommand::new("write", "write a checkpoint"))
+            .subcommand(CliSubcommand::new("show", "show the checkpoint"))
+    }
+
+    #[test]
+    fn splits_declared_subcommand_into_command_path() {
+        let tokens = vec!["checkpoint".to_string(), "show".to_string()];
+        let inv = build_extension_invocation(&tokens, Some(&checkpoint_surface()), None);
+        assert_eq!(inv.command_path, vec!["checkpoint", "show"]);
+        assert!(inv.args.is_empty());
+    }
+
+    #[test]
+    fn subcommand_plus_flags_keeps_flags_as_args() {
+        let tokens = vec!["checkpoint".into(), "write".into(), "--final".into()];
+        let inv = build_extension_invocation(&tokens, Some(&checkpoint_surface()), None);
+        assert_eq!(inv.command_path, vec!["checkpoint", "write"]);
+        assert_eq!(inv.args, vec!["--final"]);
+    }
+
+    #[test]
+    fn non_subcommand_token_stays_an_arg() {
+        // `checkpoint '{json}'` — the JSON is not a declared subcommand, so the
+        // command path is just the top command and the JSON is a positional arg.
+        let tokens = vec!["checkpoint".into(), "{\"goal\":\"x\"}".into()];
+        let inv = build_extension_invocation(&tokens, Some(&checkpoint_surface()), None);
+        assert_eq!(inv.command_path, vec!["checkpoint"]);
+        assert_eq!(inv.args, vec!["{\"goal\":\"x\"}"]);
+    }
+
+    #[test]
+    fn no_surface_keeps_everything_after_command_as_args() {
+        let tokens = vec!["hello".into(), "world".into()];
+        let inv = build_extension_invocation(&tokens, None, None);
+        assert_eq!(inv.command_path, vec!["hello"]);
+        assert_eq!(inv.args, vec!["world"]);
+    }
+
+    #[test]
+    fn stdin_is_threaded_through() {
+        let tokens = vec!["checkpoint".into()];
+        let inv =
+            build_extension_invocation(&tokens, Some(&checkpoint_surface()), Some("piped".into()));
+        assert_eq!(inv.stdin.as_deref(), Some("piped"));
+    }
 }
 
 #[cfg(test)]
