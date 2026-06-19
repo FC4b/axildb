@@ -31,6 +31,11 @@ mod host {
     use wasmtime::component::{Component, Linker};
     use wasmtime::{Config, Engine, Store};
 
+    /// Default per-instance CPU budget (Wasmtime fuel units). Generous for a
+    /// well-behaved plugin; a runaway guest exhausts it and traps. Phase
+    /// 22.5/22.9 makes this configurable and refills it per call.
+    const DEFAULT_FUEL: u64 = 10_000_000_000;
+
     /// The WASM host runtime: owns a configured Wasmtime [`Engine`] shared by
     /// every loaded plugin.
     pub struct WasmHost {
@@ -77,6 +82,14 @@ mod host {
             state: crate::abi::PluginState,
         ) -> Result<(Store<crate::abi::PluginState>, crate::bindings::Plugin)> {
             let mut store = Store::new(&self.engine, state);
+            // Seed the CPU budget so the guest can run; a CPU-bound plugin
+            // exhausts it and traps rather than hanging the host. Per-call
+            // refueling + a configurable ceiling is the Phase 22.5/22.9 refinement.
+            store.set_fuel(DEFAULT_FUEL)?;
+            // Epoch interruption is armed (the wall-clock bound) but inert until
+            // Phase 22.5 adds a ticker thread + a real per-call timeout; set a
+            // non-tripping deadline so the guest isn't interrupted immediately.
+            store.set_epoch_deadline(u64::MAX);
             let linker = self.host_linker()?;
             let plugin = crate::bindings::Plugin::instantiate(&mut store, component, &linker)?;
             Ok((store, plugin))
@@ -88,6 +101,8 @@ mod host {
         /// also binds the guest's exports).
         pub fn host_linker(&self) -> Result<Linker<crate::abi::PluginState>> {
             let mut linker = Linker::<crate::abi::PluginState>::new(&self.engine);
+            // WASI (deny-by-default ctx) so std-using guests instantiate.
+            wasmtime_wasi::add_to_linker_sync(&mut linker)?;
             crate::bindings::Plugin::add_to_linker(&mut linker, |s| s)?;
             Ok(linker)
         }
@@ -150,6 +165,10 @@ mod abi {
         caps: Capabilities,
         prefixes: Vec<String>,
         config: AxilConfig,
+        // WASI with NO granted access (no preopens, env, or sockets) — present
+        // only so std-using guests instantiate. The sandbox is deny-by-default.
+        wasi: wasmtime_wasi::WasiCtx,
+        table: wasmtime_wasi::ResourceTable,
     }
 
     impl PluginState {
@@ -165,6 +184,8 @@ mod abi {
                 caps,
                 prefixes,
                 config,
+                wasi: wasmtime_wasi::WasiCtxBuilder::new().build(),
+                table: wasmtime_wasi::ResourceTable::new(),
             }
         }
 
@@ -184,6 +205,15 @@ mod abi {
                     "table `{table}` is outside this plugin's declared prefixes"
                 )))
             }
+        }
+    }
+
+    impl wasmtime_wasi::WasiView for PluginState {
+        fn table(&mut self) -> &mut wasmtime_wasi::ResourceTable {
+            &mut self.table
+        }
+        fn ctx(&mut self) -> &mut wasmtime_wasi::WasiCtx {
+            &mut self.wasi
         }
     }
 

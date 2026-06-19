@@ -18,6 +18,10 @@ wasmtime = { version = "27", optional = true, default-features = false, features
     "cranelift",
     "component-model",
 ] }
+# WASI is linked with a DENY-BY-DEFAULT context (no fs/net/env access) — present
+# only so std-using guests instantiate. Ambient access is off; capabilities are
+# the grant (Phase 22.5).
+wasmtime-wasi = { version = "27", optional = true }
 
 [dev-dependencies]
 wat = "1"
@@ -25,4 +29,4 @@ tempfile = { workspace = true }
 
 [features]
 default = []
-wasm-host = ["dep:wasmtime"]
+wasm-host = ["dep:wasmtime", "dep:wasmtime-wasi"]

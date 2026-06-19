@@ -37,6 +37,9 @@ members = [
 # build; developers can `cargo build --manifest-path benchmarks/<name>/Cargo.toml`
 # on demand when the dir is populated locally.
 exclude = [
+    # WASM guest component (built with cargo-component for wasm32-wasip2, not a
+    # native workspace member) — a test fixture for the axil-runtime host.
+    "crates/adapters/axil-runtime/test-guest",
     "benchmarks/longmemeval",
     "benchmarks/convomem",
     "benchmarks/locomo",

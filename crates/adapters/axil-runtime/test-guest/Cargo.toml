@@ -1,0 +1,32 @@
+# A minimal WASM guest that implements the `axil:plugin` `extension` world —
+# the hello reference plugin + the host's round-trip test fixture.
+#
+# Detached from the parent workspace (own `[workspace]`) because it builds for
+# wasm32-wasip2 via `cargo component`, not as a native member.
+[package]
+name = "axil-hello-guest"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+wit-bindgen-rt = { version = "0.41", features = ["bitflags"] }
+
+[lib]
+crate-type = ["cdylib"]
+
+[package.metadata.component]
+package = "axil:hello-guest"
+
+[package.metadata.component.target]
+path = "../../../../wit"
+world = "plugin"
+
+[package.metadata.component.dependencies]
+
+[profile.release]
+codegen-units = 1
+opt-level = "s"
+strip = true
