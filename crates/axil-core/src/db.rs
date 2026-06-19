@@ -47,6 +47,65 @@ pub fn companion_path(base: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(p)
 }
 
+/// Map an Engine role or bare companion suffix to its canonical `(role, suffix)`.
+///
+/// Accepts the role (`vector`/`graph`/`timeseries`/`fts`) or the suffix with or
+/// without a leading dot (`vec`/`.vec`, `graph`, `ts`/`.ts`, `fts`). `None` for
+/// anything else.
+fn resolve_engine_suffix(engine: &str) -> Option<(&'static str, &'static str)> {
+    match engine.trim_start_matches('.') {
+        "vec" | "vector" => Some(("vector", ".vec")),
+        "graph" => Some(("graph", ".graph")),
+        "ts" | "timeseries" => Some(("timeseries", ".ts")),
+        "fts" => Some(("fts", ".fts")),
+        _ => None,
+    }
+}
+
+/// Delete the companion file/dir left behind by a removed Engine.
+///
+/// When an Engine is dropped (e.g. the binary is rebuilt without its feature,
+/// or it is listed in `[engines] disabled`), its companion file becomes an
+/// orphan the core can no longer interpret. This removes it cleanly. `engine`
+/// accepts the role (`vector`/`graph`/`timeseries`/`fts`) or the bare companion
+/// suffix (`vec`/`graph`/`ts`/`fts`); the core `.axil` file is never touched.
+///
+/// Idempotent: a missing companion reports `existed: false` rather than erroring.
+/// Operate on a database that is **not currently open with this Engine attached**
+/// — that is why the CLI never opens the DB on the `--drop-engine` path.
+pub fn drop_engine_companion(
+    base: &Path,
+    engine: &str,
+) -> Result<crate::diagnostics::DropEngineReport> {
+    let (role, suffix) = resolve_engine_suffix(engine).ok_or_else(|| {
+        crate::error::AxilError::InvalidQuery(format!(
+            "unknown engine `{engine}` — expected one of: vector, graph, timeseries, fts"
+        ))
+    })?;
+    let path = companion_path(base, suffix);
+
+    let (existed, bytes_freed) = if path.is_dir() {
+        let size = dir_size(&path);
+        std::fs::remove_dir_all(&path)
+            .map_err(|e| crate::error::AxilError::Storage(Box::new(e)))?;
+        (true, size)
+    } else if path.exists() {
+        let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        std::fs::remove_file(&path).map_err(|e| crate::error::AxilError::Storage(Box::new(e)))?;
+        (true, size)
+    } else {
+        (false, 0)
+    };
+
+    Ok(crate::diagnostics::DropEngineReport {
+        engine: role.to_string(),
+        suffix: suffix.to_string(),
+        path: path.display().to_string(),
+        existed,
+        bytes_freed,
+    })
+}
+
 /// Information about a database and its plugins.
 #[derive(Debug)]
 pub struct DatabaseInfo {
@@ -5382,6 +5441,34 @@ mod tests {
     fn extensions_empty_by_default() {
         let (db, _dir) = temp_db();
         assert!(db.extensions().is_empty());
+    }
+
+    #[test]
+    fn drop_engine_companion_removes_orphan_and_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("m.axil");
+        let companion = companion_path(&base, ".graph");
+        std::fs::write(&companion, b"orphan").unwrap();
+
+        // Role and bare suffix both resolve; the core file is never touched.
+        let report = drop_engine_companion(&base, "graph").unwrap();
+        assert_eq!(report.engine, "graph");
+        assert_eq!(report.suffix, ".graph");
+        assert!(report.existed);
+        assert_eq!(report.bytes_freed, 6);
+        assert!(!companion.exists());
+
+        // Idempotent: re-dropping a missing companion is a no-op, not an error.
+        let again = drop_engine_companion(&base, ".graph").unwrap();
+        assert!(!again.existed);
+        assert_eq!(again.bytes_freed, 0);
+
+        // The "vec" suffix and "vector" role are aliases.
+        assert_eq!(drop_engine_companion(&base, "vec").unwrap().engine, "vector");
+        assert_eq!(drop_engine_companion(&base, "vector").unwrap().engine, "vector");
+
+        // Unknown engines are rejected.
+        assert!(drop_engine_companion(&base, "bogus").is_err());
     }
 
     #[test]

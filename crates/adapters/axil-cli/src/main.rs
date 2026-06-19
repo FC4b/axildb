@@ -903,7 +903,14 @@ enum Command {
 
     /// Memory lifecycle: hard-delete expired/superseded records and clean
     /// orphaned edges/vectors/FTS, reclaiming space. Does NOT downsample.
-    Compact,
+    Compact {
+        /// Instead of compacting, delete the companion file left behind by a
+        /// removed Engine: `vector`, `graph`, `timeseries`, or `fts`. The core
+        /// `.axil` file is never touched. Use after rebuilding without an
+        /// Engine's feature or disabling it in `[engines] disabled`.
+        #[arg(long)]
+        drop_engine: Option<String>,
+    },
 
     /// Scored health assessment (0-100) + fix recommendations — the deeper
     /// sibling of `doctor`. `--save`/`--compare` track the score over time.
@@ -6181,12 +6188,22 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
         }
 
         // ── Compact ─────────────────────────────────────────────────
-        Command::Compact => {
+        Command::Compact { drop_engine } => {
             let db_path = require_db(&db_opt)?;
-            let db = open_with_all_detected(&db_path)?;
-            let report = db.compact().context("compact failed")?;
-            out.print(&serde_json::to_value(&report).unwrap());
-            Ok(EXIT_OK)
+            if let Some(engine) = drop_engine {
+                // Never open the DB here — the Engine being dropped may be
+                // orphaned or version-incompatible, which is exactly why it's
+                // being removed. This is a pure file operation on the companion.
+                let report = axil_core::drop_engine_companion(&db_path, &engine)
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                out.print(&serde_json::to_value(&report).unwrap());
+                Ok(EXIT_OK)
+            } else {
+                let db = open_with_all_detected(&db_path)?;
+                let report = db.compact().context("compact failed")?;
+                out.print(&serde_json::to_value(&report).unwrap());
+                Ok(EXIT_OK)
+            }
         }
 
         // ── Health Report ───────────────────────────────────────────

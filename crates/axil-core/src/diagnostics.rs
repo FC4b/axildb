@@ -148,6 +148,21 @@ pub struct CompactReport {
     pub duration_ms: f64,
 }
 
+/// Report from dropping a removed Engine's companion file (`compact --drop-engine`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DropEngineReport {
+    /// Canonical Engine role (e.g. `"graph"`).
+    pub engine: String,
+    /// Companion-file suffix that was targeted (e.g. `".graph"`).
+    pub suffix: String,
+    /// Full path of the companion file/dir.
+    pub path: String,
+    /// Whether a companion actually existed and was removed.
+    pub existed: bool,
+    /// Bytes reclaimed by the removal.
+    pub bytes_freed: u64,
+}
+
 /// Report from a vector index rebuild.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VectorRebuildReport {
