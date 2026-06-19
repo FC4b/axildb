@@ -184,6 +184,14 @@ pub const CATALOG: &[FeatureInfo] = &[
         in_default: false,
         in_full: false,
     },
+    FeatureInfo {
+        name: "wasm-host",
+        tier: "opt-in",
+        description: "Runtime WASM plugins (Wasmtime) — `axil ext` + .axil/plugins",
+        requires: &[],
+        in_default: false,
+        in_full: false,
+    },
 ];
 
 /// Was `name` compiled into this binary? `cfg!` needs literals, hence the match.
@@ -207,6 +215,7 @@ fn is_compiled(name: &str) -> bool {
         "llm-http" => cfg!(feature = "llm-http"),
         "web-docs" => cfg!(feature = "web-docs"),
         "otel" => cfg!(feature = "otel"),
+        "wasm-host" => cfg!(feature = "wasm-host"),
         _ => false,
     }
 }

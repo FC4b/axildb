@@ -80,6 +80,10 @@ optional = true
 workspace = true
 optional = true
 
+[dependencies.axil-runtime]
+path = "../axil-runtime"
+optional = true
+
 [dependencies.tempfile]
 workspace = true
 
@@ -110,4 +114,7 @@ mcp = ["dep:axil-mcp"]
 ql = ["dep:axil-ql", "dep:rustyline"]
 rerank = ["indexer", "axil-indexer/rerank"]
 http = ["dep:axum", "dep:tower-http"]
+# Runtime WASM plugins (Phase 22). Default-OFF: pulls Wasmtime in, so it's opt-in
+# to preserve the small-binary posture. `axil ext …` + .axil/plugins discovery.
+wasm-host = ["dep:axil-runtime", "axil-runtime/wasm-host"]
 full = ["vector", "embed", "graph", "fts", "timeseries", "indexer", "scip", "deps", "checkpoint", "rerank", "memory", "llm-http", "mcp", "ql", "http"]

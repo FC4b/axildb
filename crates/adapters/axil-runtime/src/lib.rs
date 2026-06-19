@@ -175,8 +175,11 @@ mod shim {
             let ext = plugin.axil_plugin_extension();
             let id = ext.call_id(&mut store)?;
             let display_name = ext.call_display_name(&mut store)?;
-            let prefixes: Vec<&'static str> = ext
-                .call_table_prefixes(&mut store)?
+            let declared = ext.call_table_prefixes(&mut store)?;
+            // Constrain the plugin's host writes to exactly the tables it
+            // declares it owns (the host ABI's prefix check reads these).
+            store.data_mut().set_prefixes(declared.clone());
+            let prefixes: Vec<&'static str> = declared
                 .into_iter()
                 .map(|s| &*Box::leak(s.into_boxed_str()))
                 .collect();
@@ -448,6 +451,14 @@ mod abi {
                 wasi: wasmtime_wasi::WasiCtxBuilder::new().build(),
                 table: wasmtime_wasi::ResourceTable::new(),
             }
+        }
+
+        /// Set the table prefixes this plugin may write to. Called by
+        /// [`crate::WasmExtension::load`] from the guest's own
+        /// `table-prefixes()` declaration — a plugin writes to exactly the
+        /// tables it declares it owns.
+        pub fn set_prefixes(&mut self, prefixes: Vec<String>) {
+            self.prefixes = prefixes;
         }
 
         fn require(&self, granted: bool, cap: &str) -> Result<(), wit::PluginError> {

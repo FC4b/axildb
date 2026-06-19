@@ -220,6 +220,7 @@ dependencies = [
  "axil-mcp",
  "axil-memory",
  "axil-ql",
+ "axil-runtime",
  "axil-scip",
  "axil-timeseries",
  "axil-vector",

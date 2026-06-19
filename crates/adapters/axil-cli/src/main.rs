@@ -29,6 +29,9 @@ use axil_fts::AxilBuilderFtsExt;
 #[cfg(feature = "timeseries")]
 use axil_timeseries::AxilBuilderTimeSeriesExt;
 
+#[cfg(feature = "wasm-host")]
+mod wasm_plugins;
+
 // ─── Exit codes ──────────────────────────────────────────────────────────────
 
 const EXIT_OK: i32 = 0;
@@ -666,6 +669,12 @@ enum Command {
     /// MCP tools, and boot block all vanish until it is re-enabled.
     #[command(subcommand)]
     Extensions(ExtensionsCommand),
+
+    /// Manage runtime WASM plugins in `.axil/plugins/` — install, list, or
+    /// remove a `.wasm` component with no rebuild and no fork.
+    #[cfg(feature = "wasm-host")]
+    #[command(subcommand)]
+    Ext(ExtCommand),
 
     /// Catch-all for a command no built-in subcommand claims: routed to
     /// whichever registered Extension owns it via generic Path-C dispatch
@@ -2724,6 +2733,29 @@ enum ScipCommand {
 
 /// `axil deps` subcommands — Phase 16 dependency documentation memory.
 #[cfg(feature = "deps")]
+#[cfg(feature = "wasm-host")]
+#[derive(Subcommand)]
+enum ExtCommand {
+    /// List installed WASM plugins and whether each loads.
+    List,
+    /// Install a `.wasm` component plugin: validate it loads, then copy it into
+    /// the plugins dir. No rebuild.
+    Install {
+        /// Path to the `.wasm` component file.
+        path: PathBuf,
+    },
+    /// Remove an installed plugin by its id (deletes its `.wasm`).
+    Remove {
+        /// Plugin id (as shown by `axil ext list`).
+        id: String,
+    },
+    /// Show one installed plugin's id, name, table prefixes, and file.
+    Info {
+        /// Plugin id.
+        id: String,
+    },
+}
+
 #[derive(Subcommand)]
 enum ExtensionsCommand {
     /// List every compiled-in Extension and whether it is active or disabled.
@@ -8301,6 +8333,9 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
 
         Command::Extensions(ext_cmd) => run_extensions(ext_cmd, out),
 
+        #[cfg(feature = "wasm-host")]
+        Command::Ext(ext_cmd) => run_ext(ext_cmd, &db_opt, out),
+
         Command::External(tokens) => run_extension_dispatch(tokens, &db_opt, out),
 
         // ── Report ──────────────────────────────────────────────────
@@ -13799,17 +13834,49 @@ fn run_extension_dispatch(
 
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let config = axil_core::load_config_from(&cwd).unwrap_or_default();
-    let surface = axil_bundle::builtin_extension_surfaces(&config)
+    let builtin = axil_bundle::builtin_extension_surfaces(&config)
         .into_iter()
         .find(|s| s.command == command);
-    let Some(surface) = surface else {
-        anyhow::bail!(
-            "unknown command `{command}` — run `axil --help` for built-in commands, \
-             or `axil extensions list` to see loaded Extensions"
-        );
+    let db_path = require_db(db_opt)?;
+
+    // Resolve which extension owns this command + open the database.
+    //
+    // Without `wasm-host`, a command no built-in claims is unknown — fail fast
+    // (no DB open for a typo). With `wasm-host`, it might belong to a loaded
+    // WASM plugin, so the DB is opened and `.axil/plugins/` scanned to find out.
+    #[cfg(not(feature = "wasm-host"))]
+    let (db, surface) = {
+        let Some(surface) = builtin else {
+            anyhow::bail!(
+                "unknown command `{command}` — run `axil --help` for built-in commands, \
+                 or `axil extensions list` to see loaded Extensions"
+            );
+        };
+        (open_with_all_detected(&db_path)?, surface)
     };
 
-    let db = open_with_all_detected(&require_db(db_opt)?)?;
+    #[cfg(feature = "wasm-host")]
+    let (db, surface) = {
+        let db = std::sync::Arc::new(open_with_all_detected(&db_path)?);
+        let _ = wasm_plugins::load_and_register(
+            &db,
+            &wasm_plugins::plugins_dir(&db_path),
+            &config,
+        );
+        let surface = builtin.or_else(|| {
+            db.extensions()
+                .iter()
+                .find_map(|e| e.cli_commands().filter(|s| s.command == command))
+        });
+        let Some(surface) = surface else {
+            anyhow::bail!(
+                "unknown command `{command}` — run `axil --help`, `axil extensions list` for \
+                 built-ins, or `axil ext list` for WASM plugins"
+            );
+        };
+        (db, surface)
+    };
+
     let stdin = read_piped_stdin();
     let invocation = build_extension_invocation(&tokens, Some(&surface), stdin);
 
@@ -13835,6 +13902,105 @@ fn run_extension_dispatch(
             "command `{command}` is declared by an Extension but it declined to handle \
              this invocation"
         ),
+    }
+}
+
+#[cfg(feature = "wasm-host")]
+fn run_ext(cmd: ExtCommand, db_opt: &Option<PathBuf>, out: &Output) -> Result<i32> {
+    use std::sync::Arc;
+
+    let db_path = require_db(db_opt)?;
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let config = axil_core::load_config_from(&cwd).unwrap_or_default();
+    let dir = wasm_plugins::plugins_dir(&db_path);
+
+    match cmd {
+        ExtCommand::List => {
+            let db = Arc::new(open_with_all_detected(&db_path)?);
+            let records = wasm_plugins::load_and_register(&db, &dir, &config);
+            let items: Vec<Value> = records
+                .iter()
+                .map(|r| {
+                    json!({
+                        "id": r.id,
+                        "display_name": r.display_name,
+                        "prefixes": r.prefixes,
+                        "file": r.file.file_name().and_then(|f| f.to_str()),
+                        "status": if r.error.is_some() { "failed" } else { "loaded" },
+                        "error": r.error,
+                    })
+                })
+                .collect();
+            out.print_array(&items);
+            Ok(EXIT_OK)
+        }
+        ExtCommand::Install { path } => {
+            let db = Arc::new(open_with_all_detected(&db_path)?);
+            // Gate: don't install a `.wasm` that won't load.
+            let rec = wasm_plugins::inspect(&db, &path, &config)
+                .with_context(|| format!("`{}` is not a loadable plugin", path.display()))?;
+            std::fs::create_dir_all(&dir).context("failed to create plugins dir")?;
+            let file_name = path
+                .file_name()
+                .ok_or_else(|| anyhow::anyhow!("invalid plugin path"))?;
+            let dest = dir.join(file_name);
+            std::fs::copy(&path, &dest).context("failed to copy plugin into plugins dir")?;
+            out.print(&json!({
+                "installed": rec.id,
+                "prefixes": rec.prefixes,
+                "file": dest.display().to_string(),
+            }));
+            if !out.quiet {
+                out.status(&format!(
+                    "installed plugin `{}` — its commands/tools are now available",
+                    rec.id.as_deref().unwrap_or("?")
+                ));
+            }
+            Ok(EXIT_OK)
+        }
+        ExtCommand::Remove { id } => {
+            let db = Arc::new(open_with_all_detected(&db_path)?);
+            let host = axil_runtime::WasmHost::new().context("WASM runtime init failed")?;
+            let mut removed: Option<PathBuf> = None;
+            if let Ok(entries) = std::fs::read_dir(&dir) {
+                for entry in entries.flatten() {
+                    let p = entry.path();
+                    if p.extension().and_then(|e| e.to_str()) != Some("wasm") {
+                        continue;
+                    }
+                    let rec = wasm_plugins::load_one(&db, &host, &p, &config, false);
+                    if rec.id.as_deref() == Some(id.as_str()) {
+                        std::fs::remove_file(&p).context("failed to delete plugin file")?;
+                        removed = Some(p);
+                        break;
+                    }
+                }
+            }
+            match removed {
+                Some(p) => {
+                    out.print(&json!({"removed": id, "file": p.display().to_string()}));
+                    Ok(EXIT_OK)
+                }
+                None => anyhow::bail!("no installed plugin with id `{id}`"),
+            }
+        }
+        ExtCommand::Info { id } => {
+            let db = Arc::new(open_with_all_detected(&db_path)?);
+            let records = wasm_plugins::load_and_register(&db, &dir, &config);
+            match records.iter().find(|r| r.id.as_deref() == Some(id.as_str())) {
+                Some(r) => {
+                    out.print(&json!({
+                        "id": r.id,
+                        "display_name": r.display_name,
+                        "prefixes": r.prefixes,
+                        "file": r.file.display().to_string(),
+                        "status": if r.error.is_some() { "failed" } else { "loaded" },
+                    }));
+                    Ok(EXIT_OK)
+                }
+                None => anyhow::bail!("no installed plugin with id `{id}`"),
+            }
+        }
     }
 }
 
