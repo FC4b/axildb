@@ -177,15 +177,15 @@ interface host {
     /// Delete a record by id; returns whether it existed.
     delete: func(id: string) -> result<bool, plugin-error>;
     /// List every record in one of the plugin's prefixed tables.
-    list: func(table: string) -> result<list<json>, plugin-error>;
+    list-records: func(table: string) -> result<list<json>, plugin-error>;
 
     /// Semantic + recency recall across memory.
     recall: func(query: string, top-k: u32) -> result<list<hit>, plugin-error>;
     /// Embed text into a vector using the host's configured embedder.
     embed-text: func(text: string) -> result<list<f32>, plugin-error>;
 
-    /// Create a directed graph edge.
-    relate: func(from: string, edge-type: string, to: string, props: json)
+    /// Create a directed graph edge from `source` to `target`.
+    relate: func(source: string, edge-type: string, target: string, props: json)
         -> result<string, plugin-error>;
     /// Immediate neighbors of a record along an edge type / direction.
     neighbors: func(id: string, edge-type: option<string>, dir: direction)

@@ -4,14 +4,13 @@
 
 ## Status
 
-This is a **design artifact (Phase 22.1)**. The Wasmtime-based runtime that loads `.wasm` components against this world (the `wasm-host` Cargo feature, Phases 22.2–22.10) is **not built yet** — see [`tasks/phase-21-22-extensibility-and-wasm.md`](../tasks/phase-21-22-extensibility-and-wasm.md).
+This is the **ABI design artifact (Phase 22.1)**, and it is **tool-validated**: it parses and resolves cleanly with
 
-> ⚠️ Not yet tool-validated. `wasm-tools` / `cargo-component` are not installed in this environment, so the world has not been machine-checked with `wasm-tools component wit ./wit`. It was authored by hand against the WIT spec and the Rust trait it mirrors. Validate it before depending on it:
->
-> ```sh
-> cargo install wasm-tools
-> wasm-tools component wit ./wit/axil-plugin.wit
-> ```
+```sh
+wasm-tools component wit ./wit/axil-plugin.wit   # exit 0
+```
+
+The Wasmtime-based runtime that *loads* `.wasm` components against this world (the `wasm-host` Cargo feature, Phases 22.2–22.10) is **not built yet** — see [`tasks/phase-21-22-extensibility-and-wasm.md`](../tasks/phase-21-22-extensibility-and-wasm.md). The world is the forever-supported contract those phases will mirror.
 
 ## What it encodes
 
