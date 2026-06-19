@@ -25,6 +25,7 @@ members = [
     "crates/extensions/axil-checkpoint",
     "crates/extensions/axil-workspace",
     # Tier 3 — Adapters (interface to the outside world)
+    "crates/adapters/axil-runtime",
     "crates/adapters/axil-mcp",
     "crates/adapters/axil-ql",
     "crates/adapters/axil-cli",

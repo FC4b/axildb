@@ -1,0 +1,26 @@
+[package]
+name = "axil-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "WASM runtime that loads sandboxed Extension components against the axil:plugin WIT world. Behind the wasm-host feature — zero Wasmtime in default builds."
+
+[dependencies]
+axil-core = { path = "../../axil-core" }
+anyhow = { workspace = true }
+
+# Wasmtime is pulled in ONLY by the `wasm-host` feature, so default/embedded
+# builds carry no runtime dependency and stay in the ~5–10MB envelope (C1/R2).
+wasmtime = { version = "27", optional = true, default-features = false, features = [
+    "runtime",
+    "cranelift",
+    "component-model",
+] }
+
+[dev-dependencies]
+wat = "1"
+
+[features]
+default = []
+wasm-host = ["dep:wasmtime"]
