@@ -74,8 +74,8 @@ pub use boot::{
 pub use config::{
     default_config_toml, find_config_file, get_config_value, home_dir, load_config_from,
     set_config_value, AxilConfig, DatabaseConfig, DebugConfig, DecayConfig, DevConfig,
-    DiagnoseConfig, FtsConfig, HealingConfig, IndexConfig, MetricsHealingConfig, OptimizeConfig,
-    RuntimeConfig, TimeseriesConfig,
+    DiagnoseConfig, EnginesConfig, ExtensionsConfig, FtsConfig, HealingConfig, IndexConfig,
+    MetricsHealingConfig, OptimizeConfig, RuntimeConfig, TimeseriesConfig,
 };
 pub use db::{
     companion_path, AutoLinkReport, Axil, AxilBuilder, CanonicalPublisher, DatabaseInfo,

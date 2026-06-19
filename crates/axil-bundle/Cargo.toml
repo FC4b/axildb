@@ -1,0 +1,26 @@
+[package]
+name = "axil-bundle"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Central registry of Axil's built-in Extensions — the single registration site for CLI, MCP, and the audit test."
+
+[dependencies]
+axil-core = { path = "../axil-core" }
+
+# Built-in Extensions, gated behind the same feature names the adapters use so
+# a trimmed build can drop them. The registry sits *above* the extension crates
+# (they depend on axil-core; the bundle depends on them), which is why it is its
+# own crate rather than living inside an adapter.
+axil-docs = { path = "../extensions/axil-docs", optional = true }
+axil-checkpoint = { path = "../extensions/axil-checkpoint", optional = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[features]
+default = []
+deps = ["dep:axil-docs"]
+checkpoint = ["dep:axil-checkpoint"]
+full = ["deps", "checkpoint"]

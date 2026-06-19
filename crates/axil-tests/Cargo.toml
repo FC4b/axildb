@@ -8,6 +8,8 @@ description = "Integration tests for Axil (not published)"
 
 [dev-dependencies]
 axil-core = { path = "../axil-core" }
+# Central built-in Extension registry — the audit test derives its set from here.
+axil-bundle = { path = "../axil-bundle", features = ["full"] }
 # Tier 1 — Engines
 axil-vector = { path = "../engines/axil-vector" }
 axil-graph = { path = "../engines/axil-graph" }

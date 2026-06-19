@@ -163,6 +163,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
 
 [[package]]
+name = "axil-bundle"
+version = "0.7.11"
+dependencies = [
+ "axil-checkpoint",
+ "axil-core",
+ "axil-docs",
+ "tempfile",
+]
+
+[[package]]
 name = "axil-checkpoint"
 version = "0.7.11"
 dependencies = [
@@ -179,6 +189,7 @@ name = "axil-cli"
 version = "0.7.11"
 dependencies = [
  "anyhow",
+ "axil-bundle",
  "axil-checkpoint",
  "axil-core",
  "axil-docs",
@@ -298,6 +309,7 @@ name = "axil-mcp"
 version = "0.7.11"
 dependencies = [
  "anyhow",
+ "axil-bundle",
  "axil-checkpoint",
  "axil-core",
  "axil-docs",
@@ -370,6 +382,7 @@ dependencies = [
 name = "axil-tests"
 version = "0.7.11"
 dependencies = [
+ "axil-bundle",
  "axil-checkpoint",
  "axil-core",
  "axil-docs",

@@ -4514,28 +4514,16 @@ fn attach_detected_plugins(mut builder: axil_core::AxilBuilder) -> Result<axil_c
         }
     }
 
-    // Phase 17 P3.2 — register the in-tree DocsExtension when the deps
-    // feature is enabled. This lets `db.extensions()` surface
-    // DocsExtension to any consumer (compose_mcp_surface, dispatch_mcp,
-    // dispatch_cli) without requiring third-party host code to do the
-    // registration manually. Today DocsExtension::handle_cli returns
-    // NotHandled for every invocation so this is functionally a no-op
-    // for the live `axil deps …` surface — the hardcoded `run_deps`
-    // handler still runs unchanged. As deps subcommands migrate onto
-    // DocsExtension::handle_cli (Phase 17 P3.2 follow-ups), the
-    // dispatch routing at the Command::Deps match arm will start
-    // returning Handled and the migration is incremental.
-    #[cfg(feature = "deps")]
-    {
-        builder = builder.with_extension(axil_docs::DocsExtension);
-    }
-
-    // Path-C dispatch: surface `axil checkpoint` and the "Resume Here"
-    // boot_block via the Extension's CLI / boot surfaces.
-    #[cfg(feature = "checkpoint")]
-    {
-        builder = builder.with_extension(axil_checkpoint::CheckpointExtension);
-    }
+    // Register every enabled built-in Extension from the central bundle —
+    // one site for the CLI, the MCP server, and the audit test. The
+    // `[extensions] disabled` filter is applied inside the bundle, so a
+    // disabled Extension never reaches `db.extensions()` and its CLI/MCP
+    // surface + boot_block vanish without a rebuild.
+    let config = path
+        .parent()
+        .and_then(|dir| axil_core::load_config_from(dir).ok())
+        .unwrap_or_default();
+    builder = axil_bundle::register_builtin_extensions(builder, &config);
 
     Ok(builder)
 }

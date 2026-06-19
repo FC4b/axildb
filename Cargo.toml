@@ -9,6 +9,8 @@ publish = false
 # See docs/src/extending/overview.md for the three-tier taxonomy.
 members = [
     "crates/axil-core",
+    # Central built-in Extension registry (sits above extensions, below adapters)
+    "crates/axil-bundle",
     # Tier 1 — Engines (storage substrates, implement the Plugin trait)
     "crates/engines/axil-vector",
     "crates/engines/axil-graph",

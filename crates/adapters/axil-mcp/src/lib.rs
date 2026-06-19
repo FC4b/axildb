@@ -98,18 +98,16 @@ pub(crate) fn attach_detected_plugins(
         }
     }
 
-    // Phase 17 P3.3 — register the in-tree DocsExtension so the MCP
-    // tools dispatcher's `dispatch_mcp` route finds it. With the
-    // Extension registered, `deps_status` flows through
-    // DocsExtension::handle_mcp; without it the hard-coded
-    // `handle_deps_status` fallback below in tools.rs runs unchanged.
-    builder = builder.with_extension(axil_docs::DocsExtension);
-
-    // Register CheckpointExtension; tools/list and tools/call route through it.
-    #[cfg(feature = "checkpoint")]
-    {
-        builder = builder.with_extension(axil_checkpoint::CheckpointExtension);
-    }
+    // Register every enabled built-in Extension from the central bundle so the
+    // MCP `dispatch_mcp` route finds them (`deps_status` flows through
+    // DocsExtension::handle_mcp; checkpoint tools route through
+    // CheckpointExtension). One registration site shared with the CLI + audit,
+    // with the `[extensions] disabled` filter applied centrally.
+    let config = path
+        .parent()
+        .and_then(|dir| axil_core::load_config_from(dir).ok())
+        .unwrap_or_default();
+    builder = axil_bundle::register_builtin_extensions(builder, &config);
 
     Ok(builder)
 }

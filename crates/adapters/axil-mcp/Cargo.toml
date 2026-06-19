@@ -8,6 +8,9 @@ description = "MCP (Model Context Protocol) server for Axil — JSON-RPC over st
 
 [dependencies]
 axil-core = { path = "../../axil-core" }
+# Bundle with `deps` on: axil-mcp always ships DocsExtension (axil-docs is a
+# non-optional dependency here), so its built-in registration is always present.
+axil-bundle = { path = "../../axil-bundle", features = ["deps"] }
 axil-indexer = { path = "../../extensions/axil-indexer" }
 axil-docs = { path = "../../extensions/axil-docs" }
 axil-workspace = { path = "../../extensions/axil-workspace" }
@@ -36,6 +39,6 @@ default = ["vector", "graph", "fts", "checkpoint"]
 vector = ["dep:axil-vector"]
 graph = ["dep:axil-graph"]
 fts = ["dep:axil-fts"]
-checkpoint = ["dep:axil-checkpoint"]
+checkpoint = ["dep:axil-checkpoint", "axil-bundle/checkpoint"]
 # Vector with embedder (bge-small/etc.) for plugin-attach parity with CLI.
 embed = ["vector", "axil-vector/embed"]

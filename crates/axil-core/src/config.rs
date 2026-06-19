@@ -39,6 +39,56 @@ pub struct AxilConfig {
     pub decay: DecayConfig,
     /// Opportunistic, time-gated maintenance (`axil maintain --if-stale`).
     pub maintenance: MaintenanceConfig,
+    /// Built-in Extension enable/disable overrides (`[extensions]`).
+    pub extensions: ExtensionsConfig,
+    /// Built-in Engine enable/disable overrides (`[engines]`).
+    pub engines: EnginesConfig,
+}
+
+impl AxilConfig {
+    /// Whether a built-in Extension is turned off in `[extensions] disabled`.
+    ///
+    /// A disabled Extension is skipped at registration (it never reaches
+    /// `db.extensions()`), so its CLI/MCP surface and `boot_block` vanish
+    /// without a rebuild. Matching is by [`crate::Extension::id`].
+    pub fn is_extension_disabled(&self, id: &str) -> bool {
+        self.extensions.disabled.iter().any(|d| d == id)
+    }
+
+    /// Whether a built-in Engine is turned off in `[engines] disabled`.
+    ///
+    /// Matched against the Engine's companion-file suffix (e.g. `"vec"`,
+    /// `"graph"`, `"fts"`, `"ts"`) so an operator can keep a companion file on
+    /// disk but skip attaching its Engine for a session.
+    pub fn is_engine_disabled(&self, suffix: &str) -> bool {
+        self.engines.disabled.iter().any(|d| d == suffix)
+    }
+}
+
+/// Runtime enable/disable overrides for built-in Extensions (`[extensions]`).
+///
+/// ```toml
+/// [extensions]
+/// disabled = ["deps", "checkpoint"]
+/// ```
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ExtensionsConfig {
+    /// Built-in Extension ids to skip at registration.
+    pub disabled: Vec<String>,
+}
+
+/// Runtime enable/disable overrides for built-in Engines (`[engines]`).
+///
+/// ```toml
+/// [engines]
+/// disabled = ["vec"]
+/// ```
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EnginesConfig {
+    /// Engine companion-file suffixes to skip attaching.
+    pub disabled: Vec<String>,
 }
 
 /// Per-table memory-decay half-life configuration.

@@ -1,95 +1,63 @@
-//! Phase 17 P1.4 — workspace-level audit of every in-tree Extension.
+//! Workspace-level audit of every in-tree Extension.
 //!
-//! Walks the workspace's known Extension impls and asserts each one
-//! follows the conventions described in
+//! The Extension set is sourced from [`axil_bundle::builtin_extensions`] — the
+//! same central registry the CLI and MCP server use — so this audit
+//! automatically covers any new built-in Extension the moment it is added to
+//! the bundle. There is no hand-maintained list to keep in sync.
+//!
+//! Asserts each Extension follows the conventions in
 //! `docs/src/extending/extensions.md`:
 //!
-//! 1. The Extension registers cleanly with `Axil::open(...).with_extension(...)`.
-//! 2. Its `id()` matches the crate name minus the `axil-` prefix.
-//! 3. Its `table_prefixes()` are non-empty (if it owns any tables) and
-//!    each prefix actually starts with `_` (per the convention that
-//!    Extension-owned tables live under leading-underscore names).
-//! 4. The builder-time prefix-overlap rejection mechanism actually
-//!    fires when two Extensions claim conflicting prefixes.
-//! 5. The builder-time duplicate-id rejection mechanism actually fires.
-//!
-//! When a new Extension is added to the workspace, drop a new row into
-//! the `KNOWN_EXTENSIONS` table at the bottom of this file. Forgetting
-//! to register an Extension here is a documentation gap, not a test
-//! failure — but the gap is visible at code-review time.
+//! 1. registers cleanly with `Axil::open(...).with_extension_arc(...)`;
+//! 2. has a non-empty, kebab-case `id()`;
+//! 3. declares only leading-underscore `table_prefixes()` (Extension-owned
+//!    tables live under the leading-underscore namespace);
+//! 4. the builder-time prefix-overlap rejection fires on conflicting prefixes;
+//! 5. the builder-time duplicate-id rejection fires.
 
 use std::sync::Arc;
 
-use axil_core::{Axil, Extension};
-
-/// One row per in-tree Extension. Add a new entry whenever a new
-/// `axil-*` crate ships an `impl Extension`.
-fn known_extensions() -> Vec<KnownExtension> {
-    vec![
-        KnownExtension {
-            crate_name: "axil-docs",
-            expected_id: "docs",
-            construct: || Arc::new(axil_docs::DocsExtension),
-        },
-        KnownExtension {
-            crate_name: "axil-checkpoint",
-            expected_id: "checkpoint",
-            construct: || Arc::new(axil_checkpoint::CheckpointExtension),
-        },
-    ]
-}
-
-struct KnownExtension {
-    crate_name: &'static str,
-    expected_id: &'static str,
-    construct: fn() -> Arc<dyn Extension>,
-}
+use axil_core::{Axil, AxilConfig, Extension};
 
 #[test]
-fn every_known_extension_registers_cleanly() {
+fn every_bundle_extension_registers_cleanly() {
     let dir = tempfile::tempdir().unwrap();
-    let known = known_extensions();
+    // Derived from the central registry — adding a built-in Extension to the
+    // bundle automatically extends this audit's coverage.
+    let exts = axil_bundle::builtin_extensions(&AxilConfig::default());
     assert!(
-        !known.is_empty(),
-        "no known Extensions registered — at minimum axil-docs should be present"
+        !exts.is_empty(),
+        "no built-in Extensions in the bundle — under `full` at least axil-docs should be present",
     );
 
-    for ext_spec in &known {
-        let path = dir
-            .path()
-            .join(format!("audit-{}.axil", ext_spec.crate_name));
-        let ext = (ext_spec.construct)();
+    for ext in &exts {
         let ext_id = ext.id().to_string();
         let prefixes: Vec<String> = ext.table_prefixes().iter().map(|s| s.to_string()).collect();
 
-        // The Extension must register without panicking.
-        let db = Axil::open(&path)
-            .with_extension_arc(ext)
-            .build()
-            .unwrap_or_else(|e| {
-                panic!(
-                    "extension `{}` (from {}) failed to register: {e}",
-                    ext_id, ext_spec.crate_name,
-                )
-            });
+        // id() convention: non-empty kebab-case.
+        assert!(!ext_id.is_empty(), "an Extension reported an empty id()");
+        assert!(
+            ext_id
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'),
+            "extension id `{ext_id}` is not kebab-case",
+        );
 
-        // Sanity checks on the impl.
+        // The Extension must register without panicking, into a fresh DB.
+        let path = dir.path().join(format!("audit-{ext_id}.axil"));
+        let db = Axil::open(&path)
+            .with_extension_arc(Arc::clone(ext))
+            .build()
+            .unwrap_or_else(|e| panic!("extension `{ext_id}` failed to register: {e}"));
+
         assert_eq!(
             db.extensions().len(),
             1,
             "extension `{ext_id}` registered, but Axil::extensions() did not surface it",
         );
-        assert_eq!(
-            db.extensions()[0].id(),
-            ext_spec.expected_id,
-            "extension id mismatch — expected `{}` for crate `{}`, got `{}`",
-            ext_spec.expected_id,
-            ext_spec.crate_name,
-            db.extensions()[0].id(),
-        );
+        assert_eq!(db.extensions()[0].id(), ext_id);
 
-        // Every declared prefix must start with `_` (Extensions own
-        // tables in the leading-underscore namespace).
+        // Every declared prefix must start with `_`.
         for p in &prefixes {
             assert!(
                 p.starts_with('_'),

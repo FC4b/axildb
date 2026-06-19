@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 axil-core = { path = "../../axil-core" }
+axil-bundle = { path = "../../axil-bundle" }
 axil-workspace = { path = "../../extensions/axil-workspace" }
 chrono = { workspace = true }
 clap = { version = "4", features = ["derive", "env"] }
@@ -97,8 +98,8 @@ fts = ["dep:axil-fts"]
 timeseries = ["dep:axil-timeseries"]
 indexer = ["dep:axil-indexer"]
 scip = ["dep:axil-scip", "graph"]
-deps = ["dep:axil-docs"]
-checkpoint = ["dep:axil-checkpoint"]
+deps = ["dep:axil-docs", "axil-bundle/deps"]
+checkpoint = ["dep:axil-checkpoint", "axil-bundle/checkpoint"]
 # Default-off built-in HTTP doc fetcher (Phase 16 Path B). Offline-first
 # is the default posture; implies `deps`.
 web-docs = ["deps", "axil-docs/web-docs"]
