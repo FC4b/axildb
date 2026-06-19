@@ -1,0 +1,240 @@
+// Axil plugin ABI — the host <-> guest contract for WASM Extensions.
+//
+// This is the WIT (WebAssembly Interface Types) mirror of the stable Rust
+// `axil_core::Extension` trait + the host capability surface. A WASM plugin is
+// a Component Model component that *exports* `extension` and *imports* `host`.
+// The host side is a single `WasmExtension` shim that implements
+// `axil_core::Extension` by calling across this boundary, so a loaded `.wasm`
+// plugin is "just another `dyn Extension`".
+//
+// STATUS: ABI design artifact (Phase 22.1). The runtime that loads components
+// against this world (Wasmtime + the `wasm-host` feature, Phase 22.2+) is not
+// built yet — see tasks/phase-21-22-extensibility-and-wasm.md. This file is the
+// forever-supported contract those phases mirror, versioned as
+// `axil:plugin@1.0.0`. It evolves additively only; a breaking change is a major
+// ABI bump (host supports N and N-1).
+//
+// Design notes that this world bakes in:
+//   * `serde_json::Value` has no WIT equivalent, so it crosses the boundary as a
+//     canonical JSON *string* (`type json = string`) — lossless, parsed host-side.
+//     (Phase 22.1 open question: JSON-string vs. a recursive WIT variant; the
+//     string form is chosen here for fidelity + binding simplicity.)
+//   * Metadata exports (`id`, `display-name`, `table-prefixes`, `cli-commands`,
+//     `mcp-tools`) are INFALLIBLE. The host fetches them ONCE at load and caches
+//     the owned result, then serves the Rust trait's borrow-returning methods
+//     from that cache — so `dispatch_cli`'s per-call loop crosses the boundary
+//     zero times. A guest that traps during a metadata call is quarantined at
+//     load, not surfaced as a runtime error. (Phase 22.0.)
+//   * Handlers + contributions (`handle-cli`, `handle-mcp`, `boot-block`,
+//     `refresh`, `recall-for-file`) are FALLIBLE — they run repeatedly at
+//     runtime, where a typed `plugin-error` beats a trap.
+
+package axil:plugin@1.0.0;
+
+/// Shared data types — the WIT mirror of the `#[non_exhaustive]` structs in
+/// `axil_core::extension`. All fields are owned (no borrows cross the boundary).
+interface types {
+    /// A `serde_json::Value` serialized as a canonical JSON string.
+    type json = string;
+
+    /// Direction for a graph traversal (mirrors `axil_core::Direction`).
+    enum direction {
+        out,
+        in,
+        both,
+    }
+
+    /// Severity for the `log` host import.
+    enum log-level {
+        trace,
+        debug,
+        info,
+        warn,
+        error,
+    }
+
+    /// Typed error returned by every fallible host import and guest handler.
+    /// A guest trap is surfaced by the host as quarantine, out of band — it is
+    /// never one of these.
+    variant plugin-error {
+        /// A referenced record/key does not exist.
+        not-found(string),
+        /// The plugin lacks the capability for this call.
+        permission-denied(string),
+        /// A write targeted a table outside the plugin's declared prefixes.
+        prefix-violation(string),
+        /// A fuel / memory / time limit was hit mid-call.
+        resource-exhausted(string),
+        /// Malformed argument (e.g. un-parseable JSON).
+        invalid(string),
+        /// Any other host-side failure.
+        internal(string),
+    }
+
+    /// A single CLI argument (mirror of `CliArg`).
+    record cli-arg {
+        name: string,
+        about: string,
+        required: bool,
+        takes-value: bool,
+    }
+
+    /// A nested CLI subcommand (mirror of `CliSubcommand`).
+    record cli-subcommand {
+        name: string,
+        about: string,
+        args: list<cli-arg>,
+    }
+
+    /// A plugin's top-level CLI surface (mirror of `CliSurface`).
+    record cli-surface {
+        command: string,
+        about: string,
+        subcommands: list<cli-subcommand>,
+    }
+
+    /// A single MCP tool (mirror of `McpTool`). `input-schema` is JSON Schema.
+    record mcp-tool {
+        name: string,
+        description: string,
+        input-schema: json,
+    }
+
+    /// A plugin's MCP tool surface (mirror of `McpSurface`).
+    record mcp-surface {
+        tools: list<mcp-tool>,
+    }
+
+    /// What the host passes to `handle-cli` (mirror of `CliInvocation`).
+    record cli-invocation {
+        command-path: list<string>,
+        args: list<string>,
+        stdin: option<string>,
+    }
+
+    /// What a plugin returns from a CLI dispatch (mirror of `CliOutput`).
+    record cli-output {
+        exit-code: s32,
+        stdout: string,
+        stderr: string,
+    }
+
+    /// What the host passes to `handle-mcp` (mirror of `McpCall`).
+    record mcp-call {
+        tool: string,
+        params: json,
+    }
+
+    /// Outcome of a CLI dispatch (mirror of `Dispatch<CliOutput>`): the plugin
+    /// either handled the call or declined so the host falls back.
+    variant dispatch-cli {
+        handled(cli-output),
+        not-handled,
+    }
+
+    /// Outcome of an MCP dispatch (mirror of `Dispatch<serde_json::Value>`).
+    variant dispatch-mcp {
+        handled(json),
+        not-handled,
+    }
+
+    /// Options for `refresh` (mirror of `RefreshOpts`).
+    record refresh-opts {
+        if-stale: bool,
+        path: option<string>,
+    }
+
+    /// Summary returned by `refresh` (mirror of `RefreshReport`).
+    record refresh-report {
+        inspected: u32,
+        stale: u32,
+        refreshed: u32,
+        details: list<string>,
+    }
+
+    /// A `recall-for-file` hit (mirror of `Hit`).
+    record hit {
+        table: string,
+        id: string,
+        summary: option<string>,
+        score: f32,
+    }
+}
+
+/// Host imports — the capability surface a plugin may call back into Axil with.
+/// Every call is gated by the plugin's granted capabilities (Phase 22.5); a
+/// denied call returns `plugin-error.permission-denied`. Record writes are
+/// constrained to the plugin's declared table prefixes (Phase 22.3).
+interface host {
+    use types.{json, hit, direction, log-level, plugin-error};
+
+    /// Insert a record into one of the plugin's prefixed tables. Returns the id.
+    insert: func(table: string, data: json) -> result<string, plugin-error>;
+    /// Fetch a record by id.
+    get: func(id: string) -> result<option<json>, plugin-error>;
+    /// Replace a record's data.
+    update: func(id: string, data: json) -> result<_, plugin-error>;
+    /// Delete a record by id; returns whether it existed.
+    delete: func(id: string) -> result<bool, plugin-error>;
+    /// List every record in one of the plugin's prefixed tables.
+    list: func(table: string) -> result<list<json>, plugin-error>;
+
+    /// Semantic + recency recall across memory.
+    recall: func(query: string, top-k: u32) -> result<list<hit>, plugin-error>;
+    /// Embed text into a vector using the host's configured embedder.
+    embed-text: func(text: string) -> result<list<f32>, plugin-error>;
+
+    /// Create a directed graph edge.
+    relate: func(from: string, edge-type: string, to: string, props: json)
+        -> result<string, plugin-error>;
+    /// Immediate neighbors of a record along an edge type / direction.
+    neighbors: func(id: string, edge-type: option<string>, dir: direction)
+        -> result<list<string>, plugin-error>;
+    /// Full-text search.
+    fts-search: func(query: string, limit: u32) -> result<list<hit>, plugin-error>;
+
+    /// Read a host config value by dotted key.
+    config-get: func(key: string) -> result<option<string>, plugin-error>;
+    /// Emit a structured log line attributed to this plugin.
+    log: func(level: log-level, message: string);
+}
+
+/// Guest exports — the WIT mirror of `axil_core::Extension`. The host calls the
+/// metadata funcs once at load (cached); the handlers on demand.
+interface extension {
+    use types.{cli-surface, mcp-surface, cli-invocation, dispatch-cli, mcp-call,
+        dispatch-mcp, refresh-opts, refresh-report, hit, plugin-error};
+
+    // ---- Metadata (infallible; fetched + cached once at load) ----
+
+    /// Stable kebab-case id (e.g. `"docs"`).
+    id: func() -> string;
+    /// Human-readable name for `axil status` / `axil boot`.
+    display-name: func() -> string;
+    /// Table-name prefixes this plugin owns (must be disjoint + reserved-free).
+    table-prefixes: func() -> list<string>;
+    /// Optional CLI subcommand surface.
+    cli-commands: func() -> option<cli-surface>;
+    /// Optional MCP tool surface.
+    mcp-tools: func() -> option<mcp-surface>;
+
+    // ---- Handlers + contributions (fallible; called at runtime) ----
+
+    /// Run a matched CLI subcommand.
+    handle-cli: func(invocation: cli-invocation) -> result<dispatch-cli, plugin-error>;
+    /// Run a matched MCP tool call.
+    handle-mcp: func(call: mcp-call) -> result<dispatch-mcp, plugin-error>;
+    /// Contribute an `axil boot` block.
+    boot-block: func() -> result<option<string>, plugin-error>;
+    /// Drift/refresh entry point.
+    refresh: func(opts: refresh-opts) -> result<refresh-report, plugin-error>;
+    /// Surface records relevant to a file the agent is about to edit.
+    recall-for-file: func(path: string) -> result<list<hit>, plugin-error>;
+}
+
+/// The plugin world: a component imports the host capability surface and exports
+/// the extension surface. Versioned `@1.0.0` — additive evolution only.
+world plugin {
+    import host;
+    export extension;
+}

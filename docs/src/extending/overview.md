@@ -75,18 +75,34 @@ or time-series)?
 - [Authoring Extensions](extensions.md) — Tier 2, capability extensions. `axil-docs` is the reference implementation.
 - [Authoring Adapters](adapters.md) — Tier 3, protocol adapters. `axil-cli` and `axil-mcp` are the reference implementations.
 
-## Future work
+## Stability — the 1.0 SPI
 
-The current model is **compile-time** — every Engine, Extension, and Adapter is a Cargo dependency baked into the binary at build time. There is no dynamic loading, no plugin registry, and no stable ABI for out-of-tree storage Engines.
+The extensibility surface is split into a **stable outer SPI** and an **unstable inner Engine API**, on purpose. That asymmetry is what lets the core add, drop, or swap storage Engines without breaking anyone building on the outer tiers.
 
-Tracked future work:
+| Surface | Stability | Who builds against it |
+|---|---|---|
+| `Extension` + its support types (`CliSurface`, `CliSubcommand`, `CliArg`, `McpSurface`, `McpTool`, `Hit`, `RefreshOpts`, `RefreshReport`, …) | **Stable** — semver-locked at 1.0; the structs third parties construct are `#[non_exhaustive]` with constructors/builders so they can grow additively | Extension authors (Tier 2) |
+| `Adapter`, `Protocol`, `dispatch_cli` / `dispatch_mcp`, `compose_cli_surface` / `compose_mcp_surface`, the `Axil` builder + query API | **Stable** — semver-locked at 1.0 | Adapter authors (Tier 3) |
+| `Plugin`, `VectorIndex`, `GraphIndex`, `SearchIndex`, `TimeSeriesIndex`, `TextEmbedder`, `Capability` | **Unstable** — no semver guarantee, may change in any release | Engine authors (Tier 1 — upstream-or-fork) |
 
-- **WASM runtime Extensions / Adapters** — load Extension and Adapter code from a `.wasm` artifact at runtime. Tier 1 stays compile-time because storage Engines need direct access to the master coordinator.
-- **Extension/Adapter registry** — a package-manager-style discovery surface (`axil ext install …`) once there's enough third-party code to make discovery a problem.
-- **Capability sandboxing** — today, every Extension and Adapter has full `Axil` access. A future capability model would let Extensions declare the table prefixes / CLI surface / MCP tools they need, and the host would enforce it.
+The full stable set is enumerated in one place: the crate-level docs of `axil-core` (`lib.rs`).
 
-Until those land, the practical path for a third party is:
+## What ships in 1.0 vs. what's next
 
-1. Write your Extension or Adapter as its own `axil-X` crate.
-2. Fork `axil-cli` (or your host binary) and add your crate as a dependency.
-3. Submit the upstream for inclusion if the work is generally useful.
+The current model is **compile-time** — every Engine, Extension, and Adapter is a Cargo dependency baked into the binary at build time. Within that model, 1.0 ships:
+
+- **One-line built-in registration.** `axil-bundle` is the single registry the CLI, the MCP server, and the workspace audit test all derive their Extension set from. Adding a built-in Extension is one line there, not three hand-wired sites.
+- **Runtime enable/disable, no rebuild.** `axil extensions list` shows every compiled-in Extension and its state; `axil extensions disable <id>` / `enable <id>` toggle it via `[extensions] disabled` in `axil.toml`. A disabled Extension is skipped at registration — its CLI/MCP surface and boot block vanish until re-enabled.
+- **Clean Engine removal.** `axil compact --drop-engine <vector|graph|timeseries|fts>` deletes the orphaned companion file left behind when an Engine is removed (rebuilt without its feature, or disabled).
+
+Still ahead (tracked in the Phase 21–22 extensibility plan):
+
+- **Dynamic CLI from `CliSurface`** — a CLI-facing Extension needing **zero** code in `axil-cli`: its declared surface is appended to the argument parser at runtime.
+- **WASM runtime Extensions / Adapters** — load Extension and Adapter code from a `.wasm` component at runtime (`axil ext install foo.wasm`), sandboxed and ABI-versioned. Tier 1 stays compile-time because storage Engines need direct access to the master coordinator.
+- **Capability sandboxing** — today every Extension and Adapter has full `Axil` access. A granted-capability model would let a loaded plugin declare (and the host enforce) exactly which host calls it may make.
+
+Until WASM lands, the practical path for an **out-of-tree** third party is:
+
+1. Write your Extension or Adapter as its own `axil-X` crate against the stable SPI above.
+2. Register it in a host binary — fork `axil-cli`, or build your own host that calls `Axil::open(...).with_extension(...)`.
+3. Submit it upstream for inclusion in the bundle if the work is generally useful.
