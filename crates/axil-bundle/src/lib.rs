@@ -33,32 +33,33 @@ use std::sync::Arc;
 
 use axil_core::{AxilBuilder, AxilConfig, CliSurface, Extension, McpSurface};
 
-/// Construct every in-tree Extension whose Cargo feature is enabled and whose
-/// id is **not** listed in `[extensions] disabled`.
+/// Every compiled-in built-in Extension, **ignoring** the `[extensions] disabled`
+/// filter.
 ///
-/// This is the single list to edit when adding a built-in Extension.
-pub fn builtin_extensions(config: &AxilConfig) -> Vec<Arc<dyn Extension>> {
+/// This is the single list to edit when adding a built-in Extension. Use it to
+/// enumerate the full catalog (e.g. `axil extensions list`, which must show
+/// disabled Extensions too); use [`builtin_extensions`] for the enabled set that
+/// actually gets registered.
+pub fn builtin_extensions_all() -> Vec<Arc<dyn Extension>> {
     #[allow(unused_mut)] // mutated only when at least one Extension feature is on
     let mut exts: Vec<Arc<dyn Extension>> = Vec::new();
 
     #[cfg(feature = "deps")]
-    push_if_enabled(&mut exts, config, Arc::new(axil_docs::DocsExtension));
+    exts.push(Arc::new(axil_docs::DocsExtension));
 
     #[cfg(feature = "checkpoint")]
-    push_if_enabled(&mut exts, config, Arc::new(axil_checkpoint::CheckpointExtension));
+    exts.push(Arc::new(axil_checkpoint::CheckpointExtension));
 
-    // `config` is unused when no Extension features are enabled (minimal build).
-    let _ = config;
     exts
 }
 
-/// Push `ext` onto `exts` unless it is disabled in `[extensions] disabled`.
-#[allow(dead_code)] // dead only in the zero-feature build
-fn push_if_enabled(exts: &mut Vec<Arc<dyn Extension>>, config: &AxilConfig, ext: Arc<dyn Extension>) {
-    if config.is_extension_disabled(ext.id()) {
-        return;
-    }
-    exts.push(ext);
+/// Construct every in-tree Extension whose Cargo feature is enabled and whose
+/// id is **not** listed in `[extensions] disabled`.
+pub fn builtin_extensions(config: &AxilConfig) -> Vec<Arc<dyn Extension>> {
+    builtin_extensions_all()
+        .into_iter()
+        .filter(|ext| !config.is_extension_disabled(ext.id()))
+        .collect()
 }
 
 /// Register every enabled, non-disabled built-in Extension onto `builder`.

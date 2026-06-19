@@ -73,7 +73,8 @@ pub use boot::{
 };
 pub use config::{
     default_config_toml, find_config_file, get_config_value, home_dir, load_config_from,
-    set_config_value, AxilConfig, DatabaseConfig, DebugConfig, DecayConfig, DevConfig,
+    set_config_string_array, set_config_value, AxilConfig, DatabaseConfig, DebugConfig, DecayConfig,
+    DevConfig,
     DiagnoseConfig, EnginesConfig, ExtensionsConfig, FtsConfig, HealingConfig, IndexConfig,
     MetricsHealingConfig, OptimizeConfig, RuntimeConfig, TimeseriesConfig,
 };

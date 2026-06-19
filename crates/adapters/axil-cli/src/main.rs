@@ -659,6 +659,14 @@ enum Command {
     #[command(subcommand)]
     Scip(ScipCommand),
 
+    /// Manage built-in Extensions: list them and toggle them on or off in
+    /// axil.toml — no rebuild required.
+    ///
+    /// A disabled Extension is skipped at registration: its CLI subcommands,
+    /// MCP tools, and boot block all vanish until it is re-enabled.
+    #[command(subcommand)]
+    Extensions(ExtensionsCommand),
+
     /// Dependency documentation memory (Phase 16).
     ///
     /// `deps list` resolves the project's dependencies to their exact
@@ -2701,6 +2709,22 @@ enum ScipCommand {
 
 /// `axil deps` subcommands — Phase 16 dependency documentation memory.
 #[cfg(feature = "deps")]
+#[derive(Subcommand)]
+enum ExtensionsCommand {
+    /// List every compiled-in Extension and whether it is active or disabled.
+    List,
+    /// Re-enable a built-in Extension that was disabled in axil.toml.
+    Enable {
+        /// Extension id (e.g. `docs`, `checkpoint`).
+        id: String,
+    },
+    /// Disable a built-in Extension for this project (edits axil.toml).
+    Disable {
+        /// Extension id (e.g. `docs`, `checkpoint`).
+        id: String,
+    },
+}
+
 #[derive(Subcommand)]
 enum DepsCommand {
     /// List the project's dependencies resolved to exact lockfile
@@ -8250,6 +8274,8 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
         // ── Config ───────────────────────────────────────────────────
         Command::Config { command: cfg_cmd } => run_config(cfg_cmd, out),
 
+        Command::Extensions(ext_cmd) => run_extensions(ext_cmd, out),
+
         // ── Report ──────────────────────────────────────────────────
         Command::Report { command: rep_cmd } => {
             let db_path = db_opt;
@@ -13686,6 +13712,90 @@ fn run_session(cmd: SessionCommand, db_path: &Path, out: &Output) -> Result<i32>
 }
 
 // ─── Config commands ────────────────────────────────────────────────────────
+
+fn run_extensions(cmd: ExtensionsCommand, out: &Output) -> Result<i32> {
+    let cwd = std::env::current_dir().context("failed to get current directory")?;
+
+    match cmd {
+        ExtensionsCommand::List => {
+            let config = axil_core::load_config_from(&cwd).unwrap_or_default();
+            let items: Vec<Value> = axil_bundle::builtin_extensions_all()
+                .iter()
+                .map(|ext| {
+                    let disabled = config.is_extension_disabled(ext.id());
+                    json!({
+                        "id": ext.id(),
+                        "display_name": ext.display_name(),
+                        "state": if disabled { "disabled" } else { "active" },
+                        "table_prefixes": ext.table_prefixes(),
+                    })
+                })
+                .collect();
+            out.print_array(&items);
+            Ok(EXIT_OK)
+        }
+        ExtensionsCommand::Enable { id } => set_extension_disabled(&cwd, &id, false, out),
+        ExtensionsCommand::Disable { id } => set_extension_disabled(&cwd, &id, true, out),
+    }
+}
+
+/// Add or remove `id` from `[extensions] disabled` in the resolved axil.toml.
+///
+/// Validates `id` against the compiled-in catalog so a typo can't silently
+/// disable nothing. `changed` is `false` when the toggle was already in the
+/// requested state (idempotent).
+fn set_extension_disabled(cwd: &Path, id: &str, disabled: bool, out: &Output) -> Result<i32> {
+    let known: Vec<String> = axil_bundle::builtin_extensions_all()
+        .iter()
+        .map(|e| e.id().to_string())
+        .collect();
+    if !known.iter().any(|k| k == id) {
+        anyhow::bail!(
+            "unknown built-in extension `{id}` — known: {}",
+            if known.is_empty() {
+                "(none compiled in)".to_string()
+            } else {
+                known.join(", ")
+            }
+        );
+    }
+
+    let config = axil_core::load_config_from(cwd).unwrap_or_default();
+    let mut list = config.extensions.disabled.clone();
+    let changed = if disabled {
+        if list.iter().any(|d| d == id) {
+            false
+        } else {
+            list.push(id.to_string());
+            true
+        }
+    } else {
+        let before = list.len();
+        list.retain(|d| d != id);
+        before != list.len()
+    };
+
+    let config_path = axil_core::find_config_file(cwd).unwrap_or_else(|| cwd.join("axil.toml"));
+    axil_core::set_config_string_array(&config_path, "extensions.disabled", &list)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    out.print(&json!({
+        "id": id,
+        "disabled": disabled,
+        "changed": changed,
+        "file": config_path.display().to_string(),
+    }));
+    if !out.quiet {
+        let verb = if disabled { "disabled" } else { "enabled" };
+        let note = if changed {
+            format!("extension `{id}` {verb} — reopen the database for it to take effect")
+        } else {
+            format!("extension `{id}` already {verb}")
+        };
+        out.status(&note);
+    }
+    Ok(EXIT_OK)
+}
 
 fn run_config(cmd: ConfigCommand, out: &Output) -> Result<i32> {
     let cwd = std::env::current_dir().context("failed to get current directory")?;

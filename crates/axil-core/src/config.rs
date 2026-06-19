@@ -706,6 +706,71 @@ pub fn set_config_value(config_path: &Path, key: &str, value: &str) -> Result<()
     Ok(())
 }
 
+/// Set an array-of-strings config value by dotted key in an `axil.toml` file
+/// (e.g. `extensions.disabled = ["docs", "checkpoint"]`).
+///
+/// `set_config_value` only writes scalars; this is the array counterpart used by
+/// `axil extensions enable|disable`. Creates the file and intermediate tables as
+/// needed. An empty `values` removes the key so it doesn't linger as `[]`.
+pub fn set_config_string_array(
+    config_path: &Path,
+    key: &str,
+    values: &[String],
+) -> Result<(), String> {
+    let contents = if config_path.exists() {
+        std::fs::read_to_string(config_path)
+            .map_err(|e| format!("failed to read {}: {e}", config_path.display()))?
+    } else {
+        String::new()
+    };
+
+    let mut doc: toml::Table = toml::from_str(&contents)
+        .map_err(|e| format!("invalid TOML in {}: {e}", config_path.display()))?;
+
+    let parts: Vec<&str> = key.split('.').collect();
+    if parts.is_empty() {
+        return Err("empty key".to_string());
+    }
+    for part in &parts {
+        if part.is_empty() {
+            return Err(format!("invalid key '{key}': contains empty segment"));
+        }
+        if !part.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            return Err(format!(
+                "invalid key segment '{part}': only alphanumeric and underscore allowed"
+            ));
+        }
+    }
+
+    // Navigate to the right table, creating intermediate tables as needed.
+    let mut current = &mut doc;
+    for part in &parts[..parts.len() - 1] {
+        current = current
+            .entry(part.to_string())
+            .or_insert_with(|| toml::Value::Table(toml::Table::new()))
+            .as_table_mut()
+            .ok_or_else(|| format!("'{part}' is not a table"))?;
+    }
+
+    let last_key = parts[parts.len() - 1];
+    if values.is_empty() {
+        current.remove(last_key);
+    } else {
+        let arr = values
+            .iter()
+            .map(|v| toml::Value::String(v.clone()))
+            .collect();
+        current.insert(last_key.to_string(), toml::Value::Array(arr));
+    }
+
+    let output =
+        toml::to_string_pretty(&doc).map_err(|e| format!("failed to serialize config: {e}"))?;
+    std::fs::write(config_path, output)
+        .map_err(|e| format!("failed to write {}: {e}", config_path.display()))?;
+
+    Ok(())
+}
+
 /// Get the user's home directory (`HOME` or `USERPROFILE`).
 pub fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME")
@@ -902,6 +967,30 @@ full_retention_days = 7
         let contents = std::fs::read_to_string(&path).unwrap();
         let cfg: AxilConfig = toml::from_str(&contents).unwrap();
         assert_eq!(cfg.debug.slow_query_threshold_ms, 50);
+    }
+
+    #[test]
+    fn set_config_string_array_round_trips_and_removes() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("axil.toml");
+
+        // Write an array; it parses back into ExtensionsConfig.disabled.
+        set_config_string_array(&path, "extensions.disabled", &["docs".into(), "checkpoint".into()])
+            .unwrap();
+        let cfg = load_config_from(dir.path()).unwrap();
+        assert_eq!(cfg.extensions.disabled, vec!["docs", "checkpoint"]);
+        assert!(cfg.is_extension_disabled("docs"));
+        assert!(!cfg.is_extension_disabled("scip"));
+
+        // An empty slice removes the key entirely (no lingering `[]`).
+        set_config_string_array(&path, "extensions.disabled", &[]).unwrap();
+        let cfg = load_config_from(dir.path()).unwrap();
+        assert!(cfg.extensions.disabled.is_empty());
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !contents.contains("disabled"),
+            "empty array should remove the key, got:\n{contents}"
+        );
     }
 
     #[test]
