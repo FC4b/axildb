@@ -28,6 +28,10 @@ pub mod bindings {
 #[cfg(feature = "wasm-host")]
 mod host {
     use std::path::Path;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::thread::JoinHandle;
+    use std::time::Duration;
 
     use anyhow::Result;
     use sha2::{Digest, Sha256};
@@ -35,9 +39,18 @@ mod host {
     use wasmtime::{Config, Engine, Store};
 
     /// Default per-instance CPU budget (Wasmtime fuel units). Generous for a
-    /// well-behaved plugin; a runaway guest exhausts it and traps. Phase
-    /// 22.5/22.9 makes this configurable and refills it per call.
+    /// well-behaved plugin; a runaway guest exhausts it and traps.
     const DEFAULT_FUEL: u64 = 10_000_000_000;
+
+    /// How often the background ticker advances the engine epoch. The wall-clock
+    /// timeout is enforced in multiples of this, so it bounds the worst-case
+    /// overrun (a guest can run at most one extra tick past its deadline).
+    const EPOCH_TICK: Duration = Duration::from_millis(10);
+
+    /// Default per-call wall-clock budget. Generous — a well-behaved handler
+    /// returns in microseconds; this only bounds a *runaway* guest (one CPU
+    /// metering alone wouldn't stop fast enough, or one wedged in a host call).
+    const DEFAULT_CALL_TIMEOUT: Duration = Duration::from_secs(30);
 
     /// Bytes of source-content SHA-256 prepended to a cached `.cwasm` artifact.
     /// The artifact is `[32-byte source hash][wasmtime-serialized component]`, so
@@ -103,24 +116,75 @@ mod host {
     }
 
     /// The WASM host runtime: owns a configured Wasmtime [`Engine`] shared by
-    /// every loaded plugin.
+    /// every loaded plugin, plus the background **epoch ticker** that backs the
+    /// wall-clock timeout (Phase 22.5).
     pub struct WasmHost {
         engine: Engine,
+        /// Per-call wall-clock budget, expressed in epoch ticks (see
+        /// [`EPOCH_TICK`]). The shim resets each guest call's deadline to this.
+        deadline_ticks: u64,
+        /// Signals the ticker thread to stop (set on drop).
+        epoch_stop: Arc<AtomicBool>,
+        /// The ticker thread handle, joined on drop. `Option` so `Drop` can take
+        /// it.
+        ticker: Option<JoinHandle<()>>,
     }
 
     impl WasmHost {
         /// Build a host with the Component Model enabled and the sandbox
-        /// primitives a misbehaving guest can be bounded with: CPU via fuel
-        /// metering and wall-clock via epoch interruption (both wired to limits
-        /// in Phase 22.5). No ambient filesystem/network is granted — WASI is
-        /// off until a capability is explicitly added.
+        /// primitives a misbehaving guest is bounded with: CPU via fuel metering
+        /// and wall-clock via epoch interruption. No ambient filesystem/network
+        /// is granted — WASI is off until a capability is explicitly added.
+        ///
+        /// Spawns a background thread that advances the engine epoch every
+        /// [`EPOCH_TICK`]; combined with the per-call deadline the shim sets, a
+        /// guest that runs longer than the timeout traps instead of hanging the
+        /// host. The thread is stopped and joined when the `WasmHost` is dropped.
         pub fn new() -> Result<Self> {
             let mut config = Config::new();
             config.wasm_component_model(true);
             config.consume_fuel(true);
             config.epoch_interruption(true);
             let engine = Engine::new(&config)?;
-            Ok(Self { engine })
+
+            // Ticker: advance the epoch on a fixed cadence so epoch-based
+            // deadlines actually fire. The thread owns a cheap Engine clone
+            // (Arc-backed) and exits within one tick of `epoch_stop` being set.
+            let epoch_stop = Arc::new(AtomicBool::new(false));
+            let ticker = {
+                let engine = engine.clone();
+                let stop = Arc::clone(&epoch_stop);
+                std::thread::Builder::new()
+                    .name("axil-wasm-epoch".into())
+                    .spawn(move || {
+                        while !stop.load(Ordering::Relaxed) {
+                            std::thread::sleep(EPOCH_TICK);
+                            engine.increment_epoch();
+                        }
+                    })
+                    .ok()
+            };
+
+            Ok(Self {
+                engine,
+                deadline_ticks: ticks_for(DEFAULT_CALL_TIMEOUT),
+                epoch_stop,
+                ticker,
+            })
+        }
+
+        /// Override the per-call wall-clock timeout (default 30s). Applies to
+        /// plugins loaded *after* this call (the shim captures the budget at
+        /// load). Mainly for tests and for hosts that want a tighter bound.
+        pub fn with_call_timeout(mut self, timeout: Duration) -> Self {
+            self.deadline_ticks = ticks_for(timeout);
+            self
+        }
+
+        /// Per-call wall-clock budget in epoch ticks — what the shim sets as each
+        /// guest call's epoch deadline.
+        pub fn deadline_ticks(&self) -> u64 {
+            self.deadline_ticks
         }
 
         /// The underlying engine (shared across loaded plugins).
@@ -250,10 +314,11 @@ mod host {
             // exhausts it and traps rather than hanging the host. Per-call
             // refueling + a configurable ceiling is the Phase 22.5/22.9 refinement.
             store.set_fuel(DEFAULT_FUEL)?;
-            // Epoch interruption is armed (the wall-clock bound) but inert until
-            // Phase 22.5 adds a ticker thread + a real per-call timeout; set a
-            // non-tripping deadline so the guest isn't interrupted immediately.
-            store.set_epoch_deadline(u64::MAX);
+            // Wall-clock bound: the host's ticker advances the epoch every
+            // `EPOCH_TICK`, and the shim resets this deadline before each guest
+            // call (so the budget is per-call, not cumulative). A guest that runs
+            // past it traps instead of hanging the host.
+            store.set_epoch_deadline(self.deadline_ticks);
             let linker = self.host_linker()?;
             let plugin = crate::bindings::Plugin::instantiate(&mut store, component, &linker)?;
             Ok((store, plugin))
@@ -270,6 +335,26 @@ mod host {
             crate::bindings::Plugin::add_to_linker(&mut linker, |s| s)?;
             Ok(linker)
         }
+    }
+
+    impl Drop for WasmHost {
+        fn drop(&mut self) {
+            // Stop the ticker and join it so no orphaned thread keeps advancing a
+            // dropped engine's epoch. The thread checks `epoch_stop` once per
+            // tick, so this returns within ~`EPOCH_TICK`.
+            self.epoch_stop.store(true, Ordering::Relaxed);
+            if let Some(handle) = self.ticker.take() {
+                let _ = handle.join();
+            }
+        }
+    }
+
+    /// Convert a wall-clock timeout into a count of [`EPOCH_TICK`]s, rounded up,
+    /// and clamped to ≥1 so a tiny timeout still admits at least one tick.
+    fn ticks_for(timeout: Duration) -> u64 {
+        let tick = EPOCH_TICK.as_nanos().max(1);
+        let ticks = timeout.as_nanos().div_ceil(tick);
+        (ticks as u64).max(1)
     }
 
     /// Write `data` to `path` atomically: create the parent dir, write a
@@ -340,6 +425,9 @@ mod shim {
         cli: Option<CliSurface>,
         mcp: Option<McpSurface>,
         abi: AbiVersion,
+        /// Per-call wall-clock budget (epoch ticks), reset on the store before
+        /// every guest call so a runaway handler traps instead of hanging.
+        deadline_ticks: u64,
     }
 
     impl WasmExtension {
@@ -377,6 +465,7 @@ mod shim {
                 cli,
                 mcp,
                 abi,
+                deadline_ticks: host.deadline_ticks(),
             })
         }
 
@@ -390,6 +479,15 @@ mod shim {
             self.inner
                 .lock()
                 .map_err(|_| AxilError::plugin("plugin instance lock poisoned"))
+        }
+
+        /// Lock the instance and arm a fresh per-call wall-clock deadline. Every
+        /// guest call goes through here so the budget is per-call, not
+        /// cumulative — a slow call doesn't starve the next one.
+        fn begin_call(&self) -> Result<MutexGuard<'_, Instance>, AxilError> {
+            let mut guard = self.lock()?;
+            guard.store.set_epoch_deadline(self.deadline_ticks);
+            Ok(guard)
         }
     }
 
@@ -412,7 +510,7 @@ mod shim {
 
         fn boot_block(&self, _db: &axil_core::Axil) -> Option<String> {
             // Infallible in the trait: a lock/trap/guest error collapses to None.
-            let mut inner = self.lock().ok()?;
+            let mut inner = self.begin_call().ok()?;
             let Instance { store, plugin } = &mut *inner;
             plugin
                 .axil_plugin_extension()
@@ -431,7 +529,7 @@ mod shim {
                 args: invocation.args.clone(),
                 stdin: invocation.stdin.clone(),
             };
-            let mut inner = self.lock()?;
+            let mut inner = self.begin_call()?;
             let Instance { store, plugin } = &mut *inner;
             let res = plugin
                 .axil_plugin_extension()
@@ -457,7 +555,7 @@ mod shim {
                 tool: call.tool.clone(),
                 params: serde_json::to_string(&call.params).unwrap_or_else(|_| "null".into()),
             };
-            let mut inner = self.lock()?;
+            let mut inner = self.begin_call()?;
             let Instance { store, plugin } = &mut *inner;
             let res = plugin
                 .axil_plugin_extension()
@@ -483,7 +581,7 @@ mod shim {
                 if_stale: opts.if_stale,
                 path: opts.path.map(|p| p.to_string_lossy().into_owned()),
             };
-            let mut inner = self.lock()?;
+            let mut inner = self.begin_call()?;
             let Instance { store, plugin } = &mut *inner;
             let res = plugin
                 .axil_plugin_extension()
@@ -509,7 +607,7 @@ mod shim {
             path: &std::path::Path,
         ) -> Result<Vec<Hit>, AxilError> {
             let p = path.to_string_lossy().into_owned();
-            let mut inner = self.lock()?;
+            let mut inner = self.begin_call()?;
             let Instance { store, plugin } = &mut *inner;
             let res = plugin
                 .axil_plugin_extension()

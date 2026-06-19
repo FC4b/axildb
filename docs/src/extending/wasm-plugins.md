@@ -86,7 +86,7 @@ A `.wasm` that fails to load is **quarantined** — reported by `ext list`, neve
 
 ## Capabilities (sandbox)
 
-Plugins are **deny-by-default**. A freshly installed plugin runs, but every call back into Axil is refused until the operator grants it. Ambient filesystem/network are off (WASI denied); CPU is bounded by fuel; record writes are constrained to the plugin's own declared `table-prefixes`.
+Plugins are **deny-by-default**. A freshly installed plugin runs, but every call back into Axil is refused until the operator grants it. Ambient filesystem/network are off (WASI denied); CPU is bounded by fuel and each call by a wall-clock timeout (a runaway guest traps instead of hanging the host); record writes are constrained to the plugin's own declared `table-prefixes`.
 
 Grant what a plugin needs by its **key** (its `.wasm` filename prefix, shown by `ext list`):
 

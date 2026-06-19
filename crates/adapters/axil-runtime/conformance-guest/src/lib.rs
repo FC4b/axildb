@@ -111,6 +111,11 @@ impl Guest for Component {
                 let id = host::insert("decisions", "{}")?;
                 handled(id)
             }
+            // ---- runaway: never returns; the host's wall-clock timeout (epoch
+            //      interruption) must trap it instead of hanging the host ----
+            "spin" => loop {
+                core::hint::spin_loop();
+            },
             // ---- unmatched op exercises the NotHandled marshalling ----
             _ => Ok(DispatchCli::NotHandled),
         }

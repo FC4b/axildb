@@ -20,6 +20,7 @@
 #![cfg(feature = "wasm-host")]
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use axil_core::{
     Axil, AxilConfig, CliInvocation, CliOutput, Dispatch, Extension, McpCall, RefreshOpts,
@@ -135,6 +136,38 @@ fn missing_engine_import_fails_cleanly_not_as_a_trap() {
     }
     // The instance is still usable afterward — a clean error didn't poison it.
     assert_eq!(handled_stdout(op(&ext, &db, "log").unwrap()), "logged");
+}
+
+#[test]
+fn runaway_guest_is_interrupted_by_the_wall_clock_timeout() {
+    // The guest's `spin` op never returns. With a 150ms per-call timeout — far
+    // below the fuel budget's exhaustion time — the host's epoch ticker trips
+    // the deadline and traps it, so the call returns an Err promptly instead of
+    // hanging the host forever.
+    let dir = tempfile::tempdir().unwrap();
+    let db = Arc::new(Axil::open(dir.path().join("conf.axil")).build().unwrap());
+    let host = WasmHost::new()
+        .unwrap()
+        .with_call_timeout(Duration::from_millis(150));
+    let bytes = std::fs::read(FIXTURE).unwrap();
+    let component = host.load_component(&bytes).unwrap();
+    let state = PluginState::new(
+        Arc::clone(&db),
+        Capabilities::all(),
+        Vec::new(),
+        AxilConfig::default(),
+    );
+    let ext = WasmExtension::load(&host, &component, state).unwrap();
+
+    let start = Instant::now();
+    let result = op(&ext, &db, "spin");
+    let elapsed = start.elapsed();
+
+    assert!(result.is_err(), "a runaway guest must be interrupted");
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "the wall-clock timeout should fire promptly, took {elapsed:?}"
+    );
 }
 
 #[test]
