@@ -69,6 +69,380 @@ mod host {
 #[cfg(feature = "wasm-host")]
 pub use host::WasmHost;
 
+#[cfg(feature = "wasm-host")]
+pub use abi::{Capabilities, PluginState};
+
+/// Host-side implementation of the `axil:plugin` `host` interface — backs every
+/// capability a plugin may call into Axil with (Phase 22.3), enforcing the
+/// granted capability set and the plugin's declared table prefixes.
+#[cfg(feature = "wasm-host")]
+mod abi {
+    use std::sync::Arc;
+
+    use axil_core::{Axil, AxilConfig, AxilError, RecordId};
+    use serde_json::Value;
+
+    use crate::bindings::axil::plugin::types as wit;
+
+    /// What a plugin is allowed to call into Axil with. Deny-by-default: a
+    /// freshly-constructed `Capabilities` grants nothing (Constraint C3 — the
+    /// grant, not the sandbox, is the trust decision).
+    #[derive(Debug, Clone, Default)]
+    pub struct Capabilities {
+        pub records_read: bool,
+        pub records_write: bool,
+        pub recall: bool,
+        pub embed: bool,
+        pub graph: bool,
+        pub fts: bool,
+        pub config_read: bool,
+    }
+
+    impl Capabilities {
+        /// Grant everything — for trusted in-tree use and tests.
+        pub fn all() -> Self {
+            Self {
+                records_read: true,
+                records_write: true,
+                recall: true,
+                embed: true,
+                graph: true,
+                fts: true,
+                config_read: true,
+            }
+        }
+    }
+
+    /// Per-plugin host state threaded through Wasmtime as the store data. Holds
+    /// the shared `Axil`, the plugin's granted capabilities, the table prefixes
+    /// it owns (writes outside them are rejected), and a config snapshot for
+    /// `config-get`.
+    pub struct PluginState {
+        db: Arc<Axil>,
+        caps: Capabilities,
+        prefixes: Vec<String>,
+        config: AxilConfig,
+    }
+
+    impl PluginState {
+        /// Build host state for a plugin granted `caps` and owning `prefixes`.
+        pub fn new(
+            db: Arc<Axil>,
+            caps: Capabilities,
+            prefixes: Vec<String>,
+            config: AxilConfig,
+        ) -> Self {
+            Self {
+                db,
+                caps,
+                prefixes,
+                config,
+            }
+        }
+
+        fn require(&self, granted: bool, cap: &str) -> Result<(), wit::PluginError> {
+            if granted {
+                Ok(())
+            } else {
+                Err(wit::PluginError::PermissionDenied(cap.to_string()))
+            }
+        }
+
+        fn check_prefix(&self, table: &str) -> Result<(), wit::PluginError> {
+            if self.prefixes.iter().any(|p| table.starts_with(p.as_str())) {
+                Ok(())
+            } else {
+                Err(wit::PluginError::PrefixViolation(format!(
+                    "table `{table}` is outside this plugin's declared prefixes"
+                )))
+            }
+        }
+    }
+
+    /// Map a core error to the stable plugin-error enum the guest sees.
+    fn to_wit_err(e: AxilError) -> wit::PluginError {
+        match e {
+            AxilError::NotFound(m) => wit::PluginError::NotFound(m),
+            other => wit::PluginError::Internal(other.to_string()),
+        }
+    }
+
+    fn parse_json(s: &str) -> Result<Value, wit::PluginError> {
+        serde_json::from_str(s)
+            .map_err(|e| wit::PluginError::Invalid(format!("payload is not valid JSON: {e}")))
+    }
+
+    fn record_to_json(data: &Value) -> String {
+        serde_json::to_string(data).unwrap_or_else(|_| "null".to_string())
+    }
+
+    impl crate::bindings::axil::plugin::host::Host for PluginState {
+        fn insert(
+            &mut self,
+            table: String,
+            data: String,
+        ) -> Result<String, wit::PluginError> {
+            (|| {
+                self.require(self.caps.records_write, "records.write")?;
+                self.check_prefix(&table)?;
+                let value = parse_json(&data)?;
+                let rec = self.db.insert(&table, value).map_err(to_wit_err)?;
+                Ok(rec.id.to_string())
+            })()
+        }
+
+        fn get(
+            &mut self,
+            id: String,
+        ) -> Result<Option<String>, wit::PluginError> {
+            (|| {
+                self.require(self.caps.records_read, "records.read")?;
+                let rec = self.db.get(&RecordId(id)).map_err(to_wit_err)?;
+                Ok(rec.map(|r| record_to_json(&r.data)))
+            })()
+        }
+
+        fn update(
+            &mut self,
+            id: String,
+            data: String,
+        ) -> Result<(), wit::PluginError> {
+            (|| {
+                self.require(self.caps.records_write, "records.write")?;
+                let rid = RecordId(id);
+                let existing = self
+                    .db
+                    .get(&rid)
+                    .map_err(to_wit_err)?
+                    .ok_or_else(|| wit::PluginError::NotFound(format!("record {}", rid)))?;
+                self.check_prefix(&existing.table)?;
+                let value = parse_json(&data)?;
+                self.db.update(&rid, value).map_err(to_wit_err)?;
+                Ok(())
+            })()
+        }
+
+        fn delete(&mut self, id: String) -> Result<bool, wit::PluginError> {
+            (|| {
+                self.require(self.caps.records_write, "records.write")?;
+                let rid = RecordId(id);
+                if let Some(existing) = self.db.get(&rid).map_err(to_wit_err)? {
+                    self.check_prefix(&existing.table)?;
+                }
+                self.db.delete(&rid).map_err(to_wit_err)
+            })()
+        }
+
+        fn list_records(
+            &mut self,
+            table: String,
+        ) -> Result<Vec<String>, wit::PluginError> {
+            (|| {
+                self.require(self.caps.records_read, "records.read")?;
+                self.check_prefix(&table)?;
+                let recs = self.db.list(&table).map_err(to_wit_err)?;
+                Ok(recs.iter().map(|r| record_to_json(&r.data)).collect())
+            })()
+        }
+
+        fn recall(
+            &mut self,
+            query: String,
+            top_k: u32,
+        ) -> Result<Vec<wit::Hit>, wit::PluginError> {
+            (|| {
+                self.require(self.caps.recall, "recall")?;
+                let hits = self
+                    .db
+                    .recall(&query, top_k as usize, None)
+                    .map_err(to_wit_err)?
+                    .into_iter()
+                    .map(|r| wit::Hit {
+                        table: r.record.table,
+                        id: r.record.id.to_string(),
+                        summary: None,
+                        score: r.score,
+                    })
+                    .collect();
+                Ok(hits)
+            })()
+        }
+
+        fn embed_text(
+            &mut self,
+            text: String,
+        ) -> Result<Vec<f32>, wit::PluginError> {
+            (|| {
+                self.require(self.caps.embed, "embed")?;
+                self.db.embed_query(&text).map_err(to_wit_err)
+            })()
+        }
+
+        fn relate(
+            &mut self,
+            source: String,
+            edge_type: String,
+            target: String,
+            props: String,
+        ) -> Result<String, wit::PluginError> {
+            (|| {
+                self.require(self.caps.graph, "graph.write")?;
+                let from = RecordId(source);
+                let to = RecordId(target);
+                let props = parse_json(&props)?;
+                let id = self
+                    .db
+                    .relate(&from, &edge_type, &to, Some(props))
+                    .map_err(to_wit_err)?;
+                Ok(id.to_string())
+            })()
+        }
+
+        fn neighbors(
+            &mut self,
+            id: String,
+            edge_type: Option<String>,
+            dir: wit::Direction,
+        ) -> Result<Vec<String>, wit::PluginError> {
+            (|| {
+                self.require(self.caps.graph, "graph.read")?;
+                let direction = match dir {
+                    wit::Direction::Out => axil_core::Direction::Out,
+                    wit::Direction::In => axil_core::Direction::In,
+                    wit::Direction::Both => axil_core::Direction::Both,
+                };
+                let recs = self
+                    .db
+                    .neighbors(&RecordId(id), edge_type.as_deref(), direction)
+                    .map_err(to_wit_err)?;
+                Ok(recs.iter().map(|r| r.id.to_string()).collect())
+            })()
+        }
+
+        fn fts_search(
+            &mut self,
+            query: String,
+            limit: u32,
+        ) -> Result<Vec<wit::Hit>, wit::PluginError> {
+            (|| {
+                self.require(self.caps.fts, "fts")?;
+                let hits = self
+                    .db
+                    .search_text(&query, limit as usize)
+                    .map_err(to_wit_err)?
+                    .into_iter()
+                    .map(|(rec, score)| wit::Hit {
+                        table: rec.table,
+                        id: rec.id.to_string(),
+                        summary: None,
+                        score,
+                    })
+                    .collect();
+                Ok(hits)
+            })()
+        }
+
+        fn config_get(
+            &mut self,
+            key: String,
+        ) -> Result<Option<String>, wit::PluginError> {
+            (|| {
+                self.require(self.caps.config_read, "config.read")?;
+                Ok(axil_core::get_config_value(&self.config, &key))
+            })()
+        }
+
+        fn log(&mut self, level: wit::LogLevel, message: String) {
+            let lvl = match level {
+                wit::LogLevel::Trace => "TRACE",
+                wit::LogLevel::Debug => "DEBUG",
+                wit::LogLevel::Info => "INFO",
+                wit::LogLevel::Warn => "WARN",
+                wit::LogLevel::Error => "ERROR",
+            };
+            eprintln!("[plugin {lvl}] {message}");
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::bindings::axil::plugin::host::Host;
+
+        fn state(caps: Capabilities) -> (PluginState, tempfile::TempDir) {
+            let dir = tempfile::tempdir().unwrap();
+            let db = Arc::new(Axil::open(dir.path().join("t.axil")).build().unwrap());
+            let st = PluginState::new(
+                db,
+                caps,
+                vec!["_plug_".to_string()],
+                AxilConfig::default(),
+            );
+            (st, dir)
+        }
+
+        #[test]
+        fn insert_get_roundtrip_within_prefix() {
+            let (mut st, _d) = state(Capabilities::all());
+            let id = st
+                .insert("_plug_notes".into(), r#"{"k":"v"}"#.into())
+                .unwrap();
+            let got = st.get(id).unwrap().unwrap();
+            assert!(got.contains("\"k\""));
+        }
+
+        #[test]
+        fn write_outside_prefix_is_rejected() {
+            let (mut st, _d) = state(Capabilities::all());
+            let err = st.insert("decisions".into(), "{}".into()).unwrap_err();
+            assert!(matches!(err, wit::PluginError::PrefixViolation(_)));
+        }
+
+        #[test]
+        fn missing_capability_is_denied() {
+            // records_write not granted.
+            let (mut st, _d) = state(Capabilities {
+                records_read: true,
+                ..Capabilities::default()
+            });
+            let err = st.insert("_plug_x".into(), "{}".into()).unwrap_err();
+            assert!(matches!(err, wit::PluginError::PermissionDenied(_)));
+        }
+
+        #[test]
+        fn invalid_json_is_reported() {
+            let (mut st, _d) = state(Capabilities::all());
+            let err = st.insert("_plug_x".into(), "not json".into()).unwrap_err();
+            assert!(matches!(err, wit::PluginError::Invalid(_)));
+        }
+
+        #[test]
+        fn recall_capability_gated() {
+            let (mut st, _d) = state(Capabilities::all());
+            // No semantic backend in this build → empty, but the call succeeds.
+            let hits = st.recall("anything".into(), 5).unwrap();
+            assert!(hits.is_empty());
+
+            let (mut st2, _d2) = state(Capabilities::default());
+            assert!(matches!(
+                st2.recall("x".into(), 5).unwrap_err(),
+                wit::PluginError::PermissionDenied(_)
+            ));
+        }
+
+        #[test]
+        fn config_get_reads_snapshot() {
+            let (mut st, _d) = state(Capabilities::all());
+            // A known default key resolves; an unknown key is None.
+            assert!(st
+                .config_get("timeseries.full_retention_days".into())
+                .unwrap()
+                .is_some());
+            assert!(st.config_get("nope.nope".into()).unwrap().is_none());
+        }
+    }
+}
+
 /// Whether this build embeds the WASM runtime (the `wasm-host` feature).
 ///
 /// Always available so a host can branch on runtime support without a `cfg`.

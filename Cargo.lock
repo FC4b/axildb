@@ -385,6 +385,8 @@ version = "0.7.11"
 dependencies = [
  "anyhow",
  "axil-core",
+ "serde_json",
+ "tempfile",
  "wasmtime",
  "wat",
 ]

@@ -1136,6 +1136,17 @@ impl Axil {
         Ok(())
     }
 
+    /// Embed arbitrary text into a vector using the configured embedder.
+    ///
+    /// Unlike [`Axil::embed_text`] (which embeds *and stores* a record's field
+    /// in the vector index), this returns the raw embedding for `text` without
+    /// touching any record — used by host callers that need an embedding on its
+    /// own (e.g. a WASM plugin's `embed-text` import). Errors if no embedder is
+    /// configured.
+    pub fn embed_query(&self, text: &str) -> Result<Vec<f32>> {
+        self.require_embedder()?.embed(text)
+    }
+
     /// Semantic search: embed text and find similar records.
     pub fn similar_to(&self, text: &str, top_k: usize) -> Result<Vec<(Record, f32)>> {
         let embedder = self.require_embedder()?;

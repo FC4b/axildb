@@ -9,6 +9,7 @@ description = "WASM runtime that loads sandboxed Extension components against th
 [dependencies]
 axil-core = { path = "../../axil-core" }
 anyhow = { workspace = true }
+serde_json = { workspace = true }
 
 # Wasmtime is pulled in ONLY by the `wasm-host` feature, so default/embedded
 # builds carry no runtime dependency and stay in the ~5–10MB envelope (C1/R2).
@@ -20,6 +21,7 @@ wasmtime = { version = "27", optional = true, default-features = false, features
 
 [dev-dependencies]
 wat = "1"
+tempfile = { workspace = true }
 
 [features]
 default = []
