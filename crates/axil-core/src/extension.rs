@@ -1,4 +1,4 @@
-//! Phase 17 — `Extension` trait, the contract for Tier-2 extensibility.
+//! `Extension` trait, the contract for Tier-2 extensibility.
 //!
 //! An Extension is a capability built on top of one or more Engines
 //! (Tier 1). It owns prefixed tables in the core `.axil` file (not a
@@ -8,10 +8,17 @@
 //! See `docs/src/extending/extensions.md` for the full authoring guide
 //! and `axil-docs` for the reference implementation.
 //!
-//! This trait is contract-only in Phase 17 P1.1. Builder registration
-//! and `Adapter` discovery wiring land in P1.2 / P1.3 — existing
-//! Extensions (`axil-docs`, `axil-scip`, …) continue to work without
-//! implementing this trait until they migrate in P3.
+//! # Stability
+//!
+//! `Extension` and its support types ([`CliSurface`], [`CliSubcommand`],
+//! [`CliArg`], [`CliInvocation`], [`CliOutput`], [`McpSurface`], [`McpTool`],
+//! [`McpCall`], [`Dispatch`], [`Hit`], [`RefreshOpts`], [`RefreshReport`]) are
+//! part of Axil's **1.0 stable SPI** — third-party Extensions compile against
+//! them with a semver compatibility promise. The structs third parties
+//! construct or receive are `#[non_exhaustive]` and exposed through
+//! constructors/builders so new fields can be added without a breaking change.
+//! Contrast with the `crate::plugin` Engine traits, which are explicitly
+//! *unstable* (upstream-or-fork).
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -23,6 +30,27 @@ use crate::error::Result;
 ///
 /// Every method except [`Extension::id`] has a default implementation.
 /// Implement only what your Extension needs.
+///
+/// # WASM-bindable contract
+///
+/// This trait is the mirror for the WASM plugin ABI (the `axil:plugin` WIT
+/// world). To keep a `WasmExtension` shim able to back it without a per-call
+/// boundary crossing, the trait splits into two method classes:
+///
+/// - **Metadata** — [`id`](Extension::id), [`display_name`](Extension::display_name),
+///   [`table_prefixes`](Extension::table_prefixes), [`cli_commands`](Extension::cli_commands),
+///   [`mcp_tools`](Extension::mcp_tools). These are called on hot paths (e.g.
+///   [`crate::dispatch_cli`] iterates `cli_commands()` for every Extension on
+///   every CLI call) and MUST be cheap and statically derivable. A WASM host
+///   fetches them **once at load** and caches the owned result, then serves the
+///   borrow-returning methods from that cache. They must not perform expensive,
+///   blocking, or fallible work at call time.
+/// - **Handlers / contributions** — [`handle_cli`](Extension::handle_cli),
+///   [`handle_mcp`](Extension::handle_mcp), [`refresh`](Extension::refresh),
+///   [`recall_for_file`](Extension::recall_for_file), and the live render of
+///   [`boot_block`](Extension::boot_block). These are the only methods a WASM
+///   shim invokes across the sandbox boundary on demand, and are `Result`- or
+///   `Option`-returning so a guest failure has somewhere to go.
 pub trait Extension: Send + Sync {
     /// Stable extension id, kebab-case, must match the crate name minus
     /// the `axil-` prefix (e.g. `axil-docs` → `"docs"`).
@@ -73,8 +101,8 @@ pub trait Extension: Send + Sync {
         Ok(vec![])
     }
 
-    /// Phase 17 P1.3 — handle a CLI dispatch matched against this
-    /// Extension's [`Extension::cli_commands`] surface.
+    /// Handle a CLI dispatch matched against this Extension's
+    /// [`Extension::cli_commands`] surface.
     ///
     /// **Contract (Path C — hybrid):** the default impl returns
     /// `Ok(Dispatch::NotHandled)`, signalling that the calling Adapter
@@ -94,8 +122,8 @@ pub trait Extension: Send + Sync {
         Ok(Dispatch::NotHandled)
     }
 
-    /// Phase 17 P1.3 — handle an MCP tool call matched against this
-    /// Extension's [`Extension::mcp_tools`] surface.
+    /// Handle an MCP tool call matched against this Extension's
+    /// [`Extension::mcp_tools`] surface.
     ///
     /// Same Path C contract as [`Extension::handle_cli`]: default impl
     /// returns `Ok(Dispatch::NotHandled)`, letting the Adapter fall
@@ -110,10 +138,9 @@ pub trait Extension: Send + Sync {
 }
 
 /// Whether an Extension actually handled a dispatch, or punted to the
-/// Adapter's fallback. Phase 17 Path C uses this for backwards-
-/// compatible Extension dispatch: existing Adapters keep their
-/// hard-coded paths and only run them when *no* registered Extension
-/// claims the call.
+/// Adapter's fallback. Path C uses this for backwards-compatible
+/// Extension dispatch: existing Adapters keep their hard-coded paths
+/// and only run them when *no* registered Extension claims the call.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Dispatch<T> {
     /// Extension handled this call — Adapter should surface `T`.
@@ -156,6 +183,21 @@ pub struct CliInvocation {
     pub stdin: Option<String>,
 }
 
+impl CliInvocation {
+    /// Construct a CLI invocation for dispatch to an Extension.
+    pub fn new(
+        command_path: Vec<String>,
+        args: Vec<String>,
+        stdin: Option<String>,
+    ) -> Self {
+        Self {
+            command_path,
+            args,
+            stdin,
+        }
+    }
+}
+
 /// What an Extension returns from a successful CLI dispatch.
 ///
 /// The Adapter translates this into its protocol's native output
@@ -173,6 +215,26 @@ pub struct CliOutput {
     pub stderr: String,
 }
 
+impl CliOutput {
+    /// A successful (exit code 0) output carrying `stdout`.
+    pub fn ok(stdout: impl Into<String>) -> Self {
+        Self {
+            exit_code: 0,
+            stdout: stdout.into(),
+            stderr: String::new(),
+        }
+    }
+
+    /// A failed output: `exit_code` (non-zero by convention) + `stderr`.
+    pub fn err(exit_code: i32, stderr: impl Into<String>) -> Self {
+        Self {
+            exit_code,
+            stdout: String::new(),
+            stderr: stderr.into(),
+        }
+    }
+}
+
 /// What an MCP Adapter passes to [`Extension::handle_mcp`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpCall {
@@ -185,13 +247,28 @@ pub struct McpCall {
     pub params: serde_json::Value,
 }
 
+impl McpCall {
+    /// Construct an MCP call for dispatch to an Extension.
+    pub fn new(tool: impl Into<String>, params: serde_json::Value) -> Self {
+        Self {
+            tool: tool.into(),
+            params,
+        }
+    }
+}
+
 /// Adapter-agnostic description of an Extension's CLI subcommand surface.
 ///
 /// A CLI Adapter (e.g. `axil-cli`) translates this into its native
 /// argument-parsing structure (`clap::Command` for `axil-cli`). The
 /// `Extension` trait stays free of `clap` so any Adapter can compose
 /// its surface.
+///
+/// `#[non_exhaustive]`: construct via [`CliSurface::new`] + the
+/// [`subcommand`](CliSurface::subcommand) builder so new fields can be
+/// added without breaking third-party Extensions.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct CliSurface {
     /// Top-level subcommand name (e.g. `"deps"` for `axil deps …`).
     pub command: String,
@@ -201,8 +278,35 @@ pub struct CliSurface {
     pub subcommands: Vec<CliSubcommand>,
 }
 
+impl CliSurface {
+    /// A CLI surface for top-level `command` with no subcommands yet.
+    pub fn new(command: impl Into<String>, about: impl Into<String>) -> Self {
+        Self {
+            command: command.into(),
+            about: about.into(),
+            subcommands: Vec::new(),
+        }
+    }
+
+    /// Append a subcommand (builder style).
+    pub fn subcommand(mut self, sub: CliSubcommand) -> Self {
+        self.subcommands.push(sub);
+        self
+    }
+
+    /// Append many subcommands (builder style).
+    pub fn subcommands(mut self, subs: impl IntoIterator<Item = CliSubcommand>) -> Self {
+        self.subcommands.extend(subs);
+        self
+    }
+}
+
 /// A single nested subcommand under a [`CliSurface`].
+///
+/// `#[non_exhaustive]`: construct via [`CliSubcommand::new`] + the
+/// [`arg`](CliSubcommand::arg) builder.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct CliSubcommand {
     /// Subcommand name (e.g. `"list"`).
     pub name: String,
@@ -212,8 +316,35 @@ pub struct CliSubcommand {
     pub args: Vec<CliArg>,
 }
 
+impl CliSubcommand {
+    /// A subcommand named `name` with no arguments yet.
+    pub fn new(name: impl Into<String>, about: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            about: about.into(),
+            args: Vec::new(),
+        }
+    }
+
+    /// Append an argument (builder style).
+    pub fn arg(mut self, arg: CliArg) -> Self {
+        self.args.push(arg);
+        self
+    }
+
+    /// Append many arguments (builder style).
+    pub fn args(mut self, args: impl IntoIterator<Item = CliArg>) -> Self {
+        self.args.extend(args);
+        self
+    }
+}
+
 /// Description of a single CLI argument.
+///
+/// `#[non_exhaustive]`: construct via [`CliArg::new`] +
+/// [`required`](CliArg::required) / [`takes_value`](CliArg::takes_value).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct CliArg {
     /// Argument name (positional name or long flag without the `--`).
     pub name: String,
@@ -223,6 +354,32 @@ pub struct CliArg {
     pub required: bool,
     /// Whether the argument takes a value (flags do not; named args do).
     pub takes_value: bool,
+}
+
+impl CliArg {
+    /// An optional, valueless argument named `name`. Use the builders to
+    /// mark it [`required`](CliArg::required) or value-taking
+    /// ([`takes_value`](CliArg::takes_value)).
+    pub fn new(name: impl Into<String>, about: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            about: about.into(),
+            required: false,
+            takes_value: false,
+        }
+    }
+
+    /// Set whether the argument is required (builder style).
+    pub fn required(mut self, required: bool) -> Self {
+        self.required = required;
+        self
+    }
+
+    /// Set whether the argument takes a value (builder style).
+    pub fn takes_value(mut self, takes_value: bool) -> Self {
+        self.takes_value = takes_value;
+        self
+    }
 }
 
 /// Adapter-agnostic description of an Extension's MCP tool surface.
@@ -235,8 +392,18 @@ pub struct McpSurface {
     pub tools: Vec<McpTool>,
 }
 
+impl McpSurface {
+    /// An MCP surface exposing `tools`.
+    pub fn new(tools: Vec<McpTool>) -> Self {
+        Self { tools }
+    }
+}
+
 /// A single tool exposed over MCP.
+///
+/// `#[non_exhaustive]`: construct via [`McpTool::new`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct McpTool {
     /// Tool name (e.g. `"dep_docs"`).
     pub name: String,
@@ -246,8 +413,27 @@ pub struct McpTool {
     pub input_schema: serde_json::Value,
 }
 
+impl McpTool {
+    /// An MCP tool named `name` with the given description + input schema.
+    pub fn new(
+        name: impl Into<String>,
+        description: impl Into<String>,
+        input_schema: serde_json::Value,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            description: description.into(),
+            input_schema,
+        }
+    }
+}
+
 /// Options passed to [`Extension::refresh`].
+///
+/// `#[non_exhaustive]`: construct via [`RefreshOpts::new`] or
+/// [`RefreshOpts::default`] + the builders.
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct RefreshOpts {
     /// Only re-ingest items the Extension's drift detection flags as
     /// stale. When `false`, force a full refresh.
@@ -257,8 +443,31 @@ pub struct RefreshOpts {
     pub path: Option<PathBuf>,
 }
 
+impl RefreshOpts {
+    /// Default options (full refresh, no path scope).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set whether to refresh only stale items (builder style).
+    pub fn if_stale(mut self, if_stale: bool) -> Self {
+        self.if_stale = if_stale;
+        self
+    }
+
+    /// Scope the refresh to a working directory (builder style).
+    pub fn path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.path = Some(path.into());
+        self
+    }
+}
+
 /// Summary report returned by [`Extension::refresh`].
+///
+/// `#[non_exhaustive]`: build via [`RefreshReport::default`] and the
+/// builder methods, or mutate the public fields after `default()`.
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct RefreshReport {
     /// Items inspected during the refresh pass.
     pub inspected: usize,
@@ -271,10 +480,29 @@ pub struct RefreshReport {
     pub details: Vec<String>,
 }
 
+impl RefreshReport {
+    /// Set the inspected/stale/refreshed counters (builder style).
+    pub fn with_counts(mut self, inspected: usize, stale: usize, refreshed: usize) -> Self {
+        self.inspected = inspected;
+        self.stale = stale;
+        self.refreshed = refreshed;
+        self
+    }
+
+    /// Append a status detail line (builder style).
+    pub fn detail(mut self, line: impl Into<String>) -> Self {
+        self.details.push(line.into());
+        self
+    }
+}
+
 /// A hit returned by [`Extension::recall_for_file`].
 ///
 /// Intentionally minimal — the Adapter decides how to render it.
+/// `#[non_exhaustive]`: construct via [`Hit::new`] +
+/// [`with_summary`](Hit::with_summary).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct Hit {
     /// Table the hit lives in (e.g. `"_dep_docs"`).
     pub table: String,
@@ -285,6 +513,24 @@ pub struct Hit {
     /// Extension-defined relevance score, higher = more relevant.
     /// Adapters may merge or rerank across Extensions.
     pub score: f32,
+}
+
+impl Hit {
+    /// A hit pointing at record `id` in `table` with relevance `score`.
+    pub fn new(table: impl Into<String>, id: impl Into<String>, score: f32) -> Self {
+        Self {
+            table: table.into(),
+            id: id.into(),
+            summary: None,
+            score,
+        }
+    }
+
+    /// Attach a one-line display summary (builder style).
+    pub fn with_summary(mut self, summary: impl Into<String>) -> Self {
+        self.summary = Some(summary.into());
+        self
+    }
 }
 
 #[cfg(test)]
@@ -320,7 +566,47 @@ mod tests {
         assert!(r.details.is_empty());
     }
 
-    // ---- Phase 17 P1.3 — dispatch contract ----
+    #[test]
+    fn surface_builders_compose() {
+        // The #[non_exhaustive] constructors must reproduce the same
+        // shape an external Extension would build by hand.
+        let surface = CliSurface::new("deps", "dependency docs").subcommand(
+            CliSubcommand::new("sync", "sync deps").arg(
+                CliArg::new("path", "project path")
+                    .required(false)
+                    .takes_value(true),
+            ),
+        );
+        assert_eq!(surface.command, "deps");
+        assert_eq!(surface.subcommands.len(), 1);
+        assert_eq!(surface.subcommands[0].name, "sync");
+        assert_eq!(surface.subcommands[0].args.len(), 1);
+        assert!(surface.subcommands[0].args[0].takes_value);
+        assert!(!surface.subcommands[0].args[0].required);
+
+        let mcp = McpSurface::new(vec![McpTool::new(
+            "dep_docs",
+            "search dep docs",
+            serde_json::json!({"type": "object"}),
+        )]);
+        assert_eq!(mcp.tools.len(), 1);
+        assert_eq!(mcp.tools[0].name, "dep_docs");
+
+        let hit = Hit::new("_dep_docs", "01ABC", 0.9).with_summary("serde derive");
+        assert_eq!(hit.table, "_dep_docs");
+        assert_eq!(hit.summary.as_deref(), Some("serde derive"));
+
+        let opts = RefreshOpts::new().if_stale(true);
+        assert!(opts.if_stale);
+
+        let report = RefreshReport::default()
+            .with_counts(3, 1, 1)
+            .detail("refreshed serde");
+        assert_eq!(report.inspected, 3);
+        assert_eq!(report.details.len(), 1);
+    }
+
+    // ---- dispatch contract ----
 
     #[test]
     fn dispatch_helpers() {
@@ -347,17 +633,8 @@ mod tests {
         // hard-coded path. This is the load-bearing behavior of
         // Path C, so it gets a dedicated test.
         let ext = Minimal;
-        // Can't construct an Axil without a tempdir, but we can build
-        // the invocation/call types and call them on a stub.
-        let inv = CliInvocation {
-            command_path: vec!["x".into()],
-            args: vec![],
-            stdin: None,
-        };
-        let call = McpCall {
-            tool: "x".into(),
-            params: serde_json::Value::Null,
-        };
+        let inv = CliInvocation::new(vec!["x".into()], vec![], None);
+        let call = McpCall::new("x", serde_json::Value::Null);
         // We need a real Axil to call handle_cli/handle_mcp because
         // they take `&Axil`. Build one in a temp dir.
         let dir = tempfile::tempdir().unwrap();

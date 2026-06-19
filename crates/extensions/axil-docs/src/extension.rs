@@ -95,17 +95,16 @@ impl Extension for DocsExtension {
     /// its hard-coded `dep_docs` handler; Path C's NotHandled fallback
     /// means everything keeps working.
     fn mcp_tools(&self) -> Option<McpSurface> {
-        Some(McpSurface {
-            tools: vec![
-                McpTool {
-                    name: "deps_status".into(),
-                    description: "List the dependencies whose docs are in memory: name, resolved version, ecosystem and stored doc-chunk count.".into(),
-                    input_schema: json!({ "type": "object", "properties": {} }),
-                },
-                McpTool {
-                    name: "dep_docs".into(),
-                    description: "Scoped query over the dependency-doc memory. Returns version-pinned chunks for the project's dependencies.".into(),
-                    input_schema: json!({
+        Some(McpSurface::new(vec![
+            McpTool::new(
+                "deps_status",
+                "List the dependencies whose docs are in memory: name, resolved version, ecosystem and stored doc-chunk count.",
+                json!({ "type": "object", "properties": {} }),
+            ),
+            McpTool::new(
+                "dep_docs",
+                "Scoped query over the dependency-doc memory. Returns version-pinned chunks for the project's dependencies.",
+                json!({
                         "type": "object",
                         "properties": {
                             "query": { "type": "string", "description": "Library question or API name to search for." },
@@ -115,12 +114,11 @@ impl Extension for DocsExtension {
                         },
                         "required": ["query"]
                     }),
-                },
-            ],
-        })
+            ),
+        ]))
     }
 
-    /// Phase 17 P3.1 — MCP dispatch handler.
+    /// MCP dispatch handler.
     ///
     /// Routes `deps_status` to its existing logic (mirror of
     /// `axil-mcp::tools::handle_deps_status`). Any other tool name —

@@ -41,50 +41,45 @@ impl Extension for CheckpointExtension {
     }
 
     fn cli_commands(&self) -> Option<CliSurface> {
-        Some(CliSurface {
-            command: "checkpoint".into(),
-            about: "Write or read a structured session checkpoint so a fresh agent can resume.".into(),
-            subcommands: vec![
-                CliSubcommand {
-                    name: "write".into(),
-                    about: "Write a checkpoint JSON (positional or - for stdin) to the most-recent active session.".into(),
-                    args: vec![
-                        CliArg {
-                            name: "json".into(),
-                            about: "Inline JSON object or `-` to read from stdin.".into(),
-                            required: false,
-                            takes_value: true,
-                        },
-                        CliArg {
-                            name: "session".into(),
-                            about: "Attach to a specific session id instead of the latest active.".into(),
-                            required: false,
-                            takes_value: true,
-                        },
-                        CliArg {
-                            name: "final".into(),
-                            about: "Mark this checkpoint as the final one for its session (does not end the session by itself).".into(),
-                            required: false,
-                            takes_value: false,
-                        },
-                    ],
-                },
-                CliSubcommand {
-                    name: "show".into(),
-                    about: "Print the current checkpoint (stored if present, otherwise derived).".into(),
-                    args: vec![],
-                },
-            ],
-        })
+        Some(
+            CliSurface::new(
+                "checkpoint",
+                "Write or read a structured session checkpoint so a fresh agent can resume.",
+            )
+            .subcommand(
+                CliSubcommand::new(
+                    "write",
+                    "Write a checkpoint JSON (positional or - for stdin) to the most-recent active session.",
+                )
+                .arg(
+                    CliArg::new("json", "Inline JSON object or `-` to read from stdin.")
+                        .takes_value(true),
+                )
+                .arg(
+                    CliArg::new(
+                        "session",
+                        "Attach to a specific session id instead of the latest active.",
+                    )
+                    .takes_value(true),
+                )
+                .arg(CliArg::new(
+                    "final",
+                    "Mark this checkpoint as the final one for its session (does not end the session by itself).",
+                )),
+            )
+            .subcommand(CliSubcommand::new(
+                "show",
+                "Print the current checkpoint (stored if present, otherwise derived).",
+            )),
+        )
     }
 
     fn mcp_tools(&self) -> Option<McpSurface> {
-        Some(McpSurface {
-            tools: vec![
-                McpTool {
-                    name: "checkpoint".into(),
-                    description: "Write a structured session checkpoint so a fresh agent can resume. Fields: goal, state, next_steps[], open_questions[], references[], summary. All optional but at least one required.".into(),
-                    input_schema: json!({
+        Some(McpSurface::new(vec![
+            McpTool::new(
+                "checkpoint",
+                "Write a structured session checkpoint so a fresh agent can resume. Fields: goal, state, next_steps[], open_questions[], references[], summary. All optional but at least one required.",
+                json!({
                         "type": "object",
                         "properties": {
                             "goal":           { "type": "string", "description": "The user's north-star intent for the session." },
@@ -109,14 +104,13 @@ impl Extension for CheckpointExtension {
                             "final":   { "type": "boolean", "description": "Mark as the final checkpoint for its session. Default false." }
                         }
                     }),
-                },
-                McpTool {
-                    name: "checkpoint_show".into(),
-                    description: "Return the current checkpoint (stored if present, otherwise derived from the latest session).".into(),
-                    input_schema: json!({ "type": "object", "properties": {} }),
-                },
-            ],
-        })
+            ),
+            McpTool::new(
+                "checkpoint_show",
+                "Return the current checkpoint (stored if present, otherwise derived from the latest session).",
+                json!({ "type": "object", "properties": {} }),
+            ),
+        ]))
     }
 
     /// "Resume Here" boot block. Emits the stored checkpoint when one

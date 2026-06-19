@@ -1,3 +1,17 @@
+//! Engine (Tier-1) traits — the internal storage SPI.
+//!
+//! # Stability
+//!
+//! **This is an internal Engine API with NO semver guarantee — it may change
+//! in any release.** The `Plugin`, [`VectorIndex`], [`GraphIndex`],
+//! [`SearchIndex`], [`TimeSeriesIndex`], and [`TextEmbedder`] traits, and the
+//! [`Capability`] enum, are the substrate the master coordinator drives
+//! directly; keeping them unstable is what gives Axil freedom to add, drop, or
+//! swap storage Engines without a breaking change. Third parties extend Axil
+//! through the *stable* [`crate::extension::Extension`] / [`crate::adapter::Adapter`]
+//! SPI (Tier 2 / Tier 3), not these traits. The supported posture for a custom
+//! Engine is upstream-or-fork.
+
 use crate::error::Result;
 use crate::record::{Record, RecordId};
 use serde_json::Value;

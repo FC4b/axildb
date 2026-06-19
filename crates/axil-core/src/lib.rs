@@ -1,3 +1,30 @@
+//! # Axil core — storage engine, record types, and the extensibility SPI.
+//!
+//! ## Stability surface (the 1.0 contract)
+//!
+//! Axil deliberately splits its API into a **stable outer SPI** that third
+//! parties build against, and an **unstable inner Engine API** that core owns.
+//! This asymmetry is what lets Axil add, drop, or swap storage Engines freely
+//! while third-party Extensions/Adapters keep compiling.
+//!
+//! **Stable (semver-locked at 1.0) — extend Axil through these:**
+//! - [`Extension`] + support types: [`CliSurface`], [`CliSubcommand`], [`CliArg`],
+//!   [`CliInvocation`], [`CliOutput`], [`McpSurface`], [`McpTool`], [`McpCall`],
+//!   [`Dispatch`], [`Hit`], [`RefreshOpts`], [`RefreshReport`] (see [`extension`]).
+//! - [`Adapter`], [`Protocol`], [`compose_cli_surface`], [`compose_mcp_surface`],
+//!   [`dispatch_cli`], [`dispatch_mcp`] (see [`adapter`]).
+//! - The [`Axil`] builder + query/recall methods Extensions and Adapters call.
+//!
+//! The structs third parties construct or receive are `#[non_exhaustive]` with
+//! constructors/builders, so fields can grow without a breaking change.
+//!
+//! **Unstable (no semver guarantee — upstream-or-fork):** everything in
+//! [`plugin`] — [`Plugin`], [`VectorIndex`], [`GraphIndex`], [`SearchIndex`],
+//! [`TimeSeriesIndex`], [`TextEmbedder`], [`Capability`]. These are the Engine
+//! (Tier-1) substrate the master coordinator drives directly.
+//!
+//! See `docs/src/extending/overview.md` for the three-tier taxonomy.
+
 pub mod ab_test;
 pub mod activation;
 pub mod adapter;
