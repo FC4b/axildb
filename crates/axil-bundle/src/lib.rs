@@ -40,8 +40,11 @@ use axil_core::{AxilBuilder, AxilConfig, CliSurface, Extension, McpSurface};
 /// enumerate the full catalog (e.g. `axil extensions list`, which must show
 /// disabled Extensions too); use [`builtin_extensions`] for the enabled set that
 /// actually gets registered.
+// Built incrementally rather than with `vec![]`: the entries are `#[cfg]`-gated
+// per Cargo feature, so a single literal can't express the set.
+#[allow(clippy::vec_init_then_push)]
 pub fn builtin_extensions_all() -> Vec<Arc<dyn Extension>> {
-    #[allow(unused_mut)] // mutated only when at least one Extension feature is on
+    #[allow(unused_mut)] // covers the zero-feature build (no pushes)
     let mut exts: Vec<Arc<dyn Extension>> = Vec::new();
 
     #[cfg(feature = "deps")]
