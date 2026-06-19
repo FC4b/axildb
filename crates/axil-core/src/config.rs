@@ -43,6 +43,9 @@ pub struct AxilConfig {
     pub extensions: ExtensionsConfig,
     /// Built-in Engine enable/disable overrides (`[engines]`).
     pub engines: EnginesConfig,
+    /// Per-WASM-plugin runtime config — capability grants, keyed by the
+    /// plugin's `.wasm` filename stem (`[plugins.<key>]`).
+    pub plugins: std::collections::BTreeMap<String, PluginConfig>,
 }
 
 impl AxilConfig {
@@ -63,6 +66,30 @@ impl AxilConfig {
     pub fn is_engine_disabled(&self, suffix: &str) -> bool {
         self.engines.disabled.iter().any(|d| d == suffix)
     }
+
+    /// Capabilities granted to a WASM plugin, keyed by its `.wasm` filename
+    /// stem. An unconfigured plugin gets an empty list — **deny-by-default**:
+    /// it can run but cannot call back into Axil until the operator grants
+    /// capabilities via `[plugins.<key>] capabilities = [...]`.
+    pub fn plugin_capabilities(&self, key: &str) -> Vec<String> {
+        self.plugins
+            .get(key)
+            .map(|p| p.capabilities.clone())
+            .unwrap_or_default()
+    }
+}
+
+/// Per-WASM-plugin runtime config (`[plugins.<key>]`).
+///
+/// ```toml
+/// [plugins.hello]
+/// capabilities = ["records.read", "records.write", "recall"]
+/// ```
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PluginConfig {
+    /// Capabilities granted to this plugin (deny-by-default; empty = none).
+    pub capabilities: Vec<String>,
 }
 
 /// Runtime enable/disable overrides for built-in Extensions (`[extensions]`).
@@ -665,9 +692,9 @@ pub fn set_config_value(config_path: &Path, key: &str, value: &str) -> Result<()
         if part.is_empty() {
             return Err(format!("invalid key '{key}': contains empty segment"));
         }
-        if !part.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        if !part.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
             return Err(format!(
-                "invalid key segment '{part}': only alphanumeric and underscore allowed"
+                "invalid key segment '{part}': only alphanumeric, underscore, and hyphen allowed"
             ));
         }
     }
@@ -735,9 +762,9 @@ pub fn set_config_string_array(
         if part.is_empty() {
             return Err(format!("invalid key '{key}': contains empty segment"));
         }
-        if !part.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        if !part.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
             return Err(format!(
-                "invalid key segment '{part}': only alphanumeric and underscore allowed"
+                "invalid key segment '{part}': only alphanumeric, underscore, and hyphen allowed"
             ));
         }
     }
@@ -1033,8 +1060,11 @@ full_retention_days = 7
     fn set_config_value_rejects_special_chars() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("axil.toml");
-        assert!(set_config_value(&path, "dev.source-repo", "value").is_err());
+        // `@` is not a valid TOML bare-key char (hyphens now ARE allowed).
+        assert!(set_config_value(&path, "dev.source@repo", "value").is_err());
         assert!(set_config_value(&path, "dev.source repo", "value").is_err());
+        // Hyphens are valid TOML bare keys (e.g. `[plugins.my-plugin]`).
+        assert!(set_config_value(&path, "plugins.my-plugin.x", "1").is_ok());
     }
 
     #[test]

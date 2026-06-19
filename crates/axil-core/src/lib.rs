@@ -76,7 +76,7 @@ pub use config::{
     set_config_string_array, set_config_value, AxilConfig, DatabaseConfig, DebugConfig, DecayConfig,
     DevConfig,
     DiagnoseConfig, EnginesConfig, ExtensionsConfig, FtsConfig, HealingConfig, IndexConfig,
-    MetricsHealingConfig, OptimizeConfig, RuntimeConfig, TimeseriesConfig,
+    MetricsHealingConfig, OptimizeConfig, PluginConfig, RuntimeConfig, TimeseriesConfig,
 };
 pub use db::{
     companion_path, drop_engine_companion, AutoLinkReport, Axil, AxilBuilder, CanonicalPublisher,

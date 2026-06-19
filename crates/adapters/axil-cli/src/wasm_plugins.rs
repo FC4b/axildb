@@ -11,6 +11,17 @@ use anyhow::{Context, Result};
 use axil_core::{Axil, AxilConfig, Extension};
 use axil_runtime::{Capabilities, PluginState, WasmExtension, WasmHost};
 
+/// The capability-grant key for a plugin file: the filename up to the first
+/// `.` (so `hello-guest.component.wasm` → `hello-guest`). Kept dot-free so it's
+/// a single TOML key under `[plugins.<key>]`.
+pub fn plugin_key(file: &Path) -> String {
+    file.file_name()
+        .and_then(|f| f.to_str())
+        .and_then(|n| n.split('.').next())
+        .unwrap_or_default()
+        .to_string()
+}
+
 /// Directory WASM plugins live in: `<db-dir>/plugins/`. The db is e.g.
 /// `.axil/memory.axil`, so plugins are at `.axil/plugins/`.
 pub fn plugins_dir(db_path: &Path) -> PathBuf {
@@ -23,9 +34,13 @@ pub fn plugins_dir(db_path: &Path) -> PathBuf {
 /// One plugin file's load outcome — for `axil ext list` and diagnostics.
 pub struct PluginRecord {
     pub file: PathBuf,
+    /// Capability-grant key — the `.wasm` filename stem (e.g. `hello`).
+    pub key: String,
     pub id: Option<String>,
     pub display_name: Option<String>,
     pub prefixes: Vec<String>,
+    /// Capabilities granted to this plugin (deny-by-default; empty = none).
+    pub granted: Vec<String>,
     /// `Some(reason)` if the plugin failed to load (quarantined, not fatal).
     pub error: Option<String>,
 }
@@ -50,10 +65,12 @@ pub fn load_and_register(db: &Arc<Axil>, dir: &Path, config: &AxilConfig) -> Vec
             return files
                 .into_iter()
                 .map(|file| PluginRecord {
+                    key: plugin_key(&file),
                     file,
                     id: None,
                     display_name: None,
                     prefixes: Vec::new(),
+                    granted: Vec::new(),
                     error: Some(format!("WASM runtime init failed: {e}")),
                 })
                 .collect()
@@ -76,11 +93,19 @@ pub fn load_one(
     config: &AxilConfig,
     register: bool,
 ) -> PluginRecord {
+    // Capability grants are keyed by the `.wasm` filename stem, resolved from
+    // config BEFORE load (the host ABI reads the granted set on the first host
+    // call). Deny-by-default: an unconfigured plugin gets nothing.
+    let key = plugin_key(file);
+    let granted = config.plugin_capabilities(&key);
+
     let mut rec = PluginRecord {
         file: file.to_path_buf(),
+        key: key.clone(),
         id: None,
         display_name: None,
         prefixes: Vec::new(),
+        granted: granted.clone(),
         error: None,
     };
 
@@ -99,12 +124,12 @@ pub fn load_one(
         }
     };
 
-    // Capabilities: grant-all for now — a per-plugin manifest with requested
-    // capabilities + operator consent is Phase 22.5. Writable prefixes are the
-    // plugin's own `table-prefixes()` declaration, set inside `WasmExtension::load`.
+    // Deny-by-default capabilities from `[plugins.<key>] capabilities`. Writable
+    // prefixes are the plugin's own `table-prefixes()` declaration, set inside
+    // `WasmExtension::load`.
     let state = PluginState::new(
         Arc::clone(db),
-        Capabilities::all(),
+        Capabilities::from_names(&granted),
         Vec::new(),
         config.clone(),
     );

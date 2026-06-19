@@ -2754,6 +2754,22 @@ enum ExtCommand {
         /// Plugin id.
         id: String,
     },
+    /// Grant a capability to a plugin (edits `[plugins.<key>]` in axil.toml).
+    /// Plugins are deny-by-default — they can't call back into Axil until
+    /// granted. `<key>` is the `.wasm` filename stem (shown by `ext list`).
+    Grant {
+        /// Plugin key (the `.wasm` filename stem).
+        key: String,
+        /// Capability: records.read | records.write | recall | embed | graph | fts | config.read.
+        capability: String,
+    },
+    /// Revoke a capability from a plugin.
+    Revoke {
+        /// Plugin key (the `.wasm` filename stem).
+        key: String,
+        /// Capability to revoke.
+        capability: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -13922,9 +13938,11 @@ fn run_ext(cmd: ExtCommand, db_opt: &Option<PathBuf>, out: &Output) -> Result<i3
                 .iter()
                 .map(|r| {
                     json!({
+                        "key": r.key,
                         "id": r.id,
                         "display_name": r.display_name,
                         "prefixes": r.prefixes,
+                        "granted": r.granted,
                         "file": r.file.file_name().and_then(|f| f.to_str()),
                         "status": if r.error.is_some() { "failed" } else { "loaded" },
                         "error": r.error,
@@ -13990,9 +14008,11 @@ fn run_ext(cmd: ExtCommand, db_opt: &Option<PathBuf>, out: &Output) -> Result<i3
             match records.iter().find(|r| r.id.as_deref() == Some(id.as_str())) {
                 Some(r) => {
                     out.print(&json!({
+                        "key": r.key,
                         "id": r.id,
                         "display_name": r.display_name,
                         "prefixes": r.prefixes,
+                        "granted": r.granted,
                         "file": r.file.display().to_string(),
                         "status": if r.error.is_some() { "failed" } else { "loaded" },
                     }));
@@ -14001,7 +14021,56 @@ fn run_ext(cmd: ExtCommand, db_opt: &Option<PathBuf>, out: &Output) -> Result<i3
                 None => anyhow::bail!("no installed plugin with id `{id}`"),
             }
         }
+
+        ExtCommand::Grant { key, capability } => set_plugin_cap(&key, &capability, true, out),
+        ExtCommand::Revoke { key, capability } => set_plugin_cap(&key, &capability, false, out),
     }
+}
+
+/// Grant or revoke a capability for a plugin by editing `[plugins.<key>]
+/// capabilities` in axil.toml. Validates the capability name and is idempotent.
+#[cfg(feature = "wasm-host")]
+fn set_plugin_cap(key: &str, capability: &str, grant: bool, out: &Output) -> Result<i32> {
+    if !axil_runtime::Capabilities::ALL_NAMES.contains(&capability) {
+        anyhow::bail!(
+            "unknown capability `{capability}` — valid: {}",
+            axil_runtime::Capabilities::ALL_NAMES.join(", ")
+        );
+    }
+    let cwd = std::env::current_dir().context("failed to get current directory")?;
+    let config = axil_core::load_config_from(&cwd).unwrap_or_default();
+    let mut caps = config.plugin_capabilities(key);
+    let changed = if grant {
+        if caps.iter().any(|c| c == capability) {
+            false
+        } else {
+            caps.push(capability.to_string());
+            true
+        }
+    } else {
+        let before = caps.len();
+        caps.retain(|c| c != capability);
+        before != caps.len()
+    };
+
+    let config_path = axil_core::find_config_file(&cwd).unwrap_or_else(|| cwd.join("axil.toml"));
+    axil_core::set_config_string_array(&config_path, &format!("plugins.{key}.capabilities"), &caps)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    out.print(&json!({
+        "key": key,
+        "capability": capability,
+        "granted": grant,
+        "changed": changed,
+        "capabilities": caps,
+        "file": config_path.display().to_string(),
+    }));
+    if !out.quiet {
+        let verb = if grant { "granted to" } else { "revoked from" };
+        out.status(&format!(
+            "capability `{capability}` {verb} plugin `{key}` — reopen for it to take effect"
+        ));
+    }
+    Ok(EXIT_OK)
 }
 
 fn run_extensions(cmd: ExtensionsCommand, out: &Output) -> Result<i32> {

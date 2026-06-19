@@ -418,6 +418,67 @@ mod abi {
                 config_read: true,
             }
         }
+
+        /// Build a grant set from capability names (deny-by-default; unknown
+        /// names are ignored). The canonical names match [`Capabilities::granted_names`].
+        pub fn from_names<I, S>(names: I) -> Self
+        where
+            I: IntoIterator<Item = S>,
+            S: AsRef<str>,
+        {
+            let mut c = Self::default();
+            for name in names {
+                match name.as_ref() {
+                    "records.read" => c.records_read = true,
+                    "records.write" => c.records_write = true,
+                    "recall" => c.recall = true,
+                    "embed" => c.embed = true,
+                    "graph" => c.graph = true,
+                    "fts" => c.fts = true,
+                    "config.read" => c.config_read = true,
+                    _ => {}
+                }
+            }
+            c
+        }
+
+        /// The granted capabilities as their canonical names (for display).
+        pub fn granted_names(&self) -> Vec<&'static str> {
+            let mut out = Vec::new();
+            if self.records_read {
+                out.push("records.read");
+            }
+            if self.records_write {
+                out.push("records.write");
+            }
+            if self.recall {
+                out.push("recall");
+            }
+            if self.embed {
+                out.push("embed");
+            }
+            if self.graph {
+                out.push("graph");
+            }
+            if self.fts {
+                out.push("fts");
+            }
+            if self.config_read {
+                out.push("config.read");
+            }
+            out
+        }
+
+        /// Every capability name a plugin may request (for validation + help).
+        pub const ALL_NAMES: &'static [&'static str] = &[
+            "records.read",
+            "records.write",
+            "recall",
+            "embed",
+            "graph",
+            "fts",
+            "config.read",
+        ];
     }
 
     /// Per-plugin host state threaded through Wasmtime as the store data. Holds
