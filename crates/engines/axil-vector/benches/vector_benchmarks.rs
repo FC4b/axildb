@@ -1,9 +1,9 @@
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use tempfile::TempDir;
 
-use axil_core::plugin::{Plugin, VectorIndex};
+use axil_core::plugin::{Engine, VectorIndex};
 use axil_core::record::RecordId;
-use axil_vector::VectorPlugin;
+use axil_vector::VectorEngine;
 
 /// Generate a random-ish vector of given dimensions (deterministic for reproducibility).
 fn make_vector(dims: usize, seed: usize) -> Vec<f32> {
@@ -22,15 +22,15 @@ fn make_vector(dims: usize, seed: usize) -> Vec<f32> {
     v
 }
 
-fn open_vector_plugin(dims: usize) -> (VectorPlugin, TempDir) {
+fn open_vector_engine(dims: usize) -> (VectorEngine, TempDir) {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("bench.axil");
-    let plugin = VectorPlugin::open(&path, dims).unwrap();
+    let plugin = VectorEngine::open(&path, dims).unwrap();
     (plugin, dir)
 }
 
-fn prepopulated_vector(dims: usize, n: usize) -> (VectorPlugin, Vec<RecordId>, TempDir) {
-    let (plugin, dir) = open_vector_plugin(dims);
+fn prepopulated_vector(dims: usize, n: usize) -> (VectorEngine, Vec<RecordId>, TempDir) {
+    let (plugin, dir) = open_vector_engine(dims);
     let mut ids = Vec::with_capacity(n);
     for i in 0..n {
         let id = RecordId::new();
@@ -52,7 +52,7 @@ fn bench_vector_add(c: &mut Criterion) {
     for size in [100, 1_000, 10_000] {
         group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, &n| {
             b.iter(|| {
-                let (plugin, _dir) = open_vector_plugin(dims);
+                let (plugin, _dir) = open_vector_engine(dims);
                 for i in 0..n {
                     let id = RecordId::new();
                     black_box(plugin.add(id, &make_vector(dims, i)).unwrap());

@@ -26,7 +26,7 @@ fn temp_db_full() -> (Axil, TempDir) {
     let db = Axil::open(&path)
         .with_vector(3)
         .unwrap()
-        .with_graph_plugin()
+        .with_graph_engine()
         .unwrap()
         .build()
         .unwrap();
@@ -38,7 +38,7 @@ fn temp_db_graph() -> (Axil, TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("bench.axil");
     let db = Axil::open(&path)
-        .with_graph_plugin()
+        .with_graph_engine()
         .unwrap()
         .build()
         .unwrap();

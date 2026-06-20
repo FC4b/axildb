@@ -17,7 +17,7 @@ fn temp_fts_db() -> (Axil, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("test.axil");
     let db = Axil::open(&path)
-        .with_fts_plugin()
+        .with_fts_engine()
         .unwrap()
         .build()
         .unwrap();

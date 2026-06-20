@@ -4552,7 +4552,7 @@ fn resolve_embedding_model(db_path: &Path) -> axil_vector::models::EmbeddingMode
     axil_vector::models::EmbeddingModel::BgeSmall
 }
 
-fn attach_detected_plugins(mut builder: axil_core::AxilBuilder) -> Result<axil_core::AxilBuilder> {
+fn attach_detected_engines(mut builder: axil_core::AxilBuilder) -> Result<axil_core::AxilBuilder> {
     let path = builder.path().to_path_buf();
 
     #[cfg(feature = "vector")]
@@ -4578,7 +4578,7 @@ fn attach_detected_plugins(mut builder: axil_core::AxilBuilder) -> Result<axil_c
     {
         if axil_graph::has_graph_store(&path) {
             builder = builder
-                .with_graph_plugin()
+                .with_graph_engine()
                 .context("failed to open graph store")?;
         }
     }
@@ -4587,7 +4587,7 @@ fn attach_detected_plugins(mut builder: axil_core::AxilBuilder) -> Result<axil_c
     {
         if axil_timeseries::has_timeseries_store(&path) {
             builder = builder
-                .with_timeseries_plugin()
+                .with_timeseries_engine()
                 .context("failed to open timeseries store")?;
         }
     }
@@ -4596,7 +4596,7 @@ fn attach_detected_plugins(mut builder: axil_core::AxilBuilder) -> Result<axil_c
     {
         if axil_fts::has_fts_store(&path) {
             builder = builder
-                .with_fts_plugin()
+                .with_fts_engine()
                 .context("failed to open FTS store")?;
         }
     }
@@ -4617,7 +4617,7 @@ fn attach_detected_plugins(mut builder: axil_core::AxilBuilder) -> Result<axil_c
 
 /// Open a database with all detected plugins.
 fn open_with_all_detected(path: &Path) -> Result<Axil> {
-    let builder = attach_detected_plugins(Axil::open(path))?;
+    let builder = attach_detected_engines(Axil::open(path))?;
     builder.build().context("failed to open database")
 }
 
@@ -4639,10 +4639,10 @@ fn open_with_all_detected(path: &Path) -> Result<Axil> {
 #[cfg(feature = "scip")]
 fn open_for_scip_ingest(path: &Path) -> Result<Axil> {
     let creating_graph = !axil_graph::has_graph_store(path);
-    let mut builder = attach_detected_plugins(Axil::open(path))?;
+    let mut builder = attach_detected_engines(Axil::open(path))?;
     if creating_graph {
         builder = builder
-            .with_graph_plugin()
+            .with_graph_engine()
             .context("failed to create graph store for SCIP ingest")?;
         eprintln!(
             "axil ingest-scip: created graph store at {}",
@@ -4670,7 +4670,7 @@ fn open_with_vector(path: &Path, dimensions: Option<usize>) -> Result<Axil> {
 /// Open a database with embedder loaded (for recall/search commands).
 #[cfg(feature = "embed")]
 fn open_with_embedder(path: &Path) -> Result<Axil> {
-    let mut builder = attach_detected_plugins(Axil::open(path))?;
+    let mut builder = attach_detected_engines(Axil::open(path))?;
     // Require an existing vector store — don't silently create one on read operations.
     if axil_vector::read_stored_dimensions(path)
         .ok()
@@ -4710,11 +4710,11 @@ fn open_with_best_effort(path: &Path) -> Result<Axil> {
 fn open_with_timeseries(path: &Path) -> Result<Axil> {
     let is_new_ts = !axil_timeseries::has_timeseries_store(path);
 
-    let mut builder = attach_detected_plugins(Axil::open(path))?;
+    let mut builder = attach_detected_engines(Axil::open(path))?;
 
     if is_new_ts {
         builder = builder
-            .with_timeseries_plugin()
+            .with_timeseries_engine()
             .context("failed to open timeseries store")?;
     }
 
@@ -4735,11 +4735,11 @@ fn open_with_timeseries(path: &Path) -> Result<Axil> {
 /// Open with FTS, auto-creating if needed.
 #[cfg(feature = "fts")]
 fn open_with_fts(path: &Path) -> Result<Axil> {
-    let mut builder = attach_detected_plugins(Axil::open(path))?;
+    let mut builder = attach_detected_engines(Axil::open(path))?;
 
     if !axil_fts::has_fts_store(path) {
         builder = builder
-            .with_fts_plugin()
+            .with_fts_engine()
             .context("failed to create FTS store")?;
     }
 
@@ -4766,21 +4766,21 @@ fn open_with_all_features_inner(mut builder: axil_core::AxilBuilder) -> Result<A
     #[cfg(feature = "graph")]
     {
         builder = builder
-            .with_graph_plugin()
+            .with_graph_engine()
             .context("failed to create graph store")?;
     }
 
     #[cfg(feature = "timeseries")]
     {
         builder = builder
-            .with_timeseries_plugin()
+            .with_timeseries_engine()
             .context("failed to create timeseries store")?;
     }
 
     #[cfg(feature = "fts")]
     {
         builder = builder
-            .with_fts_plugin()
+            .with_fts_engine()
             .context("failed to create FTS store")?;
     }
 
@@ -4810,7 +4810,7 @@ fn wire_llm(db: Axil, db_path: &Path) -> Result<Axil> {
     #[cfg(feature = "llm-http")]
     {
         if let Some(http_llm) = axil_core::HttpLlm::from_config(&config.llm) {
-            let mut builder = attach_detected_plugins(Axil::open(db_path))?;
+            let mut builder = attach_detected_engines(Axil::open(db_path))?;
             // Restore embedder so --embed still works alongside --llm.
             #[cfg(feature = "embed")]
             {
@@ -4831,7 +4831,7 @@ fn wire_llm(db: Axil, db_path: &Path) -> Result<Axil> {
         }
     }
 
-    let builder = attach_detected_plugins(Axil::open(db_path))?;
+    let builder = attach_detected_engines(Axil::open(db_path))?;
     builder.build().context("failed to open database")
 }
 
@@ -7872,7 +7872,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             profile,
         } => {
             let db_path = require_db(&db_opt)?;
-            let builder = attach_detected_plugins(Axil::open(&db_path))?;
+            let builder = attach_detected_engines(Axil::open(&db_path))?;
             let db = builder.build().context("failed to open database")?;
 
             // Interactive REPL mode

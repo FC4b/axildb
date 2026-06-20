@@ -3,7 +3,7 @@ use tempfile::TempDir;
 
 use axil_core::plugin::SearchIndex;
 use axil_core::record::RecordId;
-use axil_fts::FtsPlugin;
+use axil_fts::FtsEngine;
 
 /// Sample sentences for indexing.
 const CORPUS: &[&str] = &[
@@ -19,14 +19,14 @@ const CORPUS: &[&str] = &[
     "Optimized SQL queries for the analytics dashboard",
 ];
 
-fn open_fts() -> (FtsPlugin, TempDir) {
+fn open_fts() -> (FtsEngine, TempDir) {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("bench.axil");
-    let plugin = FtsPlugin::open(&path).unwrap();
+    let plugin = FtsEngine::open(&path).unwrap();
     (plugin, dir)
 }
 
-fn populated_fts(n: usize) -> (FtsPlugin, TempDir) {
+fn populated_fts(n: usize) -> (FtsEngine, TempDir) {
     let (plugin, dir) = open_fts();
     for i in 0..n {
         let id = RecordId::new();

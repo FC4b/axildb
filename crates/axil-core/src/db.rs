@@ -12,7 +12,7 @@ use crate::error::{AxilError, Result};
 use crate::extension::Extension;
 use crate::metrics::{AuditEntry, Metrics, OpType, SlowQueryEntry};
 use crate::plugin::{
-    Direction, EdgeInfo, GraphIndex, Plugin, SearchIndex, TextEmbedder, TimeSeriesIndex,
+    Direction, EdgeInfo, GraphIndex, Engine, SearchIndex, TextEmbedder, TimeSeriesIndex,
     TraversalStep, VectorIndex,
 };
 use crate::record::{Record, RecordId};
@@ -141,7 +141,7 @@ pub struct HealReport {
 /// Builder for configuring and opening an Axil database.
 pub struct AxilBuilder {
     path: PathBuf,
-    plugins: Vec<Box<dyn Plugin>>,
+    plugins: Vec<Box<dyn Engine>>,
     vector_index: Option<Arc<dyn VectorIndex>>,
     embedder: Option<Arc<dyn TextEmbedder>>,
     graph_index: Option<Arc<dyn GraphIndex>>,
@@ -188,7 +188,7 @@ impl AxilBuilder {
 
     /// Register a plugin that provides both vector indexing and text embedding.
     ///
-    /// Convenience for plugins like `VectorPlugin` that implement both traits.
+    /// Convenience for plugins like `VectorEngine` that implement both traits.
     pub fn with_vector_and_embedder<T>(mut self, plugin: T) -> Self
     where
         T: VectorIndex + TextEmbedder + 'static,
@@ -217,9 +217,9 @@ impl AxilBuilder {
         self
     }
 
-    /// Deprecated: this is a no-op. Use `AxilBuilderGraphExt::with_graph_plugin()`
+    /// Deprecated: this is a no-op. Use `AxilBuilderGraphExt::with_graph_engine()`
     /// from the `axil-graph` crate to enable graph support.
-    #[deprecated(note = "use axil_graph::AxilBuilderGraphExt::with_graph_plugin() instead")]
+    #[deprecated(note = "use axil_graph::AxilBuilderGraphExt::with_graph_engine() instead")]
     pub fn with_graph(self) -> Self {
         self
     }
@@ -241,7 +241,7 @@ impl AxilBuilder {
     }
 
     /// Register a custom plugin.
-    pub fn with_plugin(mut self, plugin: Box<dyn Plugin>) -> Self {
+    pub fn with_engine(mut self, plugin: Box<dyn Engine>) -> Self {
         self.plugins.push(plugin);
         self
     }
@@ -393,7 +393,7 @@ const MAX_SLOW_QUERIES: usize = 1_000;
 pub struct Axil {
     path: PathBuf,
     storage: Storage,
-    plugins: Vec<Box<dyn Plugin>>,
+    plugins: Vec<Box<dyn Engine>>,
     vector_index: Option<Arc<dyn VectorIndex>>,
     embedder: Option<Arc<dyn TextEmbedder>>,
     graph_index: Option<Arc<dyn GraphIndex>>,
@@ -566,7 +566,7 @@ impl Axil {
 
     /// Insert a new record into the given table.
     ///
-    /// The record is always committed to storage first. Plugin hooks run
+    /// The record is always committed to storage first. Engine hooks run
     /// after the commit. Generic plugin failures are swallowed (storage is
     /// authoritative), but **vector and timeseries index failures are
     /// propagated** so the caller can detect indexing issues (e.g. missing
@@ -597,7 +597,7 @@ impl Axil {
     /// Insert multiple records in a single transaction.
     ///
     /// Much faster than calling `insert()` in a loop because all records
-    /// share one storage transaction. Plugin hooks (vector, FTS, timeseries)
+    /// share one storage transaction. Engine hooks (vector, FTS, timeseries)
     /// still run per-record after the batch commit.
     pub fn insert_batch(&self, table: &str, data_items: Vec<Value>) -> Result<Vec<Record>> {
         let timer = self.metrics.start_timer(OpType::Insert);
@@ -807,7 +807,7 @@ impl Axil {
             // Skip run_insert_hooks — batch embedding above already indexed
             // vectors. Timeseries runs in this loop; FTS is batched below.
             // Running hooks here would double-embed every record through
-            // VectorPlugin::on_record_insert.
+            // VectorEngine::on_record_insert.
             if !record.table.starts_with('_') {
                 for plugin in &self.plugins {
                     let _ = plugin.on_record_insert(record);
@@ -931,7 +931,7 @@ impl Axil {
 
     /// Delete a record by ID.
     ///
-    /// Plugin hooks run after the storage write commits. See `insert` for
+    /// Engine hooks run after the storage write commits. See `insert` for
     /// the rationale on swallowing plugin errors.
     pub fn delete(&self, id: &RecordId) -> Result<bool> {
         let _span = crate::otel::span("axil.delete", &[]);
@@ -1026,7 +1026,7 @@ impl Axil {
 
     /// Update a record's data.
     ///
-    /// Plugin hooks run after the storage write commits. See `insert` for
+    /// Engine hooks run after the storage write commits. See `insert` for
     /// the rationale on swallowing generic plugin errors.
     pub fn update(&self, id: &RecordId, data: Value) -> Result<Record> {
         let timer = self.metrics.start_timer(OpType::Update);

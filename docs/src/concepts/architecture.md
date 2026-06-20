@@ -24,11 +24,11 @@ Axil is organized in layers, from interface down to storage:
 │  • Scoring: vector + graph + recency +  │
 │    keyword + feedback → ranked recall   │
 ├─────────────────────────────────────────┤
-│         Plugin Trait System             │
-│  • VectorPlugin (HNSW) → *.axil.vec    │
+│         Engine Trait System             │
+│  • VectorEngine (HNSW) → *.axil.vec    │
 │  • TextEmbedder (ONNX)  → model files  │
-│  • GraphPlugin (edges)  → *.axil.graph │
-│  • SearchPlugin (FTS)   → *.axil.fts/  │
+│  • GraphEngine (edges)  → *.axil.graph │
+│  • FtsEngine (FTS)   → *.axil.fts/  │
 ├─────────────────────────────────────────┤
 │         Core Storage Engine             │
 │  • redb (embedded, ACID) → *.axil      │
@@ -65,7 +65,7 @@ Each database is a set of companion files derived from the base path:
 | `axil-mcp` | Adapter | MCP protocol server |
 | `axil-cli` | Adapter | CLI binary |
 
-> The three-tier model is documented in [Extending Axil](../extending/overview.md). "Engine" is the docs label for what is spelled `Plugin` in the trait API for historical compatibility.
+> The three-tier model is documented in [Extending Axil](../extending/overview.md). "Engine" is the Tier-1 storage substrate, named the `Engine` trait in code.
 
 ## Record model
 

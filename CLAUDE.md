@@ -65,7 +65,7 @@ No existing solution combines: embeddable, Rust-native, plugin-based, knowledge 
 
 ## Architecture
 
-> **Glossary (Phase 17):** Axil has three extensibility tiers — **Engine** (Tier 1, storage substrate; implements the `Plugin` trait, owns a `*.axil.<suffix>` companion file), **Extension** (Tier 2, capability built on Engines; owns prefixed tables in the core `.axil`), **Adapter** (Tier 3, protocol surface to the outside world; no storage). "Engine" is the docs label for what is spelled `Plugin` in the trait API for historical compatibility. See [docs/src/extending/overview.md](docs/src/extending/overview.md) for the full taxonomy.
+> **Glossary (Phase 17):** Axil has three extensibility tiers — **Engine** (Tier 1, storage substrate; implements the `Engine` trait, owns a `*.axil.<suffix>` companion file), **Extension** (Tier 2, capability built on Engines; owns prefixed tables in the core `.axil`), **Adapter** (Tier 3, protocol surface to the outside world; no storage). Code and docs agree: the Tier-1 trait is `Engine`; the `AxilError::Plugin` error variant and the WASM `axil:plugin` ABI are unrelated and keep their names. See [docs/src/extending/overview.md](docs/src/extending/overview.md) for the full taxonomy.
 
 ```
 ┌─────────────────────────────────────────┐
@@ -98,11 +98,11 @@ No existing solution combines: embeddable, Rust-native, plugin-based, knowledge 
 ├─────────────────────────────────────────┤
 │         Engine Layer (Tier 1)           │
 │         (Plugin trait surface)          │
-│  • VectorPlugin (HNSW) → *.axil.vec    │
+│  • VectorEngine (HNSW) → *.axil.vec    │
 │  • TextEmbedder (ONNX)  → model files  │
-│  • GraphPlugin (edges)  → *.axil.graph │
-│  • SearchPlugin (FTS)   → *.axil.fts/  │
-│  • TimeSeriesPlugin     → *.axil.ts    │
+│  • GraphEngine (edges)  → *.axil.graph │
+│  • FtsEngine (FTS)   → *.axil.fts/  │
+│  • TimeSeriesEngine     → *.axil.ts    │
 ├─────────────────────────────────────────┤
 │         Core Storage                    │
 │  • redb (embedded, ACID) → *.axil      │
@@ -191,14 +191,14 @@ full = ["vector", "graph", "fts"]
 ## Core Traits
 
 ```rust
-pub trait Plugin: Send + Sync {
+pub trait Engine: Send + Sync {
     fn name(&self) -> &str;
     fn capabilities(&self) -> Vec<Capability>;
     fn on_record_insert(&self, record: &Record) -> Result<()>;
     fn on_record_delete(&self, id: &RecordId) -> Result<()>;
 }
 
-pub trait VectorIndex: Plugin {
+pub trait VectorIndex: Engine {
     fn add(&self, id: RecordId, vector: &[f32]) -> Result<()>;
     fn search(&self, query: &[f32], top_k: usize) -> Result<Vec<(RecordId, f32)>>;
 }
@@ -207,13 +207,13 @@ pub trait TextEmbedder: Send + Sync {
     fn embed(&self, text: &str) -> Result<Vec<f32>>;
 }
 
-pub trait GraphIndex: Plugin {
+pub trait GraphIndex: Engine {
     fn relate(&self, from: RecordId, edge_type: &str, to: RecordId, props: Value) -> Result<RecordId>;
     fn traverse(&self, start: RecordId, path: &[TraversalStep]) -> Result<Vec<Record>>;
     fn neighbors(&self, id: RecordId, edge_type: Option<&str>, direction: Direction) -> Result<Vec<Record>>;
 }
 
-pub trait SearchIndex: Plugin {
+pub trait SearchIndex: Engine {
     fn index_text(&self, id: RecordId, field: &str, text: &str) -> Result<()>;
     fn search_text(&self, query: &str, limit: usize) -> Result<Vec<(RecordId, f32)>>;
 }
@@ -440,7 +440,7 @@ axil/
 │   │   │   ├── record.rs   # Record, RecordId types
 │   │   │   ├── storage.rs  # redb storage backend
 │   │   │   ├── query.rs    # query builder, explain, profiling
-│   │   │   ├── plugin.rs   # Plugin traits
+│   │   │   ├── plugin.rs   # Engine traits
 │   │   │   ├── error.rs    # error types
 │   │   │   ├── config.rs   # AxilConfig, axil.toml parsing
 │   │   │   ├── metrics.rs  # Metrics collector, counters, latency tracking

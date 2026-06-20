@@ -6,7 +6,7 @@ fn temp_ts_db() -> (Axil, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("test.axil");
     let db = Axil::open(&path)
-        .with_timeseries_plugin()
+        .with_timeseries_engine()
         .unwrap()
         .build()
         .unwrap();
@@ -282,7 +282,7 @@ fn persistence_across_reopen() {
     // Insert in first session.
     {
         let db = Axil::open(&path)
-            .with_timeseries_plugin()
+            .with_timeseries_engine()
             .unwrap()
             .build()
             .unwrap();
@@ -292,7 +292,7 @@ fn persistence_across_reopen() {
     // Reopen and verify.
     {
         let db = Axil::open(&path)
-            .with_timeseries_plugin()
+            .with_timeseries_engine()
             .unwrap()
             .build()
             .unwrap();
@@ -377,7 +377,7 @@ fn backfill_timeseries_on_existing_db() {
     // Reopen WITH timeseries and backfill.
     {
         let db = Axil::open(&path)
-            .with_timeseries_plugin()
+            .with_timeseries_engine()
             .unwrap()
             .build()
             .unwrap();

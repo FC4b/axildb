@@ -101,7 +101,7 @@ fn open_graph_db() -> (Axil, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("t.axil");
     let db = Axil::open(&path)
-        .with_graph_plugin()
+        .with_graph_engine()
         .unwrap()
         .build()
         .unwrap();
@@ -246,7 +246,7 @@ fn bulk_path_publishes_canonical_ids_to_atlas() {
     let path = dir.path().join("t.axil");
     let publisher = Arc::new(RecordingPublisher::default());
     let db = Axil::open(&path)
-        .with_graph_plugin()
+        .with_graph_engine()
         .unwrap()
         .with_canonical_publisher(publisher.clone() as Arc<dyn axil_core::CanonicalPublisher>)
         .build()

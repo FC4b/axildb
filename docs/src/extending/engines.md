@@ -1,8 +1,8 @@
 # Authoring an Engine (Tier 1)
 
-> **Naming reminder:** In the trait API, an Engine is called a `Plugin` for historical compatibility. The docs say "Engine"; the code says `Plugin`. Both refer to the same thing.
+> **Naming reminder:** This tier is an **Engine** in both the docs and the code (the `Engine` trait).
 
-An **Engine** is the deepest extensibility tier in Axil — a storage substrate that implements the `Plugin` trait, owns a companion file next to the core `.axil` database, and participates in the master coordinator's insert/update/delete lifecycle. Engines are how Axil supports vector search, graph edges, FTS, and time-series queries side-by-side in one binary.
+An **Engine** is the deepest extensibility tier in Axil — a storage substrate that implements the `Engine` trait, owns a companion file next to the core `.axil` database, and participates in the master coordinator's insert/update/delete lifecycle. Engines are how Axil supports vector search, graph edges, FTS, and time-series queries side-by-side in one binary.
 
 This guide covers what writing a new Engine looks like. Read [the three-tier overview](overview.md) first if you haven't decided which tier you're actually in — most new functionality is an [Extension](extensions.md), not an Engine.
 
@@ -18,14 +18,14 @@ This guide covers what writing a new Engine looks like. Read [the three-tier ove
 
 ## The trait surface
 
-Every Engine implements `Plugin` plus zero or one index trait. The index traits live in `crates/axil-core/src/plugin.rs`.
+Every Engine implements `Engine` plus zero or one index trait. The index traits live in `crates/axil-core/src/plugin.rs`.
 
 ```rust
-use axil_core::{Plugin, Capability, Record, RecordId, Result};
+use axil_core::{Engine, Capability, Record, RecordId, Result};
 
 pub struct MyEngine { /* … */ }
 
-impl Plugin for MyEngine {
+impl Engine for MyEngine {
     fn name(&self) -> &str { "myengine" }
 
     fn capabilities(&self) -> Vec<Capability> {
@@ -53,7 +53,7 @@ impl Plugin for MyEngine {
 If you're adding a new *kind* of index (not vector / graph / FTS / time-series), define a new trait alongside `VectorIndex`, `GraphIndex`, etc.:
 
 ```rust
-pub trait MyIndex: Plugin {
+pub trait MyIndex: Engine {
     fn add(&self, id: RecordId, payload: &MyPayload) -> Result<()>;
     fn query(&self, q: &MyQuery, limit: usize) -> Result<Vec<(RecordId, f32)>>;
 }

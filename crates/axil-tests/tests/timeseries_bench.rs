@@ -14,7 +14,7 @@ fn setup_db() -> (Axil, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("bench.axil");
     let db = Axil::open(&path)
-        .with_timeseries_plugin()
+        .with_timeseries_engine()
         .unwrap()
         .build()
         .unwrap();

@@ -4,17 +4,17 @@ use tempfile::TempDir;
 
 use axil_core::plugin::{Direction, GraphIndex};
 use axil_core::record::RecordId;
-use axil_graph::GraphPlugin;
+use axil_graph::GraphEngine;
 
-fn open_graph() -> (GraphPlugin, TempDir) {
+fn open_graph() -> (GraphEngine, TempDir) {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("bench.axil");
-    let plugin = GraphPlugin::open(&path).unwrap();
+    let plugin = GraphEngine::open(&path).unwrap();
     (plugin, dir)
 }
 
 /// Create a chain: n0 ->knows-> n1 ->knows-> ... ->knows-> n_{count-1}
-fn chain_graph(count: usize) -> (GraphPlugin, Vec<RecordId>, TempDir) {
+fn chain_graph(count: usize) -> (GraphEngine, Vec<RecordId>, TempDir) {
     let (plugin, dir) = open_graph();
     let nodes: Vec<RecordId> = (0..count).map(|_| RecordId::new()).collect();
     for i in 0..count - 1 {
@@ -26,7 +26,7 @@ fn chain_graph(count: usize) -> (GraphPlugin, Vec<RecordId>, TempDir) {
 }
 
 /// Create a dense graph: each node has edges to `density` random other nodes.
-fn dense_graph(node_count: usize, density: usize) -> (GraphPlugin, Vec<RecordId>, TempDir) {
+fn dense_graph(node_count: usize, density: usize) -> (GraphEngine, Vec<RecordId>, TempDir) {
     let (plugin, dir) = open_graph();
     let nodes: Vec<RecordId> = (0..node_count).map(|_| RecordId::new()).collect();
     for (i, from) in nodes.iter().enumerate() {

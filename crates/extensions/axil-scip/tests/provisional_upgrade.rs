@@ -17,7 +17,7 @@ fn provisional_is_rewritten_by_scip() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("t.axil");
     let db = Axil::open(&db_path)
-        .with_graph_plugin()
+        .with_graph_engine()
         .unwrap()
         .build()
         .unwrap();

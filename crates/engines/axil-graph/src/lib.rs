@@ -11,7 +11,7 @@ use parking_lot::RwLock;
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 use serde_json::Value;
 
-use axil_core::plugin::{Capability, Direction, EdgeInfo, GraphIndex, Plugin, TraversalStep};
+use axil_core::plugin::{Capability, Direction, EdgeInfo, GraphIndex, Engine, TraversalStep};
 use axil_core::record::{Record, RecordId};
 use axil_core::{companion_path, AxilBuilder, AxilError, Result};
 
@@ -197,16 +197,16 @@ const MAX_EDGES: usize = 1_000_000;
 /// Maximum byte size for edge property JSON.
 const MAX_EDGE_PROPERTY_BYTES: usize = 65_536; // 64 KB
 
-// ── GraphPlugin ─────────────────────────────────────────────────────
+// ── GraphEngine ─────────────────────────────────────────────────────
 
 /// Graph plugin for Axil — stores directed edges between records with
 /// traversal and neighbor queries.
-pub struct GraphPlugin {
+pub struct GraphEngine {
     graph_db: Database,
     index: RwLock<AdjacencyIndex>,
 }
 
-impl GraphPlugin {
+impl GraphEngine {
     /// Open or create a graph store at the companion path for the given database.
     pub fn open(db_path: impl AsRef<Path>) -> Result<Self> {
         let graph_path = companion_path(db_path.as_ref(), ".graph");
@@ -579,9 +579,9 @@ impl GraphPlugin {
     }
 }
 
-// ── Plugin trait ────────────────────────────────────────────────────
+// ── Engine trait ────────────────────────────────────────────────────
 
-impl Plugin for GraphPlugin {
+impl Engine for GraphEngine {
     fn name(&self) -> &str {
         "graph"
     }
@@ -617,7 +617,7 @@ impl Plugin for GraphPlugin {
 
 // ── GraphIndex trait ────────────────────────────────────────────────
 
-impl GraphIndex for GraphPlugin {
+impl GraphIndex for GraphEngine {
     fn relate(
         &self,
         from: RecordId,
@@ -675,7 +675,7 @@ impl GraphIndex for GraphPlugin {
     }
 
     fn edge_count(&self) -> usize {
-        GraphPlugin::edge_count(self)
+        GraphEngine::edge_count(self)
     }
 
     fn all_edge_ids(&self) -> Result<Vec<(RecordId, RecordId, RecordId)>> {
@@ -693,14 +693,14 @@ impl GraphIndex for GraphPlugin {
 /// Extension trait for adding graph support to `AxilBuilder`.
 pub trait AxilBuilderGraphExt {
     /// Enable graph traversal with a companion `.graph` file.
-    fn with_graph_plugin(self) -> Result<Self>
+    fn with_graph_engine(self) -> Result<Self>
     where
         Self: Sized;
 }
 
 impl AxilBuilderGraphExt for AxilBuilder {
-    fn with_graph_plugin(self) -> Result<Self> {
-        let plugin = GraphPlugin::open(self.path())?;
+    fn with_graph_engine(self) -> Result<Self> {
+        let plugin = GraphEngine::open(self.path())?;
         let arc: Arc<dyn GraphIndex> = Arc::new(plugin);
         Ok(self.with_graph_index(arc))
     }
@@ -718,10 +718,10 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn temp_graph() -> (GraphPlugin, tempfile::TempDir) {
+    fn temp_graph() -> (GraphEngine, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.axil");
-        let plugin = GraphPlugin::open(&path).unwrap();
+        let plugin = GraphEngine::open(&path).unwrap();
         (plugin, dir)
     }
 
@@ -910,7 +910,7 @@ mod tests {
 
         // Create edges.
         {
-            let g = GraphPlugin::open(&path).unwrap();
+            let g = GraphEngine::open(&path).unwrap();
             g.create_edge(a.clone(), "knows", b.clone(), json!({"weight": 1}))
                 .unwrap();
             assert_eq!(g.edge_count(), 1);
@@ -918,7 +918,7 @@ mod tests {
 
         // Reopen and verify.
         {
-            let g = GraphPlugin::open(&path).unwrap();
+            let g = GraphEngine::open(&path).unwrap();
             assert_eq!(g.edge_count(), 1);
             let out = g.get_outgoing(&a, Some("knows"));
             assert_eq!(out.len(), 1);

@@ -19,7 +19,7 @@
 //! constructors/builders, so fields can grow without a breaking change.
 //!
 //! **Unstable (no semver guarantee — upstream-or-fork):** everything in
-//! [`plugin`] — [`Plugin`], [`VectorIndex`], [`GraphIndex`], [`SearchIndex`],
+//! [`plugin`] — [`Engine`], [`VectorIndex`], [`GraphIndex`], [`SearchIndex`],
 //! [`TimeSeriesIndex`], [`TextEmbedder`], [`Capability`]. These are the Engine
 //! (Tier-1) substrate the master coordinator drives directly.
 //!
@@ -95,7 +95,7 @@ pub use metrics::{
     AuditEntry, LatencyPercentiles, Metrics, MetricsSnapshot, OpType, SlowQueryEntry,
 };
 pub use plugin::{
-    parse_path, Capability, Direction, EdgeInfo, GraphIndex, Plugin, SearchIndex, TextEmbedder,
+    parse_path, Capability, Direction, EdgeInfo, GraphIndex, Engine, SearchIndex, TextEmbedder,
     TimeBucket, TimeSeriesIndex, TraversalStep, VectorIndex,
 };
 

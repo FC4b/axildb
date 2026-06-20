@@ -1,7 +1,7 @@
 //! Central registry of Axil's built-in Extensions.
 //!
 //! Before this crate, every in-tree Extension had to be hand-registered in
-//! three places — the CLI's `attach_detected_plugins`, the MCP server's
+//! three places — the CLI's `attach_detected_engines`, the MCP server's
 //! equivalent, and the workspace audit test. Adding an Extension meant editing
 //! all three and remembering to keep them in sync.
 //!

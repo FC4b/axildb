@@ -148,7 +148,7 @@ pub fn truncate_str(s: &str, max: usize) -> &str {
     }
 }
 
-/// True when `AXIL_VERBOSE=1` (or `=true`). Plugin crates use this to
+/// True when `AXIL_VERBOSE=1` (or `=true`). Engine crates use this to
 /// silence startup banners during a normal run while leaving them
 /// available for debugging.
 pub fn verbose_logging_enabled() -> bool {

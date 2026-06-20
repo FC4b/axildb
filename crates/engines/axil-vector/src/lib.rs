@@ -13,7 +13,7 @@ use parking_lot::RwLock;
 use redb::{Database, ReadOnlyDatabase, ReadableDatabase, ReadableTable, TableDefinition};
 
 use axil_core::error::AxilError;
-use axil_core::plugin::{Capability, Plugin, TextEmbedder, VectorIndex};
+use axil_core::plugin::{Capability, Engine, TextEmbedder, VectorIndex};
 use axil_core::record::{Record, RecordId};
 
 use axil_core::db::AxilBuilder;
@@ -47,14 +47,14 @@ pub struct VectorConfig {
 /// Provides HNSW-based approximate nearest neighbor search with optional
 /// ONNX-based text embedding. Vectors are persisted in a separate redb
 /// file alongside the main database.
-pub struct VectorPlugin {
+pub struct VectorEngine {
     config: VectorConfig,
     index: RwLock<HnswIndex>,
     vector_db: Database,
     embedder: Option<Embedder>,
 }
 
-impl VectorPlugin {
+impl VectorEngine {
     /// Open (or create) a vector store alongside the given database path.
     ///
     /// The vector data is stored at `<db_path>.vec`.
@@ -151,7 +151,7 @@ impl VectorPlugin {
     }
 }
 
-impl Plugin for VectorPlugin {
+impl Engine for VectorEngine {
     fn name(&self) -> &str {
         "vector"
     }
@@ -205,7 +205,7 @@ impl Plugin for VectorPlugin {
     }
 }
 
-impl VectorIndex for VectorPlugin {
+impl VectorIndex for VectorEngine {
     fn add(&self, id: RecordId, vector: &[f32]) -> axil_core::Result<()> {
         // Persist to disk first so a crash can't leave the in-memory
         // index ahead of storage.
@@ -258,7 +258,7 @@ impl VectorIndex for VectorPlugin {
     }
 }
 
-impl TextEmbedder for VectorPlugin {
+impl TextEmbedder for VectorEngine {
     fn embed(&self, text: &str) -> axil_core::Result<Vec<f32>> {
         match &self.embedder {
             Some(e) => e.embed(text).map_err(AxilError::plugin),
@@ -377,11 +377,11 @@ pub fn read_stored_dimensions(db_path: impl AsRef<Path>) -> axil_core::Result<Op
 /// Extension trait that adds vector plugin support to [`AxilBuilder`].
 ///
 /// Lets users write `Axil::open(path).with_vector(384)?.build()?`
-/// without manually constructing a `VectorPlugin`.
+/// without manually constructing a `VectorEngine`.
 pub trait AxilBuilderVectorExt {
     /// Enable vector search with the given dimensions.
     ///
-    /// Creates a `VectorPlugin` internally using the builder's path.
+    /// Creates a `VectorEngine` internally using the builder's path.
     fn with_vector(self, dims: usize) -> axil_core::Result<Self>
     where
         Self: Sized;
@@ -395,7 +395,7 @@ pub trait AxilBuilderVectorExt {
 
     /// Enable vector search with an embedding model.
     ///
-    /// Creates a `VectorPlugin` with the model's native dimensions and attaches
+    /// Creates a `VectorEngine` with the model's native dimensions and attaches
     /// the embedder for `embed_field()`, `embed_text()`, and `similar_to()`.
     fn with_embedder_model(self, model: EmbeddingModel) -> axil_core::Result<Self>
     where
@@ -405,7 +405,7 @@ pub trait AxilBuilderVectorExt {
 impl AxilBuilderVectorExt for AxilBuilder {
     fn with_vector(self, dims: usize) -> axil_core::Result<Self> {
         let path = self.path().to_path_buf();
-        let plugin = VectorPlugin::open(&path, dims)?;
+        let plugin = VectorEngine::open(&path, dims)?;
         Ok(self.with_vector_and_embedder(plugin))
     }
 
@@ -423,7 +423,7 @@ impl AxilBuilderVectorExt for AxilBuilder {
     fn with_embedder_model(self, model: EmbeddingModel) -> axil_core::Result<Self> {
         let path = self.path().to_path_buf();
         let dims = model.dimensions();
-        let plugin = VectorPlugin::open(&path, dims)?;
+        let plugin = VectorEngine::open(&path, dims)?;
         let plugin = plugin.with_model(model).map_err(AxilError::plugin)?;
         Ok(self.with_vector_and_embedder(plugin))
     }
@@ -469,16 +469,16 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn temp_plugin(dims: usize) -> (VectorPlugin, tempfile::TempDir) {
+    fn temp_engine(dims: usize) -> (VectorEngine, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.axil");
-        let plugin = VectorPlugin::open(&path, dims).unwrap();
+        let plugin = VectorEngine::open(&path, dims).unwrap();
         (plugin, dir)
     }
 
     #[test]
     fn add_and_search() {
-        let (plugin, _dir) = temp_plugin(3);
+        let (plugin, _dir) = temp_engine(3);
         let id1 = RecordId::new();
         let id2 = RecordId::new();
 
@@ -497,13 +497,13 @@ mod tests {
         let id = RecordId::new();
 
         {
-            let plugin = VectorPlugin::open(&path, 3).unwrap();
+            let plugin = VectorEngine::open(&path, 3).unwrap();
             plugin.add(id.clone(), &[1.0, 0.0, 0.0]).unwrap();
             assert_eq!(plugin.vector_count(), 1);
         }
 
         {
-            let plugin = VectorPlugin::open(&path, 3).unwrap();
+            let plugin = VectorEngine::open(&path, 3).unwrap();
             assert_eq!(plugin.vector_count(), 1);
             let results = plugin.search(&[1.0, 0.0, 0.0], 1).unwrap();
             assert_eq!(results.len(), 1);
@@ -518,21 +518,21 @@ mod tests {
         let id = RecordId::new();
 
         {
-            let plugin = VectorPlugin::open(&path, 3).unwrap();
+            let plugin = VectorEngine::open(&path, 3).unwrap();
             plugin.add(id.clone(), &[1.0, 0.0, 0.0]).unwrap();
             plugin.on_record_delete(&id).unwrap();
             assert_eq!(plugin.vector_count(), 0);
         }
 
         {
-            let plugin = VectorPlugin::open(&path, 3).unwrap();
+            let plugin = VectorEngine::open(&path, 3).unwrap();
             assert_eq!(plugin.vector_count(), 0);
         }
     }
 
     #[test]
     fn on_record_insert_without_embedder_is_noop() {
-        let (plugin, _dir) = temp_plugin(3);
+        let (plugin, _dir) = temp_engine(3);
         let record = Record::new("test", json!({"summary": "hello"}));
         plugin.on_record_insert(&record).unwrap();
         assert_eq!(plugin.vector_count(), 0);
@@ -558,12 +558,12 @@ mod tests {
         let path = dir.path().join("dims.axil");
 
         {
-            let plugin = VectorPlugin::open(&path, 3).unwrap();
+            let plugin = VectorEngine::open(&path, 3).unwrap();
             let id = RecordId::new();
             plugin.add(id, &[1.0, 0.0, 0.0]).unwrap();
         }
 
-        let result = VectorPlugin::open(&path, 768);
+        let result = VectorEngine::open(&path, 768);
         assert!(result.is_err());
         let err = format!("{}", result.err().unwrap());
         assert!(err.contains("dimension mismatch"), "error was: {err}");

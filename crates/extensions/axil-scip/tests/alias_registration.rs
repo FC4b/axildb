@@ -15,7 +15,7 @@ fn fixture() -> (tempfile::TempDir, std::path::PathBuf, Axil) {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("t.axil");
     let db = Axil::open(&db_path)
-        .with_graph_plugin()
+        .with_graph_engine()
         .unwrap()
         .build()
         .unwrap();

@@ -8,7 +8,7 @@ use chrono::Utc;
 use parking_lot::RwLock;
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 
-use axil_core::plugin::{Capability, Plugin, TimeBucket, TimeSeriesIndex};
+use axil_core::plugin::{Capability, Engine, TimeBucket, TimeSeriesIndex};
 use axil_core::record::{Record, RecordId};
 use axil_core::{companion_path, AxilBuilder, AxilError, Result};
 
@@ -182,16 +182,16 @@ impl TimeIndex {
     }
 }
 
-// ── TimeSeriesPlugin ────────────────────────────────────────────────
+// ── TimeSeriesEngine ────────────────────────────────────────────────
 
 /// Time-series plugin for Axil — indexes records by creation and update
 /// timestamps for fast range queries.
-pub struct TimeSeriesPlugin {
+pub struct TimeSeriesEngine {
     ts_db: Database,
     index: RwLock<TimeIndex>,
 }
 
-impl TimeSeriesPlugin {
+impl TimeSeriesEngine {
     /// Open or create a time-series store at the companion path for the given database.
     pub fn open(db_path: impl AsRef<Path>) -> Result<Self> {
         let ts_path = companion_path(db_path.as_ref(), ".ts");
@@ -286,9 +286,9 @@ impl TimeSeriesPlugin {
     }
 }
 
-// ── Plugin trait ────────────────────────────────────────────────────
+// ── Engine trait ────────────────────────────────────────────────────
 
-impl Plugin for TimeSeriesPlugin {
+impl Engine for TimeSeriesEngine {
     fn name(&self) -> &str {
         "timeseries"
     }
@@ -353,7 +353,7 @@ impl Plugin for TimeSeriesPlugin {
 
 // ── TimeSeriesIndex trait ───────────────────────────────────────────
 
-impl TimeSeriesIndex for TimeSeriesPlugin {
+impl TimeSeriesIndex for TimeSeriesEngine {
     fn range(&self, table: Option<&str>, start_us: i64, end_us: i64) -> Result<Vec<RecordId>> {
         Ok(self.index.read().range_created(table, start_us, end_us))
     }
@@ -413,14 +413,14 @@ impl TimeSeriesIndex for TimeSeriesPlugin {
 /// Extension trait for adding time-series support to `AxilBuilder`.
 pub trait AxilBuilderTimeSeriesExt {
     /// Enable time-series indexing with a companion `.ts` file.
-    fn with_timeseries_plugin(self) -> Result<Self>
+    fn with_timeseries_engine(self) -> Result<Self>
     where
         Self: Sized;
 }
 
 impl AxilBuilderTimeSeriesExt for AxilBuilder {
-    fn with_timeseries_plugin(self) -> Result<Self> {
-        let plugin = TimeSeriesPlugin::open(self.path())?;
+    fn with_timeseries_engine(self) -> Result<Self> {
+        let plugin = TimeSeriesEngine::open(self.path())?;
         let arc: Arc<dyn TimeSeriesIndex> = Arc::new(plugin);
         Ok(self.with_timeseries_index(arc))
     }
@@ -438,10 +438,10 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn temp_ts() -> (TimeSeriesPlugin, tempfile::TempDir) {
+    fn temp_ts() -> (TimeSeriesEngine, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.axil");
-        let plugin = TimeSeriesPlugin::open(&path).unwrap();
+        let plugin = TimeSeriesEngine::open(&path).unwrap();
         (plugin, dir)
     }
 
@@ -535,13 +535,13 @@ mod tests {
         let r = make_record("sessions");
 
         {
-            let ts = TimeSeriesPlugin::open(&path).unwrap();
+            let ts = TimeSeriesEngine::open(&path).unwrap();
             ts.on_record_insert(&r).unwrap();
             assert_eq!(ts.count(), 1);
         }
 
         {
-            let ts = TimeSeriesPlugin::open(&path).unwrap();
+            let ts = TimeSeriesEngine::open(&path).unwrap();
             assert_eq!(ts.count(), 1);
             let ids = ts.since(None, 60).unwrap();
             assert_eq!(ids.len(), 1);
@@ -661,7 +661,7 @@ mod tests {
     fn has_timeseries_store_true_after_open() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.axil");
-        let _ts = TimeSeriesPlugin::open(&path).unwrap();
+        let _ts = TimeSeriesEngine::open(&path).unwrap();
         assert!(has_timeseries_store(&path));
     }
 }

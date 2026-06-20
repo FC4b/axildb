@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
-use axil_core::plugin::{Capability, Plugin, SearchIndex};
+use axil_core::plugin::{Capability, Engine, SearchIndex};
 use axil_core::record::{Record, RecordId};
 use axil_core::{companion_path, AxilBuilder, Result};
 
@@ -17,11 +17,11 @@ use crate::index::FtsIndex;
 /// Stores a tantivy index directory alongside the `.axil` database file
 /// at `<db_path>.fts/`. Supports both explicit indexing via `index_text()`
 /// and automatic indexing of string fields on record insert.
-pub struct FtsPlugin {
+pub struct FtsEngine {
     index: FtsIndex,
 }
 
-impl FtsPlugin {
+impl FtsEngine {
     /// Open or create the FTS index for the database at `db_path`.
     pub fn open(db_path: &Path) -> Result<Self> {
         let fts_path = companion_path(db_path, ".fts");
@@ -95,7 +95,7 @@ impl FtsPlugin {
     }
 }
 
-impl Plugin for FtsPlugin {
+impl Engine for FtsEngine {
     fn name(&self) -> &str {
         "fts"
     }
@@ -131,7 +131,7 @@ impl Plugin for FtsPlugin {
     }
 }
 
-impl SearchIndex for FtsPlugin {
+impl SearchIndex for FtsEngine {
     fn index_text(&self, id: &RecordId, field: &str, text: &str) -> Result<()> {
         self.index.index_field(id, field, text)
     }
@@ -198,14 +198,14 @@ impl SearchIndex for FtsPlugin {
 /// Extension trait for `AxilBuilder` to enable FTS support.
 pub trait AxilBuilderFtsExt {
     /// Enable full-text search with a companion `.fts/` directory.
-    fn with_fts_plugin(self) -> Result<Self>
+    fn with_fts_engine(self) -> Result<Self>
     where
         Self: Sized;
 }
 
 impl AxilBuilderFtsExt for AxilBuilder {
-    fn with_fts_plugin(mut self) -> Result<Self> {
-        let plugin = FtsPlugin::open(self.path())?;
+    fn with_fts_engine(mut self) -> Result<Self> {
+        let plugin = FtsEngine::open(self.path())?;
         if plugin.needs_reindex() {
             self.needs_fts_reindex = true;
         }
@@ -226,16 +226,16 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn temp_fts_plugin() -> (FtsPlugin, tempfile::TempDir) {
+    fn temp_fts_engine() -> (FtsEngine, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.axil");
-        let plugin = FtsPlugin::open(&db_path).unwrap();
+        let plugin = FtsEngine::open(&db_path).unwrap();
         (plugin, dir)
     }
 
     #[test]
     fn auto_index_on_insert() {
-        let (plugin, _dir) = temp_fts_plugin();
+        let (plugin, _dir) = temp_fts_engine();
         let record = Record::new(
             "sessions",
             json!({"summary": "Fixed authentication bug", "count": 42}),
@@ -254,7 +254,7 @@ mod tests {
 
     #[test]
     fn delete_removes_from_index() {
-        let (plugin, _dir) = temp_fts_plugin();
+        let (plugin, _dir) = temp_fts_engine();
         let record = Record::new("sessions", json!({"summary": "Important data"}));
         plugin.on_record_insert(&record).unwrap();
         assert_eq!(plugin.search_text("important", 10).unwrap().len(), 1);
@@ -265,7 +265,7 @@ mod tests {
 
     #[test]
     fn explicit_index_text() {
-        let (plugin, _dir) = temp_fts_plugin();
+        let (plugin, _dir) = temp_fts_engine();
         let id = RecordId::new();
         plugin
             .index_text(&id, "custom", "explicitly indexed content")
@@ -282,7 +282,7 @@ mod tests {
         let db_path = dir.path().join("test.axil");
         assert!(!has_fts_store(&db_path));
 
-        let _plugin = FtsPlugin::open(&db_path).unwrap();
+        let _plugin = FtsEngine::open(&db_path).unwrap();
         assert!(has_fts_store(&db_path));
     }
 }

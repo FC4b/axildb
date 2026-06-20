@@ -6,7 +6,7 @@ fn temp_ts_db() -> (Axil, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("test.axil");
     let db = Axil::open(&path)
-        .with_timeseries_plugin()
+        .with_timeseries_engine()
         .unwrap()
         .build()
         .unwrap();

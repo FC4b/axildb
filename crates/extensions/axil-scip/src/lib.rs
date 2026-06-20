@@ -118,7 +118,7 @@ pub fn ingest_scip_opts(db: &Axil, scip_path: &Path, opts: IngestOptions) -> Res
     if !opts.dry_run && db.graph_index_ref().is_none() {
         return Err(AxilError::plugin(
             "SCIP ingest requires a graph plugin — open the DB with \
-             `with_graph_plugin()` (or use `axil ingest-scip`, which \
+             `with_graph_engine()` (or use `axil ingest-scip`, which \
              attaches it automatically). Without a graph store, edge \
              counts in IngestReport would be misleading: the rows \
              land but the edges silently drop."

@@ -538,7 +538,7 @@ fn handle_recall_across(
 
     let (results, warnings) = fan_out(req, |label, member, path| {
         let builder = axil_core::Axil::open(&path);
-        let builder = crate::attach_detected_plugins(builder)
+        let builder = crate::attach_detected_engines(builder)
             .map_err(|e| format!("attach plugins for {label}: {e}"))?;
         let sibling = builder.build().map_err(|e| format!("open {label}: {e}"))?;
         let cfg = axil_core::RecallConfig {

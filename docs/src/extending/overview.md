@@ -4,13 +4,13 @@ Axil is built from a small core (`axil-core`) plus a fan of pluggable crates. To
 
 | Tier | Name | What it is | Owns | 3rd-party? |
 |---|---|---|---|---|
-| 1 | **[Engine](engines.md)** | Storage substrate. Implements the `Plugin` trait, owns a companion file, gets `on_record_insert` / `on_record_update` / `on_record_delete` lifecycle hooks from the master coordinator. | A companion file (`*.axil.vec`, `*.axil.graph`, `*.axil.fts/`, `*.axil.ts`) | Possible, high bar — upstream-only in practice |
+| 1 | **[Engine](engines.md)** | Storage substrate. Implements the `Engine` trait, owns a companion file, gets `on_record_insert` / `on_record_update` / `on_record_delete` lifecycle hooks from the master coordinator. | A companion file (`*.axil.vec`, `*.axil.graph`, `*.axil.fts/`, `*.axil.ts`) | Possible, high bar — upstream-only in practice |
 | 2 | **[Extension](extensions.md)** | Capability built on Engines. Owns prefixed tables in the core `.axil` file, optionally registers CLI subcommands, MCP tools, brain hooks, and drift-refresh logic. | Prefixed tables (`_dep_docs`, `_dep_manifests`, `_scip_aliases`, …) | **Yes — designed for it** |
 | 3 | **[Adapter](adapters.md)** | Interface to the outside world. Translates an external protocol (CLI argv, MCP stdio, HTTP, AxilQL) to/from `Axil::query()`. | A protocol surface | **Yes — designed for it** |
 
 The taxonomy is **the** organizing principle of the codebase. Every `axil-*` crate fits exactly one tier.
 
-> **Naming note:** *Engine* is the canonical industry term for the substrate layer (SQLite/MySQL storage engines, Tantivy search engine, V8 JavaScript engine). In the trait API the same concept is spelled `Plugin` for historical compatibility — both words refer to the same thing.
+> **Naming note:** *Engine* is the canonical industry term for the substrate layer (SQLite/MySQL storage engines, Tantivy search engine, V8 JavaScript engine), and the Tier-1 trait is named `Engine` in code to match.
 
 ## Crate classification
 
@@ -51,7 +51,7 @@ Do I need to store data in a new kind of index
 or time-series)?
 │
 ├── Yes → Engine (Tier 1). See engines.md.
-│         You'll implement Plugin + one of the index
+│         You'll implement Engine + one of the index
 │         traits, own a *.axil.<suffix> companion file,
 │         and need master-coordinator coordination.
 │
@@ -83,7 +83,7 @@ The extensibility surface is split into a **stable outer SPI** and an **unstable
 |---|---|---|
 | `Extension` + its support types (`CliSurface`, `CliSubcommand`, `CliArg`, `McpSurface`, `McpTool`, `Hit`, `RefreshOpts`, `RefreshReport`, …) | **Stable** — semver-locked at 1.0; the structs third parties construct are `#[non_exhaustive]` with constructors/builders so they can grow additively | Extension authors (Tier 2) |
 | `Adapter`, `Protocol`, `dispatch_cli` / `dispatch_mcp`, `compose_cli_surface` / `compose_mcp_surface`, the `Axil` builder + query API | **Stable** — semver-locked at 1.0 | Adapter authors (Tier 3) |
-| `Plugin`, `VectorIndex`, `GraphIndex`, `SearchIndex`, `TimeSeriesIndex`, `TextEmbedder`, `Capability` | **Unstable** — no semver guarantee, may change in any release | Engine authors (Tier 1 — upstream-or-fork) |
+| `Engine`, `VectorIndex`, `GraphIndex`, `SearchIndex`, `TimeSeriesIndex`, `TextEmbedder`, `Capability` | **Unstable** — no semver guarantee, may change in any release | Engine authors (Tier 1 — upstream-or-fork) |
 
 The full stable set is enumerated in one place: the crate-level docs of `axil-core` (`lib.rs`).
 
@@ -106,4 +106,4 @@ There are now **two** ways to add an Extension, and you pick by whether you cont
 
 The `wasm-host` feature is **off by default** so the standard binary stays small (zero Wasmtime); build with `--features wasm-host` to opt in. Tier 1 (storage Engines) stays compile-time — Engines need direct master-coordinator access and are the storage hot path.
 
-Load-time **ABI-version negotiation** (a precise error when a plugin's `axil:plugin@X.Y.Z` isn't one this host implements, instead of a raw link failure), a **compiled-module cache** (`.axil/plugins/.cache/`, ~16× faster repeat invocations — a deserialize instead of a recompile), a **host-ABI conformance suite** (a real guest exercising every host import across the boundary), and an **ergonomic guest authoring layer** (the `Plugin` trait + `export_plugin!` macro — implement only what you need) are in. Still ahead (Phase 22 polish): packaging that authoring layer as a standalone published crate, and a fuzz harness. None change the contract above.
+Load-time **ABI-version negotiation** (a precise error when a plugin's `axil:plugin@X.Y.Z` isn't one this host implements, instead of a raw link failure), a **compiled-module cache** (`.axil/plugins/.cache/`, ~16× faster repeat invocations — a deserialize instead of a recompile), a **host-ABI conformance suite** (a real guest exercising every host import across the boundary), and an **ergonomic guest authoring layer** (the `Engine` trait + `export_plugin!` macro — implement only what you need) are in. Still ahead (Phase 22 polish): packaging that authoring layer as a standalone published crate, and a fuzz harness. None change the contract above.

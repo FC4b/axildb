@@ -6,7 +6,7 @@ fn temp_graph_db() -> (Axil, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("test.axil");
     let db = Axil::open(&path)
-        .with_graph_plugin()
+        .with_graph_engine()
         .unwrap()
         .build()
         .unwrap();
@@ -215,7 +215,7 @@ fn persistence_across_reopen() {
     // First session: create records and edge.
     {
         let db = Axil::open(&path)
-            .with_graph_plugin()
+            .with_graph_engine()
             .unwrap()
             .build()
             .unwrap();
@@ -231,7 +231,7 @@ fn persistence_across_reopen() {
     // Second session: reopen and verify.
     {
         let db = Axil::open(&path)
-            .with_graph_plugin()
+            .with_graph_engine()
             .unwrap()
             .build()
             .unwrap();

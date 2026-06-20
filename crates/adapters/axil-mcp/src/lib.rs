@@ -45,14 +45,14 @@ fn resolve_embedding_model(db_path: &std::path::Path) -> axil_vector::models::Em
 }
 
 /// Detect plugin companion files at `path` and attach each one whose
-/// on-disk state is present. Mirrors the CLI's `attach_detected_plugins`
+/// on-disk state is present. Mirrors the CLI's `attach_detected_engines`
 /// helper so MCP clients get the same set of retrieval/graph/FTS
 /// capabilities that `axil recall` / `axil search` / `axil link` use.
 ///
 /// Gated by the crate's optional features (`vector`, `graph`, `fts`) so a
 /// minimal build that disables all three still compiles and just ships a
 /// CRUD-only MCP surface.
-pub(crate) fn attach_detected_plugins(
+pub(crate) fn attach_detected_engines(
     #[allow(unused_mut)] mut builder: axil_core::AxilBuilder,
 ) -> anyhow::Result<axil_core::AxilBuilder> {
     #[allow(unused)]
@@ -87,7 +87,7 @@ pub(crate) fn attach_detected_plugins(
     {
         use axil_graph::AxilBuilderGraphExt;
         if axil_graph::has_graph_store(&path) {
-            builder = builder.with_graph_plugin()?;
+            builder = builder.with_graph_engine()?;
         }
     }
 
@@ -95,7 +95,7 @@ pub(crate) fn attach_detected_plugins(
     {
         use axil_fts::AxilBuilderFtsExt;
         if axil_fts::has_fts_store(&path) {
-            builder = builder.with_fts_plugin()?;
+            builder = builder.with_fts_engine()?;
         }
     }
 
@@ -146,7 +146,7 @@ impl McpServer {
     /// absent plugin return a structured error at call time instead of
     /// failing at open.
     pub fn open(path: &Path) -> anyhow::Result<Self> {
-        let builder = attach_detected_plugins(Axil::open(path))?;
+        let builder = attach_detected_engines(Axil::open(path))?;
         let db = builder.build()?;
         Ok(Self { db: Arc::new(db) })
     }

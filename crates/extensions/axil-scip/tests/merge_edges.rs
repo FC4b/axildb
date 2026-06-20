@@ -11,7 +11,7 @@ use serde_json::json;
 fn merge_moves_edges_and_removes_originals() {
     let dir = tempfile::tempdir().unwrap();
     let db = Axil::open(dir.path().join("t.axil"))
-        .with_graph_plugin()
+        .with_graph_engine()
         .unwrap()
         .build()
         .unwrap();

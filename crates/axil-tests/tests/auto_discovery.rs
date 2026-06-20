@@ -12,7 +12,7 @@ fn temp_db_with_graph() -> (Axil, TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("test.axil");
     let db = Axil::open(&path)
-        .with_graph_plugin()
+        .with_graph_engine()
         .unwrap()
         .build()
         .unwrap();

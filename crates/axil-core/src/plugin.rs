@@ -3,7 +3,7 @@
 //! # Stability
 //!
 //! **This is an internal Engine API with NO semver guarantee — it may change
-//! in any release.** The `Plugin`, [`VectorIndex`], [`GraphIndex`],
+//! in any release.** The `Engine`, [`VectorIndex`], [`GraphIndex`],
 //! [`SearchIndex`], [`TimeSeriesIndex`], and [`TextEmbedder`] traits, and the
 //! [`Capability`] enum, are the substrate the master coordinator drives
 //! directly; keeping them unstable is what gives Axil freedom to add, drop, or
@@ -30,7 +30,7 @@ pub enum Capability {
 }
 
 /// Base trait every plugin must implement.
-pub trait Plugin: Send + Sync {
+pub trait Engine: Send + Sync {
     /// Human-readable plugin name.
     fn name(&self) -> &str;
 
@@ -78,11 +78,11 @@ pub struct TraversalStep {
     pub direction: Direction,
 }
 
-/// Plugin that provides vector similarity search (pure ANN operations).
+/// Engine that provides vector similarity search (pure ANN operations).
 ///
 /// Handles adding vectors and searching by similarity. Text-to-vector
 /// conversion is handled separately by [`TextEmbedder`].
-pub trait VectorIndex: Plugin {
+pub trait VectorIndex: Engine {
     /// Add a vector for a record.
     fn add(&self, id: RecordId, vector: &[f32]) -> Result<()>;
 
@@ -160,8 +160,8 @@ pub struct EdgeInfo {
     pub created_at: String,
 }
 
-/// Plugin that provides graph traversal.
-pub trait GraphIndex: Plugin {
+/// Engine that provides graph traversal.
+pub trait GraphIndex: Engine {
     /// Create a directed edge between two records.
     fn relate(
         &self,
@@ -175,7 +175,7 @@ pub trait GraphIndex: Plugin {
     ///
     /// The default implementation calls `relate` once per edge and is
     /// purely a convenience — implementations that persist edges in
-    /// their own transaction (`GraphPlugin`) override this to amortize
+    /// their own transaction (`GraphEngine`) override this to amortize
     /// transaction overhead across the whole batch. SCIP ingest writes
     /// hundreds of thousands of edges per workspace; per-edge txns
     /// turned a 10 MB index into a 15-minute redb-lock-holding job.
@@ -431,14 +431,14 @@ mod tests {
     }
 }
 
-/// Plugin that provides full-text search.
-pub trait SearchIndex: Plugin {
+/// Engine that provides full-text search.
+pub trait SearchIndex: Engine {
     /// Index a text field for a record.
     fn index_text(&self, id: &RecordId, field: &str, text: &str) -> Result<()>;
 
     /// Index a batch of records' auto-extracted text fields in one pass.
     ///
-    /// Default implementation calls [`Plugin::on_record_insert`] per record.
+    /// Default implementation calls [`Engine::on_record_insert`] per record.
     /// Implementations backed by a write buffer (e.g. Tantivy) should
     /// override this to defer the commit until the whole batch is buffered —
     /// turning N expensive commits into 1.
@@ -559,11 +559,11 @@ impl TimeBucket {
     }
 }
 
-/// Plugin that provides time-series range queries.
+/// Engine that provides time-series range queries.
 ///
 /// Records are automatically indexed by `created_at` on insert.
 /// A secondary index on `updated_at` supports change tracking.
-pub trait TimeSeriesIndex: Plugin {
+pub trait TimeSeriesIndex: Engine {
     /// Get record IDs in a time range `[start_us, end_us]` (microseconds since epoch).
     /// If `table` is `None`, searches across all tables.
     fn range(&self, table: Option<&str>, start_us: i64, end_us: i64) -> Result<Vec<RecordId>>;

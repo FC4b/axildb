@@ -28,7 +28,7 @@ fn temp_db_path() -> (tempfile::TempDir, std::path::PathBuf) {
 /// record so history/FTS have data, then drop the handle. After this
 /// function returns, the on-disk companion files exist, and we can
 /// exercise `McpServer::open`'s plugin detection.
-fn seed_db_with_all_plugins(path: &Path) {
+fn seed_db_with_all_engines(path: &Path) {
     use axil_core::Axil;
     use axil_fts::AxilBuilderFtsExt;
     use axil_graph::AxilBuilderGraphExt;
@@ -37,9 +37,9 @@ fn seed_db_with_all_plugins(path: &Path) {
     let db = Axil::open(path)
         .with_vector(4)
         .expect("vector plugin")
-        .with_graph_plugin()
+        .with_graph_engine()
         .expect("graph plugin")
-        .with_fts_plugin()
+        .with_fts_engine()
         .expect("fts plugin")
         .build()
         .expect("build");
@@ -74,7 +74,7 @@ fn a4_missing_companions_open_without_crash() {
 #[test]
 fn a1_vector_companion_attaches_plugin() {
     let (_tmp, path) = temp_db_path();
-    seed_db_with_all_plugins(&path);
+    seed_db_with_all_engines(&path);
 
     let server = McpServer::open(&path).expect("open");
     assert!(
@@ -86,7 +86,7 @@ fn a1_vector_companion_attaches_plugin() {
 #[test]
 fn a3_graph_companion_attaches_plugin() {
     let (_tmp, path) = temp_db_path();
-    seed_db_with_all_plugins(&path);
+    seed_db_with_all_engines(&path);
 
     let server = McpServer::open(&path).expect("open");
     assert!(
@@ -98,7 +98,7 @@ fn a3_graph_companion_attaches_plugin() {
 #[test]
 fn a2_fts_companion_attaches_plugin() {
     let (_tmp, path) = temp_db_path();
-    seed_db_with_all_plugins(&path);
+    seed_db_with_all_engines(&path);
 
     let server = McpServer::open(&path).expect("open");
     // `search_text` requires the FTS plugin; if it's not attached the call
@@ -121,7 +121,7 @@ fn a2_fts_companion_attaches_plugin() {
 #[test]
 fn a5_recall_does_not_panic_and_returns_json_array() {
     let (_tmp, path) = temp_db_path();
-    seed_db_with_all_plugins(&path);
+    seed_db_with_all_engines(&path);
 
     let server = McpServer::open(&path).expect("open");
     // No embedder in this test (no ONNX model on the test runner), so the
@@ -153,7 +153,7 @@ fn a5_recall_does_not_panic_and_returns_json_array() {
 #[test]
 fn a6_query_history_without_table_respects_default_limit() {
     let (_tmp, path) = temp_db_path();
-    seed_db_with_all_plugins(&path);
+    seed_db_with_all_engines(&path);
 
     // Seed more records than the default limit to exercise truncation.
     let db = axil_core::Axil::open(&path)
@@ -218,9 +218,9 @@ fn a6_query_history_honors_custom_limit() {
 #[test]
 fn a6_query_history_skips_internal_tables() {
     let (_tmp, path) = temp_db_path();
-    seed_db_with_all_plugins(&path);
+    seed_db_with_all_engines(&path);
 
-    // seed_db_with_all_plugins inserts a record which produces
+    // seed_db_with_all_engines inserts a record which produces
     // `_recall_chunks` bookkeeping. A cross-table history scan must skip
     // underscore-prefixed tables so agents don't see the internals.
     let server = McpServer::open(&path).expect("open");

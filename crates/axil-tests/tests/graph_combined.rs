@@ -12,7 +12,7 @@ fn temp_graph_db() -> (Axil, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("test.axil");
     let db = Axil::open(&path)
-        .with_graph_plugin()
+        .with_graph_engine()
         .unwrap()
         .build()
         .unwrap();
@@ -25,7 +25,7 @@ fn temp_vector_graph_db(dims: usize) -> (Axil, tempfile::TempDir) {
     let db = Axil::open(&path)
         .with_vector(dims)
         .unwrap()
-        .with_graph_plugin()
+        .with_graph_engine()
         .unwrap()
         .build()
         .unwrap();

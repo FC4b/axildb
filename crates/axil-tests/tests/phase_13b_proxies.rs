@@ -376,7 +376,7 @@ fn same_file_edges_emitted_when_graph_plugin_present() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("g.axil");
     let db = Axil::open(&path)
-        .with_graph_plugin()
+        .with_graph_engine()
         .unwrap()
         .build()
         .unwrap();
@@ -435,7 +435,7 @@ fn tests_edges_emitted_for_test_files_by_naming_convention() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("g.axil");
     let db = Axil::open(&path)
-        .with_graph_plugin()
+        .with_graph_engine()
         .unwrap()
         .build()
         .unwrap();
@@ -506,7 +506,7 @@ fn graph_neighbors_expand_via_scip_edges() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("graph.axil");
     let db = Axil::open(&path)
-        .with_graph_plugin()
+        .with_graph_engine()
         .unwrap()
         .build()
         .unwrap();

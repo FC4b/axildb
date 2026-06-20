@@ -9,7 +9,7 @@ use axil_core::{
 };
 use axil_fts::AxilBuilderFtsExt;
 use axil_graph::AxilBuilderGraphExt;
-use axil_vector::VectorPlugin;
+use axil_vector::VectorEngine;
 use chrono::{TimeZone, Utc};
 use serde_json::json;
 
@@ -24,7 +24,7 @@ fn temp_db_with_graph() -> (Axil, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("test.axil");
     let db = Axil::open(&path)
-        .with_graph_plugin()
+        .with_graph_engine()
         .unwrap()
         .build()
         .unwrap();
@@ -48,7 +48,7 @@ impl axil_core::TextEmbedder for FrontWindowEmbedder {
 fn temp_db_with_mock_vector() -> (Axil, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("test.axil");
-    let vector = VectorPlugin::open(&path, 4).unwrap();
+    let vector = VectorEngine::open(&path, 4).unwrap();
     let db = Axil::open(&path)
         .with_vector_index(Box::new(vector))
         .with_embedder(Box::new(FrontWindowEmbedder))
@@ -60,11 +60,11 @@ fn temp_db_with_mock_vector() -> (Axil, tempfile::TempDir) {
 fn temp_db_with_mock_vector_and_fts() -> (Axil, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("test.axil");
-    let vector = VectorPlugin::open(&path, 4).unwrap();
+    let vector = VectorEngine::open(&path, 4).unwrap();
     let db = Axil::open(&path)
         .with_vector_index(Box::new(vector))
         .with_embedder(Box::new(FrontWindowEmbedder))
-        .with_fts_plugin()
+        .with_fts_engine()
         .unwrap()
         .build()
         .unwrap();
@@ -75,7 +75,7 @@ fn temp_db_with_fts() -> (Axil, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("test.axil");
     let db = Axil::open(&path)
-        .with_fts_plugin()
+        .with_fts_engine()
         .unwrap()
         .build()
         .unwrap();

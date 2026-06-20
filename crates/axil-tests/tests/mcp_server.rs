@@ -21,7 +21,7 @@ fn axil_bin() -> String {
 }
 
 /// Pre-create a database with all plugins (vector, graph, FTS, timeseries).
-fn init_db_with_all_plugins(db_path: &Path) {
+fn init_db_with_all_engines(db_path: &Path) {
     let out = Command::new(axil_bin())
         .args(["init", db_path.to_str().unwrap()])
         .output()
@@ -79,7 +79,7 @@ fn mcp_full_lifecycle() {
     let db_path = tmp.path().join("test.axil");
 
     // Pre-create DB with all plugins so MCP auto-detects them.
-    init_db_with_all_plugins(&db_path);
+    init_db_with_all_engines(&db_path);
 
     let mut child = Command::new(axil_bin())
         .args(["--db", db_path.to_str().unwrap(), "mcp"])
