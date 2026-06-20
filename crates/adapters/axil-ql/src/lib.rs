@@ -67,6 +67,61 @@ impl From<CompileError> for QueryError {
     }
 }
 
+/// Tier-3 [`Adapter`](axil_core::Adapter) for the AxilQL query language.
+///
+/// AxilQL *is* a protocol surface — it translates a query string into
+/// `Axil::query()` calls — so it slots into Axil's stable Adapter contract: the
+/// query is the request, `bind` attaches a shared database, and `run` executes
+/// and writes the result as JSON to stdout. Use [`QlAdapter::execute`] for the
+/// programmatic path that returns the structured result instead of printing it.
+pub struct QlAdapter {
+    db: Option<std::sync::Arc<axil_core::Axil>>,
+    query: String,
+}
+
+impl QlAdapter {
+    /// An AxilQL adapter that will run `query`. Bind a database before running.
+    pub fn new(query: impl Into<String>) -> Self {
+        Self {
+            db: None,
+            query: query.into(),
+        }
+    }
+
+    /// Execute the query against the bound database and return the structured
+    /// result. Errors if the adapter was never bound or the query fails.
+    pub fn execute(&self) -> axil_core::Result<QueryResult> {
+        let db = self
+            .db
+            .as_ref()
+            .ok_or_else(|| axil_core::AxilError::plugin("AxilQL adapter used before bind()"))?;
+        run(db, &self.query).map_err(|e| axil_core::AxilError::InvalidQuery(e.to_string()))
+    }
+}
+
+impl axil_core::Adapter for QlAdapter {
+    fn id(&self) -> &str {
+        "axilql"
+    }
+
+    fn protocol(&self) -> axil_core::Protocol {
+        axil_core::Protocol::QueryLang
+    }
+
+    fn bind(&mut self, db: std::sync::Arc<axil_core::Axil>) -> axil_core::Result<()> {
+        self.db = Some(db);
+        Ok(())
+    }
+
+    fn run(self) -> axil_core::Result<()> {
+        let result = self.execute()?;
+        let json = serde_json::to_string(&result)
+            .map_err(|e| axil_core::AxilError::plugin(format!("result serialization: {e}")))?;
+        println!("{json}");
+        Ok(())
+    }
+}
+
 /// Syntax metadata for syntax highlighting in query consoles.
 ///
 /// Each entry maps a token category to a list of keywords/patterns.
@@ -251,5 +306,43 @@ mod tests {
     fn autocomplete_after_order_suggests_by() {
         let suggestions = autocomplete_suggestions("FIND \"x\" ORDER ");
         assert_eq!(suggestions, vec!["BY".to_string()]);
+    }
+}
+
+#[cfg(test)]
+mod adapter_tests {
+    use super::*;
+    use axil_core::Adapter;
+    use std::sync::Arc;
+
+    fn db() -> (Arc<axil_core::Axil>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(
+            axil_core::Axil::open(dir.path().join("q.axil"))
+                .build()
+                .unwrap(),
+        );
+        (db, dir)
+    }
+
+    #[test]
+    fn ql_adapter_identity() {
+        let a = QlAdapter::new("COUNT FROM sessions");
+        assert_eq!(a.id(), "axilql");
+        assert_eq!(a.protocol(), axil_core::Protocol::QueryLang);
+    }
+
+    #[test]
+    fn execute_runs_the_query_against_the_bound_db() {
+        let (db, _d) = db();
+        db.insert("sessions", serde_json::json!({"summary": "x"})).unwrap();
+        let mut a = QlAdapter::new("COUNT FROM sessions");
+        a.bind(db).unwrap();
+        assert_eq!(a.execute().unwrap().count, 1);
+    }
+
+    #[test]
+    fn execute_before_bind_errors() {
+        assert!(QlAdapter::new("COUNT FROM sessions").execute().is_err());
     }
 }

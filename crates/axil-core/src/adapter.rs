@@ -9,13 +9,16 @@
 //! Adapters are stateless w.r.t. storage: they read and write through
 //! `Axil`, never to their own files.
 //!
-//! See `docs/src/extending/adapters.md` for the full authoring guide
-//! and `axil-cli` / `axil-mcp` for reference implementations.
+//! See `docs/src/extending/adapters.md` for the full authoring guide.
 //!
-//! This trait is contract-only in Phase 17 P2.1. Helper functions for
-//! composing Extension surfaces (`compose_cli_surface`,
-//! `compose_mcp_surface`) land in P2.3. The reference Adapters
-//! (`axil-cli`, `axil-mcp`) migrate onto this trait in P3.
+//! Every in-tree adapter implements this trait: `axil_cli::CliAdapter`
+//! (argv), `axil_mcp::McpAdapter` (stdio JSON-RPC), and
+//! `axil_ql::QlAdapter` (the AxilQL query frontend); the
+//! `examples/http_adapter.rs` `HttpAdapter` is the out-of-tree template.
+//! Helper functions for composing Extension surfaces
+//! (`compose_cli_surface`, `compose_mcp_surface`) let an Adapter discover
+//! every registered Extension's commands/tools without reaching into
+//! internals.
 //!
 //! [`Extension`]: crate::extension::Extension
 

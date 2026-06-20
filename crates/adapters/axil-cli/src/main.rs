@@ -4855,19 +4855,73 @@ fn main() {
 
 /// Real entry point — runs on a large-stack worker thread (see `main`).
 fn real_main() -> i32 {
-    let cli = Cli::parse();
-    let out = Output {
-        format: cli.format.clone(),
-        quiet: cli.quiet,
-        jsonl: cli.jsonl,
-    };
+    // The CLI is Axil's Tier-3 argv Adapter; drive it through that type. `main`
+    // uses the inherent `dispatch` (which returns the process exit code) rather
+    // than `Adapter::run` so exit-code fidelity is preserved.
+    CliAdapter::new().dispatch()
+}
 
-    match run(cli, &out) {
-        Ok(code) => code,
-        Err(e) => {
-            let err_json = json!({"error": format!("{e:#}")});
-            eprintln!("{}", serde_json::to_string(&err_json).unwrap());
-            EXIT_ERROR
+/// Tier-3 [`Adapter`](axil_core::Adapter) for the command-line interface.
+///
+/// The CLI resolves its database per-subcommand (from `--db` / auto-detect; some
+/// commands — `init`, `--help` — open none), so unlike a server Adapter it does
+/// not run against a single pre-bound `Axil`. `bind` is accepted for contract
+/// conformance but intentionally unused; the argv flow opens what each command
+/// needs. This makes `axil-cli` a first-class Adapter alongside `axil-mcp` /
+/// the AxilQL frontend / the HTTP example.
+struct CliAdapter;
+
+impl CliAdapter {
+    fn new() -> Self {
+        Self
+    }
+
+    /// Parse argv and dispatch, returning the process exit code. The CLI's real
+    /// entry — `main` calls this directly because the `Adapter::run` signature
+    /// (`Result<()>`) cannot carry the exit code.
+    fn dispatch(self) -> i32 {
+        let cli = Cli::parse();
+        let out = Output {
+            format: cli.format.clone(),
+            quiet: cli.quiet,
+            jsonl: cli.jsonl,
+        };
+
+        match run(cli, &out) {
+            Ok(code) => code,
+            Err(e) => {
+                let err_json = json!({"error": format!("{e:#}")});
+                eprintln!("{}", serde_json::to_string(&err_json).unwrap());
+                EXIT_ERROR
+            }
+        }
+    }
+}
+
+impl axil_core::Adapter for CliAdapter {
+    fn id(&self) -> &str {
+        "cli"
+    }
+
+    fn protocol(&self) -> axil_core::Protocol {
+        axil_core::Protocol::Cli
+    }
+
+    fn bind(&mut self, _db: std::sync::Arc<axil_core::Axil>) -> axil_core::Result<()> {
+        // See the type docs: the CLI self-resolves its database per subcommand,
+        // so a pre-bound handle is accepted but unused.
+        Ok(())
+    }
+
+    fn run(self) -> axil_core::Result<()> {
+        // Trait-conformant entry: dispatch, mapping a non-zero exit code to an
+        // error so a programmatic embedder sees failure. `main` prefers
+        // `dispatch` to keep the exact exit code.
+        match self.dispatch() {
+            EXIT_OK => Ok(()),
+            code => Err(axil_core::AxilError::plugin(format!(
+                "CLI exited with code {code}"
+            ))),
         }
     }
 }
@@ -12493,9 +12547,15 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             let db = open_with_best_effort(&db_path)?;
             #[cfg(not(feature = "embed"))]
             let db = open_with_all_detected(&db_path)?;
-            let server = axil_mcp::McpServer::new(db);
-            let rt = tokio::runtime::Runtime::new().context("failed to create tokio runtime")?;
-            rt.block_on(server.run()).context("MCP server error")?;
+            // Drive the MCP server through its Tier-3 Adapter contract: bind a
+            // shared Axil, then run the blocking serve loop (it owns the tokio
+            // runtime internally).
+            use axil_core::Adapter as _;
+            let mut adapter = axil_mcp::McpAdapter::new();
+            adapter
+                .bind(std::sync::Arc::new(db))
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            adapter.run().map_err(|e| anyhow::anyhow!("MCP server error: {e}"))?;
             Ok(EXIT_OK)
         }
 
@@ -16201,6 +16261,33 @@ mod extension_dispatch_tests {
         let inv =
             build_extension_invocation(&tokens, Some(&checkpoint_surface()), Some("piped".into()));
         assert_eq!(inv.stdin.as_deref(), Some("piped"));
+    }
+}
+
+#[cfg(test)]
+mod adapter_tests {
+    use super::*;
+    use axil_core::Adapter;
+
+    #[test]
+    fn cli_adapter_identity() {
+        let a = CliAdapter::new();
+        assert_eq!(a.id(), "cli");
+        assert_eq!(a.protocol(), axil_core::Protocol::Cli);
+    }
+
+    #[test]
+    fn cli_adapter_bind_is_accepted() {
+        // bind is a documented no-op for the CLI (it self-resolves its db), but
+        // it must still honor the contract — accept the handle, return Ok.
+        let dir = tempfile::tempdir().unwrap();
+        let db = std::sync::Arc::new(
+            axil_core::Axil::open(dir.path().join("c.axil"))
+                .build()
+                .unwrap(),
+        );
+        let mut a = CliAdapter::new();
+        assert!(a.bind(db).is_ok());
     }
 }
 

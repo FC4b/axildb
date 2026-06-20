@@ -14,11 +14,12 @@ pub mod protocol;
 pub mod tools;
 
 use std::path::Path;
+use std::sync::Arc;
 
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
-use axil_core::Axil;
+use axil_core::{Adapter, Axil, AxilError, Protocol};
 
 use protocol::{
     InitializeResult, JsonRpcRequest, JsonRpcResponse, ServerCapabilities, ServerInfo,
@@ -113,13 +114,23 @@ pub(crate) fn attach_detected_plugins(
 }
 
 /// MCP server wrapping an Axil database.
+///
+/// Holds an `Arc<Axil>` so the same database can be shared with other Adapters
+/// in-process (the [`Adapter`] contract). [`McpServer::new`] keeps the original
+/// owned-`Axil` constructor working by wrapping it.
 pub struct McpServer {
-    db: Axil,
+    db: Arc<Axil>,
 }
 
 impl McpServer {
     /// Create a new MCP server backed by the given Axil database.
     pub fn new(db: Axil) -> Self {
+        Self { db: Arc::new(db) }
+    }
+
+    /// Create an MCP server over an already-shared database handle — the path
+    /// the [`McpAdapter`] uses so several Adapters can share one `Axil`.
+    pub fn from_arc(db: Arc<Axil>) -> Self {
         Self { db }
     }
 
@@ -137,7 +148,7 @@ impl McpServer {
     pub fn open(path: &Path) -> anyhow::Result<Self> {
         let builder = attach_detected_plugins(Axil::open(path))?;
         let db = builder.build()?;
-        Ok(Self { db })
+        Ok(Self { db: Arc::new(db) })
     }
 
     /// Narrow accessor for integration tests that need to verify plugin
@@ -359,6 +370,53 @@ impl McpServer {
     }
 }
 
+/// Tier-3 [`Adapter`] for MCP over stdio JSON-RPC.
+///
+/// Expresses the MCP server through Axil's stable Adapter contract: `bind` a
+/// shared `Axil`, then `run` the blocking serve loop. It owns the tokio runtime
+/// internally so a caller drives it synchronously — the `Adapter::run(self)`
+/// shape — instead of managing async itself.
+#[derive(Default)]
+pub struct McpAdapter {
+    db: Option<Arc<Axil>>,
+}
+
+impl McpAdapter {
+    /// An unbound MCP adapter. Call [`Adapter::bind`] before [`Adapter::run`].
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl Adapter for McpAdapter {
+    fn id(&self) -> &str {
+        "mcp"
+    }
+
+    fn protocol(&self) -> Protocol {
+        Protocol::Mcp
+    }
+
+    fn bind(&mut self, db: Arc<Axil>) -> axil_core::Result<()> {
+        self.db = Some(db);
+        Ok(())
+    }
+
+    fn run(self) -> axil_core::Result<()> {
+        let db = self
+            .db
+            .ok_or_else(|| AxilError::plugin("MCP adapter run() called before bind()"))?;
+        let server = McpServer::from_arc(db);
+        // The serve loop is async; the Adapter contract is a synchronous
+        // `run(self)`, so own a current-thread runtime and block on it. `axil`
+        // builds no ambient runtime, so this never nests.
+        let rt = tokio::runtime::Runtime::new()
+            .map_err(|e| AxilError::plugin(format!("tokio runtime init failed: {e}")))?;
+        rt.block_on(server.run())
+            .map_err(|e| AxilError::plugin(format!("MCP server error: {e}")))
+    }
+}
+
 /// Write a JSON-RPC response as a newline-delimited JSON line to the writer.
 async fn write_response<W: AsyncWriteExt + Unpin>(
     writer: &mut W,
@@ -369,4 +427,30 @@ async fn write_response<W: AsyncWriteExt + Unpin>(
     writer.write_all(b"\n").await?;
     writer.flush().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod adapter_tests {
+    use super::*;
+
+    #[test]
+    fn mcp_adapter_identity() {
+        let a = McpAdapter::new();
+        assert_eq!(a.id(), "mcp");
+        assert_eq!(a.protocol(), Protocol::Mcp);
+    }
+
+    #[test]
+    fn run_before_bind_errors_instead_of_panicking() {
+        // An unbound adapter refuses to run (no db, no runtime, no stdin read).
+        assert!(McpAdapter::new().run().is_err());
+    }
+
+    #[test]
+    fn bind_accepts_a_shared_db() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Axil::open(dir.path().join("m.axil")).build().unwrap());
+        let mut a = McpAdapter::new();
+        assert!(a.bind(db).is_ok());
+    }
 }
