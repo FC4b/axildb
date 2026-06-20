@@ -1,5 +1,5 @@
 # A WASM guest that exercises EVERY `axil:plugin` host import across the sandbox
-# boundary — the fixture for the host-ABI conformance suite (Phase 22.10).
+# boundary — the fixture for the host-ABI conformance suite.
 # Unlike the minimal hello reference plugin, this one calls back into Axil
 # (insert/get/recall/relate/fts/embed/config/log) so the host test can assert
 # capability gating, prefix enforcement, marshalling, and fault isolation.

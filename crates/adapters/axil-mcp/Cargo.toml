@@ -30,15 +30,17 @@ chrono = { workspace = true }
 axil-vector = { path = "../../engines/axil-vector", optional = true }
 axil-graph = { path = "../../engines/axil-graph", optional = true }
 axil-fts = { path = "../../engines/axil-fts", optional = true }
+axil-timeseries = { path = "../../engines/axil-timeseries", optional = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
 
 [features]
-default = ["vector", "graph", "fts", "checkpoint"]
+default = ["vector", "graph", "fts", "timeseries", "checkpoint"]
 vector = ["dep:axil-vector"]
 graph = ["dep:axil-graph"]
 fts = ["dep:axil-fts"]
+timeseries = ["dep:axil-timeseries"]
 checkpoint = ["dep:axil-checkpoint", "axil-bundle/checkpoint"]
 # Vector with embedder (bge-small/etc.) for plugin-attach parity with CLI.
 embed = ["vector", "axil-vector/embed"]

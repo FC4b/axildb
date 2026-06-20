@@ -12,7 +12,7 @@ fn main() -> Result<()> {
     let db_path = dir.path().join("demo.axil");
 
     // Open with graph plugin.
-    let db = Axil::open(&db_path).with_graph_plugin()?.build()?;
+    let db = Axil::open(&db_path).with_graph_engine()?.build()?;
     println!("Opened database with graph at {}", db_path.display());
 
     // ── Create entities ───────────────────────────────────────────

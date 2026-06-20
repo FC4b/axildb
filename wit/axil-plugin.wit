@@ -7,10 +7,9 @@
 // `axil_core::Extension` by calling across this boundary, so a loaded `.wasm`
 // plugin is "just another `dyn Extension`".
 //
-// STATUS: ABI design artifact. The runtime that loads components
-// against this world (Wasmtime + the `wasm-host` feature, +) is not
-// built yet — see tasks/phase-21-22-extensibility-and-wasm.md. This file is the
-// forever-supported contract those phases mirror, versioned as
+// The runtime that loads components against this world is `axil-runtime`
+// (Wasmtime, behind the `wasm-host` feature). This file is the
+// forever-supported contract that runtime mirrors, versioned as
 // `axil:plugin@1.0.0`. It evolves additively only; a breaking change is a major
 // ABI bump (host supports N and N-1).
 //

@@ -11,15 +11,20 @@ use anyhow::{Context, Result};
 use axil_core::{Axil, AxilConfig, Extension};
 use axil_runtime::{Capabilities, PluginState, WasmExtension, WasmHost};
 
-/// The capability-grant key for a plugin file: the filename up to the first
-/// `.` (so `hello-guest.component.wasm` → `hello-guest`). Kept dot-free so it's
-/// a single TOML key under `[plugins.<key>]`.
+/// The capability-grant + cache key for a plugin file: the full filename with
+/// only the trailing `.wasm` stripped, interior dots replaced by `-` so it stays
+/// a single TOML bare key under `[plugins.<key>]`.
+///
+/// Using the *full* stem (not just up to the first `.`) avoids collisions: two
+/// distinct plugins sharing a prefix before the first dot — `acme.alpha.wasm`
+/// and `acme.beta.wasm` — keyed identically under the old rule, so they shared
+/// grants and the same `<key>.cwasm` cache artifact. Now they key as
+/// `acme-alpha` and `acme-beta`.
 pub fn plugin_key(file: &Path) -> String {
-    file.file_name()
-        .and_then(|f| f.to_str())
-        .and_then(|n| n.split('.').next())
+    file.file_stem()
+        .and_then(|s| s.to_str())
         .unwrap_or_default()
-        .to_string()
+        .replace('.', "-")
 }
 
 /// Directory WASM plugins live in: `<db-dir>/plugins/`. The db is e.g.

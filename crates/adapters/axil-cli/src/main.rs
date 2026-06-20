@@ -4554,29 +4554,40 @@ fn resolve_embedding_model(db_path: &Path) -> axil_vector::models::EmbeddingMode
 
 fn attach_detected_engines(mut builder: axil_core::AxilBuilder) -> Result<axil_core::AxilBuilder> {
     let path = builder.path().to_path_buf();
+    // Config (from the db dir) governs both which Engines attach
+    // (`[engines] disabled = ["vec","graph","ts","fts"]`) and which Extensions
+    // register (`[extensions] disabled`). An Engine with a companion file on
+    // disk but listed in `[engines] disabled` is skipped — the operator can keep
+    // the data and turn the Engine off for a session without a rebuild.
+    let config = path
+        .parent()
+        .and_then(|dir| axil_core::load_config_from(dir).ok())
+        .unwrap_or_default();
 
     #[cfg(feature = "vector")]
     {
-        if let Ok(Some(_)) = axil_vector::read_stored_dimensions(&path) {
-            // Attach vector index + embedder together so auto-embed on insert works.
-            #[cfg(feature = "embed")]
-            {
-                builder = builder
-                    .with_embedder_model(resolve_embedding_model(&path))
-                    .context("failed to open vector store with embedder")?;
-            }
-            #[cfg(not(feature = "embed"))]
-            {
-                builder = builder
-                    .with_vector_auto()
-                    .context("failed to open vector store")?;
+        if !config.is_engine_disabled("vec") {
+            if let Ok(Some(_)) = axil_vector::read_stored_dimensions(&path) {
+                // Attach vector index + embedder together so auto-embed on insert works.
+                #[cfg(feature = "embed")]
+                {
+                    builder = builder
+                        .with_embedder_model(resolve_embedding_model(&path))
+                        .context("failed to open vector store with embedder")?;
+                }
+                #[cfg(not(feature = "embed"))]
+                {
+                    builder = builder
+                        .with_vector_auto()
+                        .context("failed to open vector store")?;
+                }
             }
         }
     }
 
     #[cfg(feature = "graph")]
     {
-        if axil_graph::has_graph_store(&path) {
+        if !config.is_engine_disabled("graph") && axil_graph::has_graph_store(&path) {
             builder = builder
                 .with_graph_engine()
                 .context("failed to open graph store")?;
@@ -4585,7 +4596,7 @@ fn attach_detected_engines(mut builder: axil_core::AxilBuilder) -> Result<axil_c
 
     #[cfg(feature = "timeseries")]
     {
-        if axil_timeseries::has_timeseries_store(&path) {
+        if !config.is_engine_disabled("ts") && axil_timeseries::has_timeseries_store(&path) {
             builder = builder
                 .with_timeseries_engine()
                 .context("failed to open timeseries store")?;
@@ -4594,7 +4605,7 @@ fn attach_detected_engines(mut builder: axil_core::AxilBuilder) -> Result<axil_c
 
     #[cfg(feature = "fts")]
     {
-        if axil_fts::has_fts_store(&path) {
+        if !config.is_engine_disabled("fts") && axil_fts::has_fts_store(&path) {
             builder = builder
                 .with_fts_engine()
                 .context("failed to open FTS store")?;
@@ -4606,10 +4617,6 @@ fn attach_detected_engines(mut builder: axil_core::AxilBuilder) -> Result<axil_c
     // `[extensions] disabled` filter is applied inside the bundle, so a
     // disabled Extension never reaches `db.extensions()` and its CLI/MCP
     // surface + boot_block vanish without a rebuild.
-    let config = path
-        .parent()
-        .and_then(|dir| axil_core::load_config_from(dir).ok())
-        .unwrap_or_default();
     builder = axil_bundle::register_builtin_extensions(builder, &config);
 
     Ok(builder)
@@ -10651,7 +10658,10 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             schema,
         } => {
             let db_path = require_db(&db_opt)?;
-            let db = open_with_all_detected(&db_path)?;
+            let db = std::sync::Arc::new(open_with_all_detected(&db_path)?);
+            // Register installed WASM plugins so their boot_block contributions
+            // render in `axil boot`, like a native Extension's.
+            register_installed_plugins(&db, &db_path);
 
             // Opt-in stable schema; legacy flat JSON below stays the default.
             if schema.as_deref() == Some("v1") {
@@ -12547,13 +12557,18 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             let db = open_with_best_effort(&db_path)?;
             #[cfg(not(feature = "embed"))]
             let db = open_with_all_detected(&db_path)?;
+            let db = std::sync::Arc::new(db);
+            // Register installed WASM plugins so their mcp_tools appear in
+            // tools/list and tools/call reaches them — not only via the plugin's
+            // own CLI command.
+            register_installed_plugins(&db, &db_path);
             // Drive the MCP server through its Tier-3 Adapter contract: bind a
             // shared Axil, then run the blocking serve loop (it owns the tokio
             // runtime internally).
             use axil_core::Adapter as _;
             let mut adapter = axil_mcp::McpAdapter::new();
             adapter
-                .bind(std::sync::Arc::new(db))
+                .bind(db)
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
             adapter.run().map_err(|e| anyhow::anyhow!("MCP server error: {e}"))?;
             Ok(EXIT_OK)
@@ -13893,6 +13908,34 @@ fn read_piped_stdin() -> Option<String> {
     }
 }
 
+/// Load config from the database's own directory — where engines, extensions,
+/// and `[plugins.<key>]` grants all live — rather than the process cwd, so a
+/// plugin's capability grants (and `[extensions] disabled`) are read from the
+/// same place as everything else even when `axil --db /abs/path` is run from an
+/// unrelated cwd.
+fn plugin_config_for_db(db_path: &Path) -> axil_core::AxilConfig {
+    db_path
+        .parent()
+        .and_then(|dir| axil_core::load_config_from(dir).ok())
+        .unwrap_or_default()
+}
+
+/// Register any installed WASM plugins into an already-open database so their
+/// `boot_block` / `mcp_tools` / `recall_for_file` flow through like native
+/// Extensions — not only when the plugin's own CLI subcommand is invoked. A
+/// failed plugin is quarantined inside `load_and_register`, never fatal. No-op
+/// without the `wasm-host` feature.
+fn register_installed_plugins(db: &std::sync::Arc<Axil>, db_path: &Path) {
+    #[cfg(feature = "wasm-host")]
+    {
+        let config = plugin_config_for_db(db_path);
+        let dir = wasm_plugins::plugins_dir(db_path);
+        let _ = wasm_plugins::load_and_register(db, &dir, &config);
+    }
+    #[cfg(not(feature = "wasm-host"))]
+    let _ = (db, db_path);
+}
+
 /// Generic dispatch for a command no built-in subcommand claimed: route it to
 /// whichever registered Extension owns it. The Extension's command surface is
 /// resolved from the bundle **without** opening the DB, so a genuine typo fails
@@ -13908,12 +13951,13 @@ fn run_extension_dispatch(
         .cloned()
         .ok_or_else(|| anyhow::anyhow!("no command given"))?;
 
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let config = axil_core::load_config_from(&cwd).unwrap_or_default();
+    let db_path = require_db(db_opt)?;
+    // Read config (disabled extensions + plugin grants) from the db's own dir,
+    // consistent with where engines/extensions read it.
+    let config = plugin_config_for_db(&db_path);
     let builtin = axil_bundle::builtin_extension_surfaces(&config)
         .into_iter()
         .find(|s| s.command == command);
-    let db_path = require_db(db_opt)?;
 
     // Resolve which extension owns this command + open the database.
     //
@@ -13986,8 +14030,8 @@ fn run_ext(cmd: ExtCommand, db_opt: &Option<PathBuf>, out: &Output) -> Result<i3
     use std::sync::Arc;
 
     let db_path = require_db(db_opt)?;
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let config = axil_core::load_config_from(&cwd).unwrap_or_default();
+    // Grants + disabled lists live in the db's own dir, not the process cwd.
+    let config = plugin_config_for_db(&db_path);
     let dir = wasm_plugins::plugins_dir(&db_path);
 
     match cmd {
@@ -14088,23 +14132,39 @@ fn run_ext(cmd: ExtCommand, db_opt: &Option<PathBuf>, out: &Output) -> Result<i3
             }
         }
 
-        ExtCommand::Grant { key, capability } => set_plugin_cap(&key, &capability, true, out),
-        ExtCommand::Revoke { key, capability } => set_plugin_cap(&key, &capability, false, out),
+        ExtCommand::Grant { key, capability } => {
+            set_plugin_cap(&key, &capability, true, &db_path, out)
+        }
+        ExtCommand::Revoke { key, capability } => {
+            set_plugin_cap(&key, &capability, false, &db_path, out)
+        }
     }
 }
 
 /// Grant or revoke a capability for a plugin by editing `[plugins.<key>]
 /// capabilities` in axil.toml. Validates the capability name and is idempotent.
 #[cfg(feature = "wasm-host")]
-fn set_plugin_cap(key: &str, capability: &str, grant: bool, out: &Output) -> Result<i32> {
+fn set_plugin_cap(
+    key: &str,
+    capability: &str,
+    grant: bool,
+    db_path: &Path,
+    out: &Output,
+) -> Result<i32> {
     if !axil_runtime::Capabilities::ALL_NAMES.contains(&capability) {
         anyhow::bail!(
             "unknown capability `{capability}` — valid: {}",
             axil_runtime::Capabilities::ALL_NAMES.join(", ")
         );
     }
-    let cwd = std::env::current_dir().context("failed to get current directory")?;
-    let config = axil_core::load_config_from(&cwd).unwrap_or_default();
+    // Grants live next to the database (the same axil.toml the loader reads from
+    // the db dir), not the process cwd — so a grant applies regardless of where
+    // `axil` is run from.
+    let dir = db_path
+        .parent()
+        .map(|d| d.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let config = axil_core::load_config_from(&dir).unwrap_or_default();
     let mut caps = config.plugin_capabilities(key);
     let changed = if grant {
         if caps.iter().any(|c| c == capability) {
@@ -14119,7 +14179,7 @@ fn set_plugin_cap(key: &str, capability: &str, grant: bool, out: &Output) -> Res
         before != caps.len()
     };
 
-    let config_path = axil_core::find_config_file(&cwd).unwrap_or_else(|| cwd.join("axil.toml"));
+    let config_path = axil_core::find_config_file(&dir).unwrap_or_else(|| dir.join("axil.toml"));
     axil_core::set_config_string_array(&config_path, &format!("plugins.{key}.capabilities"), &caps)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     out.print(&json!({
@@ -14133,7 +14193,8 @@ fn set_plugin_cap(key: &str, capability: &str, grant: bool, out: &Output) -> Res
     if !out.quiet {
         let verb = if grant { "granted to" } else { "revoked from" };
         out.status(&format!(
-            "capability `{capability}` {verb} plugin `{key}` — reopen for it to take effect"
+            "capability `{capability}` {verb} plugin `{key}` — applies on the next \
+             `axil` command (and in `axil boot` / `axil mcp`)"
         ));
     }
     Ok(EXIT_OK)

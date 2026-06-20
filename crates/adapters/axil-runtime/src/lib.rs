@@ -114,6 +114,26 @@ mod host {
         }
     }
 
+    /// Owns the background thread that advances the engine epoch. Shared via
+    /// `Arc` so the ticker lives as long as the `WasmHost` **or any loaded
+    /// `WasmExtension`** — extensions are registered into a long-lived `Axil`
+    /// and outlive the host that loaded them, and the wall-clock timeout only
+    /// works while the epoch keeps advancing. Dropped (thread stopped + joined)
+    /// when the last holder goes.
+    pub(crate) struct EpochTicker {
+        stop: Arc<AtomicBool>,
+        handle: Option<JoinHandle<()>>,
+    }
+
+    impl Drop for EpochTicker {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::Relaxed);
+            if let Some(handle) = self.handle.take() {
+                let _ = handle.join();
+            }
+        }
+    }
+
     /// The WASM host runtime: owns a configured Wasmtime [`Engine`] shared by
     /// every loaded plugin, plus the background **epoch ticker** that backs the
     /// wall-clock timeout.
@@ -122,11 +142,9 @@ mod host {
         /// Per-call wall-clock budget, expressed in epoch ticks (see
         /// [`EPOCH_TICK`]). The shim resets each guest call's deadline to this.
         deadline_ticks: u64,
-        /// Signals the ticker thread to stop (set on drop).
-        epoch_stop: Arc<AtomicBool>,
-        /// The ticker thread handle, joined on drop. `Option` so `Drop` can take
-        /// it.
-        ticker: Option<JoinHandle<()>>,
+        /// The epoch ticker, shared with every loaded plugin so it survives the
+        /// host's drop (the plugins outlive it).
+        epoch: Arc<EpochTicker>,
     }
 
     impl WasmHost {
@@ -148,11 +166,11 @@ mod host {
 
             // Ticker: advance the epoch on a fixed cadence so epoch-based
             // deadlines actually fire. The thread owns a cheap Engine clone
-            // (Arc-backed) and exits within one tick of `epoch_stop` being set.
-            let epoch_stop = Arc::new(AtomicBool::new(false));
-            let ticker = {
+            // (Arc-backed) and exits within one tick of `stop` being set.
+            let stop = Arc::new(AtomicBool::new(false));
+            let handle = {
                 let engine = engine.clone();
-                let stop = Arc::clone(&epoch_stop);
+                let stop = Arc::clone(&stop);
                 std::thread::Builder::new()
                     .name("axil-wasm-epoch".into())
                     .spawn(move || {
@@ -167,9 +185,22 @@ mod host {
             Ok(Self {
                 engine,
                 deadline_ticks: ticks_for(DEFAULT_CALL_TIMEOUT),
-                epoch_stop,
-                ticker,
+                epoch: Arc::new(EpochTicker { stop, handle }),
             })
+        }
+
+        /// A handle that keeps the epoch ticker alive. A loaded plugin holds one
+        /// so the wall-clock timeout keeps advancing after the `WasmHost` that
+        /// loaded it is dropped (the extension outlives the host).
+        pub(crate) fn epoch_handle(&self) -> Arc<EpochTicker> {
+            Arc::clone(&self.epoch)
+        }
+
+        /// Per-call CPU budget (Wasmtime fuel units). The shim refills this
+        /// before every guest call so fuel is per-call, not a cumulative budget
+        /// that eventually bricks a long-lived plugin.
+        pub fn fuel_budget(&self) -> u64 {
+            DEFAULT_FUEL
         }
 
         /// Override the per-call wall-clock timeout (default 30s). Applies to
@@ -310,8 +341,9 @@ mod host {
         ) -> Result<(Store<crate::abi::PluginState>, crate::bindings::Plugin)> {
             let mut store = Store::new(&self.engine, state);
             // Seed the CPU budget so the guest can run; a CPU-bound plugin
-            // exhausts it and traps rather than hanging the host. Per-call
-            // refueling + a configurable ceiling is the /22.9 refinement.
+            // exhausts it and traps rather than hanging the host. The shim
+            // refills it per call (see `WasmExtension::begin_call`) so it isn't a
+            // cumulative budget that eventually bricks a long-lived plugin.
             store.set_fuel(DEFAULT_FUEL)?;
             // Wall-clock bound: the host's ticker advances the epoch every
             // `EPOCH_TICK`, and the shim resets this deadline before each guest
@@ -333,18 +365,6 @@ mod host {
             wasmtime_wasi::add_to_linker_sync(&mut linker)?;
             crate::bindings::Plugin::add_to_linker(&mut linker, |s| s)?;
             Ok(linker)
-        }
-    }
-
-    impl Drop for WasmHost {
-        fn drop(&mut self) {
-            // Stop the ticker and join it so no orphaned thread keeps advancing a
-            // dropped engine's epoch. The thread checks `epoch_stop` once per
-            // tick, so this returns within ~`EPOCH_TICK`.
-            self.epoch_stop.store(true, Ordering::Relaxed);
-            if let Some(handle) = self.ticker.take() {
-                let _ = handle.join();
-            }
         }
     }
 
@@ -376,6 +396,9 @@ pub use host::{
 };
 
 #[cfg(feature = "wasm-host")]
+pub(crate) use host::EpochTicker;
+
+#[cfg(feature = "wasm-host")]
 pub use abi::{Capabilities, PluginState};
 
 #[cfg(feature = "wasm-host")]
@@ -388,7 +411,7 @@ pub use shim::WasmExtension;
 /// like a native Extension — with zero per-plugin host code.
 #[cfg(feature = "wasm-host")]
 mod shim {
-    use std::sync::{Mutex, MutexGuard};
+    use std::sync::{Arc, Mutex, MutexGuard};
 
     use axil_core::{
         AxilError, CliArg, CliInvocation, CliOutput, CliSubcommand, CliSurface, Dispatch, Extension,
@@ -399,7 +422,7 @@ mod shim {
 
     use crate::bindings::axil::plugin::types as wit;
     use crate::bindings::Plugin;
-    use crate::{AbiVersion, PluginState, WasmHost};
+    use crate::{AbiVersion, EpochTicker, PluginState, WasmHost};
 
     /// The instantiated guest + its store. Wasmtime's `Store` is `!Sync`, so the
     /// `WasmExtension` wraps this in a `Mutex` to satisfy `Extension: Send + Sync`
@@ -407,6 +430,10 @@ mod shim {
     struct Instance {
         store: Store<PluginState>,
         plugin: Plugin,
+        /// Set once a guest call traps (epoch timeout / fuel exhaustion / panic).
+        /// A trapped Wasmtime instance is non-reentrant, so every later call must
+        /// be refused with a clear error rather than reused and failing opaquely.
+        poisoned: bool,
     }
 
     /// A loaded WASM plugin presented as a native [`Extension`].
@@ -427,6 +454,13 @@ mod shim {
         /// Per-call wall-clock budget (epoch ticks), reset on the store before
         /// every guest call so a runaway handler traps instead of hanging.
         deadline_ticks: u64,
+        /// Per-call CPU budget (fuel units), refilled before every guest call so
+        /// fuel is per-call, not a cumulative budget that bricks the plugin.
+        fuel: u64,
+        /// Keeps the host's epoch ticker alive for as long as this plugin lives —
+        /// without it the wall-clock timeout freezes once the loading `WasmHost`
+        /// is dropped (the extension outlives it).
+        _epoch: Arc<EpochTicker>,
     }
 
     impl WasmExtension {
@@ -447,6 +481,22 @@ mod shim {
             let id = ext.call_id(&mut store)?;
             let display_name = ext.call_display_name(&mut store)?;
             let declared = ext.call_table_prefixes(&mut store)?;
+            // The table-prefix jail is only as strong as the prefixes the guest
+            // declares, so validate them: empty or bare `_` would make
+            // `check_prefix`'s `starts_with` match every (or every internal)
+            // table, defeating the sandbox. Require each to be a specific
+            // `_`-namespaced prefix — a plugin owns prefixed tables, never the
+            // core user tables (`decisions`, `errors`, …).
+            for p in &declared {
+                if p.len() < 2 || !p.starts_with('_') {
+                    anyhow::bail!(
+                        "plugin `{id}` declares an invalid table prefix {p:?}: a prefix \
+                         must start with `_` and be more specific than `_` (it jails the \
+                         plugin's writes; an empty or `_`-only prefix would let it write \
+                         every table)"
+                    );
+                }
+            }
             // Constrain the plugin's host writes to exactly the tables it
             // declares it owns (the host ABI's prefix check reads these).
             store.data_mut().set_prefixes(declared.clone());
@@ -457,7 +507,11 @@ mod shim {
             let cli = ext.call_cli_commands(&mut store)?.map(cli_surface_from_wit);
             let mcp = ext.call_mcp_tools(&mut store)?.map(mcp_surface_from_wit);
             Ok(Self {
-                inner: Mutex::new(Instance { store, plugin }),
+                inner: Mutex::new(Instance {
+                    store,
+                    plugin,
+                    poisoned: false,
+                }),
                 id,
                 display_name,
                 prefixes,
@@ -465,6 +519,8 @@ mod shim {
                 mcp,
                 abi,
                 deadline_ticks: host.deadline_ticks(),
+                fuel: host.fuel_budget(),
+                _epoch: host.epoch_handle(),
             })
         }
 
@@ -480,13 +536,48 @@ mod shim {
                 .map_err(|_| AxilError::plugin("plugin instance lock poisoned"))
         }
 
-        /// Lock the instance and arm a fresh per-call wall-clock deadline. Every
-        /// guest call goes through here so the budget is per-call, not
-        /// cumulative — a slow call doesn't starve the next one.
+        /// Lock the instance, refuse a poisoned (post-trap) one, and arm fresh
+        /// per-call CPU + wall-clock budgets. Every guest call goes through here
+        /// so both budgets are per-call, not cumulative — a slow call doesn't
+        /// starve the next one, and fuel can't monotonically deplete.
         fn begin_call(&self) -> Result<MutexGuard<'_, Instance>, AxilError> {
             let mut guard = self.lock()?;
+            if guard.poisoned {
+                return Err(AxilError::plugin(format!(
+                    "plugin `{}` is disabled: a previous call trapped (timeout, fuel \
+                     exhaustion, or panic) and the instance is non-reentrant — \
+                     reinstall the plugin or restart the process to recover",
+                    self.id
+                )));
+            }
+            guard
+                .store
+                .set_fuel(self.fuel)
+                .map_err(|e| AxilError::plugin(format!("failed to refill plugin fuel: {e}")))?;
             guard.store.set_epoch_deadline(self.deadline_ticks);
             Ok(guard)
+        }
+
+        /// Drive one guest call under the instance lock with per-call budgets.
+        /// `f` runs the actual export against the store; a Wasmtime trap (Err)
+        /// poisons the instance so later calls fail cleanly instead of reusing a
+        /// dead store. Returns the guest's own (flattened) return value.
+        fn call_guest<T>(
+            &self,
+            f: impl FnOnce(&mut Store<PluginState>, &Plugin) -> wasmtime::Result<T>,
+        ) -> Result<T, AxilError> {
+            let mut inner = self.begin_call()?;
+            let result = {
+                let Instance { store, plugin, .. } = &mut *inner;
+                f(store, plugin)
+            };
+            match result {
+                Ok(t) => Ok(t),
+                Err(e) => {
+                    inner.poisoned = true;
+                    Err(trap_err(e))
+                }
+            }
         }
     }
 
@@ -508,14 +599,22 @@ mod shim {
         }
 
         fn boot_block(&self, _db: &axil_core::Axil) -> Option<String> {
-            // Infallible in the trait: a lock/trap/guest error collapses to None.
-            let mut inner = self.begin_call().ok()?;
-            let Instance { store, plugin } = &mut *inner;
-            plugin
-                .axil_plugin_extension()
-                .call_boot_block(&mut *store)
-                .ok()?
-                .ok()?
+            // Infallible in the trait, but a guest error/trap is logged (not
+            // silently swallowed) so an operator can see why a plugin's block is
+            // missing — and `call_guest` poisons the instance on a trap.
+            match self.call_guest(|store, plugin| {
+                plugin.axil_plugin_extension().call_boot_block(&mut *store)
+            }) {
+                Ok(Ok(block)) => block,
+                Ok(Err(e)) => {
+                    eprintln!("[plugin {}] boot_block error: {e:?}", self.id);
+                    None
+                }
+                Err(e) => {
+                    eprintln!("[plugin {}] boot_block failed: {e}", self.id);
+                    None
+                }
+            }
         }
 
         fn handle_cli(
@@ -528,12 +627,11 @@ mod shim {
                 args: invocation.args.clone(),
                 stdin: invocation.stdin.clone(),
             };
-            let mut inner = self.begin_call()?;
-            let Instance { store, plugin } = &mut *inner;
-            let res = plugin
-                .axil_plugin_extension()
-                .call_handle_cli(&mut *store, &wit_inv)
-                .map_err(trap_err)?;
+            let res = self.call_guest(|store, plugin| {
+                plugin
+                    .axil_plugin_extension()
+                    .call_handle_cli(&mut *store, &wit_inv)
+            })?;
             match res {
                 Ok(wit::DispatchCli::Handled(out)) => Ok(Dispatch::Handled(CliOutput {
                     exit_code: out.exit_code,
@@ -554,12 +652,11 @@ mod shim {
                 tool: call.tool.clone(),
                 params: serde_json::to_string(&call.params).unwrap_or_else(|_| "null".into()),
             };
-            let mut inner = self.begin_call()?;
-            let Instance { store, plugin } = &mut *inner;
-            let res = plugin
-                .axil_plugin_extension()
-                .call_handle_mcp(&mut *store, &wit_call)
-                .map_err(trap_err)?;
+            let res = self.call_guest(|store, plugin| {
+                plugin
+                    .axil_plugin_extension()
+                    .call_handle_mcp(&mut *store, &wit_call)
+            })?;
             match res {
                 Ok(wit::DispatchMcp::Handled(json)) => {
                     let v = serde_json::from_str(&json)
@@ -580,12 +677,11 @@ mod shim {
                 if_stale: opts.if_stale,
                 path: opts.path.map(|p| p.to_string_lossy().into_owned()),
             };
-            let mut inner = self.begin_call()?;
-            let Instance { store, plugin } = &mut *inner;
-            let res = plugin
-                .axil_plugin_extension()
-                .call_refresh(&mut *store, &wit_opts)
-                .map_err(trap_err)?;
+            let res = self.call_guest(|store, plugin| {
+                plugin
+                    .axil_plugin_extension()
+                    .call_refresh(&mut *store, &wit_opts)
+            })?;
             match res {
                 Ok(r) => {
                     let mut report = RefreshReport::default().with_counts(
@@ -606,12 +702,11 @@ mod shim {
             path: &std::path::Path,
         ) -> Result<Vec<Hit>, AxilError> {
             let p = path.to_string_lossy().into_owned();
-            let mut inner = self.begin_call()?;
-            let Instance { store, plugin } = &mut *inner;
-            let res = plugin
-                .axil_plugin_extension()
-                .call_recall_for_file(&mut *store, &p)
-                .map_err(trap_err)?;
+            let res = self.call_guest(|store, plugin| {
+                plugin
+                    .axil_plugin_extension()
+                    .call_recall_for_file(&mut *store, &p)
+            })?;
             match res {
                 Ok(hits) => Ok(hits.into_iter().map(hit_from_wit).collect()),
                 Err(e) => Err(plugin_err(e)),
@@ -855,6 +950,26 @@ mod abi {
         serde_json::to_string(data).unwrap_or_else(|_| "null".to_string())
     }
 
+    /// Whether a dotted config key reaches a secret that must never be exposed to
+    /// a plugin via `config-get`, even with `config.read`. Denies the `llm`
+    /// credential section (and its `api_key`) and any leaf segment that names a
+    /// credential.
+    fn is_secret_config_key(key: &str) -> bool {
+        let k = key.trim().to_ascii_lowercase();
+        // The [llm] section holds api_key; deny the table itself (its Debug dump
+        // would include the key) and the key path.
+        if k == "llm" || k.starts_with("llm.api_key") {
+            return true;
+        }
+        let last = k.rsplit('.').next().unwrap_or(k.as_str());
+        matches!(
+            last,
+            "api_key" | "apikey" | "secret" | "token" | "password" | "passwd"
+        ) || last.ends_with("_key")
+            || last.ends_with("_secret")
+            || last.ends_with("_token")
+    }
+
     // The `types` interface defines only data types, but bindgen still emits an
     // (empty) Host trait for it that the store data must satisfy.
     impl crate::bindings::axil::plugin::types::Host for PluginState {}
@@ -922,7 +1037,11 @@ mod abi {
         ) -> Result<Vec<String>, wit::PluginError> {
             (|| {
                 self.require(self.caps.records_read, "records.read")?;
-                self.check_prefix(&table)?;
+                // Reads are NOT prefix-constrained — the WIT scopes only *writes*
+                // to the plugin's prefixes (`records.read` is the trust decision,
+                // matching get/recall/neighbors/fts). Gating list here while
+                // leaving get ungated was an inconsistency; both are now
+                // capability-gated only.
                 let recs = self.db.list(&table).map_err(to_wit_err)?;
                 Ok(recs.iter().map(|r| record_to_json(&r.data)).collect())
             })()
@@ -969,7 +1088,7 @@ mod abi {
             props: String,
         ) -> Result<String, wit::PluginError> {
             (|| {
-                self.require(self.caps.graph, "graph.write")?;
+                self.require(self.caps.graph, "graph")?;
                 let from = RecordId(source);
                 let to = RecordId(target);
                 let props = parse_json(&props)?;
@@ -988,7 +1107,7 @@ mod abi {
             dir: wit::Direction,
         ) -> Result<Vec<String>, wit::PluginError> {
             (|| {
-                self.require(self.caps.graph, "graph.read")?;
+                self.require(self.caps.graph, "graph")?;
                 let direction = match dir {
                     wit::Direction::Out => axil_core::Direction::Out,
                     wit::Direction::In => axil_core::Direction::In,
@@ -1031,6 +1150,14 @@ mod abi {
         ) -> Result<Option<String>, wit::PluginError> {
             (|| {
                 self.require(self.caps.config_read, "config.read")?;
+                // `config.read` is a benign read capability in the docs, so it
+                // must NOT expose credentials. Deny secret keys outright;
+                // `get_config_value` additionally returns None for non-leaf
+                // (table/array) keys so a plugin can't dump a whole subtree
+                // (e.g. `[llm]`) to read the api_key indirectly.
+                if is_secret_config_key(&key) {
+                    return Ok(None);
+                }
                 Ok(axil_core::get_config_value(&self.config, &key))
             })()
         }
@@ -1122,6 +1249,25 @@ mod abi {
                 .unwrap()
                 .is_some());
             assert!(st.config_get("nope.nope".into()).unwrap().is_none());
+        }
+
+        #[test]
+        fn config_get_denies_secrets() {
+            use super::is_secret_config_key;
+            // Credentials and the whole [llm] table are off-limits even with
+            // config.read; non-secret leaves are fine.
+            assert!(is_secret_config_key("llm.api_key"));
+            assert!(is_secret_config_key("llm"));
+            assert!(is_secret_config_key("some.access_token"));
+            assert!(is_secret_config_key("foo.client_secret"));
+            assert!(is_secret_config_key("DB.PASSWORD"));
+            assert!(!is_secret_config_key("llm.model"));
+            assert!(!is_secret_config_key("timeseries.full_retention_days"));
+
+            // And the host method returns None for a secret key even when
+            // config.read is granted.
+            let (mut st, _d) = state(Capabilities::all());
+            assert!(st.config_get("llm.api_key".into()).unwrap().is_none());
         }
     }
 }

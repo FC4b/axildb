@@ -108,7 +108,7 @@ which writes:
 capabilities = ["recall"]
 ```
 
-Capabilities: `records.read`, `records.write` (own-prefix only), `recall`, `query`, `embed`, `graph`, `fts`, `config.read`. A plugin granted `recall` + a network capability can read the whole memory DB — **the grant is the trust decision**, not just the sandbox. Only grant what a plugin you trust actually needs.
+Capabilities: `records.read`, `records.write` (own-prefix only), `recall`, `embed`, `graph`, `fts`, `config.read`. A plugin granted `recall` + a network capability can read the whole memory DB — **the grant is the trust decision**, not just the sandbox. Only grant what a plugin you trust actually needs.
 
 ## Status
 

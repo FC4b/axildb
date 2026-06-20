@@ -168,6 +168,54 @@ fn runaway_guest_is_interrupted_by_the_wall_clock_timeout() {
         elapsed < Duration::from_secs(5),
         "the wall-clock timeout should fire promptly, took {elapsed:?}"
     );
+
+    // The poisoned (post-trap) instance must refuse later calls cleanly, not
+    // reuse the dead store and fail opaquely.
+    let after = op(&ext, &db, "log");
+    assert!(
+        after.is_err(),
+        "a plugin must stay disabled after a trap, not be reused"
+    );
+}
+
+#[test]
+fn wall_clock_timeout_survives_dropping_the_loading_host() {
+    // Regression: the epoch ticker that backs the wall-clock timeout lives in
+    // the `WasmHost`, but plugins are registered into a long-lived `Axil` and
+    // outlive the host that loaded them (as in `load_and_register`). If the
+    // ticker stopped when the host dropped, the epoch would freeze and the
+    // timeout would never fire on the real dispatch path. The plugin holds a
+    // shared handle to the ticker so it keeps advancing — verify a runaway guest
+    // is still interrupted AFTER the loading host is dropped.
+    let dir = tempfile::tempdir().unwrap();
+    let db = Arc::new(Axil::open(dir.path().join("conf.axil")).build().unwrap());
+    let ext = {
+        let host = WasmHost::new()
+            .unwrap()
+            .with_call_timeout(Duration::from_millis(150));
+        let bytes = std::fs::read(FIXTURE).unwrap();
+        let component = host.load_component(&bytes).unwrap();
+        let state = PluginState::new(
+            Arc::clone(&db),
+            Capabilities::all(),
+            Vec::new(),
+            AxilConfig::default(),
+        );
+        WasmExtension::load(&host, &component, state).unwrap()
+        // `host` is dropped here — the ticker must keep running via the
+        // extension's own handle.
+    };
+
+    let start = Instant::now();
+    let result = op(&ext, &db, "spin");
+    assert!(
+        result.is_err(),
+        "the wall-clock timeout must still fire after the loading host is dropped"
+    );
+    assert!(
+        start.elapsed() < Duration::from_secs(5),
+        "the epoch ticker should still be advancing post-drop"
+    );
 }
 
 #[test]

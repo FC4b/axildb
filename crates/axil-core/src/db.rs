@@ -462,6 +462,31 @@ impl Axil {
     /// invariants as the builder, but returns an error rather than panicking
     /// since it runs at runtime, not at programmer-controlled build time.
     pub fn register_extension(&self, ext: Arc<dyn Extension>) -> Result<()> {
+        // Prefixes reserved by Axil core + built-in engines/extensions. A
+        // runtime (WASM) Extension may not declare a prefix overlapping these,
+        // even when the owning built-in isn't registered in *this* build — so an
+        // untrusted plugin can't claim a core/engine table by declaring its
+        // prefix while the legitimate owner is absent. (Built-in Extensions
+        // register via the builder, not this path, so they're unaffected.)
+        const RESERVED_TABLE_PREFIXES: &[&str] = &[
+            // core memory tables
+            "decisions",
+            "errors",
+            "context",
+            "sessions",
+            "rules",
+            // core / engine / built-in-extension internal tables
+            "_entities",
+            "_entity_aliases",
+            "_summaries",
+            "_beliefs",
+            "_idx_",
+            "_scip_",
+            "_dep_",
+            "_checkpoint_",
+            "_recall",
+        ];
+
         let mut exts = self
             .extensions
             .write()
@@ -473,6 +498,15 @@ impl Axil {
             )));
         }
         for prefix in ext.table_prefixes() {
+            if let Some(reserved) = RESERVED_TABLE_PREFIXES
+                .iter()
+                .find(|r| prefix_overlaps(prefix, r))
+            {
+                return Err(AxilError::plugin(format!(
+                    "extension `{id}` table prefix `{prefix}` is reserved by Axil core/engines \
+                     (overlaps `{reserved}`) — choose a distinct, more specific prefix"
+                )));
+            }
             for existing in exts.iter() {
                 for existing_prefix in existing.table_prefixes() {
                     if prefix_overlaps(prefix, existing_prefix) {

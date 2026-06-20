@@ -57,28 +57,38 @@ pub(crate) fn attach_detected_engines(
 ) -> anyhow::Result<axil_core::AxilBuilder> {
     #[allow(unused)]
     let path = builder.path().to_path_buf();
+    // Config (from the db dir) governs which Engines attach (`[engines]
+    // disabled`) and which Extensions register (`[extensions] disabled`) —
+    // identical to the CLI's `attach_detected_engines`, so MCP and CLI expose
+    // the same engine set for the same DB.
+    let config = path
+        .parent()
+        .and_then(|dir| axil_core::load_config_from(dir).ok())
+        .unwrap_or_default();
 
     #[cfg(feature = "vector")]
     {
         use axil_vector::AxilBuilderVectorExt;
-        if let Ok(Some(_)) = axil_vector::read_stored_dimensions(&path) {
-            // When `embed` is on, load the embedder so `db.recall()` and
-            // auto-embed-on-insert work end-to-end. Resolve the model from
-            // the same `axil.toml` the CLI uses so MCP and CLI agree on
-            // which model to load — hard-coding BgeSmall would break any
-            // DB built with nomic/bge-base/bge-m3/custom.
-            #[cfg(feature = "embed")]
-            {
-                let model = resolve_embedding_model(&path);
-                let with_embed = axil_core::Axil::open(&path).with_embedder_model(model);
-                builder = match with_embed {
-                    Ok(b) => b,
-                    Err(_) => axil_core::Axil::open(&path).with_vector_auto()?,
-                };
-            }
-            #[cfg(not(feature = "embed"))]
-            {
-                builder = builder.with_vector_auto()?;
+        if !config.is_engine_disabled("vec") {
+            if let Ok(Some(_)) = axil_vector::read_stored_dimensions(&path) {
+                // When `embed` is on, load the embedder so `db.recall()` and
+                // auto-embed-on-insert work end-to-end. Resolve the model from
+                // the same `axil.toml` the CLI uses so MCP and CLI agree on
+                // which model to load — hard-coding BgeSmall would break any
+                // DB built with nomic/bge-base/bge-m3/custom.
+                #[cfg(feature = "embed")]
+                {
+                    let model = resolve_embedding_model(&path);
+                    let with_embed = axil_core::Axil::open(&path).with_embedder_model(model);
+                    builder = match with_embed {
+                        Ok(b) => b,
+                        Err(_) => axil_core::Axil::open(&path).with_vector_auto()?,
+                    };
+                }
+                #[cfg(not(feature = "embed"))]
+                {
+                    builder = builder.with_vector_auto()?;
+                }
             }
         }
     }
@@ -86,15 +96,23 @@ pub(crate) fn attach_detected_engines(
     #[cfg(feature = "graph")]
     {
         use axil_graph::AxilBuilderGraphExt;
-        if axil_graph::has_graph_store(&path) {
+        if !config.is_engine_disabled("graph") && axil_graph::has_graph_store(&path) {
             builder = builder.with_graph_engine()?;
+        }
+    }
+
+    #[cfg(feature = "timeseries")]
+    {
+        use axil_timeseries::AxilBuilderTimeSeriesExt;
+        if !config.is_engine_disabled("ts") && axil_timeseries::has_timeseries_store(&path) {
+            builder = builder.with_timeseries_engine()?;
         }
     }
 
     #[cfg(feature = "fts")]
     {
         use axil_fts::AxilBuilderFtsExt;
-        if axil_fts::has_fts_store(&path) {
+        if !config.is_engine_disabled("fts") && axil_fts::has_fts_store(&path) {
             builder = builder.with_fts_engine()?;
         }
     }
@@ -104,10 +122,6 @@ pub(crate) fn attach_detected_engines(
     // DocsExtension::handle_mcp; checkpoint tools route through
     // CheckpointExtension). One registration site shared with the CLI + audit,
     // with the `[extensions] disabled` filter applied centrally.
-    let config = path
-        .parent()
-        .and_then(|dir| axil_core::load_config_from(dir).ok())
-        .unwrap_or_default();
     builder = axil_bundle::register_builtin_extensions(builder, &config);
 
     Ok(builder)

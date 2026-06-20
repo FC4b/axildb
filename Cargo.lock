@@ -338,6 +338,7 @@ dependencies = [
  "axil-fts",
  "axil-graph",
  "axil-indexer",
+ "axil-timeseries",
  "axil-vector",
  "axil-workspace",
  "chrono",

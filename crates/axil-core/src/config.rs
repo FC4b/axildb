@@ -665,9 +665,13 @@ pub fn get_config_value(config: &AxilConfig, key: &str) -> Option<String> {
         toml::Value::Integer(n) => Some(n.to_string()),
         toml::Value::Float(f) => Some(f.to_string()),
         toml::Value::Boolean(b) => Some(b.to_string()),
-        toml::Value::Array(a) => Some(format!("{a:?}")),
-        toml::Value::Table(t) => Some(format!("{t:?}")),
         toml::Value::Datetime(d) => Some(d.to_string()),
+        // Non-leaf keys (a table or array) have no single scalar value. Return
+        // None rather than a Rust `Debug` dump — the `{:?}` form is not valid
+        // config syntax, isn't round-trippable, and (for e.g. `[llm]`) would
+        // expose every field of the subtree, including secrets, to a plugin
+        // reading the parent key.
+        toml::Value::Array(_) | toml::Value::Table(_) => None,
     }
 }
 
