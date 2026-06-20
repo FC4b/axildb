@@ -157,7 +157,7 @@ pub fn analyze(text: &str, source: &str) -> Vec<CapturedKnowledge> {
         if !text_lower.contains(pattern) {
             continue;
         }
-        let Some((idx, line)) = lines
+        let Some((_idx, line)) = lines
             .iter()
             .enumerate()
             .find(|(i, l)| Some(*i) != claimed_line && l.to_lowercase().contains(pattern))

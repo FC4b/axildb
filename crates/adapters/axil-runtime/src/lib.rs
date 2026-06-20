@@ -87,19 +87,21 @@ mod host {
             Self::parse(name.strip_prefix("axil:plugin/extension@")?)
         }
 
-        /// Parse a bare `major.minor.patch` (patch optional, any
-        /// pre-release/build suffix on the last component ignored).
+        /// Parse a bare `major[.minor[.patch]]` — only the major is required, so
+        /// a major-only `@1` parses as `1.0.0` (and is then version-checked)
+        /// rather than being misreported as "not an Axil plugin". A
+        /// pre-release/build suffix on a component is ignored.
         fn parse(v: &str) -> Option<Self> {
+            let digits = |s: &str| -> u64 {
+                s.split(|c: char| !c.is_ascii_digit())
+                    .next()
+                    .and_then(|d| d.parse().ok())
+                    .unwrap_or(0)
+            };
             let mut it = v.split('.');
             let major = it.next()?.parse().ok()?;
-            let minor = it.next()?.parse().ok()?;
-            // Tolerate `1.0.0+meta` / `1.0` by trimming non-digits off the patch.
-            let patch = it
-                .next()
-                .map(|p| p.split(|c: char| !c.is_ascii_digit()).next().unwrap_or("0"))
-                .unwrap_or("0")
-                .parse()
-                .unwrap_or(0);
+            let minor = it.next().map(digits).unwrap_or(0);
+            let patch = it.next().map(digits).unwrap_or(0);
             Some(Self {
                 major,
                 minor,
@@ -150,8 +152,9 @@ mod host {
     impl WasmHost {
         /// Build a host with the Component Model enabled and the sandbox
         /// primitives a misbehaving guest is bounded with: CPU via fuel metering
-        /// and wall-clock via epoch interruption. No ambient filesystem/network
-        /// is granted — WASI is off until a capability is explicitly added.
+        /// and wall-clock via epoch interruption. The WASI ctx is empty, so no
+        /// ambient filesystem/network/env/stdio is granted (clocks/random stay
+        /// available so std guests run — see [`PluginState`]).
         ///
         /// Spawns a background thread that advances the engine epoch every
         /// [`EPOCH_TICK`]; combined with the per-call deadline the shim sets, a
@@ -376,15 +379,23 @@ mod host {
         (ticks as u64).max(1)
     }
 
-    /// Write `data` to `path` atomically: create the parent dir, write a
-    /// process-unique temp sibling, then rename onto `path` (atomic on POSIX).
-    /// Concurrent `axil` processes therefore never observe a half-written cache
-    /// file — the loser of a rename race just overwrites with identical content.
+    /// Write `data` to `path` atomically: create the parent dir, write a temp
+    /// sibling unique per (process, call), then rename onto `path` (atomic on
+    /// POSIX). No reader ever observes a half-written cache file, and two
+    /// concurrent loads in the *same* process can't race on the same temp path
+    /// (the PID alone isn't unique within a process). Atomic rename also means a
+    /// self-produced artifact is never left truncated for the deserialize path.
     fn atomic_write(path: &Path, data: &[u8]) -> std::io::Result<()> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
+        let tmp = path.with_extension(format!(
+            "{}.{}.tmp",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
         std::fs::write(&tmp, data)?;
         std::fs::rename(&tmp, path)
     }
@@ -774,94 +785,64 @@ mod abi {
 
     use crate::bindings::axil::plugin::types as wit;
 
-    /// What a plugin is allowed to call into Axil with. Deny-by-default: a
-    /// freshly-constructed `Capabilities` grants nothing — the grant, not the
-    /// sandbox, is the trust decision.
-    #[derive(Debug, Clone, Default)]
-    pub struct Capabilities {
-        pub records_read: bool,
-        pub records_write: bool,
-        pub recall: bool,
-        pub embed: bool,
-        pub graph: bool,
-        pub fts: bool,
-        pub config_read: bool,
+    /// Generates the `Capabilities` struct and its name<->field plumbing from a
+    /// single list, so a new capability can't be added to one place (a struct
+    /// field, the parser, `granted_names`, `ALL_NAMES`) and silently forgotten
+    /// in another — they stay in lockstep by construction.
+    macro_rules! capabilities {
+        ($($field:ident => $name:literal),+ $(,)?) => {
+            /// What a plugin is allowed to call into Axil with. Deny-by-default:
+            /// a freshly-constructed `Capabilities` grants nothing — the grant,
+            /// not the sandbox, is the trust decision.
+            #[derive(Debug, Clone, Default)]
+            pub struct Capabilities {
+                $(pub $field: bool,)+
+            }
+
+            impl Capabilities {
+                /// Grant everything — for trusted in-tree use and tests.
+                pub fn all() -> Self {
+                    Self { $($field: true,)+ }
+                }
+
+                /// Build a grant set from capability names (deny-by-default;
+                /// unknown names are ignored).
+                pub fn from_names<I, S>(names: I) -> Self
+                where
+                    I: IntoIterator<Item = S>,
+                    S: AsRef<str>,
+                {
+                    let mut c = Self::default();
+                    for name in names {
+                        match name.as_ref() {
+                            $($name => c.$field = true,)+
+                            _ => {}
+                        }
+                    }
+                    c
+                }
+
+                /// The granted capabilities as their canonical names (display).
+                pub fn granted_names(&self) -> Vec<&'static str> {
+                    let mut out = Vec::new();
+                    $(if self.$field { out.push($name); })+
+                    out
+                }
+
+                /// Every capability name a plugin may request (validation + help).
+                pub const ALL_NAMES: &'static [&'static str] = &[$($name,)+];
+            }
+        };
     }
 
-    impl Capabilities {
-        /// Grant everything — for trusted in-tree use and tests.
-        pub fn all() -> Self {
-            Self {
-                records_read: true,
-                records_write: true,
-                recall: true,
-                embed: true,
-                graph: true,
-                fts: true,
-                config_read: true,
-            }
-        }
-
-        /// Build a grant set from capability names (deny-by-default; unknown
-        /// names are ignored). The canonical names match [`Capabilities::granted_names`].
-        pub fn from_names<I, S>(names: I) -> Self
-        where
-            I: IntoIterator<Item = S>,
-            S: AsRef<str>,
-        {
-            let mut c = Self::default();
-            for name in names {
-                match name.as_ref() {
-                    "records.read" => c.records_read = true,
-                    "records.write" => c.records_write = true,
-                    "recall" => c.recall = true,
-                    "embed" => c.embed = true,
-                    "graph" => c.graph = true,
-                    "fts" => c.fts = true,
-                    "config.read" => c.config_read = true,
-                    _ => {}
-                }
-            }
-            c
-        }
-
-        /// The granted capabilities as their canonical names (for display).
-        pub fn granted_names(&self) -> Vec<&'static str> {
-            let mut out = Vec::new();
-            if self.records_read {
-                out.push("records.read");
-            }
-            if self.records_write {
-                out.push("records.write");
-            }
-            if self.recall {
-                out.push("recall");
-            }
-            if self.embed {
-                out.push("embed");
-            }
-            if self.graph {
-                out.push("graph");
-            }
-            if self.fts {
-                out.push("fts");
-            }
-            if self.config_read {
-                out.push("config.read");
-            }
-            out
-        }
-
-        /// Every capability name a plugin may request (for validation + help).
-        pub const ALL_NAMES: &'static [&'static str] = &[
-            "records.read",
-            "records.write",
-            "recall",
-            "embed",
-            "graph",
-            "fts",
-            "config.read",
-        ];
+    capabilities! {
+        records_read => "records.read",
+        records_write => "records.write",
+        recall => "recall",
+        embed => "embed",
+        graph => "graph",
+        fts => "fts",
+        config_read => "config.read",
     }
 
     /// Per-plugin host state threaded through Wasmtime as the store data. Holds
@@ -873,8 +854,12 @@ mod abi {
         caps: Capabilities,
         prefixes: Vec<String>,
         config: AxilConfig,
-        // WASI with NO granted access (no preopens, env, or sockets) — present
-        // only so std-using guests instantiate. The sandbox is deny-by-default.
+        // WASI context with NO ambient access granted: no filesystem preopens,
+        // no environment, no network sockets, and stdio sinks to null. Present
+        // only so std-using guests instantiate. (Note: `wasi:clocks` and
+        // `wasi:random` remain callable — they read host time/entropy without a
+        // ctx grant — so the deny-by-default posture covers fs/net/env/stdio,
+        // not the wall-clock/entropy surface.)
         wasi: wasmtime_wasi::WasiCtx,
         table: wasmtime_wasi::ResourceTable,
     }

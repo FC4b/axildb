@@ -144,6 +144,13 @@ impl McpServer {
 
     /// Create an MCP server over an already-shared database handle — the path
     /// the [`McpAdapter`] uses so several Adapters can share one `Axil`.
+    ///
+    /// Unlike [`McpServer::open`], this trusts the caller's handle as-is: it does
+    /// **not** attach engines or register built-in/WASM Extensions. The caller is
+    /// responsible for building a fully-configured `Axil` (as `axil-cli`'s `mcp`
+    /// command does via `attach_detected_engines` + `register_installed_plugins`
+    /// before binding) — otherwise tools that need a missing engine/extension
+    /// return errors and plugin tools are absent from `tools/list`.
     pub fn from_arc(db: Arc<Axil>) -> Self {
         Self { db }
     }

@@ -12,19 +12,35 @@ use axil_core::{Axil, AxilConfig, Extension};
 use axil_runtime::{Capabilities, PluginState, WasmExtension, WasmHost};
 
 /// The capability-grant + cache key for a plugin file: the full filename with
-/// only the trailing `.wasm` stripped, interior dots replaced by `-` so it stays
-/// a single TOML bare key under `[plugins.<key>]`.
+/// only the trailing `.wasm` stripped, mapped into the `[A-Za-z0-9_-]` charset
+/// (every other char → `-`) so it stays a single TOML bare key under
+/// `[plugins.<key>]` and is always grantable via `ext grant`.
 ///
 /// Using the *full* stem (not just up to the first `.`) avoids collisions: two
 /// distinct plugins sharing a prefix before the first dot — `acme.alpha.wasm`
 /// and `acme.beta.wasm` — keyed identically under the old rule, so they shared
 /// grants and the same `<key>.cwasm` cache artifact. Now they key as
-/// `acme-alpha` and `acme-beta`.
+/// `acme-alpha` and `acme-beta`. Sanitizing to ASCII also means a non-ASCII
+/// stem (`café.wasm`) loads *and* can be granted, where the old rule left it
+/// un-grantable (the config key validator rejects non-ASCII).
 pub fn plugin_key(file: &Path) -> String {
-    file.file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or_default()
-        .replace('.', "-")
+    let stem = file.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
+    let key: String = stem
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let key = key.trim_matches('-');
+    if key.is_empty() {
+        "plugin".to_string()
+    } else {
+        key.to_string()
+    }
 }
 
 /// Directory WASM plugins live in: `<db-dir>/plugins/`. The db is e.g.
@@ -197,4 +213,36 @@ fn list_wasm_files(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::plugin_key;
+    use std::path::Path;
+
+    #[test]
+    fn plugin_key_uses_full_stem_no_collision() {
+        // Two plugins sharing a pre-first-dot prefix must key distinctly (the old
+        // rule keyed both as "acme", sharing grants + the .cwasm cache).
+        assert_eq!(plugin_key(Path::new("acme.alpha.wasm")), "acme-alpha");
+        assert_eq!(plugin_key(Path::new("acme.beta.wasm")), "acme-beta");
+        assert_ne!(
+            plugin_key(Path::new("acme.alpha.wasm")),
+            plugin_key(Path::new("acme.beta.wasm"))
+        );
+        assert_eq!(
+            plugin_key(Path::new("hello-guest.component.wasm")),
+            "hello-guest-component"
+        );
+    }
+
+    #[test]
+    fn plugin_key_is_toml_bare_key_safe() {
+        // Non-ASCII / odd chars map into [A-Za-z0-9_-] so the key is grantable.
+        let k = plugin_key(Path::new("café.wasm"));
+        assert!(k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'));
+        assert!(!k.is_empty());
+        // A stem of only odd chars still yields a usable key.
+        assert_eq!(plugin_key(Path::new("...wasm")), "plugin");
+    }
 }

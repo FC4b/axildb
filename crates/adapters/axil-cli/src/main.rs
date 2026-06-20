@@ -4552,6 +4552,11 @@ fn resolve_embedding_model(db_path: &Path) -> axil_vector::models::EmbeddingMode
     axil_vector::models::EmbeddingModel::BgeSmall
 }
 
+// NOTE: `axil_mcp::attach_detected_engines` is the parallel implementation for
+// the MCP server — keep the engine set + gating in sync (the vector/embed setup
+// differs because the two crates resolve the embedder differently, but the
+// graph/fts/timeseries/extension blocks are identical). A divergence here is the
+// "MCP and CLI expose different engines for the same DB" bug.
 fn attach_detected_engines(mut builder: axil_core::AxilBuilder) -> Result<axil_core::AxilBuilder> {
     let path = builder.path().to_path_buf();
     // Config (from the db dir) governs both which Engines attach
@@ -13168,7 +13173,7 @@ fn deps_sweep_removed(
 }
 
 /// `axil deps` — dependency documentation memory.
-#[cfg(feature = "deps")]
+///
 /// Route a `axil deps …` invocation through the registered
 /// `DocsExtension` (or any other Extension that claims the `deps`
 /// top-level command) via [`axil_core::dispatch_cli`].
@@ -13184,7 +13189,7 @@ fn deps_sweep_removed(
 /// The DB is only opened for variants that need it (every variant
 /// except `List`, which is a pure filesystem scan over manifests).
 /// `List` without an open DB falls back to `run_deps` directly, which
-/// preserves the pre-Phase-17 contract that `axil deps list` works
+/// preserves the original contract that `axil deps list` works
 /// outside an initialised `.axil` project.
 #[cfg(feature = "deps")]
 fn try_deps_extension_dispatch(
