@@ -1,4 +1,4 @@
-//! Shared utilities used across Phase 5e modules.
+//! Shared utilities used across modules.
 
 use crate::record::Record;
 
@@ -197,7 +197,7 @@ pub fn extract_str_array(data: &serde_json::Value, field: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Edge type constants used by Phase 5e intelligence features.
+/// Edge type constants used by intelligence features.
 pub mod edge_types {
     /// Record mentions an entity.
     pub const MENTIONS: &str = "mentions";

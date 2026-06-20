@@ -1,5 +1,4 @@
-//! Auto-importance scoring — Phase 10.1
-//!
+//! Auto-importance scoring —//!
 //! Every record gets an `_importance` score (0.0–1.0) computed at insert time.
 //! Signals: entity density, structural markers, text length/complexity.
 //! Novelty scoring (vector distance) requires embeddings and runs post-insert.

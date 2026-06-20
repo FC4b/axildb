@@ -1,4 +1,4 @@
-//! Dependency documentation memory for Axil — Phase 16.
+//! Dependency documentation memory for Axil — .
 //!
 //! Pre-loads version-pinned documentation for a project's dependencies
 //! into Axil memory, so an agent can recall library docs without
@@ -11,7 +11,7 @@
 //! `axil-cli` — nothing here runs unless the feature is enabled and the
 //! agent explicitly invokes `axil deps …`.
 //!
-//! ## P0.1 — manifest detection + dependency resolution
+//! ## — manifest detection + dependency resolution
 //!
 //! - [`manifest`] detects and parses every supported manifest in a repo.
 //! - [`resolve`] pins each dependency to the exact version in the

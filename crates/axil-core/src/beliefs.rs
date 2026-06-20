@@ -1,5 +1,4 @@
-//! Belief system — Phase 10.6
-//!
+//! Belief system —//!
 //! Beliefs are the agent's high-level understanding of the world.
 //! Auto-generated from consolidated high-importance facts, or explicitly stated.
 //! Updated when contradicting evidence arrives (superseding).

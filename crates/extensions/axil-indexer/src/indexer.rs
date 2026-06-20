@@ -812,7 +812,7 @@ impl<'a> ProjectIndexer<'a> {
             count += 1;
         }
 
-        // ── Section proxies (Phase 13b.5) ────────────────────────────
+        // ── Section proxies ────────────────────────────
         // Markdown headings (P0) + TOML/JSON top-level sections (P1).
         let sections: Vec<crate::markdown::ParsedSection> = match scanned.language {
             Language::Markdown => split_sections(source),
@@ -1009,7 +1009,7 @@ impl<'a> ProjectIndexer<'a> {
     }
 
     /// Insert one `_idx_symbols` record per parsed symbol and return the
-    /// inserted record IDs alongside their parsed symbol. Phase 13b proxy
+    /// inserted record IDs alongside their parsed symbol. structural proxy
     /// creation needs the record IDs so symbol proxies can point at their
     /// `_idx_symbols` source record without a second discovery pass.
     fn index_symbols_with_records(

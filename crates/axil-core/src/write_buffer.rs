@@ -1,4 +1,4 @@
-//! Deferred indexing write buffer (8b.11).
+//! Deferred indexing write buffer.
 //!
 //! Accumulates inserted records and defers plugin indexing (vector, FTS, timeseries)
 //! until a flush trigger: buffer full, read query, or explicit flush().

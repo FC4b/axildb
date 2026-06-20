@@ -98,12 +98,12 @@ pub struct WhereClause {
     pub value: Value,
 }
 
-/// Cross-encoder rerank stage (Phase 15 P0.3). Implementations live in the
+/// Cross-encoder rerank stage. Implementations live in the
 /// `axil-rerank` crate so this seam stays small and dep-free at the core
 /// level. The trait is intentionally minimal: take a query + the resolved
 /// records and reorder them in place. Errors are reported via a return
 /// value so the pipeline can continue with the unreranked list on failure
-/// — the reranker is a quality bonus, not a correctness requirement.
+/// the reranker is a quality bonus, not a correctness requirement.
 pub trait Rerank: Send + Sync {
     /// Reorder `records` against `query`, keeping at most `top_k_out`
     /// entries from the reranked prefix (the rest of the list is left
@@ -189,7 +189,7 @@ impl<'a> QueryBuilder<'a> {
         }
     }
 
-    /// Attach a cross-encoder reranker stage (Phase 15 P0.3). When set, it
+    /// Attach a cross-encoder reranker stage. When set, it
     /// runs after RRF fusion + record resolution but before sort+limit.
     /// `top_k_in` candidates are scored; the reranked prefix is kept up
     /// to `top_k_out`. Defaults: 50 in, 10 out. Pass `top_k_out` larger
@@ -231,7 +231,7 @@ impl<'a> QueryBuilder<'a> {
         self
     }
 
-    /// Filter by memory scope (Phase 11.3).
+    /// Filter by memory scope.
     ///
     /// Only return records whose `_scope` field matches the given scope.
     /// Can be called multiple times to allow multiple scopes.
@@ -767,7 +767,7 @@ impl<'a> QueryBuilder<'a> {
             let vec = embedder.embed(text)?;
             let mut fetch_k = (top_k + self.offset).saturating_mul(over_fetch_factor);
             if self.reranker.is_some() {
-                // Phase 15 P0.3: rerank window must dominate fetch sizing or
+                // rerank window must dominate fetch sizing or
                 // the reranker only sees the prefix the vector already ranked.
                 fetch_k = fetch_k.max(self.rerank_top_k_in + self.offset);
             }
@@ -824,7 +824,7 @@ impl<'a> QueryBuilder<'a> {
                 fan_out_traversal(gi, self.storage, &results, steps, self.limit + self.offset)?;
         }
 
-        // Phase 15 P0.3 rerank stage. Same shape as exec_unified_profiled —
+        // rerank stage. Same shape as exec_unified_profiled —
         // runs only when a reranker is attached and we have query text.
         if let Some(reranker) = self.reranker {
             let query_text: Option<&str> = self
@@ -1037,7 +1037,7 @@ impl<'a> QueryBuilder<'a> {
     /// Unified execution pipeline that handles arbitrary combinations of
     /// vector + FTS + time-series + graph traversal + field filters.
     ///
-    /// Uses cascaded filtering (8b.1): runs cheapest filters first (timeseries,
+    /// Uses cascaded filtering: runs cheapest filters first (timeseries,
     /// FTS) before expensive ones (vector). If an early filter produces high-
     /// confidence results (top score > 0.95), skips remaining expensive indexes.
     fn exec_unified(self) -> Result<Vec<Record>> {
@@ -1048,7 +1048,7 @@ impl<'a> QueryBuilder<'a> {
         let min_fetch = (self.limit + self.offset).saturating_mul(4);
         let mut ranked_lists: Vec<Vec<(RecordId, f32)>> = Vec::new();
 
-        // ── Cascaded filtering (8b.1): run cheapest filters first ──
+        // ── Cascaded filtering: run cheapest filters first ──
         // Cost order: timeseries (cheap scan) → FTS (inverted index) → vector (HNSW)
         // After each step, check if we can short-circuit.
 
@@ -1093,7 +1093,7 @@ impl<'a> QueryBuilder<'a> {
             ranked_lists.push(scored);
         }
 
-        // Score threshold cutoff (8b.1): skip vector search if FTS already
+        // Score threshold cutoff: skip vector search if FTS already
         // found high-confidence results. Timeseries pseudo-scores (always 1.0
         // for the most recent hit) are excluded — they don't indicate relevance.
         let skip_vector = has_fts && {
@@ -1127,7 +1127,7 @@ impl<'a> QueryBuilder<'a> {
             ranked_lists.push(scored);
         }
 
-        // ── Step 2: Score Fusion via adaptive RRF (8b.2) ──
+        // ── Step 2: Score Fusion via adaptive RRF ──
         let fused = if ranked_lists.is_empty() {
             Vec::new()
         } else {
@@ -1305,7 +1305,7 @@ impl<'a> QueryBuilder<'a> {
         let seed_cap = if self.traversal.is_some() {
             usize::MAX
         } else if self.reranker.is_some() {
-            // Phase 15 P0.3: when a reranker is attached, the resolve
+            // when a reranker is attached, the resolve
             // stage must hand it the full window — capping at
             // limit+offset would turn rerank into a no-op (it'd only
             // see the prefix that already won by fused score).
@@ -1351,7 +1351,7 @@ impl<'a> QueryBuilder<'a> {
             });
         }
 
-        // Step 4b: Cross-encoder rerank (Phase 15 P0.3). Runs only when a
+        // Step 4b: Cross-encoder rerank. Runs only when a
         // reranker is attached AND the query carries a textual signal —
         // pure structural queries (graph-only / time-only) have no string
         // to score against, so the stage is skipped.
@@ -1476,7 +1476,7 @@ fn build_profile(total_ms: f64, steps: Vec<ProfileStep>) -> QueryProfile {
 /// Each document's RRF score is the sum of `1 / (k + rank_i)` across all lists
 /// where the document appears.
 ///
-/// Adaptive k (8b.2): Instead of fixed k=60, computes per-source k based on
+/// Adaptive k: Instead of fixed k=60, computes per-source k based on
 /// score distribution spread. Tight spread → higher k (flatten rankings),
 /// wide spread → lower k (preserve source ranking).
 ///
@@ -1490,7 +1490,7 @@ fn reciprocal_rank_fusion(
     let mut scores: HashMap<RecordId, f32> = HashMap::with_capacity(total);
 
     for list in ranked_lists {
-        // Compute adaptive k for this source based on score spread (8b.2)
+        // Compute adaptive k for this source based on score spread
         let k = adaptive_rrf_k(list);
 
         for (rank_0, (rid, _original_score)) in list.iter().enumerate() {
@@ -1506,7 +1506,7 @@ fn reciprocal_rank_fusion(
     fused
 }
 
-/// Compute adaptive k for a ranked list based on score distribution spread (8b.2).
+/// Compute adaptive k for a ranked list based on score distribution spread.
 ///
 /// - Tight spread (low std dev) → higher k (60-120) — flatten rankings
 /// - Wide spread (high std dev) → lower k (20-60) — preserve source ranking
@@ -1534,7 +1534,7 @@ fn adaptive_rrf_k(ranked_list: &[(RecordId, f32)]) -> usize {
     k.clamp(20, 120)
 }
 
-/// Compute graph boost factor for re-ranking (8b.2).
+/// Compute graph boost factor for re-ranking.
 ///
 /// Records with more graph connections get a score boost.
 /// Formula: `1 + ln(1 + neighbor_count)` — logarithmic to avoid runaway boost.

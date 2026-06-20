@@ -18,7 +18,7 @@ use crate::plugin::{
 use crate::record::{Record, RecordId};
 use crate::storage::Storage;
 
-/// Phase 13 scoped-alias table. Distinct from axil-memory's
+/// Scoped-alias table. Distinct from axil-memory's
 /// `_entity_aliases` (which uses the `{entity, alias}` schema for
 /// natural-language aliasing) — these two tables have incompatible row
 /// shapes and must not be merged.
@@ -72,7 +72,7 @@ fn resolve_engine_suffix(engine: &str) -> Option<(&'static str, &'static str)> {
 ///
 /// Idempotent: a missing companion reports `existed: false` rather than erroring.
 /// Operate on a database that is **not currently open with this Engine attached**
-/// — that is why the CLI never opens the DB on the `--drop-engine` path.
+/// that is why the CLI never opens the DB on the `--drop-engine` path.
 pub fn drop_engine_companion(
     base: &Path,
     engine: &str,
@@ -150,7 +150,7 @@ pub struct AxilBuilder {
     llm_provider: Option<Arc<dyn crate::llm::LlmProvider>>,
     llm_config: crate::llm::LlmConfig,
     canonical_publisher: Option<Arc<dyn CanonicalPublisher>>,
-    /// Phase 17 — registered Tier-2 Extensions.
+    /// registered Tier-2 Extensions.
     extensions: Vec<Arc<dyn Extension>>,
     /// Set by FTS plugin when schema migration required a rebuild.
     pub needs_fts_reindex: bool,
@@ -376,7 +376,7 @@ impl AxilBuilder {
     }
 }
 
-/// Phase 17 — true if two table prefixes overlap (one is a prefix of
+/// true if two table prefixes overlap (one is a prefix of
 /// the other, or they're equal). Used by [`AxilBuilder::with_extension`]
 /// to reject conflicting Extension registrations at build time.
 fn prefix_overlaps(a: &str, b: &str) -> bool {
@@ -399,7 +399,7 @@ pub struct Axil {
     graph_index: Option<Arc<dyn GraphIndex>>,
     timeseries_index: Option<Arc<dyn TimeSeriesIndex>>,
     fts_index: Option<Arc<dyn SearchIndex>>,
-    /// Optional LLM provider for enhanced intelligence (Phase 5f).
+    /// Optional LLM provider for enhanced intelligence.
     llm_provider: Option<Arc<dyn crate::llm::LlmProvider>>,
     /// Session-level LLM usage tracker.
     llm_usage: Arc<crate::llm::LlmUsageTracker>,
@@ -410,9 +410,9 @@ pub struct Axil {
     audit_enabled: std::sync::atomic::AtomicBool,
     /// Monotonic counter for generating unique log keys within a session.
     log_counter: std::sync::atomic::AtomicU64,
-    /// Relevance feedback store (Phase 5e).
+    /// Relevance feedback store.
     feedback_store: crate::feedback::FeedbackStore,
-    /// Optional Atlas canonical-ID publisher (Phase 14.6 v0.2).
+    /// Optional Atlas canonical-ID publisher.
     canonical_publisher: Option<Arc<dyn CanonicalPublisher>>,
     /// Registered Tier-2 Extensions. Behind a lock so plugins that need a live
     /// `Axil` handle (WASM plugins) can register *after* the database is open,
@@ -439,7 +439,7 @@ impl Axil {
         }
     }
 
-    /// Phase 17 — Tier-2 Extensions registered with [`AxilBuilder::with_extension`].
+    /// Tier-2 Extensions registered with [`AxilBuilder::with_extension`].
     ///
     /// Returns an empty slice if no Extensions are registered.
     /// Adapters (CLI, MCP, HTTP, …) iterate this to discover the
@@ -493,7 +493,7 @@ impl Axil {
         let table = record.table.clone();
         let _span = crate::otel::span("axil.insert", &[("table", table.clone())]);
         let timer = self.metrics.start_timer(OpType::Insert);
-        // Auto-score importance if not already set (Phase 10.1).
+        // Auto-score importance if not already set.
         if record.data.get("_importance").is_none() && !table.starts_with('_') {
             let score = crate::importance::compute_importance(&record.data);
             if let Some(obj) = record.data.as_object_mut() {
@@ -1809,7 +1809,7 @@ impl Axil {
         fi.optimize()
     }
 
-    // ── LLM API (Phase 5f) ─────────────────────────────────────────────
+    // ── LLM API ─────────────────────────────────────────────
 
     /// Check whether an LLM provider is configured and available.
     pub fn has_llm(&self) -> bool {
@@ -2065,7 +2065,7 @@ impl Axil {
         Ok(count)
     }
 
-    // ── Self-Healing API (Phase 5c) ──────────────────────────────────
+    // ── Self-Healing API ──────────────────────────────────
 
     /// Compact the database: purge expired records, superseded records,
     /// and clean orphaned edges/vectors/FTS entries.
@@ -3386,7 +3386,7 @@ impl Axil {
         })
     }
 
-    // ── Phase 5e: Intelligent Database ──────────────────────────────
+    // ── Intelligent Database ──────────────────────────────
 
     /// Recall with multi-signal scoring and explanation.
     ///
@@ -3437,7 +3437,7 @@ impl Axil {
             cfg.query_keywords = crate::scoring::extract_keywords(&effective_query);
         }
 
-        // Phase 13b: widen candidate pool so downstream fusion / rerank
+        // B: widen candidate pool so downstream fusion / rerank
         // has enough raw material; minor CPU cost, meaningful recall lift.
         let fetch_k = top_k.saturating_mul(8).max(40);
         // Step 1: Vector search when an embedder + vector index are available.
@@ -3546,7 +3546,7 @@ impl Axil {
             };
 
         // Step 5: Score and rank all candidates
-        // Phase 11.3: Pre-compute scope/confidence/importance filters.
+        // Pre-compute scope/confidence/importance filters.
         let has_scope_filter = !cfg.scope_filter.is_empty();
         let mut scored_results = Vec::new();
         let mut aggregated_candidates: Vec<(RecordId, RecallCandidate)> =
@@ -3554,7 +3554,7 @@ impl Axil {
         aggregated_candidates.sort_by(|a, b| a.1.first_rank.cmp(&b.1.first_rank));
         for (rid, candidate) in aggregated_candidates {
             let record = candidate.record;
-            // Phase 11.3: Scope filter — skip records outside requested scope(s).
+            // Scope filter — skip records outside requested scope(s).
             if has_scope_filter {
                 let record_scope = record
                     .data
@@ -3566,7 +3566,7 @@ impl Axil {
                 }
             }
 
-            // Phase 11.3: Confidence filter.
+            // Confidence filter.
             if let Some(min_conf) = cfg.min_confidence {
                 let conf = record
                     .data
@@ -3578,7 +3578,7 @@ impl Axil {
                 }
             }
 
-            // Phase 11.3: Importance filter.
+            // Importance filter.
             if let Some(min_imp) = cfg.min_importance {
                 let imp = crate::importance::get_importance(&record.data);
                 if imp < min_imp {
@@ -4380,7 +4380,7 @@ impl Axil {
         }
     }
 
-    /// Atlas publish (Phase 14.6 v0.2): every `_entities` row with a
+    /// Atlas publish: every `_entities` row with a
     /// non-empty, non-provisional canonical_id flows to the workspace
     /// control plane so cross-project recall can resolve "who has this
     /// entity" without fan-out. Publisher contract is best-effort +
@@ -5474,7 +5474,7 @@ mod tests {
         assert_eq!(fetched.data["summary"], "test");
     }
 
-    // ---- Phase 17 — Extension registration ----
+    // ---- — Extension registration ----
 
     struct StubExt {
         id: &'static str,

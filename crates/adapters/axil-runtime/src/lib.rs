@@ -2,22 +2,21 @@
 //! `axil:plugin` WIT world (see `wit/axil-plugin.wit`).
 //!
 //! Behind the `wasm-host` Cargo feature: **default builds carry zero Wasmtime
-//! dependency**, preserving Axil's small-binary posture (Constraint C1 / Risk
-//! R2 in the Phase 21–22 plan). This crate is the foundation for Phase 22.2+ —
-//! it embeds the engine, enables the Component Model and a deny-by-default
-//! resource posture (fuel + epoch interruption, no ambient WASI), and
-//! compiles/validates `.wasm` **components**. The host-ABI implementation
-//! (22.3) and the `WasmExtension` shim (22.4) build directly on `WasmHost`.
+//! dependency**, preserving Axil's small-binary posture. It embeds the engine,
+//! enables the Component Model and a deny-by-default resource posture (fuel +
+//! epoch interruption, no ambient WASI), and compiles/validates `.wasm`
+//! **components**. The host-ABI implementation and the `WasmExtension` shim
+//! build directly on `WasmHost`.
 
 /// Generated host + guest bindings for the `axil:plugin@1.0.0` world, produced
 /// from `wit/axil-plugin.wit` at compile time. The host-side imports trait this
-/// generates is what Phase 22.3 implements against a live `Axil`; the guest
-/// proxy is what the `WasmExtension` shim (22.4) calls across the boundary.
+/// generates is what the host implements against a live `Axil`; the guest
+/// proxy is what the `WasmExtension` shim calls across the boundary.
 ///
 /// Generating these here is also the strongest validation of the WIT: it must
 /// be not just syntactically valid (`wasm-tools`) but codegen-compatible.
 #[cfg(feature = "wasm-host")]
-#[allow(dead_code, clippy::all)] // generated; consumed by 22.3/22.4
+#[allow(dead_code, clippy::all)] // generated; consumed by the host ABI + shim
 pub mod bindings {
     wasmtime::component::bindgen!({
         path: "../../../wit",
@@ -117,7 +116,7 @@ mod host {
 
     /// The WASM host runtime: owns a configured Wasmtime [`Engine`] shared by
     /// every loaded plugin, plus the background **epoch ticker** that backs the
-    /// wall-clock timeout (Phase 22.5).
+    /// wall-clock timeout.
     pub struct WasmHost {
         engine: Engine,
         /// Per-call wall-clock budget, expressed in epoch ticks (see
@@ -193,14 +192,14 @@ mod host {
         }
 
         /// Compile + validate a `.wasm` **component** from bytes — the first
-        /// gate of the load path (Phase 22.4). A core module (not a component)
+        /// gate of the load path. A core module (not a component)
         /// or malformed bytes are rejected here, before any instantiation.
         pub fn load_component(&self, bytes: &[u8]) -> Result<Component> {
             Component::new(&self.engine, bytes)
         }
 
         /// Like [`load_component`](Self::load_component), but backed by an
-        /// on-disk **compiled-module cache** at `cache_file` (Phase 22.9).
+        /// on-disk **compiled-module cache** at `cache_file`.
         ///
         /// Every `axil <plugin-cmd>` is a fresh process that reloads the plugin
         /// set; without a cache each invocation Cranelift-compiles every
@@ -261,7 +260,7 @@ mod host {
         /// Reconcile a component's declared `axil:plugin` ABI against what this
         /// host implements, returning the detected version on success.
         ///
-        /// This is the load-time **version-negotiation** gate (Phase 22.8): it
+        /// This is the load-time **version-negotiation** gate: it
         /// turns the otherwise-cryptic Wasmtime link failure ("expected export
         /// `axil:plugin/extension@1.0.0`…") that an incompatible world produces
         /// at instantiation into a precise, actionable error *before* any
@@ -298,7 +297,7 @@ mod host {
         }
 
         /// Instantiate a loaded component, wiring the `axil:plugin` host imports
-        /// against `state` (Phase 22.4). The returned `Store` + `Plugin` bindings
+        /// against `state`. The returned `Store` + `Plugin` bindings
         /// are what the `WasmExtension` shim drives to call the guest's exports.
         ///
         /// `add_to_linker` registers every host import (record CRUD, recall,
@@ -312,7 +311,7 @@ mod host {
             let mut store = Store::new(&self.engine, state);
             // Seed the CPU budget so the guest can run; a CPU-bound plugin
             // exhausts it and traps rather than hanging the host. Per-call
-            // refueling + a configurable ceiling is the Phase 22.5/22.9 refinement.
+            // refueling + a configurable ceiling is the /22.9 refinement.
             store.set_fuel(DEFAULT_FUEL)?;
             // Wall-clock bound: the host's ticker advances the epoch every
             // `EPOCH_TICK`, and the shim resets this deadline before each guest
@@ -382,7 +381,7 @@ pub use abi::{Capabilities, PluginState};
 #[cfg(feature = "wasm-host")]
 pub use shim::WasmExtension;
 
-/// Makes a loaded `.wasm` component "just another `dyn Extension`" (Phase 22.4):
+/// Makes a loaded `.wasm` component "just another `dyn Extension`":
 /// [`WasmExtension`] implements [`axil_core::Extension`] by calling the guest's
 /// exports across the sandbox boundary, so a loaded plugin registers into
 /// `db.extensions()` and flows through dispatch / dynamic CLI / boot exactly
@@ -404,7 +403,7 @@ mod shim {
 
     /// The instantiated guest + its store. Wasmtime's `Store` is `!Sync`, so the
     /// `WasmExtension` wraps this in a `Mutex` to satisfy `Extension: Send + Sync`
-    /// — calls into the guest serialize on the instance lock.
+    /// calls into the guest serialize on the instance lock.
     struct Instance {
         store: Store<PluginState>,
         plugin: Plugin,
@@ -412,7 +411,7 @@ mod shim {
 
     /// A loaded WASM plugin presented as a native [`Extension`].
     ///
-    /// Metadata is fetched once at load and cached (Phase 22.0) so the
+    /// Metadata is fetched once at load and cached so the
     /// borrow-returning trait methods never cross the boundary; handlers call
     /// the guest on demand under the instance lock.
     pub struct WasmExtension {
@@ -439,7 +438,7 @@ mod shim {
             component: &Component,
             state: PluginState,
         ) -> anyhow::Result<Self> {
-            // Version-negotiation gate (22.8): a clean, actionable error for an
+            // Version-negotiation gate: a clean, actionable error for an
             // incompatible ABI, before the cryptic Wasmtime link failure that
             // instantiation would otherwise surface.
             let abi = host.check_abi(component)?;
@@ -669,7 +668,7 @@ mod shim {
 }
 
 /// Host-side implementation of the `axil:plugin` `host` interface — backs every
-/// capability a plugin may call into Axil with (Phase 22.3), enforcing the
+/// capability a plugin may call into Axil with, enforcing the
 /// granted capability set and the plugin's declared table prefixes.
 #[cfg(feature = "wasm-host")]
 mod abi {
@@ -681,8 +680,8 @@ mod abi {
     use crate::bindings::axil::plugin::types as wit;
 
     /// What a plugin is allowed to call into Axil with. Deny-by-default: a
-    /// freshly-constructed `Capabilities` grants nothing (Constraint C3 — the
-    /// grant, not the sandbox, is the trust decision).
+    /// freshly-constructed `Capabilities` grants nothing — the grant, not the
+    /// sandbox, is the trust decision.
     #[derive(Debug, Clone, Default)]
     pub struct Capabilities {
         pub records_read: bool,

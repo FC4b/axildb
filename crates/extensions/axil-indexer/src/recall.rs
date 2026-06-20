@@ -143,7 +143,7 @@ pub struct RecallWithRelated {
     /// Memories whose `code_refs` point at any of the proxy hits in
     /// `primary`.
     pub related: Vec<RecallResult>,
-    /// Graph neighbors of matched proxies (Phase 13b.7 / 13b.8 P1).
+    /// Graph neighbors of matched proxies.
     /// Empty when no graph plugin or SCIP edges are present.
     #[serde(default)]
     pub graph_neighbors: Vec<RecallResult>,
@@ -159,7 +159,7 @@ pub const WHY_POINTER_ATTACHED: &str = "memory attached to matched code proxy";
 pub const WHY_GRAPH_NEIGHBOR: &str = "graph neighbor of matched proxy";
 
 /// Expand a list of proxy hits with up to `limit` graph neighbors via
-/// Phase 13 SCIP edges (`calls`/`references`/`implements`/`type_of`).
+/// SCIP edges (`calls`/`references`/`implements`/`type_of`).
 ///
 /// Strategy:
 /// 1. For each direct proxy hit with a `canonical_id`, look up the
@@ -215,7 +215,7 @@ pub fn graph_neighbors_for_proxies(
     let mut seen: std::collections::HashSet<String> = direct_proxy_ids.clone();
 
     'outer: for hit in direct {
-        // ── 1. Phase 13 SCIP entity edges (canonical_id bridge) ─────
+        // ── 1. SCIP entity edges (canonical_id bridge) ─────
         if let Some(canonical) = &hit.canonical_id {
             if let Some(entity_id) = canonical_to_entity.get(canonical).cloned() {
                 for edge_kind in &entity_edge_kinds {
@@ -585,7 +585,7 @@ pub fn recall(db: &Axil, query: &str, top_k: usize) -> axil_core::Result<Vec<Rec
         // Boost path/symbol/breadcrumb matches on proxies already fused in
         // by vector + FTS. FTS indexes those fields at store time, so an
         // exact-equality match always reaches this point as a fused entry
-        // — no need to walk the full proxy table.
+        // no need to walk the full proxy table.
         //
         // Match rules — conservative to avoid short queries ("rs", "src")
         // inflating every proxy:

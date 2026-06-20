@@ -172,10 +172,10 @@ impl HnswIndex {
         Ok(results)
     }
 
-    /// Matryoshka search (8b.6): HNSW coarse retrieval, re-rank at full dims.
+    /// Matryoshka search: HNSW coarse retrieval, re-rank at full dims.
     ///
-    /// Phase 1: HNSW graph search for 4*k candidates at full dimensions.
-    /// Phase 2: re-ranks candidates using truncated `search_dims` cosine similarity,
+    /// HNSW graph search for 4*k candidates at full dimensions.
+    /// re-ranks candidates using truncated `search_dims` cosine similarity,
     /// then final re-rank at full dimensions. This leverages HNSW speed for
     /// candidate retrieval while MRL truncation provides a diversity signal.
     ///
@@ -198,11 +198,11 @@ impl HnswIndex {
             ));
         }
 
-        // Phase 1: HNSW graph search for coarse candidates at full dimensions.
+        // HNSW graph search for coarse candidates at full dimensions.
         let coarse_k = top_k.saturating_mul(4).min(self.vectors.len());
         let candidates = self.search_clean(query, coarse_k)?;
 
-        // Phase 2: Re-rank candidates using truncated dimensions as a diversity signal,
+        // Re-rank candidates using truncated dimensions as a diversity signal,
         // blending full-dim and truncated-dim similarity.
         const FULL_DIM_WEIGHT: f32 = 0.7;
         const TRUNC_DIM_WEIGHT: f32 = 0.3;

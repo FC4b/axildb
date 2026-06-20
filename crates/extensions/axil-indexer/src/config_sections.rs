@@ -1,4 +1,4 @@
-//! Phase 13b.5 P1: structural section splitters for config files.
+//! P1: structural section splitters for config files.
 //!
 //! Coding projects carry config files (Cargo.toml, package.json,
 //! pyproject.toml, CI workflows) whose internal structure is *exactly*
@@ -539,7 +539,7 @@ jobs:
     #[test]
     fn yaml_url_lines_are_not_keys() {
         // `url:https://...` is not a YAML key (no whitespace after colon)
-        // — we should reject it instead of fabricating a section.
+        // we should reject it instead of fabricating a section.
         let src = "url:https://example.com\nname: ok\n";
         let sections = split_yaml_sections(src);
         let names: Vec<&str> = sections.iter().map(|s| s.heading.as_str()).collect();

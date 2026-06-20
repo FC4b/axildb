@@ -99,7 +99,7 @@ pub use plugin::{
     TimeBucket, TimeSeriesIndex, TraversalStep, VectorIndex,
 };
 
-// Phase 17 — extensibility contracts (Tier 2 + Tier 3).
+// extensibility contracts (Tier 2 + Tier 3).
 pub use adapter::{
     compose_cli_surface, compose_mcp_surface, dispatch_cli, dispatch_mcp, Adapter, Protocol,
 };
@@ -119,7 +119,7 @@ pub use scoring::{
 };
 pub use storage::Storage;
 
-// Phase 5f re-exports
+// Re-exports
 pub use llm::{
     LlmConfig, LlmLimits, LlmProvider, LlmRateLimiter, LlmResponse, LlmUsage, LlmUsageTracker,
     NoLlm,
@@ -127,7 +127,7 @@ pub use llm::{
 #[cfg(feature = "llm-http")]
 pub use llm_http::HttpLlm;
 
-// Phase 5e re-exports
+// Re-exports
 pub use consolidation::{
     check_conflict, compute_confidence, consolidate_facts, detect_conflict_confidence,
     ConfidenceScore, ConflictConfidence, ConflictResult, ConsolidatedFact,
@@ -138,30 +138,30 @@ pub use inference::{InferenceEngine, InferenceRule, InferredFact};
 pub use prefetch::{MaterializedRecall, PrefetchEngine, QueryLogEntry, QueryPattern};
 pub use temporal::{parse_temporal, temporal_boost, TemporalTarget};
 
-// Phase 6 re-exports — benchmark metrics and A/B testing
+// Re-exports — benchmark metrics and A/B testing
 pub use ab_test::{compare_configs, AbTestConfig, AbTestResult};
 pub use bench_metrics::{
     competitor_baselines, compute_mem_efficiency, format_memscore,
     BenchmarkResult as RecallBenchmarkResult, ComparisonReport, CompetitorResult,
 };
 
-// Phase 8b re-exports — activation-level scoring
+// Re-exports — activation-level scoring
 pub use activation::{
     activation_boost, compute_bump, compute_stats as compute_activation_stats, decayed_activation,
     get_activation, get_last_accessed, ActivationConfig, ActivationDistribution, ActivationStats,
     DEFAULT_ACTIVATION, DEFAULT_ACTIVATION_WEIGHT, DEFAULT_BOOST, DEFAULT_HALF_LIFE_DAYS,
 };
 
-// Phase 8b re-exports — write buffer (deferred indexing)
+// Re-exports — write buffer (deferred indexing)
 pub use write_buffer::{WriteBuffer, WriteBufferConfig};
 
-// Phase 8b re-exports — tiered memory
+// Re-exports — tiered memory
 pub use tiering::{classify_tier, tier_distribution, MemoryTier, TierConfig, TierStats};
 
-// Phase 8b re-exports — snapshots
+// Re-exports — snapshots
 pub use snapshot::{create_snapshot, list_snapshots, restore_snapshot, SnapshotMeta};
 
-// Phase 11 re-exports — brain (full agent brain)
+// Re-exports — brain (full agent brain)
 pub use brain::{
     belief_history, classify_trust, doubt_record, extract_provenance, migrate_provenance_all,
     migrate_provenance_record, project_model_generate, project_model_set, project_model_show,
@@ -173,7 +173,7 @@ pub use brain::{
     WhyRemembered, WhyRevised,
 };
 
-// Phase 5d re-exports — worker, branching
+// Re-exports — worker, branching
 pub use branch::{
     branch_create, branch_delete, branch_diff, branch_list, branch_merge, branch_switch,
     BranchDiff, MergeReport, MergeStrategy,

@@ -295,7 +295,7 @@ impl McpServer {
 
     /// Handle the `tools/list` request.
     ///
-    /// Phase 17 P3.3 (final): start from the static hardcoded list,
+    /// start from the static hardcoded list,
     /// then overlay tools from every registered Extension's
     /// [`axil_core::Extension::mcp_tools`]. Extension entries
     /// **replace** matching hardcoded entries (by tool name) so the

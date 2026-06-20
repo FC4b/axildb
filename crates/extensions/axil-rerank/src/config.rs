@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 /// Knob set for the rerank stage. Serialised under `[rerank]` in `axil.toml`.
 ///
-/// Defaults match the Phase 15 memory-quality tuning (P0.3):
+/// Defaults match the memory-quality tuning:
 /// - `top_k_in = 50`  — candidates fed to the reranker after fusion
 /// - `top_k_out = 10` — kept after rerank, before the token-budget trim
 /// - `weight = 0.7`   — blend toward the reranker's score

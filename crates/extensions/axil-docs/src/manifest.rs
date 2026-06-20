@@ -63,7 +63,7 @@ pub enum DepKind {
     /// A build-script dependency (`[build-dependencies]`).
     Build,
     /// A transitive dependency — present in the lockfile but not
-    /// declared in any manifest (Phase 16 P1.a).
+    /// declared in any manifest.
     Transitive,
 }
 

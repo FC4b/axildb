@@ -25,7 +25,7 @@
 //! - `session_id`     — owning session (string form)
 //! - `kind`           — "snapshot" (mid-session) or "final" (at session end)
 //!
-//! ## Path C dispatch (Phase 17)
+//! ## Path C dispatch
 //!
 //! [`CheckpointExtension`] implements every dispatch method on
 //! [`axil_core::Extension`]: a CLI surface `axil checkpoint …`, an MCP
@@ -697,7 +697,7 @@ mod tests {
     }
 
     /// Regression for the cross-session staleness bug Codex caught
-    /// (/octo:review on the Phase 18 commit): writing a checkpoint in
+    /// (/octo:review on the commit): writing a checkpoint in
     /// session A, then later starting session B without writing a
     /// new checkpoint, must NOT replay A's checkpoint at boot — B is the
     /// current scope and its derive-from-state should win.

@@ -1,4 +1,4 @@
-//! `code-recall-eval` — Phase 13b.9 evaluation harness.
+//! `code-recall-eval` — evaluation harness.
 //!
 //! Runs a small set of known-answer queries against an indexed Axil
 //! database and reports hit-rate / MRR / FP / token / latency metrics for
@@ -49,9 +49,9 @@ pub struct ExpectedPointer {
 pub enum Strategy {
     /// Pre-13b baseline: recall over `_idx_files` / `_idx_symbols` only.
     BaselineIndexer,
-    /// Phase 13b.2/3: recall over `_idx_code_proxies` proxies.
+    /// B.2/3: recall over `_idx_code_proxies` proxies.
     StructuralProxies,
-    /// 13b.4: proxies + memories whose `code_refs` point at proxy hits.
+    /// Proxies + memories whose `code_refs` point at proxy hits.
     ProxiesPlusPointerMemories,
 }
 

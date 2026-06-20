@@ -16,7 +16,7 @@ pub enum RerankModel {
     /// answerdotai/answerai-colbert-small-v1 — 33M params, Apache-2.0.
     /// BEIR 53.79 NDCG@10 (beats bge-base 53.25 at ~7× smaller). Despite
     /// the ColBERT name, the ONNX export runs as a single-vector cross-
-    /// encoder for our purposes. **Default** for Phase 15 P0.3.
+    /// encoder for our purposes. **Default** for .
     AnswerAiColbertSmall,
     /// cross-encoder/ms-marco-MiniLM-L-6-v2 — 22M params, Apache-2.0.
     /// MS-MARCO-trained, widely tested. Kept for backward compatibility

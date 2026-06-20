@@ -7,8 +7,8 @@
 // `axil_core::Extension` by calling across this boundary, so a loaded `.wasm`
 // plugin is "just another `dyn Extension`".
 //
-// STATUS: ABI design artifact (Phase 22.1). The runtime that loads components
-// against this world (Wasmtime + the `wasm-host` feature, Phase 22.2+) is not
+// STATUS: ABI design artifact. The runtime that loads components
+// against this world (Wasmtime + the `wasm-host` feature, +) is not
 // built yet — see tasks/phase-21-22-extensibility-and-wasm.md. This file is the
 // forever-supported contract those phases mirror, versioned as
 // `axil:plugin@1.0.0`. It evolves additively only; a breaking change is a major
@@ -17,14 +17,14 @@
 // Design notes that this world bakes in:
 //   * `serde_json::Value` has no WIT equivalent, so it crosses the boundary as a
 //     canonical JSON *string* (`type json = string`) — lossless, parsed host-side.
-//     (Phase 22.1 open question: JSON-string vs. a recursive WIT variant; the
+//     ( open question: JSON-string vs. a recursive WIT variant; the
 //     string form is chosen here for fidelity + binding simplicity.)
 //   * Metadata exports (`id`, `display-name`, `table-prefixes`, `cli-commands`,
 //     `mcp-tools`) are INFALLIBLE. The host fetches them ONCE at load and caches
 //     the owned result, then serves the Rust trait's borrow-returning methods
 //     from that cache — so `dispatch_cli`'s per-call loop crosses the boundary
 //     zero times. A guest that traps during a metadata call is quarantined at
-//     load, not surfaced as a runtime error. (Phase 22.0.)
+//     load, not surfaced as a runtime error.
 //   * Handlers + contributions (`handle-cli`, `handle-mcp`, `boot-block`,
 //     `refresh`, `recall-for-file`) are FALLIBLE — they run repeatedly at
 //     runtime, where a typed `plugin-error` beats a trap.
@@ -162,9 +162,9 @@ interface types {
 }
 
 /// Host imports — the capability surface a plugin may call back into Axil with.
-/// Every call is gated by the plugin's granted capabilities (Phase 22.5); a
+/// Every call is gated by the plugin's granted capabilities; a
 /// denied call returns `plugin-error.permission-denied`. Record writes are
-/// constrained to the plugin's declared table prefixes (Phase 22.3).
+/// constrained to the plugin's declared table prefixes.
 interface host {
     use types.{json, hit, direction, log-level, plugin-error};
 

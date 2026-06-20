@@ -1,4 +1,4 @@
-//! Phase 17 — `Adapter` trait, the contract for Tier-3 extensibility.
+//! `Adapter` trait, the contract for Tier-3 extensibility.
 //!
 //! An Adapter is the interface between Axil and an external protocol
 //! (CLI argv, MCP stdio JSON-RPC, HTTP, GraphQL, AxilQL, etc.). It
@@ -43,7 +43,7 @@ pub trait Adapter {
     /// the same database (e.g. CLI + HTTP in the same process).
     ///
     /// The adapter is expected to inspect registered Extensions via
-    /// `db.extensions()` (once that lands in P1.2) and prepare its
+    /// `db.extensions()` (once that lands) and prepare its
     /// dispatch table here.
     fn bind(&mut self, db: Arc<Axil>) -> Result<()>;
 
@@ -56,7 +56,7 @@ pub trait Adapter {
         Self: Sized;
 }
 
-/// Phase 17 P2.3 — compose every registered Extension's CLI surface
+/// compose every registered Extension's CLI surface
 /// into a flat list.
 ///
 /// An Adapter (typically `axil-cli`) calls this once after `bind()`
@@ -73,7 +73,7 @@ pub fn compose_cli_surface(extensions: &[Arc<dyn Extension>]) -> Vec<CliSurface>
         .collect()
 }
 
-/// Phase 17 P2.3 — compose every registered Extension's MCP tool
+/// compose every registered Extension's MCP tool
 /// surface into a flat list.
 ///
 /// An Adapter (typically `axil-mcp`) calls this once after `bind()`
@@ -87,7 +87,7 @@ pub fn compose_mcp_surface(extensions: &[Arc<dyn Extension>]) -> Vec<McpSurface>
         .collect()
 }
 
-/// Phase 17 P2.3 — route a CLI invocation to whichever registered
+/// route a CLI invocation to whichever registered
 /// Extension owns the matched top-level subcommand.
 ///
 /// **Path C semantics:** the first Extension whose
@@ -116,7 +116,7 @@ pub fn dispatch_cli(
                     return Ok(result);
                 }
                 // Extension matched the top-level command but declined
-                // — keep walking; another Extension may claim the same
+                // keep walking; another Extension may claim the same
                 // top-level command for a different subcommand. This is
                 // unusual but the builder doesn't enforce uniqueness on
                 // top-level CLI names (only on table prefixes).
@@ -126,7 +126,7 @@ pub fn dispatch_cli(
     Ok(Dispatch::NotHandled)
 }
 
-/// Phase 17 P2.3 — route an MCP tool call to whichever registered
+/// route an MCP tool call to whichever registered
 /// Extension owns the named tool. Same Path C semantics as
 /// [`dispatch_cli`].
 pub fn dispatch_mcp(
@@ -203,7 +203,7 @@ mod tests {
         assert_ne!(Protocol::Custom("x"), Protocol::Custom("y"));
     }
 
-    // ---- Phase 17 P2.3 — compose + dispatch helpers ----
+    // ---- — compose + dispatch helpers ----
 
     use crate::extension::{
         CliInvocation, CliOutput, CliSurface, McpCall, McpSurface, McpTool,

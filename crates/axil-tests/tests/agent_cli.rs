@@ -1,4 +1,4 @@
-//! Integration tests for the agent-first CLI (Phase 4b).
+//! Integration tests for the agent-first CLI.
 //!
 //! These tests invoke the `axil` binary and verify JSON output, exit codes,
 //! env var support, piping, and end-to-end agent workflows.

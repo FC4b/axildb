@@ -1,4 +1,4 @@
-//! CLI handlers for Phase 14 workspace / consent / bridge commands.
+//! CLI handlers for workspace / consent / bridge commands.
 
 use std::path::{Path, PathBuf};
 
@@ -1419,7 +1419,7 @@ mod tests {
         assert_eq!(scip_canonical_id(&entity("local 0")), None);
         assert_eq!(scip_canonical_id(&entity("local 42")), None);
 
-        // Phase 13 provisional rows are pre-canonical and must not bridge.
+        // Provisional rows are pre-canonical and must not bridge.
         assert_eq!(scip_canonical_id(&entity("provisional:abc123def")), None,);
 
         // Records with no canonical_id, or non-string canonical_id, are skipped.

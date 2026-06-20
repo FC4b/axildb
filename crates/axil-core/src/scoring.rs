@@ -30,10 +30,10 @@ pub struct ScoreWeights {
     pub feedback: f32,
     pub temporal: f32,
     pub preference: f32,
-    /// Weight for activation-level scoring (Phase 8b.4).
+    /// Weight for activation-level scoring.
     #[serde(default = "default_activation_weight")]
     pub activation: f32,
-    /// Weight for importance scoring (Phase 10.1).
+    /// Weight for importance scoring.
     #[serde(default = "default_importance_weight")]
     pub importance: f32,
     /// Weight for reciprocal rank fusion (combines vector + FTS rank agreement).
@@ -108,14 +108,14 @@ pub struct RecallConfig {
     pub temporal_target: Option<TemporalTarget>,
     /// Keywords extracted from the query (lowercased, stop words removed).
     pub query_keywords: Vec<String>,
-    /// Activation-level scoring configuration (Phase 8b.4).
+    /// Activation-level scoring configuration.
     pub activation_config: crate::activation::ActivationConfig,
-    /// Phase 11.3: Optional scope filter. If set, only return records matching this scope.
+    /// Optional scope filter. If set, only return records matching this scope.
     /// Multiple scopes can be provided for "widen" queries.
     pub scope_filter: Vec<String>,
-    /// Phase 11.3: Minimum confidence threshold (0.0–1.0). Records below this are excluded.
+    /// Minimum confidence threshold (0.0–1.0). Records below this are excluded.
     pub min_confidence: Option<f32>,
-    /// Phase 11.3: Minimum importance threshold (0.0–1.0). Records below this are excluded.
+    /// Minimum importance threshold (0.0–1.0). Records below this are excluded.
     pub min_importance: Option<f32>,
     /// Query-Time Chunk reranking. When `Some(top_k)`, after session-level
     /// candidates are scored the top-K are re-scored by embedding their text
@@ -344,7 +344,7 @@ pub fn fuse_signals(
         0.0
     };
 
-    // Per-record adaptive reweighting was tried (Phase 13b) but hurt recall:
+    // Per-record adaptive reweighting was tried but hurt recall:
     // it penalized records with richer signal profiles because more active
     // signals → smaller scale factor per signal. On LongMemEval-s this flipped
     // recency-dominated distractors past answer records. Keeping the static

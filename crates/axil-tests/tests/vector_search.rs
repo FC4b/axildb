@@ -210,7 +210,7 @@ fn add_vector_rejects_nan() {
     assert!(result.unwrap_err().to_string().contains("NaN"));
 }
 
-// ── New Phase 2b tests ─────────────────────────────────────────────
+// ── New tests ─────────────────────────────────────────────
 
 #[test]
 fn files_returns_correct_paths() {

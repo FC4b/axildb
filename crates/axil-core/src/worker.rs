@@ -35,7 +35,7 @@ pub struct WorkerReport {
     /// Number of records whose effective importance was updated by decay.
     #[serde(default)]
     pub decayed_records: usize,
-    // ── Phase 11.7: Brain consolidation fields ──
+    // ── Brain consolidation fields ──
     /// Number of stale beliefs detected and auto-doubted.
     #[serde(default)]
     pub stale_beliefs: usize,
@@ -53,7 +53,7 @@ pub struct WorkerReport {
 /// Background worker that runs maintenance tasks on an Axil database.
 pub struct AxilWorker<'a> {
     db: &'a Axil,
-    /// When true, also run Phase 11.7 brain consolidation tasks.
+    /// When true, also run brain consolidation tasks.
     brain_mode: bool,
 }
 
@@ -66,7 +66,7 @@ impl<'a> AxilWorker<'a> {
         }
     }
 
-    /// Enable brain consolidation tasks (Phase 11.7).
+    /// Enable brain consolidation tasks.
     pub fn with_brain(mut self) -> Self {
         self.brain_mode = true;
         self
@@ -94,7 +94,7 @@ impl<'a> AxilWorker<'a> {
         let stale_detected = self.detect_stale();
         let decayed_records = self.run_decay();
 
-        // Phase 11.7: Brain consolidation tasks.
+        // Brain consolidation tasks.
         let (stale_beliefs, candidate_procedures, candidate_preferences, duplicate_clusters) =
             if self.brain_mode {
                 (
@@ -368,7 +368,7 @@ impl<'a> AxilWorker<'a> {
         updated
     }
 
-    // ── Phase 11.7: Brain consolidation tasks ──────────────────────
+    // ── Brain consolidation tasks ──────────────────────
 
     /// Detect beliefs that haven't been validated recently and auto-doubt them.
     fn detect_stale_beliefs(&self) -> usize {

@@ -240,7 +240,7 @@ impl Storage {
 
     /// Overwrite a record's metadata JSON. Returns the updated record.
     ///
-    /// Introduced for Phase 14 so consent scopes can be toggled without
+    /// Introduced for so consent scopes can be toggled without
     /// disturbing `data` or `updated_at`. Touches neither the table index
     /// nor plugin hooks — metadata is a side-channel.
     pub fn set_metadata(

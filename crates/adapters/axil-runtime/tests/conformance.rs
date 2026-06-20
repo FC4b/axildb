@@ -1,4 +1,4 @@
-//! Host-ABI conformance suite (Phase 22.10).
+//! Host-ABI conformance suite.
 //!
 //! Drives the `conformance-guest` fixture — a real WASM component that calls
 //! every `axil:plugin` host import — through the `WasmExtension` shim, asserting

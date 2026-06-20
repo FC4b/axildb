@@ -39,8 +39,7 @@ impl Extension for DocsExtension {
     /// `_dep_manifests`. The single declared prefix `_dep` is a prefix
     /// of all three.
     ///
-    /// > **Note on naming:** the prefix is `_dep` (legacy — Phase 16
-    /// > predates the Phase 17 convention). The `_deps` table name
+    /// > **Note on naming:** the prefix is `_dep` (legacy —    /// > predates the convention). The `_deps` table name
     /// > without a trailing underscore is why the prefix isn't `_dep_`.
     /// > New Extensions should use `_<id>_` (e.g. `_myext_`); see
     /// > `docs/src/extending/extensions.md`.
@@ -85,7 +84,7 @@ impl Extension for DocsExtension {
         ))
     }
 
-    /// Phase 17 P3.1 — MCP tool surface for `axil-docs`.
+    /// MCP tool surface for `axil-docs`.
     ///
     /// Today this exposes the read-only `deps_status` tool (the same
     /// shape `axil-mcp` already serves via its hard-coded handler).
@@ -167,7 +166,7 @@ impl Extension for DocsExtension {
         }
     }
 
-    /// Phase 17 P3.2 — CLI dispatch handler.
+    /// CLI dispatch handler.
     ///
     /// Handles `deps status [--path <dir>]`, mirroring `axil-cli`'s
     /// `run_deps`'s `DepsCommand::Status` JSON shape exactly. Path C
@@ -593,7 +592,7 @@ mod tests {
         assert_eq!(db.extensions()[0].table_prefixes(), &["_dep"]);
     }
 
-    // ---- Phase 17 P3.1 — MCP dispatch tests ----
+    // ---- — MCP dispatch tests ----
 
     #[test]
     fn mcp_surface_lists_deps_status() {
@@ -640,7 +639,7 @@ mod tests {
         assert!(matches!(result, Dispatch::NotHandled));
     }
 
-    // ---- Phase 17 P3.2 — handle_cli tests ----
+    // ---- — handle_cli tests ----
 
     #[test]
     fn handle_cli_unknown_path_declines() {
@@ -659,7 +658,7 @@ mod tests {
         ));
     }
 
-    /// Phase 17 P3.4 — byte-identical-shape verification.
+    /// byte-identical-shape verification.
     ///
     /// Asserts that the JSON shape `DocsExtension::handle_cli`
     /// produces for `deps status` matches what `axil-cli`'s

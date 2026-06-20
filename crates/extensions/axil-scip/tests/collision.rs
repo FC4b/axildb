@@ -1,4 +1,4 @@
-//! Cross-language collision test — Phase 13 acceptance.
+//! Cross-language collision test — acceptance.
 //!
 //! `login` defined in both a Rust document and a Python document must
 //! produce two distinct `_entities` rows with distinct canonical ids.

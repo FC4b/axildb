@@ -1,4 +1,4 @@
-//! Structural code proxies (Phase 13b).
+//! Structural code proxies.
 //!
 //! A `CodeProxy` is a small, structure-aware record that points back to an
 //! exact file, symbol, or markdown section. Proxies are embedded and FTS-
@@ -317,7 +317,7 @@ fn signature_hash(sig: Option<&str>) -> Option<String> {
     sig.map(normalize_signature).map(|s| short_hash(&s))
 }
 
-/// Phase 13b.8 P1: backfill report — counts proxies that gained a
+/// P1: backfill report — counts proxies that gained a
 /// canonical_id (and a new proxy_id) after a SCIP ingest.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct BackfillReport {
@@ -326,7 +326,7 @@ pub struct BackfillReport {
     pub ambiguous: usize,
 }
 
-/// Phase 13b.8 P1: rewrite `_idx_code_proxies` rows that did not have a
+/// P1: rewrite `_idx_code_proxies` rows that did not have a
 /// SCIP `canonical_id` when they were built so they pick up the canonical
 /// id (and a new stable `proxy_id`) once SCIP data exists in the DB.
 ///
@@ -339,7 +339,7 @@ pub struct BackfillReport {
 ///
 /// `proxy_id` is recomputed using the existing identity rule (project,
 /// path, kind, canonical_id, signature_hash). The old proxy is updated
-/// in-place — Phase 13b's identity rule (canonical_id dominates) means
+/// in-place — 's identity rule (canonical_id dominates) means
 /// the new id is the durable one going forward; old code_refs that
 /// pointed at the regex-only proxy_id continue to work via path/symbol
 /// fallback in `related_memories_for_proxies`.

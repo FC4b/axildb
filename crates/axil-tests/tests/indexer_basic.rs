@@ -1,4 +1,4 @@
-//! Integration tests for the project indexer (Phase 4d).
+//! Integration tests for the project indexer.
 
 use serde_json::json;
 use std::fs;

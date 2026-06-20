@@ -1,4 +1,4 @@
-//! Integration tests for Phase 4e: Agent Runtime.
+//! Integration tests for : Agent Runtime.
 
 use serde_json::json;
 use std::fs;

@@ -196,7 +196,7 @@ enum OutputFormat {
     Table,
 }
 
-/// Recall output format (8b.19 + 12.1).
+/// Recall output format.
 #[derive(Clone, ValueEnum, Default)]
 enum RecallFormat {
     /// Full JSON (default).
@@ -230,7 +230,7 @@ enum RerankMode {
     Llm,
 }
 
-/// Boot context output format (8b.21).
+/// Boot context output format.
 #[derive(Clone, ValueEnum, Default)]
 enum BootFormat {
     /// Structured JSON (default).
@@ -684,7 +684,7 @@ enum Command {
     #[command(external_subcommand)]
     External(Vec<String>),
 
-    /// Dependency documentation memory (Phase 16).
+    /// Dependency documentation memory.
     ///
     /// `deps list` resolves the project's dependencies to their exact
     /// lockfile versions — the foundation for version-pinned library
@@ -693,7 +693,7 @@ enum Command {
     #[command(subcommand)]
     Deps(DepsCommand),
 
-    /// Query the dependency documentation memory (Phase 16).
+    /// Query the dependency documentation memory.
     ///
     /// Returns version-pinned doc chunks for the project's
     /// dependencies. Run `axil deps sync` first to populate them.
@@ -715,7 +715,7 @@ enum Command {
     },
 
     /// Write or read a structured session checkpoint so a fresh agent can
-    /// pick up where the last session left off (Phase 18).
+    /// pick up where the last session left off.
     ///
     /// Common shapes:
     ///   axil checkpoint '{"goal":"…","next_steps":["…"]}'
@@ -1742,7 +1742,7 @@ enum Command {
         file: Option<String>,
     },
 
-    // ── Agent memory commands (Phase 5) ────────────────────────────
+    // ── Agent memory commands ────────────────────────────
     /// Store a fact about an entity (semantic memory).
     #[cfg(feature = "memory")]
     Know {
@@ -1851,7 +1851,7 @@ enum Command {
         id: String,
     },
 
-    // ── Phase 5e: Intelligent Database ─────────────────────────────
+    // ── Intelligent Database ─────────────────────────────
     /// Auto-link a record: extract entities and create graph edges.
     #[cfg(all(feature = "embed", feature = "graph"))]
     AutoLink {
@@ -1927,14 +1927,14 @@ enum Command {
     /// Warm up the database (rebuild indexes, prepare caches).
     WarmUp,
 
-    // ── LLM provider commands (Phase 5f) ──────────────────────────────
+    // ── LLM provider commands ──────────────────────────────
     /// LLM provider management.
     Llm {
         #[command(subcommand)]
         command: LlmCommand,
     },
 
-    // ── Phase 8b: AI Agent Performance ──────────────────────────────
+    // ── AI Agent Performance ──────────────────────────────
     /// Extract entities from text using pattern-based extraction (no LLM).
     ///
     /// Extracts file paths, CamelCase/snake_case identifiers, backtick code,
@@ -2046,7 +2046,7 @@ enum Command {
         source: String,
     },
 
-    /// Axil Brain mode management (Phase 11.10).
+    /// Axil Brain mode management.
     ///
     /// Enable/disable brain mode, check status, trigger reflection, debug memories, run evals.
     #[command(subcommand)]
@@ -2106,8 +2106,8 @@ enum Command {
         top_k: usize,
     },
 
-    // ── Phase 11: Agent Brain ──────────────────────────────────────────
-    /// Observe and remember — unified write entry point (Phase 11.1).
+    // ── Agent Brain ──────────────────────────────────────────
+    /// Observe and remember — unified write entry point.
     ///
     /// Routes observations through the decision pipeline:
     /// classify → scope → resolve (dedup/supersede) → score → commit.
@@ -2186,14 +2186,14 @@ enum Command {
         id: String,
     },
 
-    /// Backfill provenance metadata on pre-Phase 11 records.
+    /// Backfill provenance metadata on legacy records.
     ///
     /// Adds _source, _scope, _confidence, _verified fields to records
     /// that predate the brain pipeline. Safe to run multiple times.
     #[command(name = "migrate-provenance")]
     MigrateProvenance,
 
-    /// Revise beliefs based on new evidence text (Phase 11.4).
+    /// Revise beliefs based on new evidence text.
     ///
     /// Checks all existing beliefs against the observation and automatically
     /// reinforces, supersedes, doubts, or creates competing hypotheses.
@@ -2203,19 +2203,19 @@ enum Command {
         text: String,
     },
 
-    /// Agent self-memory management (Phase 11.6).
+    /// Agent self-memory management.
     #[command(subcommand, name = "self")]
     SelfMemory(SelfCommand),
 
-    /// Project operating model (Phase 11.6).
+    /// Project operating model.
     #[command(subcommand, name = "project-model")]
     ProjectModel(ProjectModelCommand),
 
-    /// User contract rules (Phase 11.6).
+    /// User contract rules.
     #[command(subcommand, name = "user-contract")]
     UserContract(UserContractCommand),
 
-    /// Show belief history for a topic (Phase 11.4).
+    /// Show belief history for a topic.
     ///
     /// Includes current and doubted/superseded beliefs to show evolution.
     #[command(name = "belief-history")]
@@ -2256,11 +2256,11 @@ enum Command {
     #[command(name = "memory-policy")]
     MemoryPolicy,
 
-    /// Run the brain eval suite (Phase 11.9).
+    /// Run the brain eval suite.
     #[command(name = "brain-eval")]
     BrainEval,
 
-    /// Explain why a record was remembered (stored) — Phase 11.5.
+    /// Explain why a record was remembered (stored) — .
     ///
     /// Shows source event, classifier decision, importance breakdown,
     /// scope assignment, related memories considered, resolution.
@@ -2270,7 +2270,7 @@ enum Command {
         id: String,
     },
 
-    /// Explain why a record was recalled for a query — Phase 11.5.
+    /// Explain why a record was recalled for a query — .
     ///
     /// Shows score breakdown, scope filter, trust tier, and ranking position.
     #[command(name = "why-recalled")]
@@ -2281,7 +2281,7 @@ enum Command {
         query: String,
     },
 
-    /// Explain why a record was revised (superseded/doubted) — Phase 11.5.
+    /// Explain why a record was revised (superseded/doubted) — .
     ///
     /// Shows the evidence that caused the revision, confidence change, and related records.
     #[command(name = "why-revised")]
@@ -2290,7 +2290,7 @@ enum Command {
         id: String,
     },
 
-    // ── Phase 5d: Worker & Branching ──────────────────────────────────
+    // ── Worker & Branching ──────────────────────────────────
     /// Run background worker tasks (consolidation, connection strengthening, stale detection).
     Worker {
         #[command(subcommand)]
@@ -2303,7 +2303,7 @@ enum Command {
         command: BranchCommand,
     },
 
-    // ── MCP server (Phase 4) ─────────────────────────────────────────
+    // ── MCP server ─────────────────────────────────────────
     /// Start the MCP (Model Context Protocol) server over stdio.
     #[cfg(feature = "mcp")]
     Mcp {
@@ -2313,7 +2313,7 @@ enum Command {
         otel_endpoint: Option<String>,
     },
 
-    // ── HTTP API server (Phase 7) ────────────────────────────────────
+    // ── HTTP API server ────────────────────────────────────
     /// Start the HTTP API server.
     #[cfg(feature = "http")]
     Serve {
@@ -2325,7 +2325,7 @@ enum Command {
         port: u16,
     },
 
-    // ── Phase 5d: Active Memory ──────────────────────────────────────
+    // ── Active Memory ──────────────────────────────────────
     /// Reflect on memory — synthesize patterns and insights across all memory types.
     #[cfg(feature = "memory")]
     Reflect {
@@ -2403,8 +2403,8 @@ enum Command {
         id: String,
     },
 
-    // ── Phase 14: Workspace / consent / bridges ────────────────────
-    /// Manage multi-project workspaces (Phase 14).
+    // ── Workspace / consent / bridges ────────────────────
+    /// Manage multi-project workspaces.
     Workspace {
         #[command(subcommand)]
         op: WorkspaceOp,
@@ -2422,7 +2422,7 @@ enum Command {
         op: BridgeOp,
     },
 
-    /// Cross-project recall fan-out (Phase 14 free-tier).
+    /// Cross-project recall fan-out.
     ///
     /// Fans out the query to every named sibling DB, filters each
     /// sibling's results by its own `read_consent`, and merges with
@@ -2623,7 +2623,7 @@ enum ConfigCommand {
     },
 }
 
-// ── Phase 11.6: Self memory, project model, user contract subcommands ──
+// ── Self memory, project model, user contract subcommands ──
 
 #[derive(Subcommand)]
 enum SelfCommand {
@@ -2665,7 +2665,7 @@ enum UserContractCommand {
     List,
 }
 
-// ── Phase 11.10: Brain mode subcommands ──
+// ── Brain mode subcommands ──
 
 /// `axil scip` subcommands. Closes the loop between `axil doctor`
 /// (which reports SCIP missing/stale) and `axil ingest-scip` (which
@@ -2731,7 +2731,7 @@ enum ScipCommand {
     Status,
 }
 
-/// `axil deps` subcommands — Phase 16 dependency documentation memory.
+/// `axil deps` subcommands — dependency documentation memory.
 #[cfg(feature = "deps")]
 #[cfg(feature = "wasm-host")]
 #[derive(Subcommand)]
@@ -2807,7 +2807,7 @@ enum DepsCommand {
         #[arg(long, default_value = ".")]
         path: PathBuf,
         /// Local-only: never touch the network. Currently always on —
-        /// the web fallback is a later Phase 16 increment.
+        /// the web fallback is a later increment.
         #[arg(long)]
         offline: bool,
         /// Also ingest transitive dependencies that the project's own
@@ -2895,7 +2895,7 @@ enum WorkerCommand {
     /// Run all worker tasks (consolidation, connections, stale detection).
     /// With --brain, also runs belief revision, procedure/preference extraction, dedup.
     Run {
-        /// Enable brain consolidation tasks (Phase 11.7).
+        /// Enable brain consolidation tasks.
         #[arg(long)]
         brain: bool,
     },
@@ -3009,7 +3009,7 @@ enum ScheduleOp {
     },
 }
 
-// ── Phase 14: Workspace / consent / bridge / atlas subcommands ────
+// ── Workspace / consent / bridge / atlas subcommands ────
 
 #[derive(Subcommand)]
 enum WorkspaceOp {
@@ -3063,7 +3063,7 @@ enum ConsentOp {
         #[arg(long)]
         write: Option<String>,
     },
-    /// Export the audit log for consent changes (Phase 14.8).
+    /// Export the audit log for consent changes.
     Audit {
         /// Filter to entries newer than this ISO timestamp.
         #[arg(long)]
@@ -5204,7 +5204,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                     continue;
                 }
 
-                // Shared with the Phase 4d indexer so one hash function catches all change-detection paths.
+                // Shared with the indexer so one hash function catches all change-detection paths.
                 let hash = axil_indexer::indexer::hash_content(&content);
                 if let Some(prev_hash) = prev_entry
                     .and_then(|v| v.get("hash"))
@@ -5498,7 +5498,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                 });
             }
 
-            // Multi-agent framework support (8b.20)
+            // Multi-agent framework support
             let agents_installed = install_agent_integrations(
                 &cwd,
                 &db_path,
@@ -5842,7 +5842,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                 }
             }
 
-            // Phase 13.2b: SCIP detection block.
+            // B: SCIP detection block.
             #[cfg(feature = "scip")]
             {
                 use axil_core::diagnostics::{CheckResult, Severity};
@@ -6439,7 +6439,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                 // Atomically claim the lock BEFORE spawning (shared
                 // `LockGuard::try_acquire`, same as scip-refresh). If a racing
                 // invocation created it between our mtime check and here, bail
-                // — the guard a plain `fs::write` would miss. `mem::forget`
+                // the guard a plain `fs::write` would miss. `mem::forget`
                 // keeps the file for the detached child, which removes it on exit.
                 let pid = std::process::id().to_string();
                 match LockGuard::try_acquire(lock_path.clone(), &pid) {
@@ -6974,7 +6974,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                 })
                 .transpose()?;
 
-            // Both paths use db.recall() for multi-signal scoring (Phase 5e unified)
+            // Both paths use db.recall() for multi-signal scoring
             let alpha = alpha.clamp(0.0, 1.0);
             let scope_filter: Vec<String> = if let Some(s) = scope.as_deref() {
                 let mut out = Vec::new();
@@ -7353,7 +7353,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             let recall_ms = recall_start.elapsed().as_secs_f64() * 1000.0;
             db.record_slow_query(&format!("recall {query}"), recall_ms, values.len());
 
-            // Apply format and budget (8b.19)
+            // Apply format and budget
             match recall_format {
                 RecallFormat::ContextBlock => {
                     // Plain-text block — not JSON — so bypass out.print_array entirely.
@@ -9379,7 +9379,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             Ok(EXIT_OK)
         }
 
-        // ── Phase 5e: Intelligent Database ─────────────────────────────
+        // ── Intelligent Database ─────────────────────────────
         #[cfg(all(feature = "embed", feature = "graph"))]
         Command::AutoLink { id, threshold } => {
             let db_path = require_db(&db_opt)?;
@@ -9565,7 +9565,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             Ok(EXIT_OK)
         }
 
-        // ── LLM commands (Phase 5f) ────────────────────────────────
+        // ── LLM commands ────────────────────────────────
         Command::Llm { command: llm_cmd } => {
             let db_path = require_db(&db_opt)?;
             match llm_cmd {
@@ -9649,7 +9649,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             Ok(EXIT_OK)
         }
 
-        // ── Phase 13.2: SCIP ingest ────────────────────────────────
+        // ── SCIP ingest ────────────────────────────────
         #[cfg(feature = "scip")]
         Command::IngestScip {
             path,
@@ -9852,7 +9852,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
 
         #[cfg(feature = "deps")]
         Command::Deps(action) => {
-            // Phase 17 P3.2 — try Extension dispatch first; fall back
+            // try Extension dispatch first; fall back
             // to the hardcoded `run_deps` for any subcommand the
             // Extension doesn't claim. DocsExtension::handle_cli
             // currently claims only `deps status`; the rest stay on
@@ -10608,7 +10608,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             Ok(EXIT_OK)
         }
 
-        // ── Extract Entities (8b.18) ────────────────────────────────
+        // ── Extract Entities ────────────────────────────────
         Command::ExtractEntities { text } => {
             let input = if text == "-" {
                 let mut buf = String::new();
@@ -10640,7 +10640,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             Ok(EXIT_OK)
         }
 
-        // ── Boot (8b.21) ───────────────────────────────────────────
+        // ── Boot ───────────────────────────────────────────
         Command::Boot {
             budget,
             boot_format,
@@ -11456,7 +11456,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             Ok(EXIT_OK)
         }
 
-        // ── Phase 13.3: Recall for entity ──────────────────────────
+        // ── Recall for entity ──────────────────────────
         #[cfg(feature = "scip")]
         Command::RecallForEntity {
             entity,
@@ -11614,7 +11614,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                 }
             }
 
-            // Pass-4 (Phase 14.5): follow `_entity_bridges` to sibling
+            // Pass-4: follow `_entity_bridges` to sibling
             // members where the bridge confidence clears the workspace's
             // `federation.min_bridge_confidence` threshold. Remote
             // mentions are pulled with provenance tags. No-op when no
@@ -11818,7 +11818,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                 }
             }
 
-            // Pass 4 (Phase 13.3): entity-level neighbors via SCIP edges.
+            // Pass 4: entity-level neighbors via SCIP edges.
             // For each entity whose `defined_in` edge points at this file,
             // surface memories attached to callers/callees/references.
             #[cfg(feature = "scip")]
@@ -11827,7 +11827,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                 hits.append(&mut pass4);
             }
 
-            // Pass 5 (Phase 16): dependency docs for the file's imports.
+            // Pass 5: dependency docs for the file's imports.
             // Scans the file's import statements; for each that maps to a
             // synced dependency, surfaces a representative doc chunk.
             #[cfg(feature = "deps")]
@@ -11879,7 +11879,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             Ok(EXIT_OK)
         }
 
-        // ── Phase 11: Observe (unified write entry point) ──────────
+        // ── Observe (unified write entry point) ──────────
         Command::Observe {
             text,
             stdin,
@@ -12007,7 +12007,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             Ok(EXIT_OK)
         }
 
-        // ── Phase 11: Inspect memory ──────────────────────────────────
+        // ── Inspect memory ──────────────────────────────────
         Command::InspectMemory { id } => {
             let db_path = require_db(&db_opt)?;
             let db = open_with_all_detected(&db_path)?;
@@ -12081,7 +12081,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             Ok(EXIT_OK)
         }
 
-        // ── Phase 11: Trace memory ────────────────────────────────────
+        // ── Trace memory ────────────────────────────────────
         Command::TraceMemory { id } => {
             let db_path = require_db(&db_opt)?;
             let db = open_with_all_detected(&db_path)?;
@@ -12152,7 +12152,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             Ok(EXIT_OK)
         }
 
-        // ── Phase 11.10: Brain mode ───────────────────────────────────
+        // ── Brain mode ───────────────────────────────────
         Command::Brain(cmd) => {
             let db_path = require_db(&db_opt)?;
             match cmd {
@@ -12287,14 +12287,14 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             }
         }
 
-        // ── Phase 11.9: Brain eval ────────────────────────────────────
+        // ── Brain eval ────────────────────────────────────
         Command::BrainEval => {
             let report = run_brain_eval_scratch()?;
             out.print(&report);
             Ok(EXIT_OK)
         }
 
-        // ── Phase 11.8: Redact ───────────────────────────────────────
+        // ── Redact ───────────────────────────────────────
         Command::Redact { id, field } => {
             let db_path = require_db(&db_opt)?;
             let db = open_with_all_detected(&db_path)?;
@@ -12305,7 +12305,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             Ok(EXIT_OK)
         }
 
-        // ── Phase 11.8: Retention ─────────────────────────────────────
+        // ── Retention ─────────────────────────────────────
         Command::Retention { command } => {
             let db_path = require_db(&db_opt)?;
             let db = open_with_all_detected(&db_path)?;
@@ -12324,7 +12324,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             Ok(EXIT_OK)
         }
 
-        // ── Phase 11.8: Pin/Unpin ─────────────────────────────────────
+        // ── Pin/Unpin ─────────────────────────────────────
         Command::Pin { id } => {
             let db_path = require_db(&db_opt)?;
             let db = open_with_all_detected(&db_path)?;
@@ -12345,7 +12345,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             Ok(EXIT_OK)
         }
 
-        // ── Phase 11.8: Memory policy ─────────────────────────────────
+        // ── Memory policy ─────────────────────────────────
         Command::MemoryPolicy => {
             let db_path = require_db(&db_opt)?;
             let db = open_with_all_detected(&db_path)?;
@@ -12355,7 +12355,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             Ok(EXIT_OK)
         }
 
-        // ── Phase 11.6: Self memory ──────────────────────────────────
+        // ── Self memory ──────────────────────────────────
         Command::SelfMemory(cmd) => {
             let db_path = require_db(&db_opt)?;
             let db = open_with_all_detected(&db_path)?;
@@ -12374,7 +12374,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             Ok(EXIT_OK)
         }
 
-        // ── Phase 11.6: Project model ─────────────────────────────────
+        // ── Project model ─────────────────────────────────
         Command::ProjectModel(cmd) => {
             let db_path = require_db(&db_opt)?;
             let db = open_with_all_detected(&db_path)?;
@@ -12398,7 +12398,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             Ok(EXIT_OK)
         }
 
-        // ── Phase 11.6: User contract ─────────────────────────────────
+        // ── User contract ─────────────────────────────────
         Command::UserContract(cmd) => {
             let db_path = require_db(&db_opt)?;
             let db = open_with_all_detected(&db_path)?;
@@ -12417,7 +12417,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             Ok(EXIT_OK)
         }
 
-        // ── Phase 11: Why remembered ──────────────────────────────────
+        // ── Why remembered ──────────────────────────────────
         Command::WhyRemembered { id } => {
             let db_path = require_db(&db_opt)?;
             let db = open_with_all_detected(&db_path)?;
@@ -12428,7 +12428,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             Ok(EXIT_OK)
         }
 
-        // ── Phase 11: Why recalled ────────────────────────────────────
+        // ── Why recalled ────────────────────────────────────
         Command::WhyRecalled { id, query } => {
             let db_path = require_db(&db_opt)?;
             let db = open_with_all_detected(&db_path)?;
@@ -12439,7 +12439,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             Ok(EXIT_OK)
         }
 
-        // ── Phase 11: Why revised ─────────────────────────────────────
+        // ── Why revised ─────────────────────────────────────
         Command::WhyRevised { id } => {
             let db_path = require_db(&db_opt)?;
             let db = open_with_all_detected(&db_path)?;
@@ -12450,7 +12450,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             Ok(EXIT_OK)
         }
 
-        // ── Phase 11: Revise beliefs ───────────────────────────────────
+        // ── Revise beliefs ───────────────────────────────────
         Command::ReviseBeliefs { text } => {
             let db_path = require_db(&db_opt)?;
             let db = open_with_all_detected(&db_path)?;
@@ -12463,7 +12463,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             Ok(EXIT_OK)
         }
 
-        // ── Phase 11: Belief history ──────────────────────────────────
+        // ── Belief history ──────────────────────────────────
         Command::BeliefHistory { topic } => {
             let db_path = require_db(&db_opt)?;
             let db = open_with_all_detected(&db_path)?;
@@ -12490,7 +12490,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             Ok(EXIT_OK)
         }
 
-        // ── Phase 11: Verify ───────────────────────────────────────────
+        // ── Verify ───────────────────────────────────────────
         Command::Verify { id } => {
             let db_path = require_db(&db_opt)?;
             let db = open_with_all_detected(&db_path)?;
@@ -12505,7 +12505,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             Ok(EXIT_OK)
         }
 
-        // ── Phase 11: Migrate provenance ──────────────────────────────
+        // ── Migrate provenance ──────────────────────────────
         Command::MigrateProvenance => {
             let db_path = require_db(&db_opt)?;
             let db = open_with_all_detected(&db_path)?;
@@ -12949,7 +12949,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             Ok(EXIT_OK)
         }
 
-        // ── Phase 14 ──────────────────────────────────────────────────
+        // ── ──────────────────────────────────────────────────
         Command::Workspace { op } => workspace::handle_workspace(op, &db_opt, out),
         Command::Consent { op } => workspace::handle_consent(op, &db_opt, out),
         Command::Bridge { op } => workspace::handle_bridge(op, &db_opt, out),
@@ -13028,7 +13028,7 @@ fn detect_project_root(db_path: &Path) -> Option<PathBuf> {
     db_path.parent().map(|p| p.to_path_buf())
 }
 
-// ─── Phase 16: dependency documentation memory ──────────────────────────────
+// ─── dependency documentation memory ──────────────────────────────
 
 /// Scan a source file for the external packages it imports.
 ///
@@ -13119,7 +13119,7 @@ fn js_first_quoted(line: &str) -> Option<&str> {
 /// dependency across many members. Path (first-party) dependencies are
 /// excluded: dep-docs target external registry libraries only.
 #[cfg(feature = "deps")]
-/// Phase 17 P3 follow-up — wrapper around the relocated
+/// P3 follow-up — wrapper around the relocated
 /// `axil_docs::collect_unique_deps`. Adapts the `DocsError` return
 /// to `anyhow::Result` so the rest of `axil-cli` stays unchanged.
 fn deps_collect_unique(
@@ -13129,7 +13129,7 @@ fn deps_collect_unique(
     axil_docs::collect_unique_deps(manifests, include_dev).map_err(|e| anyhow::anyhow!("{e}"))
 }
 
-/// Phase 17 P3 follow-up — wrapper around the relocated
+/// P3 follow-up — wrapper around the relocated
 /// `axil_docs::ingest_manifests`. Adapts `DocsError` to `anyhow`.
 #[cfg(feature = "deps")]
 fn deps_ingest_manifests(
@@ -13152,7 +13152,7 @@ fn deps_sweep_removed(
     axil_docs::sweep_removed_for_manifests(db, all_manifests).map_err(|e| anyhow::anyhow!("{e}"))
 }
 
-/// `axil deps` — Phase 16 dependency documentation memory.
+/// `axil deps` — dependency documentation memory.
 #[cfg(feature = "deps")]
 /// Route a `axil deps …` invocation through the registered
 /// `DocsExtension` (or any other Extension that claims the `deps`
@@ -13330,7 +13330,7 @@ fn try_deps_extension_dispatch(
     }
 }
 
-/// Phase 18 — route `axil checkpoint …` through the CheckpointExtension's
+/// route `axil checkpoint …` through the CheckpointExtension's
 /// CLI surface via Path C dispatch. `arg` is the optional positional
 /// (inline JSON, `-` for stdin, or the literal `show`); `session` and
 /// `is_final` are clap-parsed flags. When the positional is missing or
@@ -14050,7 +14050,7 @@ fn run_ext(cmd: ExtCommand, db_opt: &Option<PathBuf>, out: &Output) -> Result<i3
                     let rec = wasm_plugins::load_one(&db, &host, &p, &config, false, None);
                     if rec.id.as_deref() == Some(id.as_str()) {
                         std::fs::remove_file(&p).context("failed to delete plugin file")?;
-                        // Sweep the orphaned compiled-module cache entry (22.9).
+                        // Sweep the orphaned compiled-module cache entry.
                         let cache_file =
                             dir.join(".cache").join(format!("{}.cwasm", wasm_plugins::plugin_key(&p)));
                         let _ = std::fs::remove_file(&cache_file);
@@ -14462,7 +14462,7 @@ fn run_report(cmd: ReportCommand, db_opt: &Option<PathBuf>, out: &Output) -> Res
     }
 }
 
-// ─── Token-budgeted recall helpers (8b.19) ─────────────────────────────────
+// ─── Token-budgeted recall helpers ─────────────────────────────────
 
 /// Format recall results according to the specified format, then apply budget.
 fn format_recall_results(
@@ -15778,7 +15778,7 @@ fn apply_token_budget(v: &Value, budget: Option<usize>) -> Value {
     v.clone()
 }
 
-// ─── Boot context helpers (8b.21) ──────────────────────────────────────────
+// ─── Boot context helpers ──────────────────────────────────────────
 
 /// Convert boot JSON to a human-readable narrative format.
 fn boot_to_narrative(data: &Value) -> String {
@@ -15913,7 +15913,7 @@ fn compact_boot_json(data: &Value) -> Value {
     }
 }
 
-// ─── Multi-agent instructions (8b.20) ──────────────────────────────────────
+// ─── Multi-agent instructions ──────────────────────────────────────
 
 /// Core Axil commands shared across all agent instruction templates.
 const AXIL_COMMANDS: &str = r#"- `axil boot` — load previous session context

@@ -49,7 +49,7 @@ pub fn resolve_dependencies(
 /// Every package recorded in a manifest's lockfile — the full
 /// dependency closure as `name → exact version`.
 ///
-/// This is the *transitive* universe (Phase 16 P1.a): the lockfile
+/// This is the *transitive* universe: the lockfile
 /// pins every installed package, direct and indirect alike. Returns an
 /// empty map when the manifest has no lockfile, or for Go and Java —
 /// their manifests pin versions inline, so there is no separate

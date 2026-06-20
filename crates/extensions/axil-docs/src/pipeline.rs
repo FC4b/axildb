@@ -1,4 +1,4 @@
-//! Phase 17 P3 (deferred slice) — multi-manifest ingestion pipeline.
+//! P3 (deferred slice) — multi-manifest ingestion pipeline.
 //!
 //! The functions here previously lived as `axil-cli`-private helpers
 //! (`deps_collect_unique`, `collect_gated_transitive`,
@@ -64,7 +64,7 @@ pub fn collect_unique_deps(
 }
 
 /// Collect the transitive dependencies a project's own source actually
-/// imports (Phase 16 P1.a).
+/// imports.
 ///
 /// The lockfile closure minus the manifest-declared deps is the
 /// transitive universe; it is intersected with a scan of the project's
@@ -129,7 +129,7 @@ pub fn collect_gated_transitive(
 /// detection.
 ///
 /// With `transitive`, the transitive deps the project's own source
-/// imports are ingested too (Phase 16 P1.a).
+/// imports are ingested too.
 ///
 /// Returns the run summary as JSON. Schema:
 /// ```text
@@ -248,7 +248,7 @@ pub fn ingest_manifests(
 }
 
 /// Mark dependencies no longer declared in any manifest as `removed`
-/// — the *removed* set of the P0.4 drift diff.
+/// the *removed* set of the drift diff.
 ///
 /// Keyed on the **full** detected manifest set, so a partial
 /// `--if-stale` refresh never mistakes a still-declared dependency for

@@ -1,8 +1,8 @@
-//! Markdown heading splitter for structural recall (Phase 13b.5 P0).
+//! Markdown heading splitter for structural recall.
 //!
 //! Walks a markdown source by ATX headings (`#`, `##`, ...) and produces
 //! one `ParsedSection` per heading. Each section carries:
-//! - the full heading path (e.g. `["Phase 13b", "Data Model", "Identity"]`),
+//! - the full heading path (e.g. `[" ", "Data Model", "Identity"]`),
 //! - line start/end for navigation,
 //! - the heading text as the section "symbol",
 //! - the section body trimmed and squeezed for proxy text use.

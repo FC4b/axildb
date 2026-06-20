@@ -1,4 +1,4 @@
-//! Int8 scalar quantization for vectors (8b.5).
+//! Int8 scalar quantization for vectors.
 //!
 //! Per-dimension min/max scaling compresses f32 vectors to int8 (4x compression).
 //! Two-phase search: coarse pass with int8 dot product, re-rank top candidates with f32.
@@ -114,7 +114,7 @@ pub fn two_phase_search(
     query_f32: &[f32],
     top_k: usize,
 ) -> Vec<(usize, f32)> {
-    // Phase 1: Coarse pass with int8 — get 4x candidates
+    // Coarse pass with int8 — get 4x candidates
     let coarse_k = top_k.saturating_mul(4).min(quantized_vectors.len());
     let mut coarse_scores: Vec<(usize, f32)> = quantized_vectors
         .iter()
@@ -123,7 +123,7 @@ pub fn two_phase_search(
     coarse_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     coarse_scores.truncate(coarse_k);
 
-    // Phase 2: Re-rank with f32 cosine
+    // Re-rank with f32 cosine
     let candidate_indices: std::collections::HashSet<usize> =
         coarse_scores.iter().map(|(idx, _)| *idx).collect();
 

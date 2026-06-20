@@ -1,6 +1,6 @@
 //! Cross-encoder reranking stage for the Axil recall pipeline.
 //!
-//! Phase 15 P0.3 (Memory Quality Foundation): inserts a learned (query, passage)
+//! inserts a learned (query, passage)
 //! scorer between RRF fusion and token-budget trim. Replaces the prior
 //! in-tree reranker module (formerly `axil_indexer::rerank`) which was wired
 //! only via the CLI, never into [`axil_core::query::QueryBuilder`].
@@ -11,12 +11,12 @@
 //!     RERANK (top-50 → top-10)  →  token-budget trim  →  return
 //! ```
 //!
-//! Status (2026-05-16): **opt-in only.** Phase 15 was trimmed after four
+//! Status (2026-05-16): **opt-in only.** was trimmed after four
 //! benchmark sweeps (`01KPT2TDH6GDGZYBWK9BKWEYCC`, `01KPTFNP0WQJ0EDAK4SJWNW6KB`,
 //! `01KPTA6AA0YRKYPFKXTKAX53PF`, `01KPTA769A3NCX1YHBJ3GGPJ35`) showed the
 //! reranker did not clear the ≥+5 recall@K gate on LongMemEval-S. The crate
 //! stays in tree behind the `rerank` Cargo feature for future re-evaluation
-//! on different datasets (e.g. dep-docs in Phase 16). The original gate
+//! on different datasets (e.g. dep-docs in ). The original gate
 //! threshold — ≥+5 recall@K over reranker-off, p95 ≤80ms — is the bar to
 //! clear before any future default-on flip.
 //!

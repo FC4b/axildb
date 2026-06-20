@@ -1,4 +1,4 @@
-//! Binary embedding search via Hamming distance (8b.15).
+//! Binary embedding search via Hamming distance.
 //!
 //! Packs f32 vectors into binary (1 bit/dim = 32x compression).
 //! Two-phase search: fast Hamming scan for candidates, f32 re-rank for final results.
@@ -48,8 +48,8 @@ impl BinaryVector {
 
 /// Two-phase binary search: Hamming scan for candidates, f32 cosine re-rank.
 ///
-/// Phase 1: Scan all binary vectors (extremely fast, ~32x less memory than f32)
-/// Phase 2: Re-rank top 8*k candidates with f32 cosine similarity
+/// Scan all binary vectors (extremely fast, ~32x less memory than f32)
+/// Re-rank top 8*k candidates with f32 cosine similarity
 pub fn binary_two_phase_search(
     query_binary: &BinaryVector,
     binary_vectors: &[(usize, BinaryVector)],
@@ -57,7 +57,7 @@ pub fn binary_two_phase_search(
     full_vectors: &[(usize, &[f32])],
     top_k: usize,
 ) -> Vec<(usize, f32)> {
-    // Phase 1: Fast Hamming scan
+    // Fast Hamming scan
     let candidate_k = top_k.saturating_mul(8).min(binary_vectors.len());
     let mut candidates: Vec<(usize, f32)> = binary_vectors
         .iter()
@@ -66,7 +66,7 @@ pub fn binary_two_phase_search(
     candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     candidates.truncate(candidate_k);
 
-    // Phase 2: Re-rank with f32 cosine
+    // Re-rank with f32 cosine
     let candidate_set: std::collections::HashSet<usize> =
         candidates.iter().map(|(idx, _)| *idx).collect();
 

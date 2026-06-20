@@ -310,7 +310,7 @@ impl Embedder {
         Ok(embedding)
     }
 
-    /// Batch embed multiple texts in a single ONNX inference call (8b.3).
+    /// Batch embed multiple texts in a single ONNX inference call.
     ///
     /// Pads all sequences to the longest in the batch and runs one forward pass.
     /// 5-10x faster than sequential embedding for bulk operations.

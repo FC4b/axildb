@@ -19,10 +19,10 @@ pub struct Edge {
     pub properties: Value,
     /// When the edge was created.
     pub created_at: DateTime<Utc>,
-    /// When this edge becomes valid (None = always valid). (8b.8)
+    /// When this edge becomes valid (None = always valid).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub valid_from: Option<DateTime<Utc>>,
-    /// When this edge expires (None = never expires). (8b.8)
+    /// When this edge expires (None = never expires).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub valid_until: Option<DateTime<Utc>>,
 }

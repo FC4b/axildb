@@ -610,7 +610,7 @@ mod tests {
         }
     }
 
-    // ---- Phase 17 follow-up — Extension boot_block integration ----
+    // ---- follow-up — Extension boot_block integration ----
 
     /// Stub Extension that always emits a known boot_block — used to
     /// pin the wiring from `Extension::boot_block` → `CurrentScope`'s
@@ -742,7 +742,7 @@ mod tests {
         );
     }
 
-    /// Regression gate for Phase 18 review finding #6: each call to
+    /// Regression gate for review finding #6: each call to
     /// `db.boot()` must invoke `Extension::boot_block` exactly once per
     /// registered Extension.
     ///

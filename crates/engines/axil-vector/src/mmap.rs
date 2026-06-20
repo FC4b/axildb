@@ -1,4 +1,4 @@
-//! Flat binary vector storage format (8b.13).
+//! Flat binary vector storage format.
 //!
 //! Provides a compact binary file format for vector data that can be
 //! memory-mapped by the OS. Current implementation reads via `fs::read()`

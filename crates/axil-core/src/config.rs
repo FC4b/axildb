@@ -25,9 +25,9 @@ pub struct AxilConfig {
     pub fts: FtsConfig,
     /// Self-healing and auto-optimization settings.
     pub healing: HealingConfig,
-    /// LLM provider settings (Phase 5f).
+    /// LLM provider settings.
     pub llm: crate::llm::LlmConfig,
-    /// Brain display settings (Phase 10).
+    /// Brain display settings.
     pub brain: BrainConfig,
     /// Per-table memory-decay half-life overrides.
     ///
@@ -147,7 +147,7 @@ impl DecayConfig {
     }
 }
 
-/// Brain configuration (Phase 11.10).
+/// Brain configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BrainConfig {

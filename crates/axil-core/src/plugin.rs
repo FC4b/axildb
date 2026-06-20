@@ -131,7 +131,7 @@ pub trait TextEmbedder: Send + Sync {
     /// Embed text into a vector.
     fn embed(&self, text: &str) -> Result<Vec<f32>>;
 
-    /// Embed multiple texts in a single batch (8b.3).
+    /// Embed multiple texts in a single batch.
     ///
     /// Default implementation falls back to sequential embedding.
     /// Implementations backed by ONNX can override for 5-10x speedup

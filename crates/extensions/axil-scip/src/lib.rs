@@ -193,7 +193,7 @@ pub fn ingest_scip_opts(db: &Axil, scip_path: &Path, opts: IngestOptions) -> Res
     };
 
     // All edge writes funnel through here so we commit them in a
-    // single redb txn at the end (Phase 14 perf, friction #8).
+    // single redb txn at the end.
     let mut edge_buf = EdgeBuffer::new();
     // Same idea for entity rows + alias rows: queue with synchronous
     // ID allocation, flush at the end. Without this the per-record
@@ -800,7 +800,7 @@ fn flush_entities_and_aliases(
 
 /// Buffer of pending edge writes. SCIP ingest produces ~200k edges on
 /// a 10 MB workspace index; persisting each in its own redb txn turned
-/// ingest into a 15-minute job (Phase 14 dogfood friction #8). The
+/// ingest into a 15-minute job. The
 /// buffer collects intent during the multi-pass walk, then flushes the
 /// whole batch through `GraphIndex::relate_batch` (single redb txn) at
 /// the end of ingest.

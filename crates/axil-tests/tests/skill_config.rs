@@ -1,4 +1,4 @@
-//! Integration tests for Phase 4c: Skills, Config, and Report CLI commands.
+//! Integration tests for : Skills, Config, and Report CLI commands.
 //!
 //! Tests config init/show/get/set, report generate/list/import,
 //! and skill install/list/uninstall.

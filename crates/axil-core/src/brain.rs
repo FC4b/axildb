@@ -1,4 +1,4 @@
-//! Phase 11 — Agent Brain
+//! Agent Brain
 //!
 //! ## 11.1 — Unified Memory Decision Pipeline
 //! All write paths route through a single decision pipeline:
@@ -566,7 +566,7 @@ pub fn remember(db: &Axil, observation: Observation) -> Result<PipelineOutcome> 
             }
         }
 
-        // Inject provenance metadata (Phase 11.2 fields).
+        // Inject provenance metadata.
         obj.insert(
             "_source".to_string(),
             json!({
@@ -1006,7 +1006,7 @@ pub fn doubt_record(db: &Axil, id: &RecordId, reason: Option<&str>) -> Result<Re
     let mut data = record.data.clone();
     if let Some(obj) = data.as_object_mut() {
         obj.insert("doubted".to_string(), json!(true));
-        // Halve _confidence (Phase 11 provenance field).
+        // Halve _confidence.
         if let Some(c) = obj.get("_confidence").and_then(|v| v.as_f64()) {
             obj.insert("_confidence".to_string(), json!((c * 0.5).max(0.1)));
         }
@@ -1029,7 +1029,7 @@ pub fn doubt_record(db: &Axil, id: &RecordId, reason: Option<&str>) -> Result<Re
 ///
 /// Returns true if the record was updated, false if it already had provenance.
 pub fn migrate_provenance_record(db: &Axil, record: &Record) -> Result<bool> {
-    // Skip if already has Phase 11 provenance.
+    // Skip if already has provenance.
     if record.data.get("_source").is_some() && record.data.get("_scope").is_some() {
         return Ok(false);
     }

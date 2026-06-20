@@ -1,4 +1,4 @@
-//! Phase 13.1 ↔ 13.2 checkpoint: provisional entities written by the regex
+//! ↔ 13.2 checkpoint: provisional entities written by the regex
 //! extractor must be rewritten to SCIP-grounded canonical ids when ingest
 //! provides an unambiguous match.
 

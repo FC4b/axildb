@@ -1,5 +1,4 @@
-//! Auto-capture — Phase 10.4
-//!
+//! Auto-capture —//!
 //! Analyzes text from agent actions and auto-extracts knowledge:
 //! errors, decisions, and context. The agent doesn't need to explicitly store.
 

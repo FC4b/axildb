@@ -133,7 +133,7 @@ impl SystemInfo {
     }
 }
 
-// ── Self-Healing Types (Phase 5c) ──────────────────────────────────────────
+// ── Self-Healing Types ──────────────────────────────────────────
 
 /// Report from a compaction operation.
 #[derive(Debug, Clone, Serialize, Deserialize)]

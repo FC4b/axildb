@@ -1,4 +1,4 @@
-//! First-party import scan (Phase 16 P1.a).
+//! First-party import scan.
 //!
 //! Which external packages does the project's *own* source actually
 //! `use` / `import`? Transitive-dependency doc ingestion is gated on

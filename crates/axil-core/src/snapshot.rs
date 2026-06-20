@@ -1,4 +1,4 @@
-//! Data versioning and snapshots (8b.16).
+//! Data versioning and snapshots.
 //!
 //! File-copy based snapshots of the database and all companion files.
 //! Supports create, list, and restore operations.

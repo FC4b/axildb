@@ -14,7 +14,7 @@ pub enum PoolingStrategy {
 pub enum EmbeddingModel {
     /// bge-small-en-v1.5: 384 dimensions, ~33MB ONNX.
     BgeSmall,
-    /// bge-small-en-v1.5 (int8 quantized): 384 dimensions, ~17MB ONNX (8b.7).
+    /// bge-small-en-v1.5 (int8 quantized): 384 dimensions, ~17MB ONNX.
     /// Same quality (<1% MTEB loss), 4x smaller, 2-3x faster inference.
     BgeSmallInt8,
     /// bge-base-en-v1.5: 768 dimensions, ~110MB ONNX.
@@ -33,7 +33,7 @@ pub enum EmbeddingModel {
     ///
     /// ModernBERT backbone, Apache-2.0, MTEB 64.38 (vs bge-small 62.17).
     /// 16× longer context than bge-small without truncation. Mean pooling.
-    /// Registered as an additional option in Phase 15 (P0.2) — bge-small
+    /// Registered as an additional option in — bge-small
     /// remains the default; switch via `axil.toml` `model = "gte-modernbert-base"`.
     GteModernbertBase,
     /// User-provided ONNX model.
@@ -131,7 +131,7 @@ impl EmbeddingModel {
         }
     }
 
-    /// Whether this model supports Matryoshka Representation Learning (8b.6).
+    /// Whether this model supports Matryoshka Representation Learning.
     pub fn supports_mrl(&self) -> bool {
         matches!(self, Self::Nomic)
     }

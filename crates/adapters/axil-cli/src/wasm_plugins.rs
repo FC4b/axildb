@@ -1,4 +1,4 @@
-//! Runtime WASM plugin discovery + lifecycle (Phase 22.6). Behind `wasm-host`.
+//! Runtime WASM plugin discovery + lifecycle. Behind `wasm-host`.
 //!
 //! Plugins are `.wasm` component files in `<db-dir>/plugins/`. They are loaded
 //! at open and registered into the live `Axil` via `register_extension`, so they
@@ -50,7 +50,7 @@ pub struct PluginRecord {
 /// Scan `dir` for `*.wasm`, load each as a [`WasmExtension`], and register the
 /// successful ones into `db`. A plugin that fails to load is **quarantined**
 /// (reported, not fatal) — one bad `.wasm` never breaks open or the others
-/// (Phase 22.4 fault isolation).
+///.
 ///
 /// `db` must be the SAME database the plugins call back into via host imports.
 /// Returns one record per `.wasm` file (sorted by filename for determinism).
@@ -94,7 +94,7 @@ pub fn load_and_register(db: &Arc<Axil>, dir: &Path, config: &AxilConfig) -> Vec
 /// `load_and_register` (register = true) and by `axil ext install`/`list`
 /// (register = false — inspect only).
 ///
-/// `cache_dir` enables the compiled-module cache (Phase 22.9): `Some(dir)` looks
+/// `cache_dir` enables the compiled-module cache: `Some(dir)` looks
 /// up / writes `<dir>/<key>.cwasm` instead of recompiling; `None` always
 /// compiles (the one-shot install/inspect gate, where caching buys nothing).
 pub fn load_one(

@@ -1,4 +1,4 @@
-//! Integration tests for Phase 13b: structural code proxies.
+//! Integration tests for : structural code proxies.
 //!
 //! These tests run the full project indexer against a tiny on-disk
 //! fixture, then verify that:
@@ -573,7 +573,7 @@ fn graph_neighbors_expand_via_scip_edges() {
         ..Default::default()
     }];
     let neighbors = axil_indexer::recall::graph_neighbors_for_proxies(&db, &direct, 5).unwrap();
-    // With 13b.7 same_file edges enabled, the recall proxy now also has
+    // With same_file edges enabled, the recall proxy now also has
     // a same_file neighbor (the file proxy and vector_search). Assert
     // that the SCIP `calls` neighbor is present and explains itself, and
     // that whatever else is present is also a legitimate neighbor.

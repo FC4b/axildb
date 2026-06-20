@@ -1,4 +1,4 @@
-//! Multi-project workspace coordinator for Axil (Phase 14).
+//! Multi-project workspace coordinator for Axil.
 //!
 //! A workspace links sibling `.axil` databases under a shared manifest so an
 //! agent can query across projects without merging them. Per-project DBs stay

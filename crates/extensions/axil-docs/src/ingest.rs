@@ -189,7 +189,7 @@ fn active_dep_row(
 /// A **version bump** does not discard the old version: its `_dep_docs`
 /// chunks are *archived* (kept, flagged) and its `_deps` row is marked
 /// `superseded` and linked to the replacement, so migration questions
-/// can still reach the old API (Phase 16 P0.4). A same-version
+/// can still reach the old API. A same-version
 /// re-extract simply replaces the live chunks.
 ///
 /// Returns the number of chunks stored (or already present, if skipped).
@@ -375,7 +375,7 @@ fn write_dep_row(
 /// `current` is marked `removed` and its doc chunks archived — kept,
 /// not deleted, so the agent can still recall a dropped library's
 /// docs. Returns the names swept. This is the *removed* set of the
-/// P0.4 three-way drift diff; `ingest_dep_docs` covers *added* and
+/// three-way drift diff; `ingest_dep_docs` covers *added* and
 /// *version-changed*.
 pub fn sweep_removed_deps(db: &Axil, current: &[Dependency]) -> Result<Vec<String>, DocsError> {
     use std::collections::HashSet;
@@ -415,7 +415,7 @@ pub fn sweep_removed_deps(db: &Axil, current: &[Dependency]) -> Result<Vec<Strin
 
 /// The active `_deps` row's resolved version for a dependency, if it
 /// has already been ingested. Lets a caller detect a version bump
-/// *before* re-ingesting (Phase 16 P1.b).
+/// *before* re-ingesting.
 pub fn active_dep_version(
     db: &Axil,
     name: &str,
@@ -431,7 +431,7 @@ pub fn active_dep_version(
 }
 
 /// Ingest a dependency's changelog as `migration`-tagged `_dep_docs`
-/// chunks (Phase 16 P1.b).
+/// chunks.
 ///
 /// Called on a version bump: `changelog_text` — read from the on-disk
 /// dependency copy — is split into sections, capped at
@@ -497,7 +497,7 @@ fn append_diff_list(out: &mut String, label: &str, items: &[&str]) {
 
 /// Diff a dependency's documentation across a version bump and store
 /// the section-level delta as a `doc_kind: "doc_diff"` chunk
-/// (Phase 16 P1.c).
+///.
 ///
 /// Compares the now-archived `from_version` doc chunks against the
 /// freshly-ingested current-version ones, keyed by section breadcrumb,

@@ -1,4 +1,4 @@
-//! Tiered memory model (8b.9).
+//! Tiered memory model.
 //!
 //! Records are classified into 3 tiers based on age and activation level:
 //! - Hot: active session, recent, high activation

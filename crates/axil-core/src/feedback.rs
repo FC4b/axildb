@@ -69,7 +69,7 @@ impl FeedbackStore {
     pub fn mark_relevant(&self, query_embedding: &[f32], record_id: &RecordId) {
         let now = Utc::now();
 
-        // Phase 1: Read-lock scan to find matching entry index
+        // Read-lock scan to find matching entry index
         let match_idx = {
             let entries = self.entries.read();
             entries.iter().position(|entry| {
@@ -79,7 +79,7 @@ impl FeedbackStore {
         };
         // Read lock released here
 
-        // Phase 2: Write-lock only for the targeted mutation
+        // Write-lock only for the targeted mutation
         let mut entries = self.entries.write();
         if let Some(idx) = match_idx {
             if idx < entries.len() && entries[idx].record_id == *record_id {

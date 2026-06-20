@@ -2,7 +2,7 @@
 //!
 //! Extracts entities from record text using deterministic patterns:
 //! file paths, CamelCase/snake_case identifiers, backtick-wrapped code,
-//! quoted strings, and project names. Also handles Phase 13 code symbols
+//! quoted strings, and project names. Also handles code symbols
 //! (`fn foo`, `auth::login`, `class User`, …) with a language hint so
 //! cross-language collisions can be disambiguated downstream.
 
@@ -477,7 +477,7 @@ mod tests {
         assert!(entities.is_empty());
     }
 
-    // ── Phase 13.1 tests ────────────────────────────────────────────────
+    // ── tests ────────────────────────────────────────────────
 
     fn code_syms(text: &str) -> Vec<(String, Option<String>)> {
         extract_entities(text)

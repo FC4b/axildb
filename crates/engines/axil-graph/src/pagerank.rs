@@ -1,4 +1,4 @@
-//! PersonalPageRank for graph-boosted recall (8b.10).
+//! PersonalPageRank for graph-boosted recall.
 //!
 //! Lightweight PageRank computed over the adjacency index at consolidation time.
 //! Records with more/better connections score higher, boosting recall ranking.

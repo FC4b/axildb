@@ -1,5 +1,5 @@
 //! Conformance guest — exercises every `axil:plugin` host import across the
-//! sandbox boundary so the host-side conformance suite (Phase 22.10) can assert
+//! sandbox boundary so the host-side conformance suite can assert
 //! capability gating, prefix enforcement, JSON marshalling, and fault isolation
 //! against a *real* component, not just the host's own unit tests.
 //!

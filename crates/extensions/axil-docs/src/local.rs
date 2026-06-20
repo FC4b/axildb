@@ -12,7 +12,7 @@ use crate::manifest::{Dependency, Ecosystem};
 
 /// Minimum useful local-doc length in characters. A dependency whose
 /// on-disk docs are shorter is flagged sparse — the caller should
-/// consider a web fallback (Phase 16 P0.5) rather than ingest it
+/// consider a web fallback rather than ingest it
 /// near-empty.
 pub const MIN_LOCAL_DOC_CHARS: usize = 400;
 
@@ -76,7 +76,7 @@ pub fn extract_local_doc(dep: &Dependency, project_root: &Path) -> Result<Extrac
 }
 
 /// Read a dependency's changelog from its on-disk copy, if it ships one
-/// — the raw material for Phase 16 P1.b migration notes.
+/// the raw material for P1.b migration notes.
 ///
 /// Cargo, npm and Go dependencies vendor their source (and usually a
 /// `CHANGELOG.md`) on disk. Python wheels and Maven artifacts do not

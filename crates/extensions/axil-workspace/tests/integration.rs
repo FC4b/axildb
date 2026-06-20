@@ -1,4 +1,4 @@
-//! Phase 14 integration tests covering the cross-crate contract:
+//! Integration tests covering the cross-crate contract:
 //! manifest + consent on `axil_core::Record` + bridges + blast radius.
 
 use std::fs;
@@ -88,7 +88,7 @@ fn consent_defaults_respected_across_record_lifecycle() {
     assert_eq!(reparsed, ReadConsent::Private);
 
     // The consent change must be reflected in the dedicated audit log so
-    // Phase 14.8 compliance export has a stable trail.
+    // Compliance export has a stable trail.
     let log = db.list("_consent_log").unwrap();
     assert_eq!(log.len(), 1);
     assert_eq!(

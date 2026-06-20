@@ -1,4 +1,4 @@
-//! Integration tests for Phase 5e: Intelligent Database features.
+//! Integration tests for : Intelligent Database features.
 //!
 //! Tests cover: scoring, temporal parsing, entity extraction, feedback,
 //! consolidation, auto-linking, and predictive pre-fetch.

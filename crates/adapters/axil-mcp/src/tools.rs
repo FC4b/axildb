@@ -270,7 +270,7 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
         },
 
         // `dep_docs` / `deps_status` are provided by `DocsExtension`
-        // (Phase 17 P3.3) — `handle_tools_list` overlays the Extension
+        // `handle_tools_list` overlays the Extension
         // surface onto this static list, and `dispatch` routes them
         // through `dispatch_mcp` before reaching the hardcoded match
         // below. No hardcoded entry needed here.
@@ -293,14 +293,14 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
 
 /// Dispatch a tool call to the appropriate handler.
 ///
-/// Phase 17 P3.3: before the hard-coded match, try every registered
+/// before the hard-coded match, try every registered
 /// Extension's [`axil_core::Extension::handle_mcp`]. If a registered
 /// Extension claims the tool and returns `Dispatch::Handled(value)`,
 /// surface that value as the tool result. Path C semantics: Extensions
 /// that return `Dispatch::NotHandled` (or aren't registered) fall
 /// through to the hard-coded handlers below.
 pub fn dispatch(db: &Axil, tool_name: &str, args: &Value) -> ToolCallResult {
-    // Phase 17 P3.3 — Extension dispatch first.
+    // Extension dispatch first.
     let call = axil_core::McpCall {
         tool: tool_name.to_string(),
         params: args.clone(),

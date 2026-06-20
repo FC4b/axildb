@@ -1,6 +1,6 @@
 //! Full host↔guest round-trip: load the `hello` WASM component, instantiate it
 //! against the host imports, and call its `extension` exports — proving the
-//! `axil:plugin` ABI works end-to-end (Phase 22.4).
+//! `axil:plugin` ABI works end-to-end.
 //!
 //! The fixture is built from `../test-guest` (see ../build.sh). Only compiled
 //! when the `wasm-host` feature is on.

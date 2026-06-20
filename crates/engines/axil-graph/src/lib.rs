@@ -150,7 +150,7 @@ impl AdjacencyIndex {
         self.neighbor_ids_temporal(id, edge_type, direction, None)
     }
 
-    /// Get neighbor record IDs with optional temporal filtering (8b.8).
+    /// Get neighbor record IDs with optional temporal filtering.
     ///
     /// When `as_of` is Some, only edges valid at that point in time are traversed.
     fn neighbor_ids_temporal(
@@ -320,8 +320,7 @@ impl GraphEngine {
     /// (control-char check, property size, MAX_EDGES) but folds the N
     /// per-edge `begin_write/commit` pairs into one. SCIP ingest spends
     /// >90% of its wall time in those commits; batching cuts an
-    /// edge-heavy workload from minutes to seconds (see Phase 14
-    /// dogfood friction #8).
+    /// edge-heavy workload from minutes to seconds (see    /// dogfood friction #8).
     pub fn create_edges_batch(
         &self,
         specs: Vec<(RecordId, String, RecordId, Value)>,
@@ -474,7 +473,7 @@ impl GraphEngine {
         self.traverse_ids_temporal(start, steps, None)
     }
 
-    /// Multi-hop traversal with optional temporal filtering (8b.8).
+    /// Multi-hop traversal with optional temporal filtering.
     ///
     /// When `as_of` is Some, only edges valid at that point in time are traversed.
     /// This enables "what did the agent know at time T?" queries.

@@ -55,10 +55,10 @@ pub struct ConfidenceScore {
 /// Similarity threshold for detecting potential conflicts.
 const CONFLICT_SIMILARITY_THRESHOLD: f32 = 0.92;
 
-/// Higher threshold for medium-confidence detection (8b.12).
+/// Higher threshold for medium-confidence detection.
 const CONFLICT_MEDIUM_THRESHOLD: f32 = 0.95;
 
-/// Negation words used for contradiction detection (8b.12).
+/// Negation words used for contradiction detection.
 pub const NEGATION_WORDS: &[&str] = &[
     "not",
     "no",
@@ -93,7 +93,7 @@ pub const NEGATION_WORDS: &[&str] = &[
     "migrated away",
 ];
 
-/// Confidence level for contradiction detection (8b.12).
+/// Confidence level for contradiction detection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum ConflictConfidence {
     /// Same entities + explicit negation — highly likely contradiction.
@@ -113,7 +113,7 @@ pub enum ConflictConfidence {
 /// 2. They share at least one entity
 /// 3. They appear to make different claims about that entity
 ///
-/// Enhanced with negation-aware confidence levels (8b.12):
+/// Enhanced with negation-aware confidence levels:
 /// - High: shared entities + explicit negation word → auto-supersede
 /// - Medium: similarity > 0.95 + shared entities → surface for review
 /// - Low: similarity > 0.92 + shared entities → surface for review
@@ -152,7 +152,7 @@ pub fn check_conflict(
         return ConflictResult::Novel;
     }
 
-    // Determine confidence level (8b.12)
+    // Determine confidence level
     let confidence = detect_conflict_confidence(&new_lower, &existing_lower, &shared, similarity);
 
     // Only auto-supersede on High confidence (explicit negation detected).
@@ -176,7 +176,7 @@ pub fn check_conflict(
     }
 }
 
-/// Detect conflict confidence using negation heuristics (8b.12).
+/// Detect conflict confidence using negation heuristics.
 ///
 /// Checks whether one text contains a negation word near a shared entity
 /// while the other does not — a strong signal of contradiction.
