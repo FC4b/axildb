@@ -2731,8 +2731,7 @@ enum ScipCommand {
     Status,
 }
 
-/// `axil deps` subcommands — dependency documentation memory.
-#[cfg(feature = "deps")]
+/// `axil ext` subcommands — install and manage runtime WASM plugins.
 #[cfg(feature = "wasm-host")]
 #[derive(Subcommand)]
 enum ExtCommand {
