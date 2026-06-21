@@ -9,9 +9,11 @@
 ╚═╝  ╚═╝ ╚═╝  ╚═╝ ╚═╝ ╚══════╝
 </pre>
 
-### Cognitive memory for AI agents. One binary. No LLM required.
+### Agent memory in one local file. No server, no cloud, no LLM.
 
-**74–80% fewer context tokens · vector + graph + full-text + time-series · MCP · local-first · no LLM**
+*Think SQLite, but for your agent's memory — a file you embed, not a database you run.*
+
+**Local-first · ~5–10MB binary · vector + graph + full-text + time-series · MCP · 74–80% fewer context tokens**
 
 [![CI](https://github.com/FC4b/axildb/actions/workflows/ci.yml/badge.svg)](https://github.com/FC4b/axildb/actions/workflows/ci.yml)
 [![License: PolyForm NC](https://img.shields.io/badge/license-PolyForm--NC-blue.svg)](LICENSE)
