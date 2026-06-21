@@ -185,7 +185,7 @@ checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
 
 [[package]]
 name = "axil-bundle"
-version = "0.7.11"
+version = "1.0.0"
 dependencies = [
  "axil-checkpoint",
  "axil-core",
@@ -195,7 +195,7 @@ dependencies = [
 
 [[package]]
 name = "axil-checkpoint"
-version = "0.7.11"
+version = "1.0.0"
 dependencies = [
  "axil-core",
  "chrono",
@@ -207,7 +207,7 @@ dependencies = [
 
 [[package]]
 name = "axil-cli"
-version = "0.7.11"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "axil-bundle",
@@ -243,7 +243,7 @@ dependencies = [
 
 [[package]]
 name = "axil-core"
-version = "0.7.11"
+version = "1.0.0"
 dependencies = [
  "chrono",
  "criterion",
@@ -265,7 +265,7 @@ dependencies = [
 
 [[package]]
 name = "axil-docs"
-version = "0.7.11"
+version = "1.0.0"
 dependencies = [
  "axil-core",
  "serde",
@@ -278,7 +278,7 @@ dependencies = [
 
 [[package]]
 name = "axil-fts"
-version = "0.7.11"
+version = "1.0.0"
 dependencies = [
  "axil-core",
  "criterion",
@@ -292,7 +292,7 @@ dependencies = [
 
 [[package]]
 name = "axil-graph"
-version = "0.7.11"
+version = "1.0.0"
 dependencies = [
  "axil-core",
  "chrono",
@@ -308,7 +308,7 @@ dependencies = [
 
 [[package]]
 name = "axil-indexer"
-version = "0.7.11"
+version = "1.0.0"
 dependencies = [
  "axil-core",
  "chrono",
@@ -328,7 +328,7 @@ dependencies = [
 
 [[package]]
 name = "axil-mcp"
-version = "0.7.11"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "axil-bundle",
@@ -350,7 +350,7 @@ dependencies = [
 
 [[package]]
 name = "axil-memory"
-version = "0.7.11"
+version = "1.0.0"
 dependencies = [
  "axil-core",
  "chrono",
@@ -362,7 +362,7 @@ dependencies = [
 
 [[package]]
 name = "axil-ql"
-version = "0.7.11"
+version = "1.0.0"
 dependencies = [
  "axil-core",
  "chrono",
@@ -373,7 +373,7 @@ dependencies = [
 
 [[package]]
 name = "axil-rerank"
-version = "0.7.11"
+version = "1.0.0"
 dependencies = [
  "axil-core",
  "ort",
@@ -389,7 +389,7 @@ dependencies = [
 
 [[package]]
 name = "axil-runtime"
-version = "0.7.11"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "axil-core",
@@ -403,7 +403,7 @@ dependencies = [
 
 [[package]]
 name = "axil-scip"
-version = "0.7.11"
+version = "1.0.0"
 dependencies = [
  "axil-core",
  "axil-graph",
@@ -417,7 +417,7 @@ dependencies = [
 
 [[package]]
 name = "axil-tests"
-version = "0.7.11"
+version = "1.0.0"
 dependencies = [
  "axil-bundle",
  "axil-checkpoint",
@@ -438,7 +438,7 @@ dependencies = [
 
 [[package]]
 name = "axil-timeseries"
-version = "0.7.11"
+version = "1.0.0"
 dependencies = [
  "axil-core",
  "chrono",
@@ -452,7 +452,7 @@ dependencies = [
 
 [[package]]
 name = "axil-vector"
-version = "0.7.11"
+version = "1.0.0"
 dependencies = [
  "axil-core",
  "criterion",
@@ -471,7 +471,7 @@ dependencies = [
 
 [[package]]
 name = "axil-workspace"
-version = "0.7.11"
+version = "1.0.0"
 dependencies = [
  "axil-core",
  "chrono",
@@ -485,7 +485,7 @@ dependencies = [
 
 [[package]]
 name = "axildb"
-version = "0.7.11"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "axil-core",
