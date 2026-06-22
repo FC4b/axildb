@@ -263,7 +263,7 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
                 "type": "object",
                 "properties": {
                     "task":   {"type": "string", "description": "Task description / question"},
-                    "budget": {"type": "integer", "description": "Token budget (default 2000)", "default": 2000}
+                    "budget": {"type": "integer", "description": "Token budget. Omit to auto-size by indexed repo size (tiny→1500, large monorepo→4000, capped)."}
                 },
                 "required": ["task"]
             }),
@@ -364,7 +364,13 @@ fn handle_code_context(db: &Axil, args: &Value) -> ToolCallResult {
         Some(t) => t,
         None => return ToolCallResult::error("missing required parameter: task"),
     };
-    let budget = args.get("budget").and_then(|v| v.as_u64()).unwrap_or(2000) as usize;
+    // Honor an explicit budget; otherwise auto-size by indexed repo size.
+    let budget = match args.get("budget").and_then(|v| v.as_u64()) {
+        Some(b) => b as usize,
+        None => axil_indexer::recall::adaptive_context_budget(
+            db.count(axil_indexer::TABLE_CODE_PROXIES).unwrap_or(0),
+        ),
+    };
     let opts = axil_indexer::recall::ContextOptions {
         max_tokens: budget,
         task: Some(task.to_string()),

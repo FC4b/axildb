@@ -233,7 +233,36 @@ impl Axil {
                 .collect();
             out.insert("extension_blocks".to_string(), Value::Array(blocks_arr));
         }
+
+        // Advise when this is a code repo indexed without a precise graph.
+        if let Some(hint) = self.code_graph_hint() {
+            out.insert("code_graph_hint".to_string(), json!(hint));
+        }
         Value::Object(out)
+    }
+
+    /// Advisory for a code repo that has structural proxies but no precise,
+    /// SCIP-grounded call graph. A plain `axil index` builds `_idx_code_proxies`
+    /// but never `_entities`; SCIP ingest is what produces precise
+    /// `calls`/`references`/`implements`/`type_of` edges (and the `_entities`
+    /// rows they hang off). So "proxies present but `_entities` empty" is a
+    /// reliable, cheap signal that the agent is navigating a code repo on
+    /// structural recall alone — worth one line nudging `axil scip refresh`.
+    /// Returns `None` for non-code repos (no proxies) and for repos that
+    /// already have a precise graph.
+    pub fn code_graph_hint(&self) -> Option<String> {
+        if self.count("_idx_code_proxies").unwrap_or(0) == 0 {
+            return None; // not a code repo, or not indexed yet
+        }
+        if self.count("_entities").unwrap_or(0) > 0 {
+            return None; // precise (SCIP-grounded) graph already ingested
+        }
+        Some(
+            "No precise call graph for this code repo — only structural proxies \
+             are indexed. Run `axil scip refresh` (needs rust-analyzer / scip-* on \
+             PATH) to add precise calls/references/implements edges."
+                .to_string(),
+        )
     }
 
     /// Pick the top-N records for a section, honoring `topic` (semantic
@@ -502,6 +531,25 @@ mod tests {
                 "confidence_notes",
             ]
         );
+    }
+
+    #[test]
+    fn code_graph_hint_fires_only_for_code_repo_without_precise_graph() {
+        let (db, _dir) = temp_db();
+        // No code proxies → not a code repo → no hint.
+        assert!(db.code_graph_hint().is_none());
+
+        // Code proxies present, no `_entities` → structural-only → hint fires.
+        db.insert("_idx_code_proxies", json!({"path": "src/x.rs", "kind": "file"}))
+            .unwrap();
+        let hint = db.code_graph_hint();
+        assert!(hint.is_some(), "code repo without precise graph should warn");
+        assert!(hint.unwrap().contains("axil scip refresh"));
+
+        // Precise graph present (`_entities` populated) → hint suppressed.
+        db.insert("_entities", json!({"canonical_id": "rust pkg `x`/fn y()."}))
+            .unwrap();
+        assert!(db.code_graph_hint().is_none());
     }
 
     #[test]

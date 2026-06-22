@@ -39,6 +39,27 @@ impl ContextDepth {
     }
 }
 
+/// Token budget for `code-context` / `code_context` when the caller did NOT
+/// pass one, tiered by the size of the indexed code base (`_idx_code_proxies`
+/// row count). A tiny project's whole answer is a handful of pointers, so a
+/// fat default just dilutes; a large monorepo's native discovery cost (many
+/// greps + reads) is high, so a richer block earns its place. This governs how
+/// many *pointers* the block carries, not verbatim source volume — the
+/// Phase-20 compact discipline still holds — and is hard-capped so a single
+/// response stays well under a typical MCP host's ~25K-char (~6K-token) inline
+/// limit and is never force-externalized into a Read-back.
+///
+/// Tier breakpoints intentionally mirror the explore-budget tiers so a project
+/// sits in the same size bucket across knobs.
+pub fn adaptive_context_budget(proxy_count: usize) -> usize {
+    match proxy_count {
+        0..=300 => 1500,      // tiny repo — the answer is a few pointers
+        301..=2_000 => 2000,  // small/medium — current default
+        2_001..=10_000 => 3000,
+        _ => 4000,            // large monorepo, capped (< inline limit)
+    }
+}
+
 /// Options for the `context` command.
 #[derive(Debug, Clone)]
 pub struct ContextOptions {
@@ -1716,6 +1737,21 @@ mod tests {
         let data = json!({"summary": "JWT auth middleware", "name": "auth"});
         let score = score_record(&data, &["auth", "middleware"]);
         assert!(score > 0.5);
+    }
+
+    #[test]
+    fn adaptive_budget_tiers_by_repo_size() {
+        // Monotonic non-decreasing across tiers.
+        assert_eq!(adaptive_context_budget(0), 1500);
+        assert_eq!(adaptive_context_budget(300), 1500);
+        assert_eq!(adaptive_context_budget(301), 2000);
+        assert_eq!(adaptive_context_budget(2_000), 2000);
+        assert_eq!(adaptive_context_budget(2_001), 3000);
+        assert_eq!(adaptive_context_budget(10_000), 3000);
+        assert_eq!(adaptive_context_budget(10_001), 4000);
+        assert_eq!(adaptive_context_budget(1_000_000), 4000);
+        // Capped well under a ~6K-token (~25K-char) MCP inline limit.
+        assert!(adaptive_context_budget(usize::MAX) <= 4000);
     }
 
     #[test]
