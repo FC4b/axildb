@@ -21,41 +21,50 @@
 ![No LLM required](https://img.shields.io/badge/LLM-not_required-2ea44f.svg)
 ![Runs offline](https://img.shields.io/badge/runs-offline_·_one_binary-8a2be2.svg)
 
-[**Token savings**](#token-savings--real-savings) · [**Install**](#install) · [**Quick start**](#quick-start) · [**Benchmarks**](#benchmarks) · [**Extensible**](#extensible-by-design) · [**Docs**](#documentation)
+[**Quick start**](#quick-start) · [**Why Axil**](#why-axil) · [**Token savings**](#token-savings--real-savings) · [**Benchmarks**](#benchmarks) · [**Extensible**](#extensible-by-design) · [**Docs**](#documentation)
 
 </div>
 
 ---
 
-Your coding agent is brilliant and amnesiac. Every session it re-reads the same files, re-learns the same architecture, repeats the same mistakes — and **burns tokens (your money) doing it.** Axil is the second brain that fixes this: it remembers decisions, gotchas, and code structure across sessions and hands the agent the *right* memory at the right moment, instead of dumping the whole repo into context.
+Your coding agent is brilliant and amnesiac. Every session it re-reads the same files, re-learns the same architecture, repeats the same mistakes — and **burns tokens (your money) doing it.** Axil is the second brain that fixes this: it remembers your decisions, gotchas, and code structure across sessions, then hands the agent the *right* memory at the right moment instead of dumping the whole repo into context.
 
 > **In a real, equal-correctness A/B test, agents answered the same coding questions with 74–80% fewer context tokens using Axil.** → [the numbers & caveats](#token-savings--real-savings)
 
-- 🧠 **Remembers across sessions** — learn once, never re-read. Vector + knowledge graph + full-text + time-series, all in a single `.axil` file.
-- 💸 **Frugal by design** — ~15:1 context compression; returns pointers, not file dumps. Fewer tokens, every turn.
-- ⚡ **Embeddable & instant** — no Postgres, no cloud, no daemon. A ~5–10MB binary, <100 ms commands, fully offline.
-- 🤖 **No LLM required** — local ONNX embeddings + rule-based cognition do ~80% with zero API calls; plug an LLM in for the rest.
+- 🧠 **Remembers across sessions** — decisions, gotchas, and architecture learned once, never re-read. Vector + knowledge graph + full-text + time-series, all in a single `.axil` file.
+- 🕸️ **Knows your code, not just your text** — a SCIP **code-graph** (callers/callees, not keyword guesses) and **version-pinned dependency-doc memory** (your *exact* lib versions, zero network) — code-aware context most agent memory skips.
+- 💸 **Returns a pointer, not your whole repo** — a "where is X" lookup costs **~100 tokens**, not a stack of file reads. Fewer tokens, every turn.
+- ⚡ **A file you embed, not a server you run** — no Postgres, no cloud, no daemon. A ~5–10 MB binary, <100 ms commands, fully offline.
+- 🤖 **No LLM required** — local ONNX embeddings + rule-based cognition do the work with zero API calls; plug an LLM in only to sharpen extraction & consolidation.
 - 🔗 **One memory, every tool** — the same portable `.axil` brain is read *and* written by Claude Code, Cursor, Windsurf, Codex, any MCP client, or your own Rust. No vendor lock-in.
-- 🕸️ **Code-graph + doc memory others don't have** — a SCIP **code-graph** (knows callers/callees, not just text) and **version-pinned dependency-doc memory** (your *exact* lib versions, zero network), on an **Engine · Extension · Adapter** architecture you can extend.
 
----
+## Why Axil?
+
+The honest version — what you'd otherwise reach for, what it costs you, and where Axil fits:
+
+| You could reach for… | What it costs you | Axil |
+|----------------------|-------------------|------|
+| **A markdown notes file** | No retrieval or ranking — it grows unbounded and you paste the *whole* thing into context every turn | Ranked recall + active forgetting; hands the agent the *right* memory, not all of it |
+| **A vector DB** (pgvector, Chroma) | A service to run, and vectors *only* — no graph, no full-text, no cognition; you bolt an LLM on for extraction | One embedded file fuses vector + graph + full-text + time-series; rule-based cognition, **no LLM required** |
+| **An LLM-memory framework** (Mem0, Zep, Letta) | Needs an LLM **and** external databases just to store a memory; lower recall in our tests ([below](#benchmarks)) | No LLM, no server, no daemon — a ~5–10 MB binary, 100% offline, higher recall |
+| **A single-file doc store** (Memvid) | Local and single-file like Axil — but a smart *doc* store: no knowledge graph, no entity extraction, no memory types | Structured agent memory: code-graph, entity inference, 5 memory types, consolidation |
 
 ## Token savings = real savings
 
-Every token in your agent's context is billed — and re-billed on **every turn**. We measured the win with a real, end-to-end A/B test (not a synthetic estimate): clone one public repo into two identical sandboxes, give a coding agent the same "where is X / how does Y work" tasks in each — one with only `grep` + file reads, the other with only Axil — and count the context tokens each pulls in **to reach a verified-correct answer**:
+**Same questions, same correct answers, 74–80% fewer context tokens.** Not a synthetic estimate — a real, end-to-end A/B test: clone one public repo into two identical sandboxes, give an agent the same "where is X / how does Y work" tasks in each — one with only `grep` + file reads, the other with only Axil — and count the context tokens each burns **to reach a verified-correct answer**.
 
 | Corpus | Without Axil | With Axil | Reduction |
 |--------|-------------:|----------:|----------:|
 | **Django** (906 source files) | 10,763 tok | **2,111 tok** | **80%** |
 | **Flask** (24 source files) | 16,225 tok | **4,300 tok** | **74%** |
 
-On the common "where is X" question, Axil answers in **~100 tokens** (one pointer-shaped hit) where an unaided agent greps and reads several files — **75–90% fewer tokens per lookup**, every lookup, every session.
+Every token is billed — and re-billed on **every turn**. On the common "where is X" question, Axil answers in **~100 tokens** (one pointer-shaped hit) where an unaided agent greps and reads several files — a fraction of the cost, every lookup, every session.
 
 > ⚠️ **A specific experiment, not a guarantee.** Two open-source Python repos, a disciplined agent, measured at equal task-correctness. Real savings depend on repo size and question type — **largest on big codebases and semantic "where/how" questions**, near break-even on tiny repos where `grep` already nails it. Reproduce: `scripts/context-ab-setup.sh`. Full methodology and every run: [Context Economics](docs/src/advanced/context-economics.md).
 
 ## What you get
 
-A complete cognitive memory system in one binary — vector search, knowledge graph, full-text search, and time-series, with real agent cognition on top:
+Everything below normally means standing up a vector DB **and** Neo4j **and** Elasticsearch **and** an LLM extraction pipeline. Axil is all of it in **one ~5–10 MB binary, no server, no LLM** — with real agent cognition, not just storage:
 
 **🧠 Cognitive memory (no LLM required)** — 5 memory types (working, semantic, episodic, procedural, preference) · auto-importance scoring · active forgetting (decay + reinforcement) · belief system · auto-capture of errors & decisions · consolidation & contradiction detection.
 
@@ -63,17 +72,41 @@ A complete cognitive memory system in one binary — vector search, knowledge gr
 
 **💻 Built for code agents** — structural code index + `code-search` / `code-context` (pointer-shaped, token-frugal) · SCIP cross-reference graph · version-pinned dependency-doc memory · structured session checkpoints · AxilQL · MCP server (full CLI parity).
 
-**🔌 Optional LLM upgrade** — everything works 100% without an LLM. Plug one in (Claude / GPT / Ollama, or via Claude Code skills) to go from ~80% → ~95% on extraction & consolidation.
+**🔌 Optional LLM upgrade** — plug in Claude / GPT / Ollama (or Claude Code skills) to take extraction & consolidation from ~80% → ~95%. Everything above runs without it.
+
+## Benchmarks
+
+**Top-tier retrieval recall — with no LLM and no server.** Axil beats every LLM- and server-dependent system on the board — Hindsight (PostgreSQL + LLM), Mem0, Zep — from a file you embed, and trails only MemPalace, itself a local system, by a couple of points. SQLite-shaped accuracy, no daemon to run.
+
+**LongMemEval** — retrieval recall over 500 questions (top-k=5), vs comparable memory systems:
+
+| System | Recall | No LLM | No server |
+|--------|-------:|:------:|:---------:|
+| MemPalace | 96.6% | ✅ | ✅ |
+| **Axil — Recall-QTC** | **94.5%** | ✅ | ✅ |
+| Hindsight | 91.4% | ❌ | ❌ (PostgreSQL) |
+| **Axil — Recall (fusion)** | **90.9%** | ✅ | ✅ |
+| Memvid | 85.7% | ✅ | ✅ |
+| Mem0 | 68.4% | ❌ | ❌ (3 DBs) |
+| Zep | 66.0% | ❌ | ❌ |
+
+And it's small and fast where it counts:
+
+- **94.5% recall at ~1/8th the context-token cost** of comparable systems.
+- **~173× faster vector search** than SQLite + sqlite-vec at 100k vectors.
+- **<100 ms** commands from a **~5–10 MB** offline binary — no LLM call, no network, no daemon.
+
+> Numbers from the in-tree harnesses (competitor/latency harnesses kept out-of-tree). → Full tables, per-category breakdown, and methodology: **[Benchmarks](docs/src/advanced/benchmarks.md)**.
 
 ## How it works
 
-One command turns any Claude Code / Cursor / Codex project into a memory-enriched agent:
+One command turns any Claude Code / Cursor / Codex project into a memory-enriched agent — wiring the hooks **and** indexing your code in a single shot:
 
 ```bash
 axil install --claude-code --bootstrap   # wire hooks + skills AND index your code, in one shot
 ```
 
-From then on, the loop runs itself:
+That's the only command you run. From then on, **the loop runs itself** — every session, with zero prompting from you:
 
 <div align="center">
 <pre>
@@ -90,7 +123,9 @@ From then on, the loop runs itself:
 </pre>
 </div>
 
-A PreToolUse hook injects context before each turn, file edits are auto-captured, and a Stop hook writes a checkpoint at the end — so the next session *resumes* instead of restarting. Or drive it by hand:
+A **PreToolUse** hook boots context before the agent's first move, file edits and fixes are auto-captured as they happen, and a **Stop** hook checkpoints at the end. No prompts to write, no memory tool to remember to call — your agent just stops re-discovering the same codebase every session.
+
+Want to drive it yourself? Every step of the loop is also a plain command:
 
 ```bash
 axil recall "<query>"       # cognitive recall (fusion + importance + decay)
@@ -98,61 +133,6 @@ axil code-search "<symbol>" # token-frugal code location
 axil boot                   # the "resume here" context block
 axil brief                  # today's summary, any time
 ```
-
-## Benchmarks
-
-**LongMemEval** — retrieval recall over 500 questions (top-k=5), vs comparable memory systems:
-
-| System | Recall | No LLM | No server |
-|--------|-------:|:------:|:---------:|
-| MemPalace | 96.6% | ✅ | ✅ |
-| **Axil — Recall-QTC** | **94.5%** | ✅ | ✅ |
-| Hindsight | 91.4% | ❌ | ❌ (PostgreSQL) |
-| **Axil — Recall (fusion)** | **90.9%** | ✅ | ✅ |
-| Memvid | 85.7% | ✅ | ✅ |
-| Mem0 | 68.4% | ❌ | ❌ (3 DBs) |
-| Zep | 66.0% | ❌ | ❌ |
-
-Axil hits **94.5% recall at ~1/8th the context-token cost** of comparable systems, runs **~173× faster vector search** than SQLite + sqlite-vec at 100k vectors, and answers in **<100 ms** from a **~5–10 MB** offline binary.
-
-> Numbers from the in-tree harnesses (competitor/latency harnesses kept out-of-tree). → Full tables, per-category breakdown, and methodology: **[Benchmarks](docs/src/advanced/benchmarks.md)**.
-
-## Extensible by design
-
-Axil isn't a monolith — it's a small core with a **three-tier plugin model**, and its headline capabilities are built *on* it (code-graph and dependency-doc memory are just Extensions). The tiers are Cargo features, so you build exactly what you need:
-
-```bash
-# default = everything; or compose your own — a lean code-agent build:
-cargo install axil-cli --no-default-features \
-  --features "vector,embed,graph,fts,timeseries,memory,scip,deps,checkpoint,mcp,ql"
-#   Engines    (Tier 1 · storage)      : vector embed graph fts timeseries
-#   Extensions (Tier 2 · capabilities) : memory indexer scip deps checkpoint rerank
-#   Adapters   (Tier 3 · surfaces)     : mcp ql http
-```
-
-- **Engines** — storage substrates; each owns a companion file beside your `.axil`.
-- **Extensions** — capabilities on top (memory, SCIP code-graph, dependency-doc memory, rerank, checkpoints). Add your own without forking the core.
-- **Adapters** — how the world talks to it (CLI, MCP, AxilQL) — same engine underneath, every surface in parity.
-
-Tiers are chosen at **build time** (features, above) — drop a feature and it's compiled out: its commands disappear, but your `.axil` **data stays compatible and dormant** (re-add the feature later and it's live again — no migration). **Run-time** behavior is tuned in an optional `axil.toml` (project root, or `~/.config/axil/axil.toml`):
-
-```toml
-[database]
-path = "./.axil/memory.axil"
-
-[index]
-embedding_model = "bge-small-en-v1.5"    # local ONNX, auto-downloaded
-embedding_dimensions = 384
-
-[fts]
-default_limit = 10
-
-[llm]                                     # optional — Axil works fully without it
-endpoint = "https://api.openai.com/v1"
-model = "gpt-4o-mini"                     # api_key via AXIL_LLM_API_KEY env var
-```
-
-→ Build your own: [Three Tiers](docs/src/extending/overview.md) · [Engines](docs/src/extending/engines.md) · [Extensions](docs/src/extending/extensions.md) · [Adapters](docs/src/extending/adapters.md) · [Configuration](docs/src/getting-started/configuration.md)
 
 ## Install
 
@@ -164,39 +144,58 @@ git clone https://github.com/FC4b/axildb.git && cd axildb
 cargo build --release -p axil-cli
 ```
 
-Then run `axil install --claude-code --bootstrap` inside your project. Full options — feature flags, SCIP indexers, manual setup — in [Installation](docs/src/getting-started/installation.md).
+Full options — feature flags, SCIP indexers, manual setup — in [Installation](docs/src/getting-started/installation.md).
 
 ## Quick start
 
-**Path A — agent memory (recommended).** One command wires Axil in and indexes your code; from there the agent does the work (hooks inject context, capture edits, and checkpoint automatically). The DB auto-detects at `.axil/memory.axil`, so everyday commands need no `--db`:
+**Path A — agent memory (recommended).** One command wires Axil into your project and indexes your code. From there the agent does the work: hooks inject context before each turn, capture decisions and errors as you go, and write a checkpoint at the end.
 
 ```bash
-axil install --claude-code --bootstrap   # hooks + skills + initial code index
-axil boot                                 # "resume here" — recent decisions, errors, open threads
-axil recall "auth timeout" --top-k 5      # cognitive recall (vector + graph + recency + keyword)
-axil code-search "login handler"          # token-frugal "where is X?" — pointers, not file dumps
-# the agent stores what it learns as it goes:
+axil install --claude-code --bootstrap     # wire hooks + skills AND index your code, in one shot
+```
+
+That's the whole setup. To *see the payoff immediately*, ask "where is X" the frugal way:
+
+```bash
+axil code-search "login handler"           # token-frugal "where is X?" — a pointer in ~100 tokens, not a file dump
+```
+
+Everything else runs itself, but you can drive it by hand any time:
+
+```bash
+axil boot                                  # "resume here" — recent decisions, errors, open threads
+axil recall "auth timeout" --top-k 5       # cognitive recall (vector + graph + recency + keyword)
 axil store decisions '{"summary":"Use JWT","reason":"simpler than OAuth","files":["auth.rs"]}'
 axil checkpoint      '{"goal":"ship auth","state":"tests green","next_steps":["wire refresh"]}'
 ```
 
+The DB auto-detects at `.axil/memory.axil`, so everyday commands need no `--db`.
+
 → Using Cursor, Windsurf, Codex, or another MCP client? See the [Agent Integration guide](docs/src/agents/claude-code.md) and [MCP Server](docs/src/agents/mcp.md).
 
-**Path B — standalone CLI.** Drive Axil directly as a memory store:
+<details>
+<summary><b>Path B — standalone CLI</b> (drive Axil directly as a memory store)</summary>
+
+Set `AXIL_DB` once and skip `--db` on every command:
 
 ```bash
-axil init ./memory.axil                                        # create a database
-axil --db ./memory.axil store decisions '{"choice":"Use JWT"}' # store (any table + JSON)
-axil --db ./memory.axil recall "auth issues" --top-k 5         # semantic recall (local ONNX, no key)
-axil --db ./memory.axil fts "timeout error"                    # full-text search
-axil --db ./memory.axil link <a> mentions <b>                  # knowledge-graph edge
-axil --db ./memory.axil traverse <a> "->mentions->entity"      # multi-hop walk
-axil --db ./memory.axil ql 'RECALL "auth error" TOP 5'         # AxilQL one-shot
+axil init ./memory.axil                              # create a database
+export AXIL_DB=./memory.axil                          # so the rest need no --db
+
+axil store decisions '{"choice":"Use JWT"}'          # store (any table + JSON)
+axil recall "auth issues" --top-k 5                   # semantic recall (local ONNX, no key)
+axil fts "timeout error"                              # full-text search
+axil link <a> mentions <b>                            # knowledge-graph edge
+axil traverse <a> "->mentions->entity"                # multi-hop walk
+axil ql 'RECALL "auth error" TOP 5'                   # AxilQL one-shot
 ```
 
-> Tip: set `AXIL_DB=./memory.axil` to drop the `--db` flag. `axil --help` lists every command; `axil doctor` checks health. → [Quick Start](docs/src/getting-started/quick-start.md) · [CLI reference](docs/src/cli/data.md).
+`axil --help` lists every command; `axil doctor` checks health. → [Quick Start](docs/src/getting-started/quick-start.md) · [CLI reference](docs/src/cli/data.md).
 
-**Use it from Rust:**
+</details>
+
+<details>
+<summary><b>Use it from Rust</b> (embed the engine directly)</summary>
 
 ```rust
 use axil_core::Axil;
@@ -217,6 +216,47 @@ let hits = db.query().similar_to("auth error", 5).exec()?;
 
 → [Embedded Usage](docs/src/api/embedded.md) · [Query Builder](docs/src/api/query-builder.md) · [Plugin Traits](docs/src/api/plugin-traits.md)
 
+</details>
+
+## Extensible by design
+
+The headline features aren't bolted on — they're plugins. The SCIP code-graph and dependency-doc memory are *Extensions*, built on the same public API you'd use. So the plugin model isn't a diagram; it's load-bearing.
+
+That tiered, sandboxable plugin architecture is something **no other agent-memory system ships** — Memvid, Mem0, Hindsight, HelixDB, and Zep are all fixed feature sets. Axil is a small core in three tiers, each a Cargo feature, so you build exactly what you need:
+
+```bash
+# default = everything; or compose your own — a lean code-agent build:
+cargo install axil-cli --no-default-features \
+  --features "core,vector,embed,graph,fts,timeseries,memory,scip,deps,checkpoint,mcp,ql"
+#   Engines    (Tier 1 · storage)      : vector embed graph fts timeseries
+#   Extensions (Tier 2 · capabilities) : memory indexer scip deps checkpoint rerank
+#   Adapters   (Tier 3 · surfaces)     : mcp ql http
+```
+
+- **Engines** — storage substrates; each owns a companion file beside your `.axil`.
+- **Extensions** — capabilities on top (memory, SCIP code-graph, dependency-doc memory, rerank, checkpoints). Add your own without forking the core.
+- **Adapters** — how the world talks to it (CLI, MCP, AxilQL) — same engine underneath. The MCP server mirrors the full CLI; AxilQL is the query surface.
+
+**Drop a feature and it compiles out** — its commands vanish, but your `.axil` **data stays compatible and dormant**. Re-add the feature later and it's live again, no migration. That's build-time. **Run-time** behavior is tuned in an optional `axil.toml` (project root, or `~/.config/axil/axil.toml`):
+
+```toml
+[database]
+path = "./.axil/memory.axil"
+
+[index]
+embedding_model = "bge-small-en-v1.5"    # local ONNX, auto-downloaded
+embedding_dimensions = 384
+
+[fts]
+default_limit = 10
+
+[llm]                                     # optional — Axil works fully without it
+endpoint = "https://api.openai.com/v1"
+model = "gpt-4o-mini"                     # api_key via AXIL_LLM_API_KEY env var
+```
+
+→ Build your own: [Three Tiers](docs/src/extending/overview.md) · [Engines](docs/src/extending/engines.md) · [Extensions](docs/src/extending/extensions.md) · [Adapters](docs/src/extending/adapters.md) · [Configuration](docs/src/getting-started/configuration.md)
+
 ## Documentation
 
 | Topic | Pages |
@@ -230,9 +270,14 @@ let hits = db.query().similar_to("auth error", 5).exec()?;
 
 ## Status & license
 
-**Pre-release / active development.** Core engine, all plugins, agent memory, diagnostics, and benchmarks are implemented; examples and the hosted docs site are in progress.
+**Usable today.** The core engine, every plugin, agent memory, and diagnostics are implemented and run — it's a single offline binary you can install and point at a real project right now. The in-tree Criterion hot-path suite runs in-repo; the retrieval-quality benchmark harnesses (LoCoMo / LongMemEval / SQLite-compare) are historical and archived out of the repo, so those numbers are not regenerated here. Still in progress: more examples, CI/CD, and a hosted docs site (the docs themselves are linked above).
 
-**Source-available, free for noncommercial use** under the [PolyForm Noncommercial License 1.0.0](LICENSE) — free for personal projects, research, education, nonprofits, and evaluation. Commercial use requires a commercial license; see [LICENSING.md](LICENSING.md). **Axil Atlas** (the multi-database team/sync control plane) is a separate commercial product — the engine here runs fully standalone with no Atlas dependency.
+**Free for noncommercial use.** Axil is source-available under the [PolyForm Noncommercial License 1.0.0](LICENSE):
+
+- **Free** — personal projects, research, education, nonprofits, and evaluation.
+- **Commercial license** — required for commercial use; see [LICENSING.md](LICENSING.md).
+
+**Axil Atlas** (the multi-database team/sync control plane) is a separate commercial product. The engine here runs fully standalone — no Atlas, no server, no cloud dependency.
 
 ## Star history
 
@@ -244,9 +289,10 @@ If Axil saves your agents tokens, a star helps others find it. ⭐
 
 ## Contributing
 
-Contributions, feedback, and ideas are welcome — open an issue to start a discussion.
+Issues, feedback, and PRs are all welcome — open an issue to start a discussion. Try it first, then tell us where it surprised you:
 
 ```bash
 git clone https://github.com/FC4b/axildb.git && cd axildb
 cargo build && cargo test
+axil install --claude-code --bootstrap   # wire it into a real project and see the loop run
 ```
