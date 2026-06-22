@@ -16276,6 +16276,63 @@ fn parse_comma_list(opt: &Option<String>) -> Vec<String> {
 }
 
 #[cfg(test)]
+mod agents_md_drift {
+    use super::*;
+    use std::path::Path;
+
+    const BEGIN: &str = "<!-- AXIL:BEGIN -->";
+    const END: &str = "<!-- AXIL:END -->";
+
+    // Drop the one machine-specific line (the absolute db path) before
+    // comparing — the rules body is what must not drift, the path is per-repo.
+    fn normalize(block: &str) -> String {
+        block
+            .trim()
+            .lines()
+            .map(|l| {
+                if l.starts_with("This repo uses Axil as persistent agent memory at") {
+                    "This repo uses Axil as persistent agent memory at `<DB>`.".to_string()
+                } else {
+                    l.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    // The committed root AGENTS.md is a *generated* artifact: its AXIL:BEGIN/END
+    // block is emitted by agent_instructions_codex(). If the generator changes
+    // and AGENTS.md isn't regenerated, Codex / VS Code agents read stale memory
+    // rules with no error. This pins the committed copy to its generator (db
+    // path aside) so the drift fails CI instead of silently shipping.
+    #[test]
+    fn committed_agents_md_matches_generator() {
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(3)
+            .expect("workspace root above crates/adapters/axil-cli");
+        let committed = std::fs::read_to_string(repo_root.join("AGENTS.md"))
+            .expect("read committed AGENTS.md");
+
+        let start = committed.find(BEGIN).expect("AGENTS.md missing AXIL:BEGIN");
+        let end = committed.find(END).expect("AGENTS.md missing AXIL:END") + END.len();
+        let committed_block = &committed[start..end];
+
+        let generated = format!(
+            "{BEGIN}\n{}\n{END}",
+            agent_instructions_codex(Path::new("/PLACEHOLDER")).trim()
+        );
+
+        assert_eq!(
+            normalize(committed_block),
+            normalize(&generated),
+            "AGENTS.md AXIL block drifted from agent_instructions_codex(); \
+             regenerate AGENTS.md (re-run the Codex integration installer) and commit it."
+        );
+    }
+}
+
+#[cfg(test)]
 mod extension_dispatch_tests {
     use super::*;
     use axil_core::{CliSubcommand, CliSurface};
