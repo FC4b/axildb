@@ -7,7 +7,7 @@ repository.workspace = true
 description = "Project indexer for Axil — token-efficient codebase understanding for agents"
 
 [dependencies]
-axil-core = { path = "../../axil-core" }
+axil-core = { path = "../../axil-core", version = "1.0.0" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

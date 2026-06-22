@@ -7,7 +7,7 @@ repository.workspace = true
 description = "Structured session-checkpoint memory for Axil — picks up where the last session left off (Phase 18)"
 
 [dependencies]
-axil-core = { path = "../../axil-core" }
+axil-core = { path = "../../axil-core", version = "1.0.0" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 chrono = { workspace = true }

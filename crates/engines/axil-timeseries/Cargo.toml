@@ -7,7 +7,7 @@ repository.workspace = true
 description = "Time-series index plugin for Axil"
 
 [dependencies]
-axil-core = { path = "../../axil-core" }
+axil-core = { path = "../../axil-core", version = "1.0.0" }
 chrono = { workspace = true }
 parking_lot = { workspace = true }
 redb = { workspace = true }

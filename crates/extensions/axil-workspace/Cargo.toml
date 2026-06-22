@@ -7,7 +7,7 @@ repository.workspace = true
 description = "Multi-project workspace coordinator for Axil (Phase 14)"
 
 [dependencies]
-axil-core = { path = "../../axil-core" }
+axil-core = { path = "../../axil-core", version = "1.0.0" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

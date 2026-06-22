@@ -7,7 +7,7 @@ repository.workspace = true
 description = "Structured agent memory types for Axil — working, semantic, episodic, procedural, preference"
 
 [dependencies]
-axil-core = { path = "../../axil-core" }
+axil-core = { path = "../../axil-core", version = "1.0.0" }
 chrono = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

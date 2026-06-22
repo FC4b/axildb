@@ -1,0 +1,18 @@
+# release-plz configuration · https://release-plz.dev/docs/config
+#
+# How releasing works with this setup:
+#   1. On every push to `main`, release-plz opens/updates ONE "release" PR that
+#      bumps crate versions and updates CHANGELOGs from your conventional commits.
+#   2. When you merge that PR, release-plz publishes the changed crates to
+#      crates.io (in dependency order, axil-core first … axildb last), then
+#      creates the git tags and GitHub releases.
+#
+# So you don't tag by hand — merging the release PR is the "tag a new version"
+# action. Crates with `publish = false` (axildb-umbrella, axil-tests) are
+# skipped automatically.
+
+[workspace]
+# Create a GitHub Release for each published tag.
+git_release_enable = true
+# Bump intra-workspace dependency requirements when a dependency is released.
+dependencies_update = true

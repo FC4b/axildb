@@ -7,7 +7,7 @@ repository.workspace = true
 description = "Cross-encoder reranking stage for Axil recall pipeline (Phase 15 P0.3)"
 
 [dependencies]
-axil-core = { path = "../../axil-core" }
+axil-core = { path = "../../axil-core", version = "1.0.0" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
