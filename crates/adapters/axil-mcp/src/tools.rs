@@ -364,12 +364,17 @@ fn handle_code_context(db: &Axil, args: &Value) -> ToolCallResult {
         Some(t) => t,
         None => return ToolCallResult::error("missing required parameter: task"),
     };
-    // Honor an explicit budget; otherwise auto-size by indexed repo size.
-    let budget = match args.get("budget").and_then(|v| v.as_u64()) {
-        Some(b) => b as usize,
-        None => axil_indexer::recall::adaptive_context_budget(
+    // Honor an explicit budget; otherwise auto-size by indexed repo size. A
+    // present-but-invalid budget (negative, fractional, non-numeric) is a
+    // caller error, not a cue to silently substitute the adaptive default.
+    let budget = match args.get("budget") {
+        None | Some(Value::Null) => axil_indexer::recall::adaptive_context_budget(
             db.count(axil_indexer::TABLE_CODE_PROXIES).unwrap_or(0),
         ),
+        Some(v) => match v.as_u64() {
+            Some(b) => b as usize,
+            None => return ToolCallResult::error("budget must be a non-negative integer"),
+        },
     };
     let opts = axil_indexer::recall::ContextOptions {
         max_tokens: budget,
@@ -1116,6 +1121,20 @@ mod tests {
             ),
             "relevant_code didn't surface a known proxy"
         );
+    }
+
+    #[test]
+    fn code_context_rejects_invalid_budget() {
+        let (db, _dir) = temp_db_with_index();
+        // A present-but-invalid budget is a caller error, not a cue to
+        // silently substitute the adaptive default.
+        let neg = dispatch(&db, "code_context", &json!({"task": "x", "budget": -5}));
+        assert_eq!(neg.is_error, Some(true), "negative budget must error");
+        let frac = dispatch(&db, "code_context", &json!({"task": "x", "budget": 2.5}));
+        assert_eq!(frac.is_error, Some(true), "fractional budget must error");
+        // Omitted budget auto-sizes (no error).
+        let auto = dispatch(&db, "code_context", &json!({"task": "x"}));
+        assert!(auto.is_error.is_none(), "omitted budget should auto-size, not error");
     }
 
     #[test]

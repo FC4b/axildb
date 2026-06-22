@@ -474,6 +474,42 @@ mod adapter_tests {
         assert_eq!(a.protocol(), Protocol::Mcp);
     }
 
+    /// Drift guard: every tool name the `initialize` routing instructions point
+    /// an agent at must be a real, registered tool. A rename/removal that
+    /// forgets to update `SERVER_INSTRUCTIONS` would otherwise ship stale
+    /// guidance to non-existent tools.
+    #[test]
+    fn server_instructions_reference_only_real_tools() {
+        let defs = crate::tools::tool_definitions();
+        let names: std::collections::HashSet<&str> =
+            defs.iter().map(|t| t.name.as_str()).collect();
+        // The tools the instructions steer toward (backticked in the string).
+        let referenced = [
+            "code_context",
+            "code_search",
+            "recall",
+            "get",
+            "query_history",
+            "remember_decision",
+            "remember_error",
+            "set_preference",
+            "store",
+            "boot",
+            "link",
+        ];
+        for name in referenced {
+            assert!(
+                names.contains(name),
+                "SERVER_INSTRUCTIONS references `{name}` but it is not a registered MCP tool — \
+                 update the instructions or restore the tool"
+            );
+            assert!(
+                SERVER_INSTRUCTIONS.contains(name),
+                "test's `referenced` list names `{name}` but the instructions no longer mention it"
+            );
+        }
+    }
+
     #[test]
     fn run_before_bind_errors_instead_of_panicking() {
         // An unbound adapter refuses to run (no db, no runtime, no stdin read).

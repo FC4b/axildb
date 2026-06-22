@@ -51,6 +51,12 @@ impl ContextDepth {
 ///
 /// Tier breakpoints intentionally mirror the explore-budget tiers so a project
 /// sits in the same size bucket across knobs.
+///
+/// **The specific thresholds (300/2 000/10 000 proxies → 1 500/2 000/3 000/4 000
+/// tokens) are heuristic estimates**, adapted from CodeGraph's repo-size explore
+/// tiers — NOT figures derived from a committed Axil benchmark. They are a
+/// sensible default ceiling, not a measured guarantee; tune against a real
+/// recall-quality run before treating them as validated.
 pub fn adaptive_context_budget(proxy_count: usize) -> usize {
     match proxy_count {
         0..=300 => 1500,      // tiny repo — the answer is a few pointers

@@ -243,18 +243,24 @@ impl Axil {
 
     /// Advisory for a code repo that has structural proxies but no precise,
     /// SCIP-grounded call graph. A plain `axil index` builds `_idx_code_proxies`
-    /// but never `_entities`; SCIP ingest is what produces precise
-    /// `calls`/`references`/`implements`/`type_of` edges (and the `_entities`
-    /// rows they hang off). So "proxies present but `_entities` empty" is a
-    /// reliable, cheap signal that the agent is navigating a code repo on
-    /// structural recall alone — worth one line nudging `axil scip refresh`.
-    /// Returns `None` for non-code repos (no proxies) and for repos that
-    /// already have a precise graph.
+    /// but no SCIP edges; only SCIP ingest produces precise
+    /// `calls`/`references`/`implements`/`type_of` edges.
+    ///
+    /// The presence signal is the `_scip_aliases` table ([`SCIP_ALIAS_TABLE`]),
+    /// which is written *exclusively* by SCIP ingest (`register_entity_alias`).
+    /// We deliberately do NOT key off `_entities`: that table is also populated
+    /// by algorithmic entity extraction, auto-linking, inference, and beliefs
+    /// (`entity.rs`, `worker.rs`, `inference.rs`, …), so a repo that auto-linked
+    /// without SCIP would carry `_entities` rows and wrongly suppress this
+    /// advisory in exactly the structural-only case it exists to catch.
+    ///
+    /// Returns `None` for non-code repos (no proxies) and for repos that already
+    /// have a precise graph.
     pub fn code_graph_hint(&self) -> Option<String> {
         if self.count("_idx_code_proxies").unwrap_or(0) == 0 {
             return None; // not a code repo, or not indexed yet
         }
-        if self.count("_entities").unwrap_or(0) > 0 {
+        if self.count(crate::SCIP_ALIAS_TABLE).unwrap_or(0) > 0 {
             return None; // precise (SCIP-grounded) graph already ingested
         }
         Some(
@@ -539,15 +545,24 @@ mod tests {
         // No code proxies → not a code repo → no hint.
         assert!(db.code_graph_hint().is_none());
 
-        // Code proxies present, no `_entities` → structural-only → hint fires.
+        // Code proxies present, no SCIP aliases → structural-only → hint fires.
         db.insert("_idx_code_proxies", json!({"path": "src/x.rs", "kind": "file"}))
             .unwrap();
         let hint = db.code_graph_hint();
         assert!(hint.is_some(), "code repo without precise graph should warn");
         assert!(hint.unwrap().contains("axil scip refresh"));
 
-        // Precise graph present (`_entities` populated) → hint suppressed.
-        db.insert("_entities", json!({"canonical_id": "rust pkg `x`/fn y()."}))
+        // `_entities` rows alone (e.g. from auto-linking / entity extraction,
+        // not SCIP) must NOT suppress the hint — the no-precise-graph case.
+        db.insert("_entities", json!({"canonical_id": "natural-language-entity"}))
+            .unwrap();
+        assert!(
+            db.code_graph_hint().is_some(),
+            "non-SCIP _entities rows must not suppress the advisory"
+        );
+
+        // SCIP alias rows present → precise graph ingested → hint suppressed.
+        db.insert(crate::SCIP_ALIAS_TABLE, json!({"alias": "y", "canonical_id": "scip-rust ... y()."}))
             .unwrap();
         assert!(db.code_graph_hint().is_none());
     }
