@@ -11,10 +11,10 @@ These instructions work with any AI agent that can execute shell commands (Claud
 
 ```bash
 # Install Axil (if not already available)
-cargo install axil-cli --features full
+cargo install axildb --features full
 
 # Or build from source
-cd /path/to/axildb && cargo build --release -p axil-cli --features full
+cd /path/to/axildb && cargo build --release -p axildb --features full
 export PATH="$PATH:/path/to/axildb/target/release"
 
 # Initialize a memory database in your project

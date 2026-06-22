@@ -36,7 +36,7 @@ Current AI agent memory solutions require external databases, LLM calls for basi
 
 ```bash
 # Install
-cargo install axil-cli
+cargo install axildb
 
 # Store a memory
 axil init ./memory.axil

@@ -38,6 +38,85 @@ Your coding agent is brilliant and amnesiac. Every session it re-reads the same 
 - 🤖 **No LLM required** — local ONNX embeddings + rule-based cognition do the work with zero API calls; plug an LLM in only to sharpen extraction & consolidation.
 - 🔗 **One memory, every tool** — the same portable `.axil` brain is read *and* written by Claude Code, Cursor, Windsurf, Codex, any MCP client, or your own Rust. No vendor lock-in.
 
+## Quick start
+
+**1. Install:**
+
+```bash
+cargo install axildb                     # installs the `axil` binary · default features ≈ everything
+# or from source: git clone https://github.com/FC4b/axildb.git && cd axildb && cargo build --release -p axildb
+```
+
+**2. Wire it into your project** (recommended — agent memory). One command wires Axil into your Claude Code / Cursor / Codex project and indexes your code. From there the agent does the work: hooks inject context before each turn, capture decisions and errors as you go, and write a checkpoint at the end.
+
+```bash
+axil install --claude-code --bootstrap     # wire hooks + skills AND index your code, in one shot
+```
+
+That's the whole setup. To *see the payoff immediately*, ask "where is X" the frugal way:
+
+```bash
+axil code-search "login handler"           # token-frugal "where is X?" — a pointer in ~100 tokens, not a file dump
+```
+
+Everything else runs itself, but you can drive it by hand any time:
+
+```bash
+axil boot                                  # "resume here" — recent decisions, errors, open threads
+axil recall "auth timeout" --top-k 5       # cognitive recall (vector + graph + recency + keyword)
+axil store decisions '{"summary":"Use JWT","reason":"simpler than OAuth","files":["auth.rs"]}'
+axil checkpoint      '{"goal":"ship auth","state":"tests green","next_steps":["wire refresh"]}'
+```
+
+The DB auto-detects at `.axil/memory.axil`, so everyday commands need no `--db`.
+
+→ Full install options (feature flags, SCIP indexers, manual setup): [Installation](docs/src/getting-started/installation.md). Using Cursor, Windsurf, Codex, or another MCP client? See the [Agent Integration guide](docs/src/agents/claude-code.md) and [MCP Server](docs/src/agents/mcp.md).
+
+<details>
+<summary><b>Path B — standalone CLI</b> (drive Axil directly as a memory store)</summary>
+
+Set `AXIL_DB` once and skip `--db` on every command:
+
+```bash
+axil init ./memory.axil                              # create a database
+export AXIL_DB=./memory.axil                          # so the rest need no --db
+
+axil store decisions '{"choice":"Use JWT"}'          # store (any table + JSON)
+axil recall "auth issues" --top-k 5                   # semantic recall (local ONNX, no key)
+axil fts "timeout error"                              # full-text search
+axil link <a> mentions <b>                            # knowledge-graph edge
+axil traverse <a> "->mentions->entity"                # multi-hop walk
+axil ql 'RECALL "auth error" TOP 5'                   # AxilQL one-shot
+```
+
+`axil --help` lists every command; `axil doctor` checks health. → [Quick Start](docs/src/getting-started/quick-start.md) · [CLI reference](docs/src/cli/data.md).
+
+</details>
+
+<details>
+<summary><b>Use it from Rust</b> (embed the engine directly)</summary>
+
+```rust
+use axil_core::Axil;
+use axil_vector::{models::EmbeddingModel, AxilBuilderVectorExt};
+use axil_graph::AxilBuilderGraphExt;
+use axil_fts::AxilBuilderFtsExt;
+
+let db = Axil::open("./memory.axil")
+    .with_embedder_model(EmbeddingModel::BgeSmall)?  // Engine: vector
+    .with_graph_plugin()?                            // Engine: graph
+    .with_fts_plugin()?                              // Engine: full-text
+    .build()?;
+
+let session = db.insert("sessions", serde_json::json!({ "summary": "Fixed auth timeout" }))?;
+db.embed_field(&session.id, "summary")?;
+let hits = db.query().similar_to("auth error", 5).exec()?;
+```
+
+→ [Embedded Usage](docs/src/api/embedded.md) · [Query Builder](docs/src/api/query-builder.md) · [Plugin Traits](docs/src/api/plugin-traits.md)
+
+</details>
+
 ## Why Axil?
 
 The honest version — what you'd otherwise reach for, what it costs you, and where Axil fits:
@@ -100,13 +179,7 @@ And it's small and fast where it counts:
 
 ## How it works
 
-One command turns any Claude Code / Cursor / Codex project into a memory-enriched agent — wiring the hooks **and** indexing your code in a single shot:
-
-```bash
-axil install --claude-code --bootstrap   # wire hooks + skills AND index your code, in one shot
-```
-
-That's the only command you run. From then on, **the loop runs itself** — every session, with zero prompting from you:
+After the one-command setup above, **the loop runs itself** — every session, with zero prompting from you:
 
 <div align="center">
 <pre>
@@ -125,99 +198,6 @@ That's the only command you run. From then on, **the loop runs itself** — ever
 
 A **PreToolUse** hook boots context before the agent's first move, file edits and fixes are auto-captured as they happen, and a **Stop** hook checkpoints at the end. No prompts to write, no memory tool to remember to call — your agent just stops re-discovering the same codebase every session.
 
-Want to drive it yourself? Every step of the loop is also a plain command:
-
-```bash
-axil recall "<query>"       # cognitive recall (fusion + importance + decay)
-axil code-search "<symbol>" # token-frugal code location
-axil boot                   # the "resume here" context block
-axil brief                  # today's summary, any time
-```
-
-## Install
-
-```bash
-cargo install axil-cli                 # published crate (default features ≈ everything)
-
-# or build from source:
-git clone https://github.com/FC4b/axildb.git && cd axildb
-cargo build --release -p axil-cli
-```
-
-Full options — feature flags, SCIP indexers, manual setup — in [Installation](docs/src/getting-started/installation.md).
-
-## Quick start
-
-**Path A — agent memory (recommended).** One command wires Axil into your project and indexes your code. From there the agent does the work: hooks inject context before each turn, capture decisions and errors as you go, and write a checkpoint at the end.
-
-```bash
-axil install --claude-code --bootstrap     # wire hooks + skills AND index your code, in one shot
-```
-
-That's the whole setup. To *see the payoff immediately*, ask "where is X" the frugal way:
-
-```bash
-axil code-search "login handler"           # token-frugal "where is X?" — a pointer in ~100 tokens, not a file dump
-```
-
-Everything else runs itself, but you can drive it by hand any time:
-
-```bash
-axil boot                                  # "resume here" — recent decisions, errors, open threads
-axil recall "auth timeout" --top-k 5       # cognitive recall (vector + graph + recency + keyword)
-axil store decisions '{"summary":"Use JWT","reason":"simpler than OAuth","files":["auth.rs"]}'
-axil checkpoint      '{"goal":"ship auth","state":"tests green","next_steps":["wire refresh"]}'
-```
-
-The DB auto-detects at `.axil/memory.axil`, so everyday commands need no `--db`.
-
-→ Using Cursor, Windsurf, Codex, or another MCP client? See the [Agent Integration guide](docs/src/agents/claude-code.md) and [MCP Server](docs/src/agents/mcp.md).
-
-<details>
-<summary><b>Path B — standalone CLI</b> (drive Axil directly as a memory store)</summary>
-
-Set `AXIL_DB` once and skip `--db` on every command:
-
-```bash
-axil init ./memory.axil                              # create a database
-export AXIL_DB=./memory.axil                          # so the rest need no --db
-
-axil store decisions '{"choice":"Use JWT"}'          # store (any table + JSON)
-axil recall "auth issues" --top-k 5                   # semantic recall (local ONNX, no key)
-axil fts "timeout error"                              # full-text search
-axil link <a> mentions <b>                            # knowledge-graph edge
-axil traverse <a> "->mentions->entity"                # multi-hop walk
-axil ql 'RECALL "auth error" TOP 5'                   # AxilQL one-shot
-```
-
-`axil --help` lists every command; `axil doctor` checks health. → [Quick Start](docs/src/getting-started/quick-start.md) · [CLI reference](docs/src/cli/data.md).
-
-</details>
-
-<details>
-<summary><b>Use it from Rust</b> (embed the engine directly)</summary>
-
-```rust
-use axil_core::Axil;
-use axil_vector::{models::EmbeddingModel, AxilBuilderVectorExt};
-use axil_graph::AxilBuilderGraphExt;
-use axil_fts::AxilBuilderFtsExt;
-
-let db = Axil::open("./memory.axil")
-    .with_embedder_model(EmbeddingModel::BgeSmall)?  // Engine: vector
-    .with_graph_plugin()?                            // Engine: graph
-    .with_fts_plugin()?                              // Engine: full-text
-    .build()?;
-
-let session = db.insert("sessions", serde_json::json!({ "summary": "Fixed auth timeout" }))?;
-db.embed_field(&session.id, "summary")?;
-let hits = db.query().similar_to("auth error", 5).exec()?;
-```
-
-→ [Embedded Usage](docs/src/api/embedded.md) · [Query Builder](docs/src/api/query-builder.md) · [Plugin Traits](docs/src/api/plugin-traits.md)
-
-</details>
-
 ## Extensible by design
 
 The headline features aren't bolted on — they're plugins. The SCIP code-graph and dependency-doc memory are *Extensions*, built on the same public API you'd use. So the plugin model isn't a diagram; it's load-bearing.
@@ -226,7 +206,7 @@ That tiered, sandboxable plugin architecture is something **no other agent-memor
 
 ```bash
 # default = everything; or compose your own — a lean code-agent build:
-cargo install axil-cli --no-default-features \
+cargo install axildb --no-default-features \
   --features "core,vector,embed,graph,fts,timeseries,memory,scip,deps,checkpoint,mcp,ql"
 #   Engines    (Tier 1 · storage)      : vector embed graph fts timeseries
 #   Extensions (Tier 2 · capabilities) : memory indexer scip deps checkpoint rerank

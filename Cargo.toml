@@ -1,5 +1,8 @@
 [package]
-name = "axildb"
+# Umbrella facade re-exporting axil-core (+ optional engines); hosts the
+# top-level examples. Renamed off "axildb" so the publishable CLI crate can
+# own that name (`cargo install axildb` → the `axil` binary). Never published.
+name = "axildb-umbrella"
 version = "1.0.0"
 edition = "2021"
 publish = false

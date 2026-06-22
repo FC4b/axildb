@@ -206,42 +206,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "axil-cli"
-version = "1.0.0"
-dependencies = [
- "anyhow",
- "axil-bundle",
- "axil-checkpoint",
- "axil-core",
- "axil-docs",
- "axil-fts",
- "axil-graph",
- "axil-indexer",
- "axil-mcp",
- "axil-memory",
- "axil-ql",
- "axil-runtime",
- "axil-scip",
- "axil-timeseries",
- "axil-vector",
- "axil-workspace",
- "axum 0.8.8",
- "chrono",
- "clap",
- "http-body-util",
- "indicatif",
- "rustyline",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "toml",
- "tower 0.5.3",
- "tower-http",
- "walkdir",
-]
-
-[[package]]
 name = "axil-core"
 version = "1.0.0"
 dependencies = [
@@ -485,6 +449,42 @@ dependencies = [
 
 [[package]]
 name = "axildb"
+version = "1.0.0"
+dependencies = [
+ "anyhow",
+ "axil-bundle",
+ "axil-checkpoint",
+ "axil-core",
+ "axil-docs",
+ "axil-fts",
+ "axil-graph",
+ "axil-indexer",
+ "axil-mcp",
+ "axil-memory",
+ "axil-ql",
+ "axil-runtime",
+ "axil-scip",
+ "axil-timeseries",
+ "axil-vector",
+ "axil-workspace",
+ "axum 0.8.8",
+ "chrono",
+ "clap",
+ "http-body-util",
+ "indicatif",
+ "rustyline",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "toml",
+ "tower 0.5.3",
+ "tower-http",
+ "walkdir",
+]
+
+[[package]]
+name = "axildb-umbrella"
 version = "1.0.0"
 dependencies = [
  "anyhow",

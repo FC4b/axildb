@@ -4,7 +4,7 @@ Version-over-version performance log. **Append a new section every release** so 
 
 ## How to add a new entry
 
-1. Build the release binary on the target hardware: `cargo build --release -p axil-cli`.
+1. Build the release binary on the target hardware: `cargo build --release -p axildb`.
 2. Run all three layers (or copy-paste the script in [Reproducing](#reproducing)):
    - `axil bench --format pretty` (built-in micro-bench, fresh temp DB)
    - Criterion suites for `axil-core`, `axil-vector`, `axil-graph`, `axil-fts`

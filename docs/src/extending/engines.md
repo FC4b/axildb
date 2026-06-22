@@ -123,7 +123,7 @@ myengine = ["dep:axil-myengine"]
 full = ["vector", "graph", "fts", "deps", "myengine"]
 ```
 
-A minimal `core` build should still compile without your Engine. Test this by running `cargo check -p axil-cli --no-default-features --features core`.
+A minimal `core` build should still compile without your Engine. Test this by running `cargo check -p axildb --no-default-features --features core`.
 
 ## Diagnostics integration
 

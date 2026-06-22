@@ -49,10 +49,10 @@ Target: 5-10MB with all features. Use feature flags to reduce size:
 
 ```bash
 # Minimal (core only)
-cargo build --release -p axil-cli
+cargo build --release -p axildb
 
 # Full (all plugins)
-cargo build --release -p axil-cli --features full,memory
+cargo build --release -p axildb --features full,memory
 ```
 
 ## Configuration for performance

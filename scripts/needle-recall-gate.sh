@@ -30,7 +30,7 @@ else
     # Default: rebuild so the gate always tests the CURRENT checkout, never a
     # stale prior build (cargo is incremental — a no-op when nothing changed).
     echo "[needle-gate] building axil (release) to test the current checkout…" >&2
-    (cd "$ROOT" && cargo build --release -p axil-cli --quiet)
+    (cd "$ROOT" && cargo build --release -p axildb --quiet)
     axil_bin="$ROOT/target/release/axil"
 fi
 

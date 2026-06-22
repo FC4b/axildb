@@ -11,7 +11,7 @@ set -euo pipefail
 
 AXIL="${AXIL:-./target/release/axil}"
 if [[ ! -x "$AXIL" ]]; then
-    echo "build the release binary first: cargo build --release -p axil-cli" >&2
+    echo "build the release binary first: cargo build --release -p axildb" >&2
     exit 2
 fi
 # Make the binary path absolute so later `cd $TMPROOT` calls still find it.

@@ -208,7 +208,7 @@ about its callers, callees, and impls.
 ```bash
 axil recall-for-entity login --top-k 10
 axil recall-for-entity WriteBuffer --trace-graph --depth 2
-axil recall-for-entity recall --scope cargo:axil-core --scope cargo:axil-cli
+axil recall-for-entity recall --scope cargo:axil-core --scope cargo:axildb
 ```
 
 ### Flags

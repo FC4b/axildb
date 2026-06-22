@@ -18,7 +18,7 @@ fn axil_bin() -> PathBuf {
     path.set_extension(std::env::consts::EXE_EXTENSION);
     assert!(
         path.exists(),
-        "axil binary not found at {}. Run `cargo build -p axil-cli` first.",
+        "axil binary not found at {}. Run `cargo build -p axildb` first.",
         path.display()
     );
     path

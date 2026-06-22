@@ -3,7 +3,7 @@
 ## From crates.io
 
 ```bash
-cargo install axil-cli
+cargo install axildb
 ```
 
 This installs the `axil` binary with the **default** feature set — every component in the table below except `rerank`, `web-docs`, and `otel`.
@@ -17,7 +17,7 @@ cargo install --path crates/adapters/axil-cli                   # default featur
 cargo install --path crates/adapters/axil-cli --features full   # everything
 ```
 
-`cargo build --release -p axil-cli` works too; the binary lands at `target/release/axil`.
+`cargo build --release -p axildb` works too; the binary lands at `target/release/axil`.
 
 ## Picking components
 
@@ -49,13 +49,13 @@ Axil is assembled from three extensibility tiers — [Engines, Extensions, and A
 ### Select all
 
 ```bash
-cargo install axil-cli --features full
+cargo install axildb --features full
 ```
 
 ### Pick and choose
 
 ```bash
-cargo install axil-cli --no-default-features --features "core,vector,embed,graph,mcp"
+cargo install axildb --no-default-features --features "core,vector,embed,graph,mcp"
 ```
 
 Feature dependencies are wired in — `embed` pulls `vector`, `scip` pulls `graph`, `rerank` pulls `indexer`, `web-docs` pulls `deps` — so you can't compose a broken set.
@@ -63,7 +63,7 @@ Feature dependencies are wired in — `embed` pulls `vector`, `scip` pulls `grap
 ### Minimal
 
 ```bash
-cargo install axil-cli --no-default-features --features core
+cargo install axildb --no-default-features --features core
 ```
 
 A pure document store: CRUD, queries, diagnostics — no vectors, graph, or FTS.
@@ -77,7 +77,7 @@ axil features            # what's compiled in? (use --format table for humans)
 axil features --wizard   # interactive picker → emits (and optionally runs) the cargo install command
 ```
 
-The wizard seeds its selection from the current binary, enforces feature dependencies in both directions (dropping `graph` also drops `scip`), offers `a` / `d` / `m` presets (all / default / minimal), and finishes with the exact `cargo install … --force` command — run it on the spot or copy it for later. When run inside a source checkout it uses `--path crates/adapters/axil-cli`; otherwise it targets the published `axil-cli` crate.
+The wizard seeds its selection from the current binary, enforces feature dependencies in both directions (dropping `graph` also drops `scip`), offers `a` / `d` / `m` presets (all / default / minimal), and finishes with the exact `cargo install … --force` command — run it on the spot or copy it for later. When run inside a source checkout it uses `--path crates/adapters/axil-cli`; otherwise it targets the published `axildb` crate.
 
 ## Embedding models
 

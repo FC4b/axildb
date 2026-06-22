@@ -71,7 +71,7 @@ export AXIL_BENCH_COMMIT="${AXIL_BENCH_COMMIT:-$(cd "$ROOT" && git rev-parse HEA
 axil_bin="${AXIL_BIN:-$ROOT/target/release/axil}"
 if [ ! -x "$axil_bin" ]; then
     echo "Building axil release binary…"
-    (cd "$ROOT" && cargo build --release -p axil-cli --quiet)
+    (cd "$ROOT" && cargo build --release -p axildb --quiet)
 fi
 
 run_fixture() {

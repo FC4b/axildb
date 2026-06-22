@@ -76,16 +76,16 @@ cargo tree --edges features
 
 ```bash
 # Build release binary
-cargo build --release -p axil-cli --features full
+cargo build --release -p axildb --features full
 
 # Check size
 ls -lh target/release/axil
 
 # Detailed size analysis (requires cargo-bloat)
-cargo bloat --release -p axil-cli --features full
+cargo bloat --release -p axildb --features full
 
 # Check which crates contribute most to size
-cargo bloat --release -p axil-cli --features full --crates
+cargo bloat --release -p axildb --features full --crates
 ```
 
 Target: under 10MB for the release binary (configurable in `axil.toml` → `optimize.binary_size_target_mb`).

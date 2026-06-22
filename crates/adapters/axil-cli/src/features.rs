@@ -12,7 +12,7 @@
 //!
 //! The catalog is kept honest by tests that parse this crate's Cargo.toml
 //! `[features]` section — adding a feature there without updating the
-//! catalog fails `cargo test -p axil-cli`.
+//! catalog fails `cargo test -p axildb`.
 
 use std::collections::BTreeSet;
 use std::io::{self, IsTerminal, Write};
@@ -397,7 +397,7 @@ pub fn run_wizard(quiet: bool) -> Result<i32> {
         bail!(
             "`axil features --wizard` is interactive and needs a terminal.\n\
              For scripted builds compose the command yourself, e.g.:\n  \
-             cargo install axil-cli --force --no-default-features --features \"core,vector,graph\""
+             cargo install axildb --force --no-default-features --features \"core,vector,graph\""
         );
     }
 

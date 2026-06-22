@@ -25,7 +25,7 @@ axil_bin="${AXIL_BIN:-$ROOT/target/release/axil}"
 
 if [ ! -x "$axil_bin" ]; then
     echo "Building axil release binary…" >&2
-    (cd "$ROOT" && cargo build --release -p axil-cli --quiet)
+    (cd "$ROOT" && cargo build --release -p axildb --quiet)
 fi
 
 mkdir -p "$EXP/without" "$EXP/withdb" "$EXP/.cache"

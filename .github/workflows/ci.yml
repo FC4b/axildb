@@ -22,11 +22,11 @@ jobs:
           # The only cross-boundary seam is the generic CanonicalPublisher
           # trait in axil-core.
           - label: minimal (core)
-            cmd: cargo check -p axil-cli --no-default-features --features core
+            cmd: cargo check -p axildb --no-default-features --features core
           - label: default
             cmd: cargo check --workspace --all-targets
           - label: full
-            cmd: cargo check -p axil-cli --no-default-features --features full
+            cmd: cargo check -p axildb --no-default-features --features full
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

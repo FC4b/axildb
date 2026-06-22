@@ -1,5 +1,5 @@
 [package]
-name = "axil-cli"
+name = "axildb"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
