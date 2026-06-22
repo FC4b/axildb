@@ -368,9 +368,7 @@ fn handle_code_context(db: &Axil, args: &Value) -> ToolCallResult {
     // present-but-invalid budget (negative, fractional, non-numeric) is a
     // caller error, not a cue to silently substitute the adaptive default.
     let budget = match args.get("budget") {
-        None | Some(Value::Null) => axil_indexer::recall::adaptive_context_budget(
-            db.count(axil_indexer::TABLE_CODE_PROXIES).unwrap_or(0),
-        ),
+        None | Some(Value::Null) => axil_indexer::recall::auto_context_budget(db),
         Some(v) => match v.as_u64() {
             Some(b) => b as usize,
             None => return ToolCallResult::error("budget must be a non-negative integer"),

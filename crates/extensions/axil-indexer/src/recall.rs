@@ -66,6 +66,14 @@ pub fn adaptive_context_budget(proxy_count: usize) -> usize {
     }
 }
 
+/// The default `code-context` budget for `db`: tier [`adaptive_context_budget`]
+/// by its indexed proxy count. Both the CLI and MCP code-context paths call
+/// this when the caller omits an explicit budget, so the "proxy count is the
+/// auto-size signal" decision lives in one place.
+pub fn auto_context_budget(db: &Axil) -> usize {
+    adaptive_context_budget(db.count(crate::TABLE_CODE_PROXIES).unwrap_or(0))
+}
+
 /// Options for the `context` command.
 #[derive(Debug, Clone)]
 pub struct ContextOptions {

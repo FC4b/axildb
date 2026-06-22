@@ -7499,11 +7499,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             let db_path = require_db(&db_opt)?;
             let db = open_with_all_detected(&db_path)?;
             // Honor an explicit --budget; otherwise auto-size by indexed repo size.
-            let budget = budget.unwrap_or_else(|| {
-                axil_indexer::recall::adaptive_context_budget(
-                    db.count(axil_indexer::TABLE_CODE_PROXIES).unwrap_or(0),
-                )
-            });
+            let budget = budget.unwrap_or_else(|| axil_indexer::recall::auto_context_budget(&db));
             let opts = axil_indexer::recall::ContextOptions {
                 max_tokens: budget,
                 task: Some(task.clone()),
@@ -11163,11 +11159,6 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                     .map(|(id, text)| json!({ "id": id, "text": text }))
                     .collect();
                 sections.insert("extension_blocks".into(), Value::Array(blocks_arr));
-            }
-
-            // Nudge code repos indexed without a precise (SCIP) graph.
-            if let Some(hint) = db.code_graph_hint() {
-                sections.insert("code_graph_hint".into(), json!(hint));
             }
 
             let boot_data = Value::Object(sections);
@@ -15875,11 +15866,6 @@ fn boot_to_narrative(data: &Value) -> String {
                 out.push_str("\n\n");
             }
         }
-    }
-
-    if let Some(hint) = data.get("code_graph_hint").and_then(|v| v.as_str()) {
-        out.push_str("## Code Graph\n");
-        out.push_str(&format!("- ⚠️ {hint}\n\n"));
     }
 
     if let Some(rules) = data.get("rules").and_then(|v| v.as_array()) {

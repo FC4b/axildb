@@ -233,11 +233,6 @@ impl Axil {
                 .collect();
             out.insert("extension_blocks".to_string(), Value::Array(blocks_arr));
         }
-
-        // Advise when this is a code repo indexed without a precise graph.
-        if let Some(hint) = self.code_graph_hint() {
-            out.insert("code_graph_hint".to_string(), json!(hint));
-        }
         Value::Object(out)
     }
 
@@ -410,20 +405,28 @@ impl Axil {
     }
 }
 
-/// Collect non-empty `boot_block` contributions from every registered
-/// Extension into an ordered (id, text) list. Registration order is
-/// preserved so consumers can render deterministically. Extensions
-/// whose `boot_block` returns `None` are skipped.
+/// Collect non-empty boot blocks for the never-dropped scope section, in a
+/// fixed order: every registered Extension's `boot_block` contribution first
+/// (registration order preserved so consumers render deterministically;
+/// `None`-returning Extensions skipped), then any core-synthesized advisories.
+///
+/// Routing core advisories (like the [`Axil::code_graph_hint`] SCIP nudge)
+/// through here — rather than a bespoke top-level key + render branch per
+/// adapter — keeps them a single shape across the CLI, MCP, and embedded boot
+/// surfaces, rendered by the one generic block loop.
 ///
 /// Exposed as `pub` so the CLI Adapter's flat-JSON boot path can share
 /// the same collection without re-implementing the loop.
 pub fn collect_extension_blocks(db: &Axil) -> Vec<(String, String)> {
-    db.extensions()
+    let mut blocks: Vec<(String, String)> = db
+        .extensions()
         .iter()
-        .filter_map(|ext| {
-            ext.boot_block(db).map(|text| (ext.id().to_string(), text))
-        })
-        .collect()
+        .filter_map(|ext| ext.boot_block(db).map(|text| (ext.id().to_string(), text)))
+        .collect();
+    if let Some(hint) = db.code_graph_hint() {
+        blocks.push(("code_graph".to_string(), format!("## Code Graph\n- ⚠️ {hint}")));
+    }
+    blocks
 }
 
 /// Estimate token cost of serialized JSON content. Rough but stable:
