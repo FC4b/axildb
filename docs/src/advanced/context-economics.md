@@ -10,6 +10,28 @@ misattribute — measurably less prone to hallucination.
 This page explains the mechanisms, shows how to measure the saving on your
 own repo, and records the numbers from Axil's own codebase.
 
+## Numbers integrity (policy)
+
+Every savings, compression, speed-up, or reduction figure Axil surfaces —
+in the README, in these docs, or in CLI/MCP output — must be one of:
+
+1. **Measured** against a real, named baseline, or
+2. **Labeled an estimate**, naming the heuristic that produced it, or
+3. **Sourced** to a committed, reproducible benchmark.
+
+Never print a bare multiplier or percentage a reader (or an agent) could
+mistake for a measured result. The honest pattern is used throughout this
+page: the synthetic `context-savings` figure is always tagged "optimistic
+ceiling," the A/B number is "equal-correctness, conditional," and every table
+states what it does *not* cover. When in doubt, **show the inputs** so the
+figure can be checked (e.g. `~{ratio}:1 (N index tokens vs M source tokens)`),
+and mark anything derived from the `~4 chars/token` heuristic with a `~` or
+`est.` rather than presenting it as a real count.
+
+This is a contributor *and* agent rule, not a style note: a surfaced number
+that can't be traced to (1), (2), or (3) is a bug — fix the number or fix the
+label.
+
 ## Why smaller context helps
 
 - **Less distractor text.** When the answer is 80 relevant tokens instead

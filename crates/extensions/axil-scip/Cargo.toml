@@ -7,8 +7,8 @@ repository.workspace = true
 description = "SCIP (Sourcegraph Code Intelligence Protocol) ingest for Axil"
 
 [dependencies]
-axil-core = { path = "../../axil-core", version = "1.0.0" }
-axil-graph = { path = "../../engines/axil-graph", version = "1.0.0" }
+axil-core.workspace = true
+axil-graph.workspace = true
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

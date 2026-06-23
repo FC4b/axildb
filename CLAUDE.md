@@ -536,6 +536,11 @@ axil/
 - Tests in each crate + integration tests at workspace root
 - Keep dependencies minimal — every dependency is a decision
 - File extension for databases: `.axil`
+- **Numbers integrity.** Every savings/compression/speed-up/reduction figure
+  surfaced to a user (README, docs, CLI/MCP output) must be measured against a
+  named baseline, labeled an estimate (naming its heuristic), or sourced to a
+  committed benchmark. A bare number that can't be traced to one of those is a
+  bug. See [Numbers integrity](docs/src/advanced/context-economics.md#numbers-integrity-policy).
 - **No task/phase tags in code comments.** Don't prefix comments (or doc
   comments) with `Phase 20.2:`, `8b.19:`, task IDs, etc. Comments explain *why
   the code is the way it is* — which phase shipped it is git-history noise that

@@ -263,7 +263,7 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
                 "type": "object",
                 "properties": {
                     "task":   {"type": "string", "description": "Task description / question"},
-                    "budget": {"type": "integer", "description": "Token budget (default 2000)", "default": 2000}
+                    "budget": {"type": "integer", "description": "Token budget. Omit to auto-size by indexed repo size (tiny→1500, large monorepo→4000, capped)."}
                 },
                 "required": ["task"]
             }),
@@ -364,7 +364,16 @@ fn handle_code_context(db: &Axil, args: &Value) -> ToolCallResult {
         Some(t) => t,
         None => return ToolCallResult::error("missing required parameter: task"),
     };
-    let budget = args.get("budget").and_then(|v| v.as_u64()).unwrap_or(2000) as usize;
+    // Honor an explicit budget; otherwise auto-size by indexed repo size. A
+    // present-but-invalid budget (negative, fractional, non-numeric) is a
+    // caller error, not a cue to silently substitute the adaptive default.
+    let budget = match args.get("budget") {
+        None | Some(Value::Null) => axil_indexer::recall::auto_context_budget(db),
+        Some(v) => match v.as_u64() {
+            Some(b) => b as usize,
+            None => return ToolCallResult::error("budget must be a non-negative integer"),
+        },
+    };
     let opts = axil_indexer::recall::ContextOptions {
         max_tokens: budget,
         task: Some(task.to_string()),
@@ -1110,6 +1119,20 @@ mod tests {
             ),
             "relevant_code didn't surface a known proxy"
         );
+    }
+
+    #[test]
+    fn code_context_rejects_invalid_budget() {
+        let (db, _dir) = temp_db_with_index();
+        // A present-but-invalid budget is a caller error, not a cue to
+        // silently substitute the adaptive default.
+        let neg = dispatch(&db, "code_context", &json!({"task": "x", "budget": -5}));
+        assert_eq!(neg.is_error, Some(true), "negative budget must error");
+        let frac = dispatch(&db, "code_context", &json!({"task": "x", "budget": 2.5}));
+        assert_eq!(frac.is_error, Some(true), "fractional budget must error");
+        // Omitted budget auto-sizes (no error).
+        let auto = dispatch(&db, "code_context", &json!({"task": "x"}));
+        assert!(auto.is_error.is_none(), "omitted budget should auto-size, not error");
     }
 
     #[test]

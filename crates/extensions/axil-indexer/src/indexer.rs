@@ -547,7 +547,13 @@ impl<'a> ProjectIndexer<'a> {
             symbols: symbol_count,
             deps: dep_count,
             tables_created: Vec::new(),
-            tokens_saved_estimate: format!("~{ratio}:1 compression"),
+            // Disclose the basis the same way the full-index path does, so a
+            // re-index's ratio reads as the estimate it is. Source tokens here
+            // come from cached `size_bytes` (no file re-read), not a fresh
+            // count — the one honest difference from index_full.
+            tokens_saved_estimate: format!(
+                "~{ratio}:1 compression ({index_tokens} index tokens vs {total_source_tokens} source tokens, from cached sizes)"
+            ),
             changed: Some(changed_count),
             unchanged: Some(unchanged_count),
         })

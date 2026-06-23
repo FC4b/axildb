@@ -2605,26 +2605,43 @@ mod tests {
         // Warm up: first insert pays DB init cost.
         let _ = db.insert("warmup", json!({"x": 1})).unwrap();
 
-        // Measure raw insert baseline.
-        let raw_start = std::time::Instant::now();
-        let _ = db
-            .insert("context", json!({"summary": "baseline insert"}))
-            .unwrap();
-        let raw_us = raw_start.elapsed().as_micros() as u64;
+        // This is a wall-clock assertion, so a single sample is flaky: one
+        // scheduler preemption (e.g. a loaded CI box) can spike a measurement
+        // well past budget even when the algorithmic cost is fine. Take the
+        // MINIMUM overhead over a few iterations — the fastest run is the one
+        // that got a clean CPU slice, so it reflects true overhead while a real
+        // >5ms regression still fails every sample. Vary the text per iteration
+        // so each takes the same "Stored" path (no dedupe/supersede shortcut).
+        let mut min_overhead = u64::MAX;
+        let mut last_total = 0u64;
+        let mut last_raw = 0u64;
+        for i in 0..5 {
+            let raw_start = std::time::Instant::now();
+            let _ = db
+                .insert("context", json!({"summary": format!("baseline insert {i}")}))
+                .unwrap();
+            let raw_us = raw_start.elapsed().as_micros() as u64;
 
-        // Measure pipeline.
-        let obs =
-            Observation::from_text("Architecture: auth module uses JWT tokens for stateless auth");
-        let outcome = remember(&db, obs).unwrap();
+            let obs = Observation::from_text(&format!(
+                "Architecture: auth module {i} uses JWT tokens for stateless auth"
+            ));
+            let outcome = remember(&db, obs).unwrap();
+
+            let overhead = outcome.latency_us.saturating_sub(raw_us);
+            if overhead < min_overhead {
+                min_overhead = overhead;
+                last_total = outcome.latency_us;
+                last_raw = raw_us;
+            }
+        }
 
         // Pipeline overhead = total - raw insert. Should be < 5ms.
-        let overhead = outcome.latency_us.saturating_sub(raw_us);
         assert!(
-            overhead < 5000,
-            "pipeline overhead {}us (total {}us - raw {}us) exceeds 5ms budget",
-            overhead,
-            outcome.latency_us,
-            raw_us,
+            min_overhead < 5000,
+            "min pipeline overhead {}us (total {}us - raw {}us) exceeds 5ms budget over 5 runs",
+            min_overhead,
+            last_total,
+            last_raw,
         );
     }
 

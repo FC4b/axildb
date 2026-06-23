@@ -7,14 +7,14 @@ repository.workspace = true
 description = "Central registry of Axil's built-in Extensions — the single registration site for CLI, MCP, and the audit test."
 
 [dependencies]
-axil-core = { path = "../axil-core", version = "1.0.0" }
+axil-core.workspace = true
 
 # Built-in Extensions, gated behind the same feature names the adapters use so
 # a trimmed build can drop them. The registry sits *above* the extension crates
 # (they depend on axil-core; the bundle depends on them), which is why it is its
 # own crate rather than living inside an adapter.
-axil-docs = { path = "../extensions/axil-docs", optional = true, version = "1.0.0" }
-axil-checkpoint = { path = "../extensions/axil-checkpoint", optional = true, version = "1.0.0" }
+axil-docs = { workspace = true, optional = true }
+axil-checkpoint = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

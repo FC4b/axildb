@@ -7,7 +7,7 @@ repository.workspace = true
 description = "WASM runtime that loads sandboxed Extension components against the axil:plugin WIT world. Behind the wasm-host feature — zero Wasmtime in default builds."
 
 [dependencies]
-axil-core = { path = "../../axil-core", version = "1.0.0" }
+axil-core.workspace = true
 anyhow = { workspace = true }
 serde_json = { workspace = true }
 

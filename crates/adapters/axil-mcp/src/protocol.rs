@@ -95,6 +95,13 @@ pub struct InitializeResult {
     pub protocol_version: String,
     pub capabilities: ServerCapabilities,
     pub server_info: ServerInfo,
+    /// Optional top-level routing guidance for the client/agent. MCP clients
+    /// surface this to the model once at session start, so it steers tool
+    /// selection across an overlapping surface (code vs memory vs resume)
+    /// without paying per-call description cost. Omitted from the wire when
+    /// `None`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
 }
 
 /// A tool definition in MCP format.

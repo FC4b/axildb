@@ -28,6 +28,18 @@ use protocol::{
     METHOD_NOT_FOUND, PARSE_ERROR,
 };
 
+/// Top-level routing guidance returned in the `initialize` response so the
+/// client surfaces it to the model once per session. The tool surface overlaps
+/// by design (code lookups vs memory recall vs session resume); without a map
+/// the agent pays selection cost and mis-picks. Keep this terse — it ships on
+/// every session init, not per call.
+const SERVER_INSTRUCTIONS: &str = "\
+Axil is the agent's persistent memory + code index for this project. Routing:
+- Code: \"where/how is X\", or before editing a file/symbol → `code_context` (task-scoped bundle) or `code_search` (locate symbols). Prefer these over recall for code.
+- Memory: past decisions, errors, or context → `recall`; expand one hit with `get <id>`. Time-scoped history → `query_history`.
+- Write knowledge (do this after each unit of work): a decision → `remember_decision`; a bug+fix → `remember_error`; a preference → `set_preference`; anything else → `store`.
+- Resume a session → `boot` (recent decisions, errors, checkpoint). Graph link between records → `link`.";
+
 /// Resolve the embedding model for `db_path` from the project's `axil.toml`,
 /// falling back to BgeSmall when no config is present. Mirrors the CLI's
 /// `resolve_embedding_model` so MCP and CLI agree on which model to load.
@@ -302,6 +314,7 @@ impl McpServer {
                 name: "axil-mcp".into(),
                 version: env!("CARGO_PKG_VERSION").into(),
             },
+            instructions: Some(SERVER_INSTRUCTIONS.into()),
         };
 
         match serde_json::to_value(&result) {
@@ -459,6 +472,42 @@ mod adapter_tests {
         let a = McpAdapter::new();
         assert_eq!(a.id(), "mcp");
         assert_eq!(a.protocol(), Protocol::Mcp);
+    }
+
+    /// Drift guard: every tool name the `initialize` routing instructions point
+    /// an agent at must be a real, registered tool. A rename/removal that
+    /// forgets to update `SERVER_INSTRUCTIONS` would otherwise ship stale
+    /// guidance to non-existent tools.
+    #[test]
+    fn server_instructions_reference_only_real_tools() {
+        let defs = crate::tools::tool_definitions();
+        let names: std::collections::HashSet<&str> =
+            defs.iter().map(|t| t.name.as_str()).collect();
+        // The tools the instructions steer toward (backticked in the string).
+        let referenced = [
+            "code_context",
+            "code_search",
+            "recall",
+            "get",
+            "query_history",
+            "remember_decision",
+            "remember_error",
+            "set_preference",
+            "store",
+            "boot",
+            "link",
+        ];
+        for name in referenced {
+            assert!(
+                names.contains(name),
+                "SERVER_INSTRUCTIONS references `{name}` but it is not a registered MCP tool — \
+                 update the instructions or restore the tool"
+            );
+            assert!(
+                SERVER_INSTRUCTIONS.contains(name),
+                "test's `referenced` list names `{name}` but the instructions no longer mention it"
+            );
+        }
     }
 
     #[test]

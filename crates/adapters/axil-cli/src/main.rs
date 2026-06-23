@@ -1162,9 +1162,10 @@ enum Command {
         /// Task description / question.
         #[arg(long)]
         task: String,
-        /// Token budget for the assembled context.
-        #[arg(long, default_value = "2000")]
-        budget: usize,
+        /// Token budget for the assembled context. Omit to auto-size by
+        /// indexed repo size (tiny→1500, large monorepo→4000, capped).
+        #[arg(long)]
+        budget: Option<usize>,
         /// Output: `compact` (lean pointer lines, default — ~10× smaller)
         /// or `json` (full bundle with scores/ids/sections).
         #[arg(long = "context-format", default_value = "compact")]
@@ -7497,6 +7498,8 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
         } => {
             let db_path = require_db(&db_opt)?;
             let db = open_with_all_detected(&db_path)?;
+            // Honor an explicit --budget; otherwise auto-size by indexed repo size.
+            let budget = budget.unwrap_or_else(|| axil_indexer::recall::auto_context_budget(&db));
             let opts = axil_indexer::recall::ContextOptions {
                 max_tokens: budget,
                 task: Some(task.clone()),
@@ -16273,6 +16276,63 @@ fn parse_comma_list(opt: &Option<String>) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod agents_md_drift {
+    use super::*;
+    use std::path::Path;
+
+    const BEGIN: &str = "<!-- AXIL:BEGIN -->";
+    const END: &str = "<!-- AXIL:END -->";
+
+    // Drop the one machine-specific line (the absolute db path) before
+    // comparing — the rules body is what must not drift, the path is per-repo.
+    fn normalize(block: &str) -> String {
+        block
+            .trim()
+            .lines()
+            .map(|l| {
+                if l.starts_with("This repo uses Axil as persistent agent memory at") {
+                    "This repo uses Axil as persistent agent memory at `<DB>`.".to_string()
+                } else {
+                    l.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    // The committed root AGENTS.md is a *generated* artifact: its AXIL:BEGIN/END
+    // block is emitted by agent_instructions_codex(). If the generator changes
+    // and AGENTS.md isn't regenerated, Codex / VS Code agents read stale memory
+    // rules with no error. This pins the committed copy to its generator (db
+    // path aside) so the drift fails CI instead of silently shipping.
+    #[test]
+    fn committed_agents_md_matches_generator() {
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(3)
+            .expect("workspace root above crates/adapters/axil-cli");
+        let committed = std::fs::read_to_string(repo_root.join("AGENTS.md"))
+            .expect("read committed AGENTS.md");
+
+        let start = committed.find(BEGIN).expect("AGENTS.md missing AXIL:BEGIN");
+        let end = committed.find(END).expect("AGENTS.md missing AXIL:END") + END.len();
+        let committed_block = &committed[start..end];
+
+        let generated = format!(
+            "{BEGIN}\n{}\n{END}",
+            agent_instructions_codex(Path::new("/PLACEHOLDER")).trim()
+        );
+
+        assert_eq!(
+            normalize(committed_block),
+            normalize(&generated),
+            "AGENTS.md AXIL block drifted from agent_instructions_codex(); \
+             regenerate AGENTS.md (re-run the Codex integration installer) and commit it."
+        );
+    }
 }
 
 #[cfg(test)]

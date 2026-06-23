@@ -52,3 +52,21 @@ jobs:
           -p axil-timeseries
           -p axil-ql
           -p axil-scip
+
+  recall-gate:
+    name: recall-quality gate (needle retention)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # The needle eval runs over FTS with no model and no dataset, so it needs
+      # the assembled binary (axil-core alone has no FTS index attached). Build
+      # debug for faster CI and point the gate at it; the eval is deterministic
+      # regardless of opt level. Fails (exit 3) if any planted needle stops
+      # surfacing in top-k or a recalled needle is mangled — i.e. the recall
+      # path silently regressed.
+      - name: build axil (debug, default features incl. fts)
+        run: cargo build -p axildb
+      - name: needle-retention recall gate
+        run: AXIL_BIN="$PWD/target/debug/axil" scripts/needle-recall-gate.sh

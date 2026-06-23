@@ -3,7 +3,7 @@
 # top-level examples. Renamed off "axildb" so the publishable CLI crate can
 # own that name (`cargo install axildb` → the `axil` binary). Never published.
 name = "axildb-umbrella"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2021"
 publish = false
 
@@ -53,10 +53,10 @@ exclude = [
 resolver = "2"
 
 [dependencies]
-axil-core = { path = "crates/axil-core" }
-axil-vector = { path = "crates/engines/axil-vector", optional = true }
-axil-graph = { path = "crates/engines/axil-graph", optional = true }
-axil-memory = { path = "crates/extensions/axil-memory", optional = true }
+axil-core.workspace = true
+axil-vector = { workspace = true, optional = true }
+axil-graph = { workspace = true, optional = true }
+axil-memory = { workspace = true, optional = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
 tempfile = { workspace = true }
@@ -86,12 +86,33 @@ name = "agent_memory"
 required-features = ["memory"]
 
 [workspace.package]
-version = "1.0.0"
+version = "1.1.0"
 edition = "2021"
 license = "PolyForm-Noncommercial-1.0.0"
 repository = "https://github.com/FC4b/axildb"
 
 [workspace.dependencies]
+# Internal crates — declared once here (path for local builds, version for
+# crates.io). Members reference them via `axil-x.workspace = true`, so a release
+# bump touches only `[workspace.package] version` + the versions below, not a
+# pin scattered across every member manifest.
+axil-core = { path = "crates/axil-core", version = "1.1.0" }
+axil-bundle = { path = "crates/axil-bundle", version = "1.1.0" }
+axil-vector = { path = "crates/engines/axil-vector", version = "1.1.0" }
+axil-graph = { path = "crates/engines/axil-graph", version = "1.1.0" }
+axil-fts = { path = "crates/engines/axil-fts", version = "1.1.0" }
+axil-timeseries = { path = "crates/engines/axil-timeseries", version = "1.1.0" }
+axil-memory = { path = "crates/extensions/axil-memory", version = "1.1.0" }
+axil-indexer = { path = "crates/extensions/axil-indexer", version = "1.1.0" }
+axil-rerank = { path = "crates/extensions/axil-rerank", version = "1.1.0" }
+axil-scip = { path = "crates/extensions/axil-scip", version = "1.1.0" }
+axil-docs = { path = "crates/extensions/axil-docs", version = "1.1.0" }
+axil-checkpoint = { path = "crates/extensions/axil-checkpoint", version = "1.1.0" }
+axil-workspace = { path = "crates/extensions/axil-workspace", version = "1.1.0" }
+axil-runtime = { path = "crates/adapters/axil-runtime", version = "1.1.0" }
+axil-mcp = { path = "crates/adapters/axil-mcp", version = "1.1.0" }
+axil-ql = { path = "crates/adapters/axil-ql", version = "1.1.0" }
+
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

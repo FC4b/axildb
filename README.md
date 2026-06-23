@@ -13,7 +13,7 @@
 
 *Think SQLite, but for your agent's memory — a file you embed, not a database you run.*
 
-**Local-first · ~5–10MB binary · vector + graph + full-text + time-series · MCP · 74–80% fewer context tokens**
+**Built in Rust · local-first · single ~5–10MB binary · vector + graph + full-text + time-series · MCP · up to ~80% fewer context tokens on large, semantic-search workloads**
 
 [![CI](https://github.com/FC4b/axildb/actions/workflows/ci.yml/badge.svg)](https://github.com/FC4b/axildb/actions/workflows/ci.yml)
 [![License: PolyForm NC](https://img.shields.io/badge/license-PolyForm--NC-blue.svg)](LICENSE)
@@ -29,7 +29,7 @@
 
 Your coding agent is brilliant and amnesiac. Every session it re-reads the same files, re-learns the same architecture, repeats the same mistakes — and **burns tokens (your money) doing it.** Axil is the second brain that fixes this: it remembers your decisions, gotchas, and code structure across sessions, then hands the agent the *right* memory at the right moment instead of dumping the whole repo into context.
 
-> **In a real, equal-correctness A/B test, agents answered the same coding questions with 74–80% fewer context tokens using Axil.** → [the numbers & caveats](#token-savings--real-savings)
+> **In a real, equal-correctness A/B test, agents answered the same coding questions with up to ~80% fewer context tokens on a large repo with semantic "where/how" queries (≈ parity on a tiny repo where `grep` already nails it).** → [the numbers & caveats](#token-savings--real-savings)
 
 - 🧠 **Remembers across sessions** — decisions, gotchas, and architecture learned once, never re-read. Vector + knowledge graph + full-text + time-series, all in a single `.axil` file.
 - 🕸️ **Knows your code, not just your text** — a SCIP **code-graph** (callers/callees, not keyword guesses) and **version-pinned dependency-doc memory** (your *exact* lib versions, zero network) — code-aware context most agent memory skips.
@@ -130,14 +130,14 @@ The honest version — what you'd otherwise reach for, what it costs you, and wh
 
 ## Token savings = real savings
 
-**Same questions, same correct answers, 74–80% fewer context tokens.** Not a synthetic estimate — a real, end-to-end A/B test: clone one public repo into two identical sandboxes, give an agent the same "where is X / how does Y work" tasks in each — one with only `grep` + file reads, the other with only Axil — and count the context tokens each burns **to reach a verified-correct answer**.
+**Same questions, same correct answers — fewer context tokens, most on large repos with semantic queries.** Not a synthetic estimate — a real, end-to-end A/B test: clone one public repo into two identical sandboxes, give an agent the same "where is X / how does Y work" tasks in each — one with only `grep` + file reads, the other with only Axil — and count the context tokens each burns **to reach a verified-correct answer**.
 
-| Corpus | Without Axil | With Axil | Reduction |
-|--------|-------------:|----------:|----------:|
-| **Django** (906 source files) | 10,763 tok | **2,111 tok** | **80%** |
-| **Flask** (24 source files) | 16,225 tok | **4,300 tok** | **74%** |
+| Corpus | "where/how" query | Context-token reduction |
+|--------|-------------------|------------------------:|
+| **Django** (906 source files) | semantic (not directly greppable) | **~73–80%** |
+| **Flask** (24 source files) | symbol is directly greppable | **≈ parity** |
 
-Every token is billed — and re-billed on **every turn**. On the common "where is X" question, Axil answers in **~100 tokens** (one pointer-shaped hit) where an unaided agent greps and reads several files — a fraction of the cost, every lookup, every session.
+Concrete: on Django, resolving the URL dispatcher cost an unaided agent **2,250 tokens** of grep-and-read versus **193 tokens** for two Axil `code-search` calls. On a tiny repo like Flask, `grep` already nails the answer, so it's roughly break-even — the win scales with repo size and how *semantic* (vs directly greppable) the question is. The defensible, equal-correctness figure is **~73% on large/semantic workloads, parity on small**.
 
 > ⚠️ **A specific experiment, not a guarantee.** Two open-source Python repos, a disciplined agent, measured at equal task-correctness. Real savings depend on repo size and question type — **largest on big codebases and semantic "where/how" questions**, near break-even on tiny repos where `grep` already nails it. Reproduce: `scripts/context-ab-setup.sh`. Full methodology and every run: [Context Economics](docs/src/advanced/context-economics.md).
 
@@ -171,11 +171,12 @@ Everything below normally means standing up a vector DB **and** Neo4j **and** El
 
 And it's small and fast where it counts:
 
-- **94.5% recall at ~1/8th the context-token cost** of comparable systems.
-- **~173× faster vector search** than SQLite + sqlite-vec at 100k vectors.
+- **100% needle-recall (6/6), CI-enforced** — every build runs [`scripts/needle-recall-gate.sh`](scripts/needle-recall-gate.sh): a planted fact must come back in the top-5 with its distinctive token intact, or the build fails.
+- **~173× faster vector search** than SQLite + sqlite-vec at 100k vectors *(out-of-tree `sqlite-compare` harness)*.
+- Competitive recall at a fraction of the per-query token budget *(estimate — assumes ~950 tokens/query; see [methodology](docs/src/advanced/benchmarks.md))*.
 - **<100 ms** commands from a **~5–10 MB** offline binary — no LLM call, no network, no daemon.
 
-> Numbers from the in-tree harnesses (competitor/latency harnesses kept out-of-tree). → Full tables, per-category breakdown, and methodology: **[Benchmarks](docs/src/advanced/benchmarks.md)**.
+> *Competitor figures (MemPalace, Hindsight, Mem0, Zep, Memvid) are cited from the published LongMemEval landscape as of April 2026 — not measured by Axil.* Axil's own LongMemEval rows are the **last committed run on the now-archived 500-question harness** (dataset out-of-tree, not regenerated here); the latency/vector figures come from the out-of-tree `sqlite-compare` harness. The **needle-recall gate and the Criterion hot-path suites run in-tree** (`cargo bench` / CI). → Full tables, per-category breakdown, and methodology: **[Benchmarks](docs/src/advanced/benchmarks.md)**.
 
 ## How it works
 

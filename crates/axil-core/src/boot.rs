@@ -236,6 +236,36 @@ impl Axil {
         Value::Object(out)
     }
 
+    /// Advisory for a code repo that has structural proxies but no precise,
+    /// SCIP-grounded call graph. A plain `axil index` builds `_idx_code_proxies`
+    /// but no SCIP edges; only SCIP ingest produces precise
+    /// `calls`/`references`/`implements`/`type_of` edges.
+    ///
+    /// The presence signal is the `_scip_aliases` table ([`SCIP_ALIAS_TABLE`]),
+    /// which is written *exclusively* by SCIP ingest (`register_entity_alias`).
+    /// We deliberately do NOT key off `_entities`: that table is also populated
+    /// by algorithmic entity extraction, auto-linking, inference, and beliefs
+    /// (`entity.rs`, `worker.rs`, `inference.rs`, …), so a repo that auto-linked
+    /// without SCIP would carry `_entities` rows and wrongly suppress this
+    /// advisory in exactly the structural-only case it exists to catch.
+    ///
+    /// Returns `None` for non-code repos (no proxies) and for repos that already
+    /// have a precise graph.
+    pub fn code_graph_hint(&self) -> Option<String> {
+        if self.count("_idx_code_proxies").unwrap_or(0) == 0 {
+            return None; // not a code repo, or not indexed yet
+        }
+        if self.count(crate::SCIP_ALIAS_TABLE).unwrap_or(0) > 0 {
+            return None; // precise (SCIP-grounded) graph already ingested
+        }
+        Some(
+            "No precise call graph for this code repo — only structural proxies \
+             are indexed. Run `axil scip refresh` (needs rust-analyzer / scip-* on \
+             PATH) to add precise calls/references/implements edges."
+                .to_string(),
+        )
+    }
+
     /// Pick the top-N records for a section, honoring `topic` (semantic
     /// recall scoped to `table`) and `scope` (filter by `_scope` field).
     /// Falls back to importance ranking when no topic is set or recall
@@ -375,20 +405,28 @@ impl Axil {
     }
 }
 
-/// Collect non-empty `boot_block` contributions from every registered
-/// Extension into an ordered (id, text) list. Registration order is
-/// preserved so consumers can render deterministically. Extensions
-/// whose `boot_block` returns `None` are skipped.
+/// Collect non-empty boot blocks for the never-dropped scope section, in a
+/// fixed order: every registered Extension's `boot_block` contribution first
+/// (registration order preserved so consumers render deterministically;
+/// `None`-returning Extensions skipped), then any core-synthesized advisories.
+///
+/// Routing core advisories (like the [`Axil::code_graph_hint`] SCIP nudge)
+/// through here — rather than a bespoke top-level key + render branch per
+/// adapter — keeps them a single shape across the CLI, MCP, and embedded boot
+/// surfaces, rendered by the one generic block loop.
 ///
 /// Exposed as `pub` so the CLI Adapter's flat-JSON boot path can share
 /// the same collection without re-implementing the loop.
 pub fn collect_extension_blocks(db: &Axil) -> Vec<(String, String)> {
-    db.extensions()
+    let mut blocks: Vec<(String, String)> = db
+        .extensions()
         .iter()
-        .filter_map(|ext| {
-            ext.boot_block(db).map(|text| (ext.id().to_string(), text))
-        })
-        .collect()
+        .filter_map(|ext| ext.boot_block(db).map(|text| (ext.id().to_string(), text)))
+        .collect();
+    if let Some(hint) = db.code_graph_hint() {
+        blocks.push(("code_graph".to_string(), format!("## Code Graph\n- ⚠️ {hint}")));
+    }
+    blocks
 }
 
 /// Estimate token cost of serialized JSON content. Rough but stable:
@@ -502,6 +540,34 @@ mod tests {
                 "confidence_notes",
             ]
         );
+    }
+
+    #[test]
+    fn code_graph_hint_fires_only_for_code_repo_without_precise_graph() {
+        let (db, _dir) = temp_db();
+        // No code proxies → not a code repo → no hint.
+        assert!(db.code_graph_hint().is_none());
+
+        // Code proxies present, no SCIP aliases → structural-only → hint fires.
+        db.insert("_idx_code_proxies", json!({"path": "src/x.rs", "kind": "file"}))
+            .unwrap();
+        let hint = db.code_graph_hint();
+        assert!(hint.is_some(), "code repo without precise graph should warn");
+        assert!(hint.unwrap().contains("axil scip refresh"));
+
+        // `_entities` rows alone (e.g. from auto-linking / entity extraction,
+        // not SCIP) must NOT suppress the hint — the no-precise-graph case.
+        db.insert("_entities", json!({"canonical_id": "natural-language-entity"}))
+            .unwrap();
+        assert!(
+            db.code_graph_hint().is_some(),
+            "non-SCIP _entities rows must not suppress the advisory"
+        );
+
+        // SCIP alias rows present → precise graph ingested → hint suppressed.
+        db.insert(crate::SCIP_ALIAS_TABLE, json!({"alias": "y", "canonical_id": "scip-rust ... y()."}))
+            .unwrap();
+        assert!(db.code_graph_hint().is_none());
     }
 
     #[test]
