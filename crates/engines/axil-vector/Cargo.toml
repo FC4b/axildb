@@ -7,7 +7,7 @@ repository.workspace = true
 description = "Vector search plugin for Axil (HNSW + embeddings)"
 
 [dependencies]
-axil-core = { path = "../../axil-core", version = "1.0.0" }
+axil-core.workspace = true
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

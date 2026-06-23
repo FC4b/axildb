@@ -7,7 +7,7 @@ repository.workspace = true
 description = "Dependency documentation memory for Axil (Phase 16)"
 
 [dependencies]
-axil-core = { path = "../../axil-core", version = "1.0.0" }
+axil-core.workspace = true
 serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }

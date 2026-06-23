@@ -7,17 +7,17 @@ repository.workspace = true
 description = "MCP (Model Context Protocol) server for Axil — JSON-RPC over stdio"
 
 [dependencies]
-axil-core = { path = "../../axil-core", version = "1.0.0" }
+axil-core.workspace = true
 # Bundle with `deps` on: axil-mcp always ships DocsExtension (axil-docs is a
 # non-optional dependency here), so its built-in registration is always present.
-axil-bundle = { path = "../../axil-bundle", features = ["deps"], version = "1.0.0" }
-axil-indexer = { path = "../../extensions/axil-indexer", version = "1.0.0" }
-axil-docs = { path = "../../extensions/axil-docs", version = "1.0.0" }
-axil-workspace = { path = "../../extensions/axil-workspace", version = "1.0.0" }
+axil-bundle = { workspace = true, features = ["deps"] }
+axil-indexer.workspace = true
+axil-docs.workspace = true
+axil-workspace.workspace = true
 
 # Optional Tier-2 Extensions — gate so consumers can build a trimmed
 # MCP server binary without pulling them in. Matches axil-cli's pattern.
-axil-checkpoint = { path = "../../extensions/axil-checkpoint", optional = true, version = "1.0.0" }
+axil-checkpoint = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "io-std"] }
@@ -27,10 +27,10 @@ chrono = { workspace = true }
 # Plugin crates — attached lazily at `McpServer::open` based on companion
 # files present on disk. Optional so non-MCP builds that re-export axil-mcp
 # don't pull the full stack unless they want it.
-axil-vector = { path = "../../engines/axil-vector", optional = true, version = "1.0.0" }
-axil-graph = { path = "../../engines/axil-graph", optional = true, version = "1.0.0" }
-axil-fts = { path = "../../engines/axil-fts", optional = true, version = "1.0.0" }
-axil-timeseries = { path = "../../engines/axil-timeseries", optional = true, version = "1.0.0" }
+axil-vector = { workspace = true, optional = true }
+axil-graph = { workspace = true, optional = true }
+axil-fts = { workspace = true, optional = true }
+axil-timeseries = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

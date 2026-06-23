@@ -11,9 +11,9 @@ name = "axil"
 path = "src/main.rs"
 
 [dependencies]
-axil-core = { path = "../../axil-core", version = "1.0.0" }
-axil-bundle = { path = "../../axil-bundle", version = "1.0.0" }
-axil-workspace = { path = "../../extensions/axil-workspace", version = "1.0.0" }
+axil-core.workspace = true
+axil-bundle.workspace = true
+axil-workspace.workspace = true
 chrono = { workspace = true }
 clap = { version = "4", features = ["derive", "env"] }
 anyhow = { workspace = true }
@@ -25,53 +25,43 @@ serde_json = { workspace = true }
 indicatif = { workspace = true }
 
 [dependencies.axil-vector]
-path = "../../engines/axil-vector"
-version = "1.0.0"
+workspace = true
 optional = true
 
 [dependencies.axil-graph]
-path = "../../engines/axil-graph"
-version = "1.0.0"
+workspace = true
 optional = true
 
 [dependencies.axil-fts]
-path = "../../engines/axil-fts"
-version = "1.0.0"
+workspace = true
 optional = true
 
 [dependencies.axil-timeseries]
-path = "../../engines/axil-timeseries"
-version = "1.0.0"
+workspace = true
 optional = true
 
 [dependencies.axil-indexer]
-path = "../../extensions/axil-indexer"
-version = "1.0.0"
+workspace = true
 optional = true
 
 [dependencies.axil-scip]
-path = "../../extensions/axil-scip"
-version = "1.0.0"
+workspace = true
 optional = true
 
 [dependencies.axil-docs]
-path = "../../extensions/axil-docs"
-version = "1.0.0"
+workspace = true
 optional = true
 
 [dependencies.axil-checkpoint]
-path = "../../extensions/axil-checkpoint"
-version = "1.0.0"
+workspace = true
 optional = true
 
 [dependencies.axil-memory]
-path = "../../extensions/axil-memory"
-version = "1.0.0"
+workspace = true
 optional = true
 
 [dependencies.axil-ql]
-path = "../axil-ql"
-version = "1.0.0"
+workspace = true
 optional = true
 
 [dependencies.rustyline]
@@ -79,8 +69,7 @@ workspace = true
 optional = true
 
 [dependencies.axil-mcp]
-path = "../axil-mcp"
-version = "1.0.0"
+workspace = true
 optional = true
 
 [dependencies.axum]
@@ -92,8 +81,7 @@ workspace = true
 optional = true
 
 [dependencies.axil-runtime]
-path = "../axil-runtime"
-version = "1.0.0"
+workspace = true
 optional = true
 
 [dependencies.tempfile]
