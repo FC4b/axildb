@@ -259,6 +259,10 @@ pub fn render_plain(report: &SavingsReport) -> String {
         report.reduction_pct,
         report.compression_ratio,
     ));
+    out.push_str(
+        "Baseline = whole-file-read upper bound (optimistic ceiling; a grep-savvy agent reads \
+         less, so real-world savings are lower).\n",
+    );
     out.push_str(&format!(
         "Upper bound: reading the whole indexed corpus once = {} tokens.\n",
         fmt_int(report.repo_full_scan_tokens),
@@ -288,6 +292,9 @@ pub fn render_markdown(report: &SavingsReport) -> String {
         fmt_int(report.total_without_axil),
         report.reduction_pct,
     ));
+    out.push_str(
+        "\n_Baseline = whole-file-read upper bound (optimistic ceiling; a grep-savvy agent reads less)._\n",
+    );
     out
 }
 

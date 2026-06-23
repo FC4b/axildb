@@ -126,8 +126,11 @@ MemPalace:   96.6% / 8000 tok = 12.1 efficiency  (8.2× worse)
 Mem0:        68.4% / 6000 tok = 11.4 efficiency
 ```
 
-**Axil (QTC) delivers 94.5% recall at ~1/8th the token cost of comparable
-systems.**
+**Axil (QTC) delivers 94.5% recall at a small fraction of the per-query token
+cost of comparable systems** — *estimate: Axil's ~950 tok/query is measured from
+its compact recall output, but the competitor token budgets above (8000 / 6000)
+are assumed, not measured from those systems, so the "~1/8th" ratio is
+illustrative, not a head-to-head measurement.*
 
 ## Vector search latency (100k vectors, 384 dims)
 
