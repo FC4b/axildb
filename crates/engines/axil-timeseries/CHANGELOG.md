@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.1](https://github.com/FC4b/axildb/compare/axil-timeseries-v1.1.0...axil-timeseries-v1.1.1) - 2026-06-23
+
+### Other
+
+- release v1.1.0
+
 ## [1.1.0](https://github.com/FC4b/axildb/compare/axil-timeseries-v1.0.0...axil-timeseries-v1.1.0) - 2026-06-23
 
 ### Other
