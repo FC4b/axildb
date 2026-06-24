@@ -344,7 +344,7 @@ local, gitignored `tasks/` dir — they are not shipped in the public repo.)
 - Combined query engine (RRF fusion), batch insert, Criterion benchmarks, API polish
 - LoCoMo benchmark (99% hit rate, 94.4% recall — *historical; see note below*),
   LongMemEval benchmark, A/B testing framework
-- Deferred: examples (vector_search, graph_queries, agent_memory), CI/CD, documentation site
+- Deferred: examples (vector_search, graph_queries, agent_memory), documentation site. (CI/CD shipped post-1.0: `.github/workflows/ci.yml` build/test/recall-quality gate + `release-plz.yml` auto-publish.)
 
 > **Benchmark numbers are historical.** The LoCoMo / LongMemEval / SQLite-compare
 > harnesses were untracked from git (see `.gitignore`: `/benchmarks/`) and are
@@ -367,7 +367,7 @@ local, gitignored `tasks/` dir — they are not shipped in the public repo.)
   snapshots, hook capture, entity extraction, token-budgeted recall, multi-agent, boot context
 
 ### Phase 9: Ship — Remaining Work
-- Testing gaps, CI/CD, examples, feature polish, benchmarks
+- Testing gaps, examples, feature polish, benchmarks. (CI/CD now shipped — `.github/workflows/ci.yml` + `release-plz.yml`.)
 
 ### Phase 10: Cognitive Memory ✅
 - Auto-importance scoring on every insert (entity density, structural markers, complexity)
@@ -412,7 +412,7 @@ local, gitignored `tasks/` dir — they are not shipped in the public repo.)
 - Transitive deps (P1.a): `deps sync/refresh --transitive` ingests the transitive deps the project's own source actually imports — `imports::scan_project_imports` walks `.rs`/`.js`-family source and gates the lockfile closure against it (Cargo/npm); ingested as `kind: "transitive"`
 - Web fallback: Path A — `axil deps ingest` accepts agent-fetched text (stdin/file, no feature flag); Path B — `web.rs` HTTP fetcher behind the default-off `web-docs` feature (npm registry; offline-first posture)
 - CLI: `axil deps {list,sync,refresh,ingest,status}` + `axil dep-docs`; MCP parity: `dep_docs` + `deps_status` tools
-- Deferred: `documents` graph edges (memory↔dep-doc chunks, no consumer yet); the CI gate (axildb runs no CI). Only P1 epic still open: 16.P1.d workspace-shared dep-doc cache (blocked on Phase 14, multi-project workspace).
+- Deferred: `documents` graph edges (memory↔dep-doc chunks, no consumer yet); a dep-docs-specific CI gate (the repo now has CI — `.github/workflows/ci.yml` runs build/test/recall-quality on every PR — but it does not exercise dep-docs). Only P1 epic still open: 16.P1.d workspace-shared dep-doc cache (blocked on Phase 14, multi-project workspace).
 
 ### Phase 18: Session Checkpoint ✅
 - New `crates/extensions/axil-checkpoint/` (Tier-2 Extension behind the `checkpoint` Cargo feature, in axil-cli `default`/`full`). Templated on `DocsExtension`.
