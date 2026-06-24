@@ -2772,6 +2772,14 @@ enum ExtCommand {
         /// Plugin id (as shown by `axil ext list`).
         id: String,
     },
+    /// Replace an installed plugin's `.wasm` in place, keeping its data and
+    /// capability grants; rolls back if the new file fails to load.
+    Upgrade {
+        /// Plugin id of the installed plugin to replace (as shown by `axil ext list`).
+        id: String,
+        /// Path to the new `.wasm` component file.
+        path: PathBuf,
+    },
     /// Show one installed plugin's id, name, table prefixes, and file.
     Info {
         /// Plugin id.
@@ -13960,6 +13968,63 @@ fn run_extension_dispatch(
     }
 }
 
+/// Atomically replace the file at `old_path` with `new_bytes`, rolling back to
+/// the original contents if `validate` rejects the result.
+///
+/// Pure filesystem logic, deliberately free of the WASM runtime so it is
+/// unit-testable without `wasm-host`: the validate step is a closure the caller
+/// supplies (in practice "re-inspect the upgraded `.wasm` and confirm it still
+/// loads"). The replace is done via a same-directory temp file + `rename`, which
+/// is atomic on the same filesystem — a reader never sees a half-written plugin.
+/// The previous bytes are read up front so a failed validation can restore them
+/// byte-for-byte, leaving the working plugin exactly as it was.
+// Only the `wasm-host` upgrade handler calls this at runtime; the unit test
+// exercises it in any build, so it's not dead — silence the default-build lint.
+#[cfg_attr(not(feature = "wasm-host"), allow(dead_code))]
+fn atomic_replace_with_rollback(
+    old_path: &Path,
+    new_bytes: &[u8],
+    validate: impl FnOnce(&Path) -> Result<()>,
+) -> Result<()> {
+    let old_bytes = std::fs::read(old_path)
+        .with_context(|| format!("failed to read existing plugin `{}`", old_path.display()))?;
+
+    let dir = old_path.parent().unwrap_or_else(|| Path::new("."));
+    // Same-dir temp so the final rename is a same-filesystem (atomic) move.
+    let tmp = dir.join(format!(
+        ".{}.upgrade-tmp",
+        old_path
+            .file_name()
+            .and_then(|f| f.to_str())
+            .unwrap_or("plugin")
+    ));
+    std::fs::write(&tmp, new_bytes).with_context(|| {
+        format!("failed to stage new plugin bytes at `{}`", tmp.display())
+    })?;
+    if let Err(e) = std::fs::rename(&tmp, old_path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e).with_context(|| {
+            format!("failed to swap new plugin into `{}`", old_path.display())
+        });
+    }
+
+    // The new file is now live; prove it before declaring success. If it fails,
+    // restore the original bytes so we never leave a broken plugin in place.
+    match validate(old_path) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            std::fs::write(old_path, &old_bytes).with_context(|| {
+                format!(
+                    "rollback failed: could not restore previous plugin at `{}` after a \
+                     failed upgrade ({e})",
+                    old_path.display()
+                )
+            })?;
+            Err(e)
+        }
+    }
+}
+
 #[cfg(feature = "wasm-host")]
 fn run_ext(cmd: ExtCommand, db_opt: &Option<PathBuf>, out: &Output) -> Result<i32> {
     use std::sync::Arc;
@@ -14045,6 +14110,98 @@ fn run_ext(cmd: ExtCommand, db_opt: &Option<PathBuf>, out: &Output) -> Result<i3
                 }
                 None => anyhow::bail!("no installed plugin with id `{id}`"),
             }
+        }
+        ExtCommand::Upgrade { id, path } => {
+            let db = Arc::new(open_with_all_detected(&db_path)?);
+            let host = axil_runtime::WasmHost::new().context("WASM runtime init failed")?;
+
+            // Resolve the existing plugin by id (inspect-only; don't register).
+            let mut old_path: Option<PathBuf> = None;
+            let mut old_abi: Option<String> = None;
+            if let Ok(entries) = std::fs::read_dir(&dir) {
+                for entry in entries.flatten() {
+                    let p = entry.path();
+                    if p.extension().and_then(|e| e.to_str()) != Some("wasm") {
+                        continue;
+                    }
+                    let rec = wasm_plugins::load_one(&db, &host, &p, &config, false, None);
+                    if rec.id.as_deref() == Some(id.as_str()) {
+                        old_abi = rec.abi;
+                        old_path = Some(p);
+                        break;
+                    }
+                }
+            }
+            let old_path =
+                old_path.ok_or_else(|| anyhow::anyhow!("no installed plugin with id `{id}`"))?;
+
+            // Validate the NEW `.wasm` BEFORE touching the working plugin — never
+            // replace a loadable plugin with a broken one.
+            let new_rec = wasm_plugins::inspect(&db, &path, &config)
+                .with_context(|| format!("`{}` is not a loadable plugin", path.display()))?;
+            let new_id = new_rec.id.clone().unwrap_or_default();
+            let new_abi = new_rec.abi.clone();
+
+            // Same-logical-plugin only: a different id is a different plugin and
+            // would silently inherit this one's grants + data.
+            if new_id != id {
+                anyhow::bail!(
+                    "`{}` has id `{new_id}`, not `{id}` — that's a different plugin; use \
+                     `ext remove {id}` + `ext install {}`",
+                    path.display(),
+                    path.display()
+                );
+            }
+
+            let new_bytes = std::fs::read(&path)
+                .with_context(|| format!("failed to read new plugin `{}`", path.display()))?;
+
+            // Atomic replace over the SAME filename ⇒ same grant key, so existing
+            // capability grants carry over and data (keyed by table-prefix/id, not
+            // filename) is preserved. Re-inspect the swapped file to prove it loads;
+            // on failure the helper restores the previous bytes (rollback).
+            atomic_replace_with_rollback(&old_path, &new_bytes, |swapped| {
+                wasm_plugins::inspect(&db, swapped, &config)
+                    .map(|_| ())
+                    .with_context(|| "upgraded plugin failed to load")
+            })
+            .with_context(|| {
+                format!(
+                    "upgrade failed, rolled back to previous version of `{id}` at `{}`",
+                    old_path.display()
+                )
+            })?;
+
+            // Invalidate the compiled-module cache so the next load recompiles
+            // from the new bytes instead of deserializing the stale `.cwasm`.
+            let cache_file = dir
+                .join(".cache")
+                .join(format!("{}.cwasm", wasm_plugins::plugin_key(&old_path)));
+            let _ = std::fs::remove_file(&cache_file);
+
+            // The grant key is the filename stem, which is unchanged, so grants
+            // are preserved. The WIT ABI surfaces no "requested capabilities", so
+            // we can't diff requested-vs-granted; instead we state that grants
+            // carried over and any *new* capability need stays deny-by-default
+            // until the operator runs `ext grant <key> <cap>` (no silent
+            // privilege escalation across an upgrade).
+            out.print(&json!({
+                "upgraded": id,
+                "file": old_path.display().to_string(),
+                "abi": new_abi,
+                "abi_from": old_abi,
+                "prefixes": new_rec.prefixes,
+                "granted": new_rec.granted,
+                "note": "data and capability grants preserved (same filename ⇒ same grant key); \
+                         any new capability the upgrade needs stays deny-by-default until granted \
+                         via `ext grant`",
+            }));
+            if !out.quiet {
+                out.status(&format!(
+                    "upgraded plugin `{id}` — data and grants preserved"
+                ));
+            }
+            Ok(EXIT_OK)
         }
         ExtCommand::Info { id } => {
             let db = Arc::new(open_with_all_detected(&db_path)?);
@@ -16641,5 +16798,52 @@ mod truncation_tests {
         assert!(!is_high_signal_token("responsibilities")); // plain prose word
         assert!(!is_high_signal_token("the")); // too short
         assert!(!is_high_signal_token("configuration")); // plain word, no signal shape
+    }
+}
+
+#[cfg(test)]
+mod upgrade_helper_tests {
+    use super::atomic_replace_with_rollback;
+
+    #[test]
+    fn replace_succeeds_and_swaps_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("plugin.wasm");
+        std::fs::write(&target, b"OLD").unwrap();
+
+        let res = atomic_replace_with_rollback(&target, b"NEW", |p| {
+            // Validate sees the new bytes already in place.
+            assert_eq!(std::fs::read(p).unwrap(), b"NEW");
+            Ok(())
+        });
+
+        assert!(res.is_ok(), "expected success, got {res:?}");
+        assert_eq!(std::fs::read(&target).unwrap(), b"NEW");
+        // No staging temp file is left behind.
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains("upgrade-tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "staging temp not cleaned up");
+    }
+
+    #[test]
+    fn failed_validation_rolls_back_to_original_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("plugin.wasm");
+        std::fs::write(&target, b"OLD").unwrap();
+
+        let res = atomic_replace_with_rollback(&target, b"NEW", |_p| {
+            anyhow::bail!("new version refused to load")
+        });
+
+        assert!(res.is_err(), "expected the validate error to propagate");
+        assert!(res
+            .unwrap_err()
+            .to_string()
+            .contains("new version refused to load"));
+        // The original plugin is restored byte-for-byte; the broken upgrade is gone.
+        assert_eq!(std::fs::read(&target).unwrap(), b"OLD");
     }
 }
