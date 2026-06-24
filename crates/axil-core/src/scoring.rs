@@ -76,7 +76,12 @@ impl Default for ScoreWeights {
 }
 
 /// Breakdown of individual scoring signals for a single result.
+///
+/// `#[non_exhaustive]`: construct it with [`ScoreExplanation::new`] rather than a
+/// struct literal so out-of-crate callers stay source-compatible as the struct
+/// gains fields (e.g. `query_class` was added without a major bump).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ScoreExplanation {
     /// Individual signal scores that were combined: `(signal_name, raw_value)`.
     pub signals: Vec<(String, f32)>,
@@ -89,6 +94,20 @@ pub struct ScoreExplanation {
     /// serialization when absent so existing JSON output is unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub query_class: Option<String>,
+}
+
+impl ScoreExplanation {
+    /// Build an explanation from the combined `signals` + `summary`.
+    /// `query_class` defaults to `None` (recall fills it in once the query is
+    /// classified). Prefer this over a struct literal: the struct is
+    /// `#[non_exhaustive]`, so this is the forward-compatible constructor.
+    pub fn new(signals: Vec<(String, f32)>, summary: String) -> Self {
+        Self {
+            signals,
+            summary,
+            query_class: None,
+        }
+    }
 }
 
 /// A single recall result with scoring breakdown.

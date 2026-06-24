@@ -7162,12 +7162,10 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                             .map(|(rec, score)| axil_core::scoring::RecallResult {
                                 record: rec,
                                 score,
-                                explanation: axil_core::scoring::ScoreExplanation {
-                                    signals: vec![("fts".to_string(), score)],
-                                    summary: "FTS fallback (vector recall returned empty)"
-                                        .to_string(),
-                                    query_class: None,
-                                },
+                                explanation: axil_core::scoring::ScoreExplanation::new(
+                                    vec![("fts".to_string(), score)],
+                                    "FTS fallback (vector recall returned empty)".to_string(),
+                                ),
                             })
                             .collect();
                         apply_filters(&mut r3);
@@ -14001,8 +13999,21 @@ fn atomic_replace_with_rollback(
     std::fs::write(&tmp, new_bytes).with_context(|| {
         format!("failed to stage new plugin bytes at `{}`", tmp.display())
     })?;
-    if let Err(e) = std::fs::rename(&tmp, old_path) {
+    // Swap the staged file into place. POSIX `rename` atomically replaces an
+    // existing destination, but on Windows `rename` errors when the destination
+    // exists, so remove it first there. The in-memory `old_bytes` covers
+    // rollback if either the swap or the validation below fails.
+    #[cfg(windows)]
+    let swapped = std::fs::remove_file(old_path).and_then(|()| std::fs::rename(&tmp, old_path));
+    #[cfg(not(windows))]
+    let swapped = std::fs::rename(&tmp, old_path);
+    if let Err(e) = swapped {
         let _ = std::fs::remove_file(&tmp);
+        // On Windows the original may already be gone (removed above); restore it
+        // so a failed swap never leaves the plugin missing.
+        if !old_path.exists() {
+            let _ = std::fs::write(old_path, &old_bytes);
+        }
         return Err(e).with_context(|| {
             format!("failed to swap new plugin into `{}`", old_path.display())
         });
