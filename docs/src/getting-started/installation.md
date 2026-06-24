@@ -117,7 +117,7 @@ Compile-time features control what *can* run; the builder controls what *does* r
 ```rust
 let db = Axil::open("./memory.axil")
     .with_embedder_model(EmbeddingModel::BgeSmall)?
-    .with_graph_plugin()?
-    .with_fts_plugin()?
+    .with_graph_engine()?
+    .with_fts_engine()?
     .build()?;
 ```

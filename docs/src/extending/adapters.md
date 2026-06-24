@@ -162,7 +162,7 @@ Wire it from a host binary:
 ```rust
 fn main() -> Result<()> {
     let db = Axil::open("./memory.axil")
-        .with_vector_plugin()?
+        .with_vector(384)?
         .with_extension(axil_docs::DocsExtension::default())
         .build()?;
 

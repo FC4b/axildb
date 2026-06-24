@@ -86,7 +86,7 @@ impl AxilBuilderMyEngineExt for AxilBuilder {
     fn with_my_engine(self) -> Result<Self> {
         let companion = axil_core::companion_path(self.path(), ".myengine");
         let engine = MyEngine::open(&companion)?;
-        Ok(self.with_plugin(Box::new(engine)))
+        Ok(self.with_engine(Box::new(engine)))
     }
 }
 ```
@@ -136,7 +136,7 @@ impl MyEngine {
 }
 ```
 
-The master coordinator picks them up automatically when your Engine is registered through `with_plugin()`.
+The master coordinator picks them up automatically when your Engine is registered through `with_engine()`.
 
 ## Testing
 

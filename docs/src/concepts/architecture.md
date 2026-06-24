@@ -19,8 +19,8 @@ Axil is organized in layers, from interface down to storage:
 ├─────────────────────────────────────────┤
 │      Master Coordinator (Axil)          │
 │  • Single entry: Axil::open(path)       │
-│  • Owns all plugin storage lifecycle    │
-│  • Routes mutations to all plugins      │
+│  • Owns all Engine storage lifecycle    │
+│  • Routes mutations to all Engines      │
 │  • Scoring: vector + graph + recency +  │
 │    keyword + feedback → ranked recall   │
 ├─────────────────────────────────────────┤

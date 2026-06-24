@@ -23,7 +23,7 @@ core `.axil` file (e.g. `_checkpoint_records`, `_dep_docs`,
 
 ## Companion files
 
-Plugins (Tier-1 Engines) store their data in companion files alongside
+Tier-1 Engines store their data in companion files alongside
 the main database:
 
 | File | Owner | What it holds | Safe to delete? |

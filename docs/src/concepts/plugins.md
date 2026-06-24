@@ -51,8 +51,8 @@ use axil_fts::AxilBuilderFtsExt;
 
 let db = Axil::open("./memory.axil")
     .with_embedder_model(EmbeddingModel::BgeSmall)?
-    .with_graph_plugin()?
-    .with_fts_plugin()?
+    .with_graph_engine()?
+    .with_fts_engine()?
     .build()?;
 ```
 
@@ -78,4 +78,4 @@ Writing a new Engine is the highest-bar extensibility path in Axil. An Engine mu
 
 For the full authoring walkthrough, see [Authoring Engines](../extending/engines.md).
 
-> **Practical note:** Today the realistic path for a new Engine is upstream contribution. There's no stable ABI for out-of-tree storage plugins yet — that's tracked as future work (see [extending overview](../extending/overview.md#future-work)).
+> **Practical note:** Today the realistic path for a new Engine is upstream contribution. There's no stable ABI for out-of-tree storage Engines yet — that's tracked as future work (see [extending overview](../extending/overview.md#future-work)).
