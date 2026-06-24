@@ -597,6 +597,10 @@ enum Command {
     /// per the brain pipeline. Unchanged files are skipped via content-hash.
     /// State is checkpointed to `.axil/ingest.state.json` so interrupted runs
     /// resume cleanly with `--resume`.
+    ///
+    /// With `--watch`, the same incremental ingest re-runs every `--interval`
+    /// seconds; because unchanged files are skipped via content-hash, each tick
+    /// only ingests new/changed files. Runs until interrupted (Ctrl-C).
     #[cfg(feature = "indexer")]
     Ingest {
         /// Directory to scan.
@@ -624,6 +628,15 @@ enum Command {
         /// Max chunk size in bytes (default: 2000).
         #[arg(long, default_value = "2000")]
         chunk_bytes: usize,
+        /// Re-run the incremental ingest on an interval (Ctrl-C to stop).
+        /// Each tick re-scans `<DIR>` and ingests only new/changed files
+        /// (unchanged files are skipped via content-hash). Mutually implies
+        /// `--resume` so prior state is reused across ticks.
+        #[arg(long)]
+        watch: bool,
+        /// Seconds between watch ticks (default: 2). Only used with `--watch`.
+        #[arg(long, default_value = "2")]
+        interval: u64,
     },
     /// Ingest a SCIP code-index file into Axil's graph.
     ///
@@ -5088,6 +5101,8 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             stats,
             resume,
             chunk_bytes,
+            watch,
+            interval,
         } => {
             let db_path = require_db(&db_opt)?;
             let root_canonical = dir
@@ -5111,57 +5126,31 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                 .map(|p| p.trim_matches('*').trim_matches('/').to_string())
                 .filter(|s| !s.is_empty())
                 .collect();
-            let is_excluded = |path: &Path| -> bool {
-                let s = path.to_string_lossy();
-                exclude_patterns.iter().any(|p| s.contains(p))
-            };
 
-            // Load prior ingest state for resume/skip decisions.
+            // Ingest state lives next to the DB so resume/skip survives across runs and ticks.
             let state_path = db_path
                 .parent()
                 .map(|p| p.join("ingest.state.json"))
                 .unwrap_or_else(|| PathBuf::from("ingest.state.json"));
-            let mut state: serde_json::Map<String, Value> = if resume && state_path.exists() {
-                serde_json::from_str(&std::fs::read_to_string(&state_path).unwrap_or_default())
-                    .unwrap_or_default()
-            } else {
-                serde_json::Map::new()
-            };
 
-            // Walk the tree.
-            let walker = walkdir::WalkDir::new(&root_canonical)
-                .max_depth(if recursive { 32 } else { 1 })
-                .into_iter()
-                .filter_entry(|e| !is_excluded(e.path()));
-
-            // First pass: collect candidate files + sizes for stats/planning.
-            let mut candidates: Vec<(PathBuf, u64)> = Vec::new();
-            for entry in walker {
-                let entry = match entry {
-                    Ok(e) => e,
-                    Err(_) => continue,
-                };
-                if !entry.file_type().is_file() {
-                    continue;
-                }
-                let path = entry.into_path();
-                let ext = path
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .map(|s| s.to_ascii_lowercase())
-                    .unwrap_or_default();
-                if !exts.contains(&ext) {
-                    continue;
-                }
-                let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-                candidates.push((path, size));
-            }
-
+            // --stats is a pure dry-run plan: count files/bytes, no DB, no writes.
             if stats {
+                let candidates = ingest_collect_candidates(
+                    &root_canonical,
+                    recursive,
+                    &exts,
+                    &exclude_patterns,
+                );
+                let prior_state: serde_json::Map<String, Value> = if state_path.exists() {
+                    serde_json::from_str(&std::fs::read_to_string(&state_path).unwrap_or_default())
+                        .unwrap_or_default()
+                } else {
+                    serde_json::Map::new()
+                };
                 let total_bytes: u64 = candidates.iter().map(|(_, s)| s).sum();
                 let already_indexed = candidates
                     .iter()
-                    .filter(|(p, _)| state.get(&p.display().to_string()).is_some())
+                    .filter(|(p, _)| prior_state.get(&p.display().to_string()).is_some())
                     .count();
                 out.print(&json!({
                     "dry_run": true,
@@ -5176,179 +5165,74 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             }
 
             // Open DB once, with all detected plugins so auto-embed/auto-entity run on insert.
+            // In watch mode the same handle is reused across every tick.
             let db = open_with_all_detected(&db_path)?;
-            let total = candidates.len();
-            let started = std::time::Instant::now();
-            let mut files_ingested: usize = 0;
-            let mut files_skipped: usize = 0;
-            let mut chunks_written: usize = 0;
 
-            for (idx, (path, _size)) in candidates.iter().enumerate() {
-                let key = path.display().to_string();
-                let prev_entry = state.get(&key);
-
-                // Fast skip: mtime unchanged → trust the prior hash and don't even read the file.
-                // Saves one syscall + full file read per unchanged file (10k-file runs feel it).
-                let mtime_now = std::fs::metadata(path)
-                    .ok()
-                    .and_then(|m| m.modified().ok())
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_secs());
-                if let (Some(prev), Some(now)) = (
-                    prev_entry
-                        .and_then(|v| v.get("mtime"))
-                        .and_then(|v| v.as_u64()),
-                    mtime_now,
-                ) {
-                    if prev == now {
-                        files_skipped += 1;
-                        if (idx + 1) % 50 == 0 {
-                            eprintln!(
-                                "[ingest] {}/{} scanned ({} skipped)",
-                                idx + 1,
-                                total,
-                                files_skipped
-                            );
-                        }
-                        continue;
-                    }
-                }
-
-                let content = match std::fs::read_to_string(path) {
-                    Ok(c) => c,
-                    Err(_) => {
-                        files_skipped += 1;
-                        continue;
-                    }
-                };
-                if content.trim().is_empty() {
-                    files_skipped += 1;
-                    continue;
-                }
-
-                // Shared with the indexer so one hash function catches all change-detection paths.
-                let hash = axil_indexer::indexer::hash_content(&content);
-                if let Some(prev_hash) = prev_entry
-                    .and_then(|v| v.get("hash"))
-                    .and_then(|v| v.as_str())
-                {
-                    if prev_hash == hash {
-                        files_skipped += 1;
-                        if (idx + 1) % 50 == 0 {
-                            eprintln!(
-                                "[ingest] {}/{} scanned ({} skipped)",
-                                idx + 1,
-                                total,
-                                files_skipped
-                            );
-                        }
-                        continue;
-                    }
-                }
-
-                // Purge any chunk records from a prior ingest of this exact path so the new
-                // chunk set fully replaces the old one — otherwise edits accumulate duplicates.
-                // We trust state first (O(1) id lookup), then fall back to a filtered list().
-                let mut chunks_replaced: usize = 0;
-                let prior_ids: Vec<String> = prev_entry
-                    .and_then(|v| v.get("record_ids"))
-                    .and_then(|v| v.as_array())
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|x| x.as_str().map(String::from))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                if !prior_ids.is_empty() {
-                    for id_str in &prior_ids {
-                        if let Ok(rid) = axil_core::RecordId::from_string(id_str.as_str()) {
-                            if db.delete(&rid).unwrap_or(false) {
-                                chunks_replaced += 1;
-                            }
-                        }
-                    }
-                } else if prev_entry.is_some() {
-                    // Older ingest state without record_ids — scan the table once as a fallback.
-                    let abs = path.display().to_string();
-                    for r in db.list(&table).unwrap_or_default() {
-                        if r.data.get("abs_path").and_then(|v| v.as_str()) == Some(abs.as_str()) {
-                            if db.delete(&r.id).unwrap_or(false) {
-                                chunks_replaced += 1;
-                            }
-                        }
-                    }
-                }
-
-                // Chunk the file and insert fresh records, tracking their IDs for the next ingest.
-                let chunks = chunk_text(&content, chunk_bytes);
-                let rel = path.strip_prefix(&root_canonical).unwrap_or(path);
-                let mut new_ids: Vec<String> = Vec::with_capacity(chunks.len());
-                for (chunk_idx, chunk) in chunks.iter().enumerate() {
-                    let data = json!({
-                        "path": rel.display().to_string(),
-                        "abs_path": path.display().to_string(),
-                        "chunk_idx": chunk_idx,
-                        "chunk_count": chunks.len(),
-                        "content": chunk,
-                        "file_hash": hash,
-                        "source": "ingest",
-                    });
-                    if let Ok(rec) = db.insert(&table, data) {
-                        new_ids.push(rec.id.to_string());
-                        chunks_written += 1;
-                    }
-                }
-                files_ingested += 1;
-                if chunks_replaced > 0 {
-                    eprintln!(
-                        "[ingest] {} superseded {} prior chunk(s)",
-                        rel.display(),
-                        chunks_replaced
+            if watch {
+                // Interval-poll watch (same style as `stats --watch`): no extra
+                // crate dependency. Each tick re-scans the tree and runs the
+                // incremental ingest; content-hash skipping means a tick only
+                // touches new/changed files. State is always reused across ticks
+                // (an explicit --resume is therefore redundant but harmless).
+                let interval = std::time::Duration::from_secs(interval.max(1));
+                out.status(&format!(
+                    "[watch] ingesting {} every {}s — Ctrl+C to stop",
+                    root_canonical.display(),
+                    interval.as_secs()
+                ));
+                loop {
+                    let candidates = ingest_collect_candidates(
+                        &root_canonical,
+                        recursive,
+                        &exts,
+                        &exclude_patterns,
                     );
+                    let report = run_ingest_pass(
+                        &db,
+                        &root_canonical,
+                        &candidates,
+                        &state_path,
+                        &table,
+                        chunk_bytes,
+                        true, // always reuse prior state across ticks
+                        out,
+                    )?;
+                    let ingested = report
+                        .get("files_ingested")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    // Stay quiet when nothing changed; one concise line otherwise.
+                    if ingested > 0 {
+                        let chunks = report
+                            .get("chunks_written")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
+                        out.status(&format!(
+                            "[watch] tick: {ingested} new/changed file(s) ingested ({chunks} chunks)"
+                        ));
+                    }
+                    std::thread::sleep(interval);
                 }
-                state.insert(
-                    key,
-                    json!({
-                        "hash": hash,
-                        "mtime": mtime_now,
-                        "chunks": chunks.len(),
-                        "record_ids": new_ids,
-                        "ingested_at": chrono::Utc::now().to_rfc3339(),
-                    }),
+            } else {
+                let candidates = ingest_collect_candidates(
+                    &root_canonical,
+                    recursive,
+                    &exts,
+                    &exclude_patterns,
                 );
-
-                // Checkpoint state every 20 files so a crash loses little work.
-                if files_ingested % 20 == 0 {
-                    let _ = std::fs::write(&state_path, serde_json::to_string(&state)?);
-                }
-
-                if (idx + 1) % 10 == 0 || idx + 1 == total {
-                    let elapsed = started.elapsed().as_secs_f64().max(0.001);
-                    let rate = (idx + 1) as f64 / elapsed;
-                    eprintln!(
-                        "[ingest] {}/{} files | {} chunks | {:.1} files/s",
-                        idx + 1,
-                        total,
-                        chunks_written,
-                        rate
-                    );
-                }
+                let report = run_ingest_pass(
+                    &db,
+                    &root_canonical,
+                    &candidates,
+                    &state_path,
+                    &table,
+                    chunk_bytes,
+                    resume,
+                    out,
+                )?;
+                out.print(&report);
+                Ok(EXIT_OK)
             }
-
-            // Final checkpoint.
-            std::fs::write(&state_path, serde_json::to_string_pretty(&state)?)?;
-
-            out.print(&json!({
-                "root": root_canonical.display().to_string(),
-                "files_total": total,
-                "files_ingested": files_ingested,
-                "files_skipped": files_skipped,
-                "chunks_written": chunks_written,
-                "elapsed_sec": started.elapsed().as_secs_f64(),
-                "state_file": state_path.display().to_string(),
-                "table": table,
-            }));
-            Ok(EXIT_OK)
         }
 
         Command::InstallProject {
@@ -15395,6 +15279,251 @@ Type=oneshot
 ExecStart=/bin/sh -lc '{command}'
 "#
     )
+}
+
+/// Collect the candidate files under `root_canonical` that match the
+/// extension set and survive the exclude patterns. Shared by the dry-run
+/// (`--stats`) plan and the real ingest pass so both see the same set.
+#[cfg(feature = "indexer")]
+fn ingest_collect_candidates(
+    root_canonical: &Path,
+    recursive: bool,
+    exts: &std::collections::HashSet<String>,
+    exclude_patterns: &[String],
+) -> Vec<(PathBuf, u64)> {
+    let is_excluded = |path: &Path| -> bool {
+        let s = path.to_string_lossy();
+        exclude_patterns.iter().any(|p| s.contains(p))
+    };
+    let walker = walkdir::WalkDir::new(root_canonical)
+        .max_depth(if recursive { 32 } else { 1 })
+        .into_iter()
+        .filter_entry(|e| !is_excluded(e.path()));
+
+    let mut candidates: Vec<(PathBuf, u64)> = Vec::new();
+    for entry in walker {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let path = entry.into_path();
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|s| s.to_ascii_lowercase())
+            .unwrap_or_default();
+        if !exts.contains(&ext) {
+            continue;
+        }
+        let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        candidates.push((path, size));
+    }
+    candidates
+}
+
+/// Run one incremental ingest pass and return the summary report.
+///
+/// This is the body shared by the one-shot `axil ingest` path and each tick
+/// of `--watch`. Unchanged files are skipped via mtime then content-hash, so a
+/// watch tick only re-ingests files that actually changed. State is reloaded
+/// from `.axil/ingest.state.json` on every call, so each tick (and `--resume`)
+/// builds on the prior run; checkpointing it back to disk is what makes the
+/// next tick cheap.
+#[cfg(feature = "indexer")]
+#[allow(clippy::too_many_arguments)]
+fn run_ingest_pass(
+    db: &Axil,
+    root_canonical: &Path,
+    candidates: &[(PathBuf, u64)],
+    state_path: &Path,
+    table: &str,
+    chunk_bytes: usize,
+    resume: bool,
+    out: &Output,
+) -> Result<Value> {
+    // Reload prior state every pass: this is what lets a watch tick (or
+    // `--resume`) trust earlier hashes instead of re-ingesting everything.
+    let mut state: serde_json::Map<String, Value> = if (resume) && state_path.exists() {
+        serde_json::from_str(&std::fs::read_to_string(state_path).unwrap_or_default())
+            .unwrap_or_default()
+    } else {
+        serde_json::Map::new()
+    };
+
+    let total = candidates.len();
+    let started = std::time::Instant::now();
+    let mut files_ingested: usize = 0;
+    let mut files_skipped: usize = 0;
+    let mut chunks_written: usize = 0;
+
+    for (idx, (path, _size)) in candidates.iter().enumerate() {
+        let key = path.display().to_string();
+        let prev_entry = state.get(&key);
+
+        // Fast skip: mtime unchanged → trust the prior hash and don't even read the file.
+        // Saves one syscall + full file read per unchanged file (10k-file runs feel it).
+        let mtime_now = std::fs::metadata(path)
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs());
+        if let (Some(prev), Some(now)) = (
+            prev_entry
+                .and_then(|v| v.get("mtime"))
+                .and_then(|v| v.as_u64()),
+            mtime_now,
+        ) {
+            if prev == now {
+                files_skipped += 1;
+                if (idx + 1) % 50 == 0 {
+                    out.status(&format!(
+                        "[ingest] {}/{} scanned ({} skipped)",
+                        idx + 1,
+                        total,
+                        files_skipped
+                    ));
+                }
+                continue;
+            }
+        }
+
+        let content = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(_) => {
+                files_skipped += 1;
+                continue;
+            }
+        };
+        if content.trim().is_empty() {
+            files_skipped += 1;
+            continue;
+        }
+
+        // Shared with the indexer so one hash function catches all change-detection paths.
+        let hash = axil_indexer::indexer::hash_content(&content);
+        if let Some(prev_hash) = prev_entry
+            .and_then(|v| v.get("hash"))
+            .and_then(|v| v.as_str())
+        {
+            if prev_hash == hash {
+                files_skipped += 1;
+                if (idx + 1) % 50 == 0 {
+                    out.status(&format!(
+                        "[ingest] {}/{} scanned ({} skipped)",
+                        idx + 1,
+                        total,
+                        files_skipped
+                    ));
+                }
+                continue;
+            }
+        }
+
+        // Purge any chunk records from a prior ingest of this exact path so the new
+        // chunk set fully replaces the old one — otherwise edits accumulate duplicates.
+        // We trust state first (O(1) id lookup), then fall back to a filtered list().
+        let mut chunks_replaced: usize = 0;
+        let prior_ids: Vec<String> = prev_entry
+            .and_then(|v| v.get("record_ids"))
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|x| x.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if !prior_ids.is_empty() {
+            for id_str in &prior_ids {
+                if let Ok(rid) = axil_core::RecordId::from_string(id_str.as_str()) {
+                    if db.delete(&rid).unwrap_or(false) {
+                        chunks_replaced += 1;
+                    }
+                }
+            }
+        } else if prev_entry.is_some() {
+            // Older ingest state without record_ids — scan the table once as a fallback.
+            let abs = path.display().to_string();
+            for r in db.list(table).unwrap_or_default() {
+                if r.data.get("abs_path").and_then(|v| v.as_str()) == Some(abs.as_str()) {
+                    if db.delete(&r.id).unwrap_or(false) {
+                        chunks_replaced += 1;
+                    }
+                }
+            }
+        }
+
+        // Chunk the file and insert fresh records, tracking their IDs for the next ingest.
+        let chunks = chunk_text(&content, chunk_bytes);
+        let rel = path.strip_prefix(root_canonical).unwrap_or(path);
+        let mut new_ids: Vec<String> = Vec::with_capacity(chunks.len());
+        for (chunk_idx, chunk) in chunks.iter().enumerate() {
+            let data = json!({
+                "path": rel.display().to_string(),
+                "abs_path": path.display().to_string(),
+                "chunk_idx": chunk_idx,
+                "chunk_count": chunks.len(),
+                "content": chunk,
+                "file_hash": hash,
+                "source": "ingest",
+            });
+            if let Ok(rec) = db.insert(table, data) {
+                new_ids.push(rec.id.to_string());
+                chunks_written += 1;
+            }
+        }
+        files_ingested += 1;
+        if chunks_replaced > 0 {
+            out.status(&format!(
+                "[ingest] {} superseded {} prior chunk(s)",
+                rel.display(),
+                chunks_replaced
+            ));
+        }
+        state.insert(
+            key,
+            json!({
+                "hash": hash,
+                "mtime": mtime_now,
+                "chunks": chunks.len(),
+                "record_ids": new_ids,
+                "ingested_at": chrono::Utc::now().to_rfc3339(),
+            }),
+        );
+
+        // Checkpoint state every 20 files so a crash loses little work.
+        if files_ingested % 20 == 0 {
+            let _ = std::fs::write(state_path, serde_json::to_string(&state)?);
+        }
+
+        if (idx + 1) % 10 == 0 || idx + 1 == total {
+            let elapsed = started.elapsed().as_secs_f64().max(0.001);
+            let rate = (idx + 1) as f64 / elapsed;
+            out.status(&format!(
+                "[ingest] {}/{} files | {} chunks | {:.1} files/s",
+                idx + 1,
+                total,
+                chunks_written,
+                rate
+            ));
+        }
+    }
+
+    // Final checkpoint.
+    std::fs::write(state_path, serde_json::to_string_pretty(&state)?)?;
+
+    Ok(json!({
+        "root": root_canonical.display().to_string(),
+        "files_total": total,
+        "files_ingested": files_ingested,
+        "files_skipped": files_skipped,
+        "chunks_written": chunks_written,
+        "elapsed_sec": started.elapsed().as_secs_f64(),
+        "state_file": state_path.display().to_string(),
+        "table": table,
+    }))
 }
 
 /// Split text into chunks of at most `max_bytes`, splitting on paragraph boundaries (12.2).
