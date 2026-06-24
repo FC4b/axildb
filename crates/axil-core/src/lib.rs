@@ -54,6 +54,7 @@ pub mod otel;
 pub mod plugin;
 pub mod prefetch;
 pub mod query;
+pub mod query_class;
 pub mod record;
 pub mod remember;
 pub mod scoring;
@@ -61,6 +62,7 @@ pub mod simhash;
 pub mod snapshot;
 pub mod storage;
 pub mod temporal;
+pub mod token;
 pub mod tiering;
 pub mod util;
 pub mod worker;
@@ -111,6 +113,7 @@ pub use query::{
     graph_boost, EstimatedCost, Op, PlanStep, ProfileStep, QueryBuilder, QueryPlan, QueryProfile,
     SortDirection,
 };
+pub use query_class::{classify_query, IdentifierKind, QueryClass};
 pub use record::{Record, RecordId};
 pub use remember::{DecisionInput, ErrorInput, RememberResult, WriteSource};
 pub use scoring::{
@@ -137,6 +140,12 @@ pub use feedback::{FeedbackEntry, FeedbackStore};
 pub use inference::{InferenceEngine, InferenceRule, InferredFact};
 pub use prefetch::{MaterializedRecall, PrefetchEngine, QueryLogEntry, QueryPattern};
 pub use temporal::{parse_temporal, temporal_boost, TemporalTarget};
+pub use token::{
+    CharsPerTokenEstimator, TokenEstimator, CHARS_PER_TOKEN as TOKEN_CHARS_PER_TOKEN,
+    DEFAULT_TOKEN_ESTIMATOR,
+};
+#[cfg(feature = "real-tokenizer")]
+pub use token::{TokenError, TokenizersEstimator};
 
 // Re-exports — benchmark metrics and A/B testing
 pub use ab_test::{compare_configs, AbTestConfig, AbTestResult};

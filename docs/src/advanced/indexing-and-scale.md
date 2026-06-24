@@ -149,7 +149,7 @@ embedding_model = "bge-small-en-v1.5-int8"
 ```
 
 **3. Enable deferred indexing.** `WriteBuffer` batches up to 1000
-records / 10MB before flushing to plugins — 3-5× faster bulk ingestion
+records / 10MB before flushing to Engines — 3-5× faster bulk ingestion
 (Phase 8b.11). `insert_batch()` uses it by default; single inserts
 still index immediately to preserve interactive responsiveness.
 

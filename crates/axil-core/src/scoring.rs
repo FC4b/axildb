@@ -76,12 +76,38 @@ impl Default for ScoreWeights {
 }
 
 /// Breakdown of individual scoring signals for a single result.
+///
+/// `#[non_exhaustive]`: construct it with [`ScoreExplanation::new`] rather than a
+/// struct literal so out-of-crate callers stay source-compatible as the struct
+/// gains fields (e.g. `query_class` was added without a major bump).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ScoreExplanation {
     /// Individual signal scores that were combined: `(signal_name, raw_value)`.
     pub signals: Vec<(String, f32)>,
     /// Human-readable summary of why this result ranked where it did.
     pub summary: String,
+    /// How the query was classified during recall, e.g. `"identifier:uuid"` or
+    /// `"natural-language"`. `Some` only on the multi-signal recall path; the
+    /// identifier classes mean an FTS rank tilt was applied to exact-identifier
+    /// lookups (visible as the `fts_identifier_tilt` signal). Skipped from
+    /// serialization when absent so existing JSON output is unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query_class: Option<String>,
+}
+
+impl ScoreExplanation {
+    /// Build an explanation from the combined `signals` + `summary`.
+    /// `query_class` defaults to `None` (recall fills it in once the query is
+    /// classified). Prefer this over a struct literal: the struct is
+    /// `#[non_exhaustive]`, so this is the forward-compatible constructor.
+    pub fn new(signals: Vec<(String, f32)>, summary: String) -> Self {
+        Self {
+            signals,
+            summary,
+            query_class: None,
+        }
+    }
 }
 
 /// A single recall result with scoring breakdown.
@@ -152,6 +178,18 @@ pub struct DedupConfig {
     /// Skip dedup for normalized text shorter than this many chars — short
     /// strings collide too readily under SimHash. Default 24.
     pub min_text_len: usize,
+    /// Completeness k-widening: after the top-k cut, compare how well the kept
+    /// subset compresses (DEFLATE level 1) against the full post-dedup
+    /// candidate pool. If the kept set is *materially more compressible* than
+    /// the pool — i.e. the pool holds diverse content that the cut dropped —
+    /// widen k by a bounded amount and re-trim once. Off by default so the raw
+    /// library result set is unchanged; the agent-facing recall paths opt in.
+    pub completeness_widen: bool,
+    /// Compression-ratio gap (pool ratio − kept ratio) above which a dropped
+    /// diverse cluster is inferred and k is widened. A higher kept-vs-pool gap
+    /// means the kept set is far more redundant than the pool it was cut from.
+    /// Default 0.15 (15 percentage points), per the spec heuristic.
+    pub widen_threshold: f32,
 }
 
 impl Default for DedupConfig {
@@ -160,6 +198,8 @@ impl Default for DedupConfig {
             enabled: false,
             hamming_threshold: 3,
             min_text_len: 24,
+            completeness_widen: false,
+            widen_threshold: 0.15,
         }
     }
 }
@@ -421,6 +461,9 @@ pub fn fuse_signals(
     let explanation = ScoreExplanation {
         signals: signal_list,
         summary,
+        // Set by the caller (recall) once the query is classified; fuse_signals
+        // itself is query-class agnostic.
+        query_class: None,
     };
 
     (final_score, explanation)

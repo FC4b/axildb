@@ -98,12 +98,15 @@ pub struct WhereClause {
     pub value: Value,
 }
 
-/// Cross-encoder rerank stage. Implementations live in the
-/// `axil-rerank` crate so this seam stays small and dep-free at the core
-/// level. The trait is intentionally minimal: take a query + the resolved
-/// records and reorder them in place. Errors are reported via a return
-/// value so the pipeline can continue with the unreranked list on failure
-/// the reranker is a quality bonus, not a correctness requirement.
+/// Cross-encoder rerank stage — a bring-your-own seam for embedded library
+/// users: implement this and attach it via [`QueryBuilder::with_reranker`].
+/// Kept minimal and dep-free at the core level so the heavy ONNX/tokenizer
+/// machinery stays out of `axil-core`; the shipped CLI/MCP recall rerank lives
+/// in `axil-indexer` (the `rerank` feature) with the LLM reranker in the CLI.
+/// The trait is intentionally minimal: take a query + the resolved records and
+/// reorder them in place. Errors are reported via a return value so the
+/// pipeline can continue with the unreranked list on failure — the reranker is
+/// a quality bonus, not a correctness requirement.
 pub trait Rerank: Send + Sync {
     /// Reorder `records` against `query`, keeping at most `top_k_out`
     /// entries from the reranked prefix (the rest of the list is left

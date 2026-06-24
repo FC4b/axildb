@@ -211,6 +211,7 @@ version = "1.1.1"
 dependencies = [
  "chrono",
  "criterion",
+ "flate2",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
@@ -222,6 +223,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "thiserror 2.0.18",
+ "tokenizers",
  "toml",
  "ulid",
  "ureq",
@@ -333,22 +335,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
-]
-
-[[package]]
-name = "axil-rerank"
-version = "1.1.1"
-dependencies = [
- "axil-core",
- "ort",
- "parking_lot",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "thiserror 2.0.18",
- "tokenizers",
- "ureq",
 ]
 
 [[package]]

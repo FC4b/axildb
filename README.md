@@ -104,8 +104,8 @@ use axil_fts::AxilBuilderFtsExt;
 
 let db = Axil::open("./memory.axil")
     .with_embedder_model(EmbeddingModel::BgeSmall)?  // Engine: vector
-    .with_graph_plugin()?                            // Engine: graph
-    .with_fts_plugin()?                              // Engine: full-text
+    .with_graph_engine()?                            // Engine: graph
+    .with_fts_engine()?                              // Engine: full-text
     .build()?;
 
 let session = db.insert("sessions", serde_json::json!({ "summary": "Fixed auth timeout" }))?;

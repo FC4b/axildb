@@ -597,6 +597,10 @@ enum Command {
     /// per the brain pipeline. Unchanged files are skipped via content-hash.
     /// State is checkpointed to `.axil/ingest.state.json` so interrupted runs
     /// resume cleanly with `--resume`.
+    ///
+    /// With `--watch`, the same incremental ingest re-runs every `--interval`
+    /// seconds; because unchanged files are skipped via content-hash, each tick
+    /// only ingests new/changed files. Runs until interrupted (Ctrl-C).
     #[cfg(feature = "indexer")]
     Ingest {
         /// Directory to scan.
@@ -624,6 +628,15 @@ enum Command {
         /// Max chunk size in bytes (default: 2000).
         #[arg(long, default_value = "2000")]
         chunk_bytes: usize,
+        /// Re-run the incremental ingest on an interval (Ctrl-C to stop).
+        /// Each tick re-scans `<DIR>` and ingests only new/changed files
+        /// (unchanged files are skipped via content-hash). Mutually implies
+        /// `--resume` so prior state is reused across ticks.
+        #[arg(long)]
+        watch: bool,
+        /// Seconds between watch ticks (default: 2). Only used with `--watch`.
+        #[arg(long, default_value = "2")]
+        interval: u64,
     },
     /// Ingest a SCIP code-index file into Axil's graph.
     ///
@@ -1097,6 +1110,11 @@ enum Command {
         /// near-identical hits so they don't each consume a top-k slot.
         #[arg(long)]
         no_dedup: bool,
+        /// Disable completeness k-widening. By default, when the kept top-k
+        /// compresses much better than the candidate pool (a diverse cluster
+        /// was cut), recall widens k once and re-trims.
+        #[arg(long)]
+        no_widen: bool,
         /// Filter by agent name (matches `_agent` field in record data).
         #[arg(long)]
         agent: Option<String>,
@@ -1129,6 +1147,11 @@ enum Command {
         /// stderr as `[recall] cascade rung=<name>`.
         #[arg(long)]
         no_cascade: bool,
+        /// Print recall profiling to stderr, including the query classification
+        /// and whether an identifier FTS tilt was applied (e.g.
+        /// `query_class=identifier:uuid (FTS tilt applied)`).
+        #[arg(long)]
+        profile: bool,
     },
 
     /// Search structural code proxies and return compact pointers.
@@ -2748,6 +2771,14 @@ enum ExtCommand {
     Remove {
         /// Plugin id (as shown by `axil ext list`).
         id: String,
+    },
+    /// Replace an installed plugin's `.wasm` in place, keeping its data and
+    /// capability grants; rolls back if the new file fails to load.
+    Upgrade {
+        /// Plugin id of the installed plugin to replace (as shown by `axil ext list`).
+        id: String,
+        /// Path to the new `.wasm` component file.
+        path: PathBuf,
     },
     /// Show one installed plugin's id, name, table prefixes, and file.
     Info {
@@ -5078,6 +5109,8 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             stats,
             resume,
             chunk_bytes,
+            watch,
+            interval,
         } => {
             let db_path = require_db(&db_opt)?;
             let root_canonical = dir
@@ -5101,57 +5134,31 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                 .map(|p| p.trim_matches('*').trim_matches('/').to_string())
                 .filter(|s| !s.is_empty())
                 .collect();
-            let is_excluded = |path: &Path| -> bool {
-                let s = path.to_string_lossy();
-                exclude_patterns.iter().any(|p| s.contains(p))
-            };
 
-            // Load prior ingest state for resume/skip decisions.
+            // Ingest state lives next to the DB so resume/skip survives across runs and ticks.
             let state_path = db_path
                 .parent()
                 .map(|p| p.join("ingest.state.json"))
                 .unwrap_or_else(|| PathBuf::from("ingest.state.json"));
-            let mut state: serde_json::Map<String, Value> = if resume && state_path.exists() {
-                serde_json::from_str(&std::fs::read_to_string(&state_path).unwrap_or_default())
-                    .unwrap_or_default()
-            } else {
-                serde_json::Map::new()
-            };
 
-            // Walk the tree.
-            let walker = walkdir::WalkDir::new(&root_canonical)
-                .max_depth(if recursive { 32 } else { 1 })
-                .into_iter()
-                .filter_entry(|e| !is_excluded(e.path()));
-
-            // First pass: collect candidate files + sizes for stats/planning.
-            let mut candidates: Vec<(PathBuf, u64)> = Vec::new();
-            for entry in walker {
-                let entry = match entry {
-                    Ok(e) => e,
-                    Err(_) => continue,
-                };
-                if !entry.file_type().is_file() {
-                    continue;
-                }
-                let path = entry.into_path();
-                let ext = path
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .map(|s| s.to_ascii_lowercase())
-                    .unwrap_or_default();
-                if !exts.contains(&ext) {
-                    continue;
-                }
-                let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-                candidates.push((path, size));
-            }
-
+            // --stats is a pure dry-run plan: count files/bytes, no DB, no writes.
             if stats {
+                let candidates = ingest_collect_candidates(
+                    &root_canonical,
+                    recursive,
+                    &exts,
+                    &exclude_patterns,
+                );
+                let prior_state: serde_json::Map<String, Value> = if state_path.exists() {
+                    serde_json::from_str(&std::fs::read_to_string(&state_path).unwrap_or_default())
+                        .unwrap_or_default()
+                } else {
+                    serde_json::Map::new()
+                };
                 let total_bytes: u64 = candidates.iter().map(|(_, s)| s).sum();
                 let already_indexed = candidates
                     .iter()
-                    .filter(|(p, _)| state.get(&p.display().to_string()).is_some())
+                    .filter(|(p, _)| prior_state.get(&p.display().to_string()).is_some())
                     .count();
                 out.print(&json!({
                     "dry_run": true,
@@ -5166,179 +5173,74 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             }
 
             // Open DB once, with all detected plugins so auto-embed/auto-entity run on insert.
+            // In watch mode the same handle is reused across every tick.
             let db = open_with_all_detected(&db_path)?;
-            let total = candidates.len();
-            let started = std::time::Instant::now();
-            let mut files_ingested: usize = 0;
-            let mut files_skipped: usize = 0;
-            let mut chunks_written: usize = 0;
 
-            for (idx, (path, _size)) in candidates.iter().enumerate() {
-                let key = path.display().to_string();
-                let prev_entry = state.get(&key);
-
-                // Fast skip: mtime unchanged → trust the prior hash and don't even read the file.
-                // Saves one syscall + full file read per unchanged file (10k-file runs feel it).
-                let mtime_now = std::fs::metadata(path)
-                    .ok()
-                    .and_then(|m| m.modified().ok())
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_secs());
-                if let (Some(prev), Some(now)) = (
-                    prev_entry
-                        .and_then(|v| v.get("mtime"))
-                        .and_then(|v| v.as_u64()),
-                    mtime_now,
-                ) {
-                    if prev == now {
-                        files_skipped += 1;
-                        if (idx + 1) % 50 == 0 {
-                            eprintln!(
-                                "[ingest] {}/{} scanned ({} skipped)",
-                                idx + 1,
-                                total,
-                                files_skipped
-                            );
-                        }
-                        continue;
-                    }
-                }
-
-                let content = match std::fs::read_to_string(path) {
-                    Ok(c) => c,
-                    Err(_) => {
-                        files_skipped += 1;
-                        continue;
-                    }
-                };
-                if content.trim().is_empty() {
-                    files_skipped += 1;
-                    continue;
-                }
-
-                // Shared with the indexer so one hash function catches all change-detection paths.
-                let hash = axil_indexer::indexer::hash_content(&content);
-                if let Some(prev_hash) = prev_entry
-                    .and_then(|v| v.get("hash"))
-                    .and_then(|v| v.as_str())
-                {
-                    if prev_hash == hash {
-                        files_skipped += 1;
-                        if (idx + 1) % 50 == 0 {
-                            eprintln!(
-                                "[ingest] {}/{} scanned ({} skipped)",
-                                idx + 1,
-                                total,
-                                files_skipped
-                            );
-                        }
-                        continue;
-                    }
-                }
-
-                // Purge any chunk records from a prior ingest of this exact path so the new
-                // chunk set fully replaces the old one — otherwise edits accumulate duplicates.
-                // We trust state first (O(1) id lookup), then fall back to a filtered list().
-                let mut chunks_replaced: usize = 0;
-                let prior_ids: Vec<String> = prev_entry
-                    .and_then(|v| v.get("record_ids"))
-                    .and_then(|v| v.as_array())
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|x| x.as_str().map(String::from))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                if !prior_ids.is_empty() {
-                    for id_str in &prior_ids {
-                        if let Ok(rid) = axil_core::RecordId::from_string(id_str.as_str()) {
-                            if db.delete(&rid).unwrap_or(false) {
-                                chunks_replaced += 1;
-                            }
-                        }
-                    }
-                } else if prev_entry.is_some() {
-                    // Older ingest state without record_ids — scan the table once as a fallback.
-                    let abs = path.display().to_string();
-                    for r in db.list(&table).unwrap_or_default() {
-                        if r.data.get("abs_path").and_then(|v| v.as_str()) == Some(abs.as_str()) {
-                            if db.delete(&r.id).unwrap_or(false) {
-                                chunks_replaced += 1;
-                            }
-                        }
-                    }
-                }
-
-                // Chunk the file and insert fresh records, tracking their IDs for the next ingest.
-                let chunks = chunk_text(&content, chunk_bytes);
-                let rel = path.strip_prefix(&root_canonical).unwrap_or(path);
-                let mut new_ids: Vec<String> = Vec::with_capacity(chunks.len());
-                for (chunk_idx, chunk) in chunks.iter().enumerate() {
-                    let data = json!({
-                        "path": rel.display().to_string(),
-                        "abs_path": path.display().to_string(),
-                        "chunk_idx": chunk_idx,
-                        "chunk_count": chunks.len(),
-                        "content": chunk,
-                        "file_hash": hash,
-                        "source": "ingest",
-                    });
-                    if let Ok(rec) = db.insert(&table, data) {
-                        new_ids.push(rec.id.to_string());
-                        chunks_written += 1;
-                    }
-                }
-                files_ingested += 1;
-                if chunks_replaced > 0 {
-                    eprintln!(
-                        "[ingest] {} superseded {} prior chunk(s)",
-                        rel.display(),
-                        chunks_replaced
+            if watch {
+                // Interval-poll watch (same style as `stats --watch`): no extra
+                // crate dependency. Each tick re-scans the tree and runs the
+                // incremental ingest; content-hash skipping means a tick only
+                // touches new/changed files. State is always reused across ticks
+                // (an explicit --resume is therefore redundant but harmless).
+                let interval = std::time::Duration::from_secs(interval.max(1));
+                out.status(&format!(
+                    "[watch] ingesting {} every {}s — Ctrl+C to stop",
+                    root_canonical.display(),
+                    interval.as_secs()
+                ));
+                loop {
+                    let candidates = ingest_collect_candidates(
+                        &root_canonical,
+                        recursive,
+                        &exts,
+                        &exclude_patterns,
                     );
+                    let report = run_ingest_pass(
+                        &db,
+                        &root_canonical,
+                        &candidates,
+                        &state_path,
+                        &table,
+                        chunk_bytes,
+                        true, // always reuse prior state across ticks
+                        out,
+                    )?;
+                    let ingested = report
+                        .get("files_ingested")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    // Stay quiet when nothing changed; one concise line otherwise.
+                    if ingested > 0 {
+                        let chunks = report
+                            .get("chunks_written")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
+                        out.status(&format!(
+                            "[watch] tick: {ingested} new/changed file(s) ingested ({chunks} chunks)"
+                        ));
+                    }
+                    std::thread::sleep(interval);
                 }
-                state.insert(
-                    key,
-                    json!({
-                        "hash": hash,
-                        "mtime": mtime_now,
-                        "chunks": chunks.len(),
-                        "record_ids": new_ids,
-                        "ingested_at": chrono::Utc::now().to_rfc3339(),
-                    }),
+            } else {
+                let candidates = ingest_collect_candidates(
+                    &root_canonical,
+                    recursive,
+                    &exts,
+                    &exclude_patterns,
                 );
-
-                // Checkpoint state every 20 files so a crash loses little work.
-                if files_ingested % 20 == 0 {
-                    let _ = std::fs::write(&state_path, serde_json::to_string(&state)?);
-                }
-
-                if (idx + 1) % 10 == 0 || idx + 1 == total {
-                    let elapsed = started.elapsed().as_secs_f64().max(0.001);
-                    let rate = (idx + 1) as f64 / elapsed;
-                    eprintln!(
-                        "[ingest] {}/{} files | {} chunks | {:.1} files/s",
-                        idx + 1,
-                        total,
-                        chunks_written,
-                        rate
-                    );
-                }
+                let report = run_ingest_pass(
+                    &db,
+                    &root_canonical,
+                    &candidates,
+                    &state_path,
+                    &table,
+                    chunk_bytes,
+                    resume,
+                    out,
+                )?;
+                out.print(&report);
+                Ok(EXIT_OK)
             }
-
-            // Final checkpoint.
-            std::fs::write(&state_path, serde_json::to_string_pretty(&state)?)?;
-
-            out.print(&json!({
-                "root": root_canonical.display().to_string(),
-                "files_total": total,
-                "files_ingested": files_ingested,
-                "files_skipped": files_skipped,
-                "chunks_written": chunks_written,
-                "elapsed_sec": started.elapsed().as_secs_f64(),
-                "state_file": state_path.display().to_string(),
-                "table": table,
-            }));
-            Ok(EXIT_OK)
         }
 
         Command::InstallProject {
@@ -6911,6 +6813,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             budget,
             recall_format,
             no_dedup,
+            no_widen,
             agent: agent_filter,
             min_importance,
             scope,
@@ -6920,6 +6823,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             expand,
             expand_neighbors,
             no_cascade,
+            profile,
         } => {
             let db_path = require_db(&db_opt)?;
             if top_k > MAX_RESULT_LIMIT {
@@ -7026,6 +6930,10 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                 // restores the old behavior (used for before/after baselines).
                 dedup: axil_core::scoring::DedupConfig {
                     enabled: !no_dedup,
+                    // Widen k when the kept top-k compresses far better than the
+                    // candidate pool — a diverse cluster was cut. `--no-widen`
+                    // restores the plain top-k cut.
+                    completeness_widen: !no_widen,
                     ..Default::default()
                 },
                 ..Default::default()
@@ -7254,11 +7162,10 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                             .map(|(rec, score)| axil_core::scoring::RecallResult {
                                 record: rec,
                                 score,
-                                explanation: axil_core::scoring::ScoreExplanation {
-                                    signals: vec![("fts".to_string(), score)],
-                                    summary: "FTS fallback (vector recall returned empty)"
-                                        .to_string(),
-                                },
+                                explanation: axil_core::scoring::ScoreExplanation::new(
+                                    vec![("fts".to_string(), score)],
+                                    "FTS fallback (vector recall returned empty)".to_string(),
+                                ),
                             })
                             .collect();
                         apply_filters(&mut r3);
@@ -7278,6 +7185,32 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                 }
             }
 
+            // --profile: surface the identifier-aware query classification and
+            // whether the FTS rank tilt was applied. Printed to stderr so stdout
+            // stays valid (JSON / context-block). The tilt only fires on
+            // identifier queries; natural-language recall reports the class with
+            // no tilt note. Classifying here (rather than reading it off a
+            // result) means the profile prints even on an empty result set.
+            if profile {
+                let qc = axil_core::classify_query(&query);
+                if qc.is_identifier() {
+                    let applied = recall_results.iter().any(|rr| {
+                        rr.explanation
+                            .signals
+                            .iter()
+                            .any(|(name, _)| name == "fts_identifier_tilt")
+                    });
+                    let note = if applied {
+                        "FTS tilt applied"
+                    } else {
+                        "FTS tilt eligible (no FTS hit to tilt)"
+                    };
+                    eprintln!("[recall] query_class={} ({note})", qc.tag());
+                } else {
+                    eprintln!("[recall] query_class={} (pure RRF, no tilt)", qc.tag());
+                }
+            }
+
             let values: Vec<Value> = recall_results
                 .iter()
                 .map(|rr| {
@@ -7293,6 +7226,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                         v["explanation"] = json!({
                             "signals": signals,
                             "summary": rr.explanation.summary,
+                            "query_class": rr.explanation.query_class,
                         });
                     }
                     // Include feedback flag when --feedback is set
@@ -14032,6 +13966,76 @@ fn run_extension_dispatch(
     }
 }
 
+/// Atomically replace the file at `old_path` with `new_bytes`, rolling back to
+/// the original contents if `validate` rejects the result.
+///
+/// Pure filesystem logic, deliberately free of the WASM runtime so it is
+/// unit-testable without `wasm-host`: the validate step is a closure the caller
+/// supplies (in practice "re-inspect the upgraded `.wasm` and confirm it still
+/// loads"). The replace is done via a same-directory temp file + `rename`, which
+/// is atomic on the same filesystem — a reader never sees a half-written plugin.
+/// The previous bytes are read up front so a failed validation can restore them
+/// byte-for-byte, leaving the working plugin exactly as it was.
+// Only the `wasm-host` upgrade handler calls this at runtime; the unit test
+// exercises it in any build, so it's not dead — silence the default-build lint.
+#[cfg_attr(not(feature = "wasm-host"), allow(dead_code))]
+fn atomic_replace_with_rollback(
+    old_path: &Path,
+    new_bytes: &[u8],
+    validate: impl FnOnce(&Path) -> Result<()>,
+) -> Result<()> {
+    let old_bytes = std::fs::read(old_path)
+        .with_context(|| format!("failed to read existing plugin `{}`", old_path.display()))?;
+
+    let dir = old_path.parent().unwrap_or_else(|| Path::new("."));
+    // Same-dir temp so the final rename is a same-filesystem (atomic) move.
+    let tmp = dir.join(format!(
+        ".{}.upgrade-tmp",
+        old_path
+            .file_name()
+            .and_then(|f| f.to_str())
+            .unwrap_or("plugin")
+    ));
+    std::fs::write(&tmp, new_bytes).with_context(|| {
+        format!("failed to stage new plugin bytes at `{}`", tmp.display())
+    })?;
+    // Swap the staged file into place. POSIX `rename` atomically replaces an
+    // existing destination, but on Windows `rename` errors when the destination
+    // exists, so remove it first there. The in-memory `old_bytes` covers
+    // rollback if either the swap or the validation below fails.
+    #[cfg(windows)]
+    let swapped = std::fs::remove_file(old_path).and_then(|()| std::fs::rename(&tmp, old_path));
+    #[cfg(not(windows))]
+    let swapped = std::fs::rename(&tmp, old_path);
+    if let Err(e) = swapped {
+        let _ = std::fs::remove_file(&tmp);
+        // On Windows the original may already be gone (removed above); restore it
+        // so a failed swap never leaves the plugin missing.
+        if !old_path.exists() {
+            let _ = std::fs::write(old_path, &old_bytes);
+        }
+        return Err(e).with_context(|| {
+            format!("failed to swap new plugin into `{}`", old_path.display())
+        });
+    }
+
+    // The new file is now live; prove it before declaring success. If it fails,
+    // restore the original bytes so we never leave a broken plugin in place.
+    match validate(old_path) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            std::fs::write(old_path, &old_bytes).with_context(|| {
+                format!(
+                    "rollback failed: could not restore previous plugin at `{}` after a \
+                     failed upgrade ({e})",
+                    old_path.display()
+                )
+            })?;
+            Err(e)
+        }
+    }
+}
+
 #[cfg(feature = "wasm-host")]
 fn run_ext(cmd: ExtCommand, db_opt: &Option<PathBuf>, out: &Output) -> Result<i32> {
     use std::sync::Arc;
@@ -14117,6 +14121,98 @@ fn run_ext(cmd: ExtCommand, db_opt: &Option<PathBuf>, out: &Output) -> Result<i3
                 }
                 None => anyhow::bail!("no installed plugin with id `{id}`"),
             }
+        }
+        ExtCommand::Upgrade { id, path } => {
+            let db = Arc::new(open_with_all_detected(&db_path)?);
+            let host = axil_runtime::WasmHost::new().context("WASM runtime init failed")?;
+
+            // Resolve the existing plugin by id (inspect-only; don't register).
+            let mut old_path: Option<PathBuf> = None;
+            let mut old_abi: Option<String> = None;
+            if let Ok(entries) = std::fs::read_dir(&dir) {
+                for entry in entries.flatten() {
+                    let p = entry.path();
+                    if p.extension().and_then(|e| e.to_str()) != Some("wasm") {
+                        continue;
+                    }
+                    let rec = wasm_plugins::load_one(&db, &host, &p, &config, false, None);
+                    if rec.id.as_deref() == Some(id.as_str()) {
+                        old_abi = rec.abi;
+                        old_path = Some(p);
+                        break;
+                    }
+                }
+            }
+            let old_path =
+                old_path.ok_or_else(|| anyhow::anyhow!("no installed plugin with id `{id}`"))?;
+
+            // Validate the NEW `.wasm` BEFORE touching the working plugin — never
+            // replace a loadable plugin with a broken one.
+            let new_rec = wasm_plugins::inspect(&db, &path, &config)
+                .with_context(|| format!("`{}` is not a loadable plugin", path.display()))?;
+            let new_id = new_rec.id.clone().unwrap_or_default();
+            let new_abi = new_rec.abi.clone();
+
+            // Same-logical-plugin only: a different id is a different plugin and
+            // would silently inherit this one's grants + data.
+            if new_id != id {
+                anyhow::bail!(
+                    "`{}` has id `{new_id}`, not `{id}` — that's a different plugin; use \
+                     `ext remove {id}` + `ext install {}`",
+                    path.display(),
+                    path.display()
+                );
+            }
+
+            let new_bytes = std::fs::read(&path)
+                .with_context(|| format!("failed to read new plugin `{}`", path.display()))?;
+
+            // Atomic replace over the SAME filename ⇒ same grant key, so existing
+            // capability grants carry over and data (keyed by table-prefix/id, not
+            // filename) is preserved. Re-inspect the swapped file to prove it loads;
+            // on failure the helper restores the previous bytes (rollback).
+            atomic_replace_with_rollback(&old_path, &new_bytes, |swapped| {
+                wasm_plugins::inspect(&db, swapped, &config)
+                    .map(|_| ())
+                    .with_context(|| "upgraded plugin failed to load")
+            })
+            .with_context(|| {
+                format!(
+                    "upgrade failed, rolled back to previous version of `{id}` at `{}`",
+                    old_path.display()
+                )
+            })?;
+
+            // Invalidate the compiled-module cache so the next load recompiles
+            // from the new bytes instead of deserializing the stale `.cwasm`.
+            let cache_file = dir
+                .join(".cache")
+                .join(format!("{}.cwasm", wasm_plugins::plugin_key(&old_path)));
+            let _ = std::fs::remove_file(&cache_file);
+
+            // The grant key is the filename stem, which is unchanged, so grants
+            // are preserved. The WIT ABI surfaces no "requested capabilities", so
+            // we can't diff requested-vs-granted; instead we state that grants
+            // carried over and any *new* capability need stays deny-by-default
+            // until the operator runs `ext grant <key> <cap>` (no silent
+            // privilege escalation across an upgrade).
+            out.print(&json!({
+                "upgraded": id,
+                "file": old_path.display().to_string(),
+                "abi": new_abi,
+                "abi_from": old_abi,
+                "prefixes": new_rec.prefixes,
+                "granted": new_rec.granted,
+                "note": "data and capability grants preserved (same filename ⇒ same grant key); \
+                         any new capability the upgrade needs stays deny-by-default until granted \
+                         via `ext grant`",
+            }));
+            if !out.quiet {
+                out.status(&format!(
+                    "upgraded plugin `{id}` — data and grants preserved"
+                ));
+            }
+            Ok(EXIT_OK)
         }
         ExtCommand::Info { id } => {
             let db = Arc::new(open_with_all_detected(&db_path)?);
@@ -15353,6 +15449,251 @@ ExecStart=/bin/sh -lc '{command}'
     )
 }
 
+/// Collect the candidate files under `root_canonical` that match the
+/// extension set and survive the exclude patterns. Shared by the dry-run
+/// (`--stats`) plan and the real ingest pass so both see the same set.
+#[cfg(feature = "indexer")]
+fn ingest_collect_candidates(
+    root_canonical: &Path,
+    recursive: bool,
+    exts: &std::collections::HashSet<String>,
+    exclude_patterns: &[String],
+) -> Vec<(PathBuf, u64)> {
+    let is_excluded = |path: &Path| -> bool {
+        let s = path.to_string_lossy();
+        exclude_patterns.iter().any(|p| s.contains(p))
+    };
+    let walker = walkdir::WalkDir::new(root_canonical)
+        .max_depth(if recursive { 32 } else { 1 })
+        .into_iter()
+        .filter_entry(|e| !is_excluded(e.path()));
+
+    let mut candidates: Vec<(PathBuf, u64)> = Vec::new();
+    for entry in walker {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let path = entry.into_path();
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|s| s.to_ascii_lowercase())
+            .unwrap_or_default();
+        if !exts.contains(&ext) {
+            continue;
+        }
+        let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        candidates.push((path, size));
+    }
+    candidates
+}
+
+/// Run one incremental ingest pass and return the summary report.
+///
+/// This is the body shared by the one-shot `axil ingest` path and each tick
+/// of `--watch`. Unchanged files are skipped via mtime then content-hash, so a
+/// watch tick only re-ingests files that actually changed. State is reloaded
+/// from `.axil/ingest.state.json` on every call, so each tick (and `--resume`)
+/// builds on the prior run; checkpointing it back to disk is what makes the
+/// next tick cheap.
+#[cfg(feature = "indexer")]
+#[allow(clippy::too_many_arguments)]
+fn run_ingest_pass(
+    db: &Axil,
+    root_canonical: &Path,
+    candidates: &[(PathBuf, u64)],
+    state_path: &Path,
+    table: &str,
+    chunk_bytes: usize,
+    resume: bool,
+    out: &Output,
+) -> Result<Value> {
+    // Reload prior state every pass: this is what lets a watch tick (or
+    // `--resume`) trust earlier hashes instead of re-ingesting everything.
+    let mut state: serde_json::Map<String, Value> = if (resume) && state_path.exists() {
+        serde_json::from_str(&std::fs::read_to_string(state_path).unwrap_or_default())
+            .unwrap_or_default()
+    } else {
+        serde_json::Map::new()
+    };
+
+    let total = candidates.len();
+    let started = std::time::Instant::now();
+    let mut files_ingested: usize = 0;
+    let mut files_skipped: usize = 0;
+    let mut chunks_written: usize = 0;
+
+    for (idx, (path, _size)) in candidates.iter().enumerate() {
+        let key = path.display().to_string();
+        let prev_entry = state.get(&key);
+
+        // Fast skip: mtime unchanged → trust the prior hash and don't even read the file.
+        // Saves one syscall + full file read per unchanged file (10k-file runs feel it).
+        let mtime_now = std::fs::metadata(path)
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs());
+        if let (Some(prev), Some(now)) = (
+            prev_entry
+                .and_then(|v| v.get("mtime"))
+                .and_then(|v| v.as_u64()),
+            mtime_now,
+        ) {
+            if prev == now {
+                files_skipped += 1;
+                if (idx + 1) % 50 == 0 {
+                    out.status(&format!(
+                        "[ingest] {}/{} scanned ({} skipped)",
+                        idx + 1,
+                        total,
+                        files_skipped
+                    ));
+                }
+                continue;
+            }
+        }
+
+        let content = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(_) => {
+                files_skipped += 1;
+                continue;
+            }
+        };
+        if content.trim().is_empty() {
+            files_skipped += 1;
+            continue;
+        }
+
+        // Shared with the indexer so one hash function catches all change-detection paths.
+        let hash = axil_indexer::indexer::hash_content(&content);
+        if let Some(prev_hash) = prev_entry
+            .and_then(|v| v.get("hash"))
+            .and_then(|v| v.as_str())
+        {
+            if prev_hash == hash {
+                files_skipped += 1;
+                if (idx + 1) % 50 == 0 {
+                    out.status(&format!(
+                        "[ingest] {}/{} scanned ({} skipped)",
+                        idx + 1,
+                        total,
+                        files_skipped
+                    ));
+                }
+                continue;
+            }
+        }
+
+        // Purge any chunk records from a prior ingest of this exact path so the new
+        // chunk set fully replaces the old one — otherwise edits accumulate duplicates.
+        // We trust state first (O(1) id lookup), then fall back to a filtered list().
+        let mut chunks_replaced: usize = 0;
+        let prior_ids: Vec<String> = prev_entry
+            .and_then(|v| v.get("record_ids"))
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|x| x.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if !prior_ids.is_empty() {
+            for id_str in &prior_ids {
+                if let Ok(rid) = axil_core::RecordId::from_string(id_str.as_str()) {
+                    if db.delete(&rid).unwrap_or(false) {
+                        chunks_replaced += 1;
+                    }
+                }
+            }
+        } else if prev_entry.is_some() {
+            // Older ingest state without record_ids — scan the table once as a fallback.
+            let abs = path.display().to_string();
+            for r in db.list(table).unwrap_or_default() {
+                if r.data.get("abs_path").and_then(|v| v.as_str()) == Some(abs.as_str()) {
+                    if db.delete(&r.id).unwrap_or(false) {
+                        chunks_replaced += 1;
+                    }
+                }
+            }
+        }
+
+        // Chunk the file and insert fresh records, tracking their IDs for the next ingest.
+        let chunks = chunk_text(&content, chunk_bytes);
+        let rel = path.strip_prefix(root_canonical).unwrap_or(path);
+        let mut new_ids: Vec<String> = Vec::with_capacity(chunks.len());
+        for (chunk_idx, chunk) in chunks.iter().enumerate() {
+            let data = json!({
+                "path": rel.display().to_string(),
+                "abs_path": path.display().to_string(),
+                "chunk_idx": chunk_idx,
+                "chunk_count": chunks.len(),
+                "content": chunk,
+                "file_hash": hash,
+                "source": "ingest",
+            });
+            if let Ok(rec) = db.insert(table, data) {
+                new_ids.push(rec.id.to_string());
+                chunks_written += 1;
+            }
+        }
+        files_ingested += 1;
+        if chunks_replaced > 0 {
+            out.status(&format!(
+                "[ingest] {} superseded {} prior chunk(s)",
+                rel.display(),
+                chunks_replaced
+            ));
+        }
+        state.insert(
+            key,
+            json!({
+                "hash": hash,
+                "mtime": mtime_now,
+                "chunks": chunks.len(),
+                "record_ids": new_ids,
+                "ingested_at": chrono::Utc::now().to_rfc3339(),
+            }),
+        );
+
+        // Checkpoint state every 20 files so a crash loses little work.
+        if files_ingested % 20 == 0 {
+            let _ = std::fs::write(state_path, serde_json::to_string(&state)?);
+        }
+
+        if (idx + 1) % 10 == 0 || idx + 1 == total {
+            let elapsed = started.elapsed().as_secs_f64().max(0.001);
+            let rate = (idx + 1) as f64 / elapsed;
+            out.status(&format!(
+                "[ingest] {}/{} files | {} chunks | {:.1} files/s",
+                idx + 1,
+                total,
+                chunks_written,
+                rate
+            ));
+        }
+    }
+
+    // Final checkpoint.
+    std::fs::write(state_path, serde_json::to_string_pretty(&state)?)?;
+
+    Ok(json!({
+        "root": root_canonical.display().to_string(),
+        "files_total": total,
+        "files_ingested": files_ingested,
+        "files_skipped": files_skipped,
+        "chunks_written": chunks_written,
+        "elapsed_sec": started.elapsed().as_secs_f64(),
+        "state_file": state_path.display().to_string(),
+        "table": table,
+    }))
+}
+
 /// Split text into chunks of at most `max_bytes`, splitting on paragraph boundaries (12.2).
 /// Falls back to hard-wrap when a single paragraph exceeds the cap.
 fn chunk_text(text: &str, max_bytes: usize) -> Vec<String> {
@@ -16468,5 +16809,52 @@ mod truncation_tests {
         assert!(!is_high_signal_token("responsibilities")); // plain prose word
         assert!(!is_high_signal_token("the")); // too short
         assert!(!is_high_signal_token("configuration")); // plain word, no signal shape
+    }
+}
+
+#[cfg(test)]
+mod upgrade_helper_tests {
+    use super::atomic_replace_with_rollback;
+
+    #[test]
+    fn replace_succeeds_and_swaps_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("plugin.wasm");
+        std::fs::write(&target, b"OLD").unwrap();
+
+        let res = atomic_replace_with_rollback(&target, b"NEW", |p| {
+            // Validate sees the new bytes already in place.
+            assert_eq!(std::fs::read(p).unwrap(), b"NEW");
+            Ok(())
+        });
+
+        assert!(res.is_ok(), "expected success, got {res:?}");
+        assert_eq!(std::fs::read(&target).unwrap(), b"NEW");
+        // No staging temp file is left behind.
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains("upgrade-tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "staging temp not cleaned up");
+    }
+
+    #[test]
+    fn failed_validation_rolls_back_to_original_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("plugin.wasm");
+        std::fs::write(&target, b"OLD").unwrap();
+
+        let res = atomic_replace_with_rollback(&target, b"NEW", |_p| {
+            anyhow::bail!("new version refused to load")
+        });
+
+        assert!(res.is_err(), "expected the validate error to propagate");
+        assert!(res
+            .unwrap_err()
+            .to_string()
+            .contains("new version refused to load"));
+        // The original plugin is restored byte-for-byte; the broken upgrade is gone.
+        assert_eq!(std::fs::read(&target).unwrap(), b"OLD");
     }
 }

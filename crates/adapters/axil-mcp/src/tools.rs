@@ -422,9 +422,12 @@ fn handle_recall(db: &Axil, args: &Value) -> ToolCallResult {
     let cfg = axil_core::RecallConfig {
         qtc: Some(axil_core::scoring::QtcConfig::default()),
         // Collapse near-duplicate hits so the MCP `recall` tool
-        // doesn't spend its top_k budget on restated memories.
+        // doesn't spend its top_k budget on restated memories, and widen k when
+        // the kept top-k compresses much better than the candidate pool (a
+        // diverse cluster was cut).
         dedup: axil_core::scoring::DedupConfig {
             enabled: true,
+            completeness_widen: true,
             ..Default::default()
         },
         ..Default::default()

@@ -16,7 +16,7 @@ use axil_core::{Engine, Capability, Record, RecordId, Result};
 struct MyEngine;
 
 impl Engine for MyEngine {
-    fn name(&self) -> &str { "my-plugin" }
+    fn name(&self) -> &str { "my-engine" }
     fn capabilities(&self) -> Vec<Capability> { vec![] }
     fn on_record_insert(&self, record: &Record) -> Result<()> {
         println!("Record inserted: {}", record.id);
@@ -29,7 +29,7 @@ impl Engine for MyEngine {
 }
 ```
 
-## Built-in plugin implementations
+## Built-in Engine implementations
 
 | Engine | Crate | Storage |
 |--------|-------|---------|

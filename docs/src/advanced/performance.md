@@ -51,7 +51,7 @@ Target: 5-10MB with all features. Use feature flags to reduce size:
 # Minimal (core only)
 cargo build --release -p axildb
 
-# Full (all plugins)
+# Full (all engines)
 cargo build --release -p axildb --features full,memory
 ```
 

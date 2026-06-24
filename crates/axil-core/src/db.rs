@@ -3509,6 +3509,13 @@ impl Axil {
         // RRF constant — standard value from Cormack et al. (2009).
         const RRF_K: f32 = 60.0;
 
+        // Identifier-aware query classification. When the query is an exact
+        // identifier (UUID / path / code symbol / hostname / long numeric id),
+        // the FTS list gets a tilt below so an exact lexical match isn't diluted
+        // by semantic neighbors. Natural-language queries classify as
+        // NaturalLanguage and the tilt is exactly zero — fusion stays pure RRF.
+        let query_class = crate::query_class::classify_query(&effective_query);
+
         let mut candidates: std::collections::HashMap<RecordId, RecallCandidate> =
             std::collections::HashMap::new();
         for (rank, (rid, vec_score)) in vector_results.iter().enumerate() {
@@ -3524,6 +3531,7 @@ impl Axil {
                     fts_score: 0.0,
                     first_rank: rank,
                     rrf_score: 0.0,
+                    fts_rank: None,
                 });
             if *vec_score > entry.vector_score {
                 entry.vector_score = *vec_score;
@@ -3544,12 +3552,19 @@ impl Axil {
                     fts_score: *fts_score,
                     first_rank: fetch_k + rank,
                     rrf_score: 0.0,
+                    fts_rank: Some(rank),
                 });
             if *fts_score > entry.fts_score {
                 entry.fts_score = *fts_score;
             }
             entry.first_rank = entry.first_rank.min(fetch_k + rank);
             entry.rrf_score += rrf;
+            // Keep the best (smallest) FTS rank when a record appears multiple
+            // times after canonical resolution.
+            entry.fts_rank = Some(match entry.fts_rank {
+                Some(existing) => existing.min(rank),
+                None => rank,
+            });
         }
 
         if candidates.is_empty() {
@@ -3634,7 +3649,31 @@ impl Axil {
                 rrf: candidate.rrf_score,
             };
 
-            let (score, explanation) = crate::scoring::fuse_signals(&record, &signals, &cfg);
+            let (mut score, mut explanation) =
+                crate::scoring::fuse_signals(&record, &signals, &cfg);
+
+            // Identifier tilt: for exact-identifier queries only, add an extra
+            // RRF term for the candidate's FTS rank computed with a *shrunk*
+            // constant (RRF_K_FTS_IDENTIFIER ≪ 60). 1/(k+rank) grows fast as k
+            // shrinks, so the top FTS hit gets a large bump while lower FTS ranks
+            // fall off quickly — exactly the "exact match first" behavior the
+            // task wants, without touching the vector/graph/recency signals. For
+            // natural-language queries this branch never runs, so fusion is
+            // byte-identical to pure RRF.
+            if query_class.is_identifier() {
+                if let Some(fr) = candidate.fts_rank {
+                    // Shrunk FTS RRF constant — top FTS hit ≈ 0.10 here vs
+                    // ≈0.017 at the default k=60, an ~6× tilt at rank 0.
+                    const RRF_K_FTS_IDENTIFIER: f32 = 10.0;
+                    let tilt = 1.0 / (RRF_K_FTS_IDENTIFIER + fr as f32);
+                    score += tilt;
+                    explanation
+                        .signals
+                        .push(("fts_identifier_tilt".to_string(), tilt));
+                }
+            }
+
+            explanation.query_class = Some(query_class.tag());
 
             scored_results.push(crate::scoring::RecallResult {
                 record,
@@ -3675,8 +3714,18 @@ impl Axil {
             collapse_near_duplicates(&mut scored_results, &cfg.dedup);
         }
 
-        // Truncate to top_k
-        scored_results.truncate(top_k);
+        // Completeness k-widening: widen when the kept set is far more
+        // compressible than the post-dedup pool — a diverse cluster was cut.
+        // Runs after dedup so it operates on distinct candidates, and before
+        // truncation so it can recover a dropped cluster. One bounded
+        // compression pass, single re-trim — cheap on the hot path.
+        let mut effective_top_k = top_k;
+        if cfg.dedup.completeness_widen {
+            widen_k_for_completeness(&scored_results, &mut effective_top_k, &cfg.dedup);
+        }
+
+        // Truncate to the (possibly widened) top_k
+        scored_results.truncate(effective_top_k);
 
         // Bump activation for returned results (lazy decay on read).
         if cfg.weights.activation > 0.0 {
@@ -4859,6 +4908,101 @@ fn collapse_near_duplicates(
     *results = out;
 }
 
+/// Minimum kept-text length (chars) below which completeness widening is a
+/// no-op. DEFLATE ratios on a handful of bytes are dominated by header
+/// overhead and say nothing about content diversity.
+const WIDEN_MIN_KEPT_CHARS: usize = 64;
+
+/// DEFLATE (level 1) compression ratio of `text`: `compressed_len /
+/// original_len`. A *lower* ratio means more internal redundancy (more
+/// compressible). Returns `1.0` for empty input (nothing to compress).
+///
+/// Level 1 is the spec's "zlib L1" — cheapest pass, and the ratio *gap*
+/// between two texts is what matters, not the absolute ratio, so a fast level
+/// is sufficient.
+fn deflate_ratio(text: &str) -> f64 {
+    let bytes = text.as_bytes();
+    if bytes.is_empty() {
+        return 1.0;
+    }
+    use std::io::Write;
+    let mut encoder =
+        flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::new(1));
+    if encoder.write_all(bytes).is_err() {
+        return 1.0;
+    }
+    match encoder.finish() {
+        Ok(compressed) => compressed.len() as f64 / bytes.len() as f64,
+        Err(_) => 1.0,
+    }
+}
+
+/// Decide whether the top-`top_k` cut over `pool_texts` dropped a diverse
+/// cluster, and if so return the widened k to re-trim to.
+///
+/// `pool_texts` is the per-result text of the full (post-dedup) candidate pool,
+/// already sorted best-first. Returns `Some(new_k)` only when widening should
+/// happen, where `new_k > top_k`; `None` is a no-op.
+///
+/// Heuristic (spec 20.4): if the kept top-k subset compresses *materially
+/// better* than the whole pool — `pool_ratio - kept_ratio > threshold` — then
+/// the kept set is far more redundant than the larger pool, so a distinct
+/// diverse cluster was likely cut. Widen k conservatively (toward the pool, by
+/// a bounded amount) and re-trim once.
+fn completeness_widen_target(pool_texts: &[String], top_k: usize, threshold: f32) -> Option<usize> {
+    let candidate_count = pool_texts.len();
+    // Nothing past the cut to recover, or a degenerate cut.
+    if top_k == 0 || candidate_count <= top_k {
+        return None;
+    }
+
+    let kept: String = pool_texts[..top_k].join("\n");
+    // Too little kept text for a DEFLATE ratio to mean anything.
+    if kept.chars().count() < WIDEN_MIN_KEPT_CHARS {
+        return None;
+    }
+    let cand: String = pool_texts.join("\n");
+
+    let kept_ratio = deflate_ratio(&kept);
+    let pool_ratio = deflate_ratio(&cand);
+
+    // Widen when the kept set is far more compressible (redundant) than the
+    // pool it was cut from — a diverse cluster sits just past the cut.
+    if (pool_ratio - kept_ratio) as f32 > threshold {
+        // Conservative, bounded, single-shot: bump toward the pool by up to
+        // 1.5x top_k, capped by what's actually available.
+        let widened = ((top_k as f64) * 1.5).ceil() as usize;
+        let new_k = widened.min(candidate_count).max(top_k + 1);
+        Some(new_k)
+    } else {
+        None
+    }
+}
+
+/// Widen the top-k cut over `results` (sorted best-first) when the kept subset
+/// is suspiciously more compressible than the full candidate pool — a sign a
+/// distinct diverse cluster would be dropped by a naive `truncate(top_k)`.
+///
+/// Mutates `top_k` in place (the caller then truncates to it). Bounded to a
+/// single re-trim and one extra compression pass over the pool/kept text, so
+/// it stays cheap on the hot recall path.
+fn widen_k_for_completeness(
+    results: &[crate::scoring::RecallResult],
+    top_k: &mut usize,
+    cfg: &crate::scoring::DedupConfig,
+) {
+    if results.len() <= *top_k {
+        return;
+    }
+    let texts: Vec<String> = results
+        .iter()
+        .map(|r| crate::util::record_text(&r.record))
+        .collect();
+    if let Some(new_k) = completeness_widen_target(&texts, *top_k, cfg.widen_threshold) {
+        *top_k = new_k;
+    }
+}
+
 /// Split text into overlapping char windows. Respects UTF-8 boundaries.
 /// Returns a single chunk when text is shorter than `max_chars`.
 fn chunk_by_chars(text: &str, max_chars: usize, stride: usize) -> Vec<String> {
@@ -4933,6 +5077,10 @@ struct RecallCandidate {
     /// Reciprocal Rank Fusion score combining vector + FTS rank positions.
     /// rrf_score = sum(1/(k + rank)) across each list the candidate appears in.
     rrf_score: f32,
+    /// 0-based rank of this candidate in the FTS list, if it appeared there.
+    /// Used to apply the identifier tilt — an extra RRF term computed with a
+    /// shrunk constant so exact lexical matches dominate identifier lookups.
+    fts_rank: Option<usize>,
 }
 
 impl Axil {
@@ -5411,6 +5559,7 @@ mod tests {
             explanation: crate::scoring::ScoreExplanation {
                 signals: vec![],
                 summary: String::new(),
+                query_class: None,
             },
         }
     }
@@ -5498,6 +5647,142 @@ mod tests {
         let mut b = vec![rr("same text", 0.9), rr("same text", 0.8)];
         collapse_near_duplicates(&mut b, &lenient);
         assert_eq!(b.len(), 1, "identical text collapses once long enough to fingerprint");
+    }
+
+    // ── Completeness k-widening (20.4) ──────────────────────────
+
+    // A near-duplicate filler line long enough to clear WIDEN_MIN_KEPT_CHARS.
+    const DUP_LINE: &str = "Use RRF fusion for recall because it is rank-based and robust to outliers";
+    // High-entropy, distinct items (ids / codes / signatures) that share little
+    // with the dup cluster — DEFLATE can't fold them into the kept redundancy,
+    // so the pool ratio rises sharply when they sit past the cut.
+    const DIVERSE_A: &str = "df9a1c3e-7b20-4f51-a8e2-0c6d9b1f4e77 E_TIMEOUT_4096 commit b3f7e2a quux::Zephyr<'x>";
+    const DIVERSE_B: &str = "zx81 BBC micro 6502 assembly LDA #$FF STA $D020 raster interrupt vblank NMI handler";
+
+    #[test]
+    fn widen_target_fires_when_diverse_cluster_dropped() {
+        // top_k=3, but the top 3 are near-identical restatements (highly
+        // compressible) while a distinct, high-entropy cluster sits just past
+        // the cut. The kept subset compresses far better than the full pool, so
+        // k widens to recover the dropped cluster.
+        let texts = vec![
+            DUP_LINE.to_string(),
+            DUP_LINE.to_string(),
+            DUP_LINE.to_string(),
+            DIVERSE_A.to_string(),
+            DIVERSE_B.to_string(),
+        ];
+        let new_k = completeness_widen_target(&texts, 3, 0.15);
+        assert!(
+            new_k.is_some(),
+            "kept set far more compressible than pool → expected widen"
+        );
+        let new_k = new_k.unwrap();
+        assert!(new_k > 3, "widened k must exceed top_k (got {new_k})");
+        // Bounded: ceil(3 * 1.5) = 5, capped at the 5 available candidates.
+        assert!(new_k <= 5, "widen stays bounded by ceil(top_k*1.5) and pool size");
+    }
+
+    #[test]
+    fn widen_glue_retains_diverse_item_via_record_text() {
+        // End-to-end through the recall glue: build RecallResults the way the
+        // recall path delivers them (sorted, post-dedup), run the widener, and
+        // confirm the kept slice after truncation includes the diverse cluster
+        // that a plain truncate(top_k) would have dropped.
+        let mut results = vec![
+            rr(DUP_LINE, 0.9),
+            rr(DUP_LINE, 0.8),
+            rr(DUP_LINE, 0.7),
+            rr(DIVERSE_A, 0.6),
+            rr(DIVERSE_B, 0.5),
+        ];
+        let cfg = crate::scoring::DedupConfig {
+            completeness_widen: true,
+            ..Default::default()
+        };
+        let mut k = 3usize;
+        widen_k_for_completeness(&results, &mut k, &cfg);
+        assert!(k > 3, "expected k to widen past the diverse-cluster cut");
+        results.truncate(k);
+        let kept_texts: Vec<String> = results
+            .iter()
+            .map(|r| crate::util::record_text(&r.record))
+            .collect();
+        assert!(
+            kept_texts.iter().any(|t| t.contains("E_TIMEOUT_4096")),
+            "the distinct high-entropy item must survive the widened cut"
+        );
+    }
+
+    #[test]
+    fn widen_target_noop_on_already_diverse_results() {
+        // All four candidates are distinct prose — the kept top-k is no more
+        // compressible than the pool, so no cluster was dropped: no-op.
+        let texts = vec![
+            "Implemented SCIP code-graph ingest via prost protobuf parsing and edge emission"
+                .to_string(),
+            "Dependency doc memory pins versions from the resolved lockfile closure on disk"
+                .to_string(),
+            "Entity extraction writes a canonical id alongside scoped per-language aliases"
+                .to_string(),
+            "Session checkpoint records replace the free-text session summary pattern entirely"
+                .to_string(),
+        ];
+        assert_eq!(
+            completeness_widen_target(&texts, 3, 0.15),
+            None,
+            "already-diverse top-k must not widen"
+        );
+    }
+
+    #[test]
+    fn widen_target_noop_when_no_extra_candidates() {
+        // candidate_count <= top_k: nothing past the cut to recover.
+        let texts = vec![DUP_LINE.to_string(), DUP_LINE.to_string()];
+        assert_eq!(completeness_widen_target(&texts, 3, 0.15), None);
+        assert_eq!(completeness_widen_target(&texts, 2, 0.15), None);
+    }
+
+    #[test]
+    fn widen_target_noop_on_short_kept_text() {
+        // Even a perfect compress-gap is ignored when the kept text is too
+        // short for a DEFLATE ratio to mean anything (header overhead).
+        let texts = vec![
+            "a a a".to_string(),
+            "a a a".to_string(),
+            "a a a".to_string(),
+            "completely distinct longer diverse content sitting just past the cut".to_string(),
+        ];
+        assert_eq!(
+            completeness_widen_target(&texts, 3, 0.15),
+            None,
+            "short kept text must short-circuit before compressing"
+        );
+    }
+
+    #[test]
+    fn widen_glue_is_noop_when_config_disabled() {
+        // Library default: completeness_widen=false → k is never touched, even
+        // on a textbook diverse-cluster-dropped pool. Raw API result set
+        // unchanged.
+        let results = vec![
+            rr(DUP_LINE, 0.9),
+            rr(DUP_LINE, 0.8),
+            rr(DUP_LINE, 0.7),
+            rr(
+                "Switched the storage backend to redb for ACID single-file durability \
+                 with crash-safe write transactions and a custom edge-record layout",
+                0.6,
+            ),
+        ];
+        // Mirror recall: the widener only runs when the flag is on.
+        let cfg = crate::scoring::DedupConfig::default();
+        assert!(!cfg.completeness_widen, "default must be off");
+        let mut k = 3usize;
+        if cfg.completeness_widen {
+            widen_k_for_completeness(&results, &mut k, &cfg);
+        }
+        assert_eq!(k, 3, "disabled config must never widen k");
     }
 
     #[test]
@@ -5774,5 +6059,193 @@ mod tests {
         assert_eq!(cosine(&a, 0.0, &b), 0.0);
         // Zero-norm record → 0.0 (not NaN).
         assert_eq!(cosine(&b, l2_norm(&b), &a), 0.0);
+    }
+
+    // ── Identifier-aware RRF tilt toward FTS (20.5) ─────────────
+
+    /// A minimal, query-aware in-test FTS index, so the fusion path can be
+    /// exercised deterministically without pulling in the tantivy-backed engine.
+    /// Records are registered with their text; `search_text` scores each by the
+    /// count of query terms it contains and returns the term-matched records in
+    /// descending score order — a coarse but realistic BM25 stand-in. This lets
+    /// a single fixture serve both the identifier query (exact token → only the
+    /// exact record matches) and a natural-language query (its words match the
+    /// other record), the way a real FTS would.
+    struct StubFts {
+        docs: std::sync::Mutex<Vec<(RecordId, String)>>,
+    }
+
+    impl StubFts {
+        fn new(docs: Vec<(RecordId, String)>) -> Self {
+            Self {
+                docs: std::sync::Mutex::new(docs),
+            }
+        }
+    }
+
+    impl crate::plugin::Engine for StubFts {
+        fn name(&self) -> &str {
+            "stub-fts"
+        }
+        fn capabilities(&self) -> Vec<crate::plugin::Capability> {
+            vec![crate::plugin::Capability::FullTextSearch]
+        }
+        fn on_record_insert(&self, _record: &Record) -> Result<()> {
+            Ok(())
+        }
+        fn on_record_delete(&self, _id: &RecordId) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    impl crate::plugin::SearchIndex for StubFts {
+        fn index_text(&self, _id: &RecordId, _field: &str, _text: &str) -> Result<()> {
+            Ok(())
+        }
+        fn search_text(&self, query: &str, limit: usize) -> Result<Vec<(RecordId, f32)>> {
+            let terms: Vec<String> = query.to_lowercase().split_whitespace().map(String::from).collect();
+            let docs = self.docs.lock().unwrap();
+            let mut scored: Vec<(RecordId, f32)> = docs
+                .iter()
+                .filter_map(|(id, text)| {
+                    let lower = text.to_lowercase();
+                    let hits = terms.iter().filter(|t| lower.contains(t.as_str())).count();
+                    if hits == 0 {
+                        None
+                    } else {
+                        Some((id.clone(), hits as f32))
+                    }
+                })
+                .collect();
+            // Stable sort by score desc; ties keep registration order, so the
+            // first-registered doc holds FTS rank 0 on equal term counts.
+            scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            scored.truncate(limit);
+            Ok(scored)
+        }
+    }
+
+    /// Build a DB with two records and a query-aware stub FTS. `id_exact` carries
+    /// a UUID token; `id_recent` is created *more recently* (recency-favored) and
+    /// carries distinctive natural-language words. The UUID also appears verbatim
+    /// in `id_recent`'s text so that, for the identifier query, BOTH records are
+    /// FTS candidates and `id_recent` would otherwise win on recency under pure
+    /// RRF — the tilt is what promotes the exact rank-0 FTS hit (`id_exact`).
+    fn fts_tilt_fixture() -> (Axil, RecordId, RecordId) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tilt.axil");
+        const UUID: &str = "550e8400-e29b-41d4-a716-446655440000";
+
+        let id_exact;
+        let id_recent;
+        let exact_text;
+        let recent_text;
+        {
+            let db = Axil::open(&path).build().unwrap();
+            // Exact record: leads with the UUID, inserted FIRST (older).
+            exact_text = format!("Auth bug {UUID}");
+            let exact = db
+                .insert("decisions", json!({ "summary": exact_text }))
+                .unwrap();
+            id_exact = exact.id.clone();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            // Recent record: ALSO mentions the UUID (so the bare-UUID query has
+            // the SAME term count for both → equal keyword_match), but is newer
+            // so recency favors it. Under pure RRF (rrf weight 0, no vector
+            // index) recency breaks the tie and this newer record wins; the
+            // identifier tilt — which keys off FTS *rank*, where the exact record
+            // sits at rank 0 — must override that. It also carries distinctive NL
+            // words for the natural-language query.
+            recent_text = format!("Newer deployment cadence note, see {UUID}");
+            let recent = db
+                .insert("decisions", json!({ "summary": recent_text }))
+                .unwrap();
+            id_recent = recent.id.clone();
+        }
+
+        let fts = std::sync::Arc::new(StubFts::new(vec![
+            (id_exact.clone(), exact_text),
+            (id_recent.clone(), recent_text),
+        ]));
+        let db = Axil::open(&path).with_fts_index(fts).build().unwrap();
+        // Keep the dir alive for the db's lifetime by leaking it — the test
+        // process tears down immediately after, so the bounded leak is fine.
+        std::mem::forget(dir);
+        (db, id_exact, id_recent)
+    }
+
+    #[test]
+    fn identifier_query_ranks_exact_fts_hit_first() {
+        let (db, id_exact, id_recent) = fts_tilt_fixture();
+
+        // Identifier query (the UUID itself) → tilt fires, exact FTS hit wins.
+        let results = db
+            .recall(
+                "550e8400-e29b-41d4-a716-446655440000",
+                5,
+                Some(crate::scoring::RecallConfig::default()),
+            )
+            .unwrap();
+        assert!(!results.is_empty(), "identifier recall returned nothing");
+        assert_eq!(
+            results[0].record.id, id_exact,
+            "identifier tilt did not rank the exact FTS hit first; \
+             got {:?}",
+            results[0].record.id
+        );
+        // The tilt is recorded on the winning result's explanation.
+        assert!(
+            results[0]
+                .explanation
+                .signals
+                .iter()
+                .any(|(name, v)| name == "fts_identifier_tilt" && *v > 0.0),
+            "fts_identifier_tilt signal missing from explanation"
+        );
+        assert_eq!(
+            results[0].explanation.query_class.as_deref(),
+            Some("identifier:uuid"),
+            "query_class not surfaced in explanation"
+        );
+        let _ = id_recent;
+    }
+
+    #[test]
+    fn natural_language_query_is_unaffected_by_tilt() {
+        let (db, id_exact, id_recent) = fts_tilt_fixture();
+
+        // Same corpus, but a natural-language query → NO tilt. With rrf weight 0
+        // and no vector index, recency dominates, so the newer record wins and
+        // the tilt signal is absent.
+        let results = db
+            .recall(
+                "deployment cadence note",
+                5,
+                Some(crate::scoring::RecallConfig::default()),
+            )
+            .unwrap();
+        assert!(!results.is_empty(), "NL recall returned nothing");
+        assert_eq!(
+            results[0].record.id, id_recent,
+            "natural-language ranking should be recency-led (unchanged), \
+             but got {:?}",
+            results[0].record.id
+        );
+        // No identifier tilt anywhere in the NL result set.
+        for r in &results {
+            assert!(
+                !r.explanation
+                    .signals
+                    .iter()
+                    .any(|(name, _)| name == "fts_identifier_tilt"),
+                "fts_identifier_tilt must not appear for a natural-language query"
+            );
+            assert_eq!(
+                r.explanation.query_class.as_deref(),
+                Some("natural-language"),
+                "NL query_class not surfaced"
+            );
+        }
+        let _ = id_exact;
     }
 }
