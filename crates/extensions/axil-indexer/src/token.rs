@@ -1,16 +1,18 @@
 //! Token estimation utilities.
 //!
-//! Approximates token counts without requiring a tokenizer model.
-//! Uses the ~4 characters per token heuristic (accurate within ~10%
-//! for English text and code with GPT/Claude tokenizers).
+//! Approximates token counts without requiring a tokenizer model. These
+//! helpers delegate to [`axil_core::TokenEstimator`] so the indexer's budget
+//! paths share one estimation seam with the rest of Axil: the default
+//! [`axil_core::CharsPerTokenEstimator`] keeps the historical ~4 chars/token
+//! heuristic (accurate within ~10% for English text and code), and a caller
+//! that wants precision can substitute a tokenizer-backed estimator at the
+//! core seam.
+
+use axil_core::{TokenEstimator, DEFAULT_TOKEN_ESTIMATOR};
 
 /// Estimate the number of tokens in a string (~4 chars per token, rounded up).
 pub fn estimate_tokens(text: &str) -> usize {
-    let chars = text.len();
-    if chars == 0 {
-        return 0;
-    }
-    chars.div_ceil(4)
+    DEFAULT_TOKEN_ESTIMATOR.estimate_tokens(text)
 }
 
 /// Estimate tokens for a JSON value (serialized form).

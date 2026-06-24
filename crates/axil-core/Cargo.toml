@@ -18,6 +18,8 @@ ulid = { workspace = true }
 ureq = { workspace = true, optional = true }
 sha2 = "0.10"
 regex = "1"
+# Real-tokenizer token estimation (behind feature flag, opt-in only).
+tokenizers = { workspace = true, optional = true }
 
 # OpenTelemetry (behind feature flag)
 opentelemetry = { version = "0.28", optional = true }
@@ -35,4 +37,7 @@ harness = false
 [features]
 default = []
 llm-http = ["dep:ureq"]
+# Opt-in precise token counting via a HuggingFace tokenizer model (no network,
+# loads a local tokenizer.json). Default builds keep the chars/4 heuristic.
+real-tokenizer = ["dep:tokenizers"]
 otel = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp"]

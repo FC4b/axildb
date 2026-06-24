@@ -42,11 +42,6 @@ pub const BOOT_SCHEMA_VERSION: &str = "1";
 /// comfortably in a 4k-window prompt with room for the user's turn.
 pub const DEFAULT_TOKEN_BUDGET: usize = 2000;
 
-/// Chars-to-tokens divisor. 4.0 is a widely-cited average for English BPE
-/// tokenizers and is within ±15% across cl100k, tiktoken, and BGE's
-/// XLM-R. We don't need precision — only enough accuracy to prevent
-/// boot context from blowing through a generous budget.
-const CHARS_PER_TOKEN: f64 = 4.0;
 
 /// Per-table caps on how many rows to include in each section before
 /// budget shaping. Prevents a chat-heavy DB from dumping 500 decisions
@@ -180,7 +175,8 @@ impl Axil {
         // ── Budget discipline: drop low-priority sections until we
         // fit. Never drop priority < 4 (scope/constraints/decisions/
         // failures). ─────────────────────────────────────────────
-        let (sections, dropped_sections, used) = apply_budget(sections, budget);
+        let (sections, dropped_sections, used) =
+            apply_budget(sections, budget, &crate::token::DEFAULT_TOKEN_ESTIMATOR);
 
         Ok(BootContext {
             schema_version: BOOT_SCHEMA_VERSION,
@@ -429,8 +425,6 @@ pub fn collect_extension_blocks(db: &Axil) -> Vec<(String, String)> {
     blocks
 }
 
-/// Estimate token cost of serialized JSON content. Rough but stable:
-/// total_chars / CHARS_PER_TOKEN.
 /// Returns true when `record` matches `scope` (or `scope` is None).
 /// A record is in scope when its `_scope` field equals one of the
 /// caller-supplied scopes, or when neither side declares a scope.
@@ -446,21 +440,23 @@ fn record_in_scope(record: &crate::record::Record, scope: Option<&[String]>) -> 
     scope.iter().any(|s| s == record_scope)
 }
 
-fn estimate_tokens(v: &Value) -> usize {
-    let s = v.to_string();
-    (s.len() as f64 / CHARS_PER_TOKEN).ceil() as usize
+fn estimate_tokens(v: &Value, estimator: &dyn crate::token::TokenEstimator) -> usize {
+    estimator.estimate_tokens(&v.to_string())
 }
 
-/// Approximate tokens used by a section's serialized form.
-fn section_cost(s: &BootSection) -> usize {
+/// Approximate tokens used by a section's serialized form, as scored by the
+/// supplied estimator (the default reproduces the `chars / 4` heuristic).
+fn section_cost(s: &BootSection, estimator: &dyn crate::token::TokenEstimator) -> usize {
     match s {
         BootSection::CurrentScope { content }
         | BootSection::Constraints { content }
-        | BootSection::ConfidenceNotes { content } => estimate_tokens(content),
+        | BootSection::ConfidenceNotes { content } => estimate_tokens(content, estimator),
         BootSection::RecentDecisions { content }
         | BootSection::ActiveFailures { content }
         | BootSection::OpenThreads { content }
-        | BootSection::Preferences { content } => content.iter().map(estimate_tokens).sum(),
+        | BootSection::Preferences { content } => {
+            content.iter().map(|v| estimate_tokens(v, estimator)).sum()
+        }
     }
 }
 
@@ -470,8 +466,9 @@ fn section_cost(s: &BootSection) -> usize {
 fn apply_budget(
     sections: Vec<BootSection>,
     budget: usize,
+    estimator: &dyn crate::token::TokenEstimator,
 ) -> (Vec<BootSection>, Vec<String>, usize) {
-    let mut costs: Vec<usize> = sections.iter().map(section_cost).collect();
+    let mut costs: Vec<usize> = sections.iter().map(|s| section_cost(s, estimator)).collect();
     let mut kept: Vec<bool> = vec![true; sections.len()];
 
     // We drop in priority-descending order: highest priority number
