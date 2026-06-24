@@ -82,6 +82,13 @@ pub struct ScoreExplanation {
     pub signals: Vec<(String, f32)>,
     /// Human-readable summary of why this result ranked where it did.
     pub summary: String,
+    /// How the query was classified during recall, e.g. `"identifier:uuid"` or
+    /// `"natural-language"`. `Some` only on the multi-signal recall path; the
+    /// identifier classes mean an FTS rank tilt was applied to exact-identifier
+    /// lookups (visible as the `fts_identifier_tilt` signal). Skipped from
+    /// serialization when absent so existing JSON output is unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query_class: Option<String>,
 }
 
 /// A single recall result with scoring breakdown.
@@ -435,6 +442,9 @@ pub fn fuse_signals(
     let explanation = ScoreExplanation {
         signals: signal_list,
         summary,
+        // Set by the caller (recall) once the query is classified; fuse_signals
+        // itself is query-class agnostic.
+        query_class: None,
     };
 
     (final_score, explanation)

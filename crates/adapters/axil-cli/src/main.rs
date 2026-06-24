@@ -1134,6 +1134,11 @@ enum Command {
         /// stderr as `[recall] cascade rung=<name>`.
         #[arg(long)]
         no_cascade: bool,
+        /// Print recall profiling to stderr, including the query classification
+        /// and whether an identifier FTS tilt was applied (e.g.
+        /// `query_class=identifier:uuid (FTS tilt applied)`).
+        #[arg(long)]
+        profile: bool,
     },
 
     /// Search structural code proxies and return compact pointers.
@@ -6926,6 +6931,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             expand,
             expand_neighbors,
             no_cascade,
+            profile,
         } => {
             let db_path = require_db(&db_opt)?;
             if top_k > MAX_RESULT_LIMIT {
@@ -7268,6 +7274,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                                     signals: vec![("fts".to_string(), score)],
                                     summary: "FTS fallback (vector recall returned empty)"
                                         .to_string(),
+                                    query_class: None,
                                 },
                             })
                             .collect();
@@ -7288,6 +7295,32 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                 }
             }
 
+            // --profile: surface the identifier-aware query classification and
+            // whether the FTS rank tilt was applied. Printed to stderr so stdout
+            // stays valid (JSON / context-block). The tilt only fires on
+            // identifier queries; natural-language recall reports the class with
+            // no tilt note. Classifying here (rather than reading it off a
+            // result) means the profile prints even on an empty result set.
+            if profile {
+                let qc = axil_core::classify_query(&query);
+                if qc.is_identifier() {
+                    let applied = recall_results.iter().any(|rr| {
+                        rr.explanation
+                            .signals
+                            .iter()
+                            .any(|(name, _)| name == "fts_identifier_tilt")
+                    });
+                    let note = if applied {
+                        "FTS tilt applied"
+                    } else {
+                        "FTS tilt eligible (no FTS hit to tilt)"
+                    };
+                    eprintln!("[recall] query_class={} ({note})", qc.tag());
+                } else {
+                    eprintln!("[recall] query_class={} (pure RRF, no tilt)", qc.tag());
+                }
+            }
+
             let values: Vec<Value> = recall_results
                 .iter()
                 .map(|rr| {
@@ -7303,6 +7336,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                         v["explanation"] = json!({
                             "signals": signals,
                             "summary": rr.explanation.summary,
+                            "query_class": rr.explanation.query_class,
                         });
                     }
                     // Include feedback flag when --feedback is set

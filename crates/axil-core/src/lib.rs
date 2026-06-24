@@ -54,6 +54,7 @@ pub mod otel;
 pub mod plugin;
 pub mod prefetch;
 pub mod query;
+pub mod query_class;
 pub mod record;
 pub mod remember;
 pub mod scoring;
@@ -112,6 +113,7 @@ pub use query::{
     graph_boost, EstimatedCost, Op, PlanStep, ProfileStep, QueryBuilder, QueryPlan, QueryProfile,
     SortDirection,
 };
+pub use query_class::{classify_query, IdentifierKind, QueryClass};
 pub use record::{Record, RecordId};
 pub use remember::{DecisionInput, ErrorInput, RememberResult, WriteSource};
 pub use scoring::{

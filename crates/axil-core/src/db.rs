@@ -3509,6 +3509,13 @@ impl Axil {
         // RRF constant — standard value from Cormack et al. (2009).
         const RRF_K: f32 = 60.0;
 
+        // Identifier-aware query classification. When the query is an exact
+        // identifier (UUID / path / code symbol / hostname / long numeric id),
+        // the FTS list gets a tilt below so an exact lexical match isn't diluted
+        // by semantic neighbors. Natural-language queries classify as
+        // NaturalLanguage and the tilt is exactly zero — fusion stays pure RRF.
+        let query_class = crate::query_class::classify_query(&effective_query);
+
         let mut candidates: std::collections::HashMap<RecordId, RecallCandidate> =
             std::collections::HashMap::new();
         for (rank, (rid, vec_score)) in vector_results.iter().enumerate() {
@@ -3524,6 +3531,7 @@ impl Axil {
                     fts_score: 0.0,
                     first_rank: rank,
                     rrf_score: 0.0,
+                    fts_rank: None,
                 });
             if *vec_score > entry.vector_score {
                 entry.vector_score = *vec_score;
@@ -3544,12 +3552,19 @@ impl Axil {
                     fts_score: *fts_score,
                     first_rank: fetch_k + rank,
                     rrf_score: 0.0,
+                    fts_rank: Some(rank),
                 });
             if *fts_score > entry.fts_score {
                 entry.fts_score = *fts_score;
             }
             entry.first_rank = entry.first_rank.min(fetch_k + rank);
             entry.rrf_score += rrf;
+            // Keep the best (smallest) FTS rank when a record appears multiple
+            // times after canonical resolution.
+            entry.fts_rank = Some(match entry.fts_rank {
+                Some(existing) => existing.min(rank),
+                None => rank,
+            });
         }
 
         if candidates.is_empty() {
@@ -3634,7 +3649,31 @@ impl Axil {
                 rrf: candidate.rrf_score,
             };
 
-            let (score, explanation) = crate::scoring::fuse_signals(&record, &signals, &cfg);
+            let (mut score, mut explanation) =
+                crate::scoring::fuse_signals(&record, &signals, &cfg);
+
+            // Identifier tilt: for exact-identifier queries only, add an extra
+            // RRF term for the candidate's FTS rank computed with a *shrunk*
+            // constant (RRF_K_FTS_IDENTIFIER ≪ 60). 1/(k+rank) grows fast as k
+            // shrinks, so the top FTS hit gets a large bump while lower FTS ranks
+            // fall off quickly — exactly the "exact match first" behavior the
+            // task wants, without touching the vector/graph/recency signals. For
+            // natural-language queries this branch never runs, so fusion is
+            // byte-identical to pure RRF.
+            if query_class.is_identifier() {
+                if let Some(fr) = candidate.fts_rank {
+                    // Shrunk FTS RRF constant — top FTS hit ≈ 0.10 here vs
+                    // ≈0.017 at the default k=60, an ~6× tilt at rank 0.
+                    const RRF_K_FTS_IDENTIFIER: f32 = 10.0;
+                    let tilt = 1.0 / (RRF_K_FTS_IDENTIFIER + fr as f32);
+                    score += tilt;
+                    explanation
+                        .signals
+                        .push(("fts_identifier_tilt".to_string(), tilt));
+                }
+            }
+
+            explanation.query_class = Some(query_class.tag());
 
             scored_results.push(crate::scoring::RecallResult {
                 record,
@@ -5038,6 +5077,10 @@ struct RecallCandidate {
     /// Reciprocal Rank Fusion score combining vector + FTS rank positions.
     /// rrf_score = sum(1/(k + rank)) across each list the candidate appears in.
     rrf_score: f32,
+    /// 0-based rank of this candidate in the FTS list, if it appeared there.
+    /// Used to apply the identifier tilt — an extra RRF term computed with a
+    /// shrunk constant so exact lexical matches dominate identifier lookups.
+    fts_rank: Option<usize>,
 }
 
 impl Axil {
@@ -5516,6 +5559,7 @@ mod tests {
             explanation: crate::scoring::ScoreExplanation {
                 signals: vec![],
                 summary: String::new(),
+                query_class: None,
             },
         }
     }
@@ -6015,5 +6059,193 @@ mod tests {
         assert_eq!(cosine(&a, 0.0, &b), 0.0);
         // Zero-norm record → 0.0 (not NaN).
         assert_eq!(cosine(&b, l2_norm(&b), &a), 0.0);
+    }
+
+    // ── Identifier-aware RRF tilt toward FTS (20.5) ─────────────
+
+    /// A minimal, query-aware in-test FTS index, so the fusion path can be
+    /// exercised deterministically without pulling in the tantivy-backed engine.
+    /// Records are registered with their text; `search_text` scores each by the
+    /// count of query terms it contains and returns the term-matched records in
+    /// descending score order — a coarse but realistic BM25 stand-in. This lets
+    /// a single fixture serve both the identifier query (exact token → only the
+    /// exact record matches) and a natural-language query (its words match the
+    /// other record), the way a real FTS would.
+    struct StubFts {
+        docs: std::sync::Mutex<Vec<(RecordId, String)>>,
+    }
+
+    impl StubFts {
+        fn new(docs: Vec<(RecordId, String)>) -> Self {
+            Self {
+                docs: std::sync::Mutex::new(docs),
+            }
+        }
+    }
+
+    impl crate::plugin::Engine for StubFts {
+        fn name(&self) -> &str {
+            "stub-fts"
+        }
+        fn capabilities(&self) -> Vec<crate::plugin::Capability> {
+            vec![crate::plugin::Capability::FullTextSearch]
+        }
+        fn on_record_insert(&self, _record: &Record) -> Result<()> {
+            Ok(())
+        }
+        fn on_record_delete(&self, _id: &RecordId) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    impl crate::plugin::SearchIndex for StubFts {
+        fn index_text(&self, _id: &RecordId, _field: &str, _text: &str) -> Result<()> {
+            Ok(())
+        }
+        fn search_text(&self, query: &str, limit: usize) -> Result<Vec<(RecordId, f32)>> {
+            let terms: Vec<String> = query.to_lowercase().split_whitespace().map(String::from).collect();
+            let docs = self.docs.lock().unwrap();
+            let mut scored: Vec<(RecordId, f32)> = docs
+                .iter()
+                .filter_map(|(id, text)| {
+                    let lower = text.to_lowercase();
+                    let hits = terms.iter().filter(|t| lower.contains(t.as_str())).count();
+                    if hits == 0 {
+                        None
+                    } else {
+                        Some((id.clone(), hits as f32))
+                    }
+                })
+                .collect();
+            // Stable sort by score desc; ties keep registration order, so the
+            // first-registered doc holds FTS rank 0 on equal term counts.
+            scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            scored.truncate(limit);
+            Ok(scored)
+        }
+    }
+
+    /// Build a DB with two records and a query-aware stub FTS. `id_exact` carries
+    /// a UUID token; `id_recent` is created *more recently* (recency-favored) and
+    /// carries distinctive natural-language words. The UUID also appears verbatim
+    /// in `id_recent`'s text so that, for the identifier query, BOTH records are
+    /// FTS candidates and `id_recent` would otherwise win on recency under pure
+    /// RRF — the tilt is what promotes the exact rank-0 FTS hit (`id_exact`).
+    fn fts_tilt_fixture() -> (Axil, RecordId, RecordId) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tilt.axil");
+        const UUID: &str = "550e8400-e29b-41d4-a716-446655440000";
+
+        let id_exact;
+        let id_recent;
+        let exact_text;
+        let recent_text;
+        {
+            let db = Axil::open(&path).build().unwrap();
+            // Exact record: leads with the UUID, inserted FIRST (older).
+            exact_text = format!("Auth bug {UUID}");
+            let exact = db
+                .insert("decisions", json!({ "summary": exact_text }))
+                .unwrap();
+            id_exact = exact.id.clone();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            // Recent record: ALSO mentions the UUID (so the bare-UUID query has
+            // the SAME term count for both → equal keyword_match), but is newer
+            // so recency favors it. Under pure RRF (rrf weight 0, no vector
+            // index) recency breaks the tie and this newer record wins; the
+            // identifier tilt — which keys off FTS *rank*, where the exact record
+            // sits at rank 0 — must override that. It also carries distinctive NL
+            // words for the natural-language query.
+            recent_text = format!("Newer deployment cadence note, see {UUID}");
+            let recent = db
+                .insert("decisions", json!({ "summary": recent_text }))
+                .unwrap();
+            id_recent = recent.id.clone();
+        }
+
+        let fts = std::sync::Arc::new(StubFts::new(vec![
+            (id_exact.clone(), exact_text),
+            (id_recent.clone(), recent_text),
+        ]));
+        let db = Axil::open(&path).with_fts_index(fts).build().unwrap();
+        // Keep the dir alive for the db's lifetime by leaking it — the test
+        // process tears down immediately after, so the bounded leak is fine.
+        std::mem::forget(dir);
+        (db, id_exact, id_recent)
+    }
+
+    #[test]
+    fn identifier_query_ranks_exact_fts_hit_first() {
+        let (db, id_exact, id_recent) = fts_tilt_fixture();
+
+        // Identifier query (the UUID itself) → tilt fires, exact FTS hit wins.
+        let results = db
+            .recall(
+                "550e8400-e29b-41d4-a716-446655440000",
+                5,
+                Some(crate::scoring::RecallConfig::default()),
+            )
+            .unwrap();
+        assert!(!results.is_empty(), "identifier recall returned nothing");
+        assert_eq!(
+            results[0].record.id, id_exact,
+            "identifier tilt did not rank the exact FTS hit first; \
+             got {:?}",
+            results[0].record.id
+        );
+        // The tilt is recorded on the winning result's explanation.
+        assert!(
+            results[0]
+                .explanation
+                .signals
+                .iter()
+                .any(|(name, v)| name == "fts_identifier_tilt" && *v > 0.0),
+            "fts_identifier_tilt signal missing from explanation"
+        );
+        assert_eq!(
+            results[0].explanation.query_class.as_deref(),
+            Some("identifier:uuid"),
+            "query_class not surfaced in explanation"
+        );
+        let _ = id_recent;
+    }
+
+    #[test]
+    fn natural_language_query_is_unaffected_by_tilt() {
+        let (db, id_exact, id_recent) = fts_tilt_fixture();
+
+        // Same corpus, but a natural-language query → NO tilt. With rrf weight 0
+        // and no vector index, recency dominates, so the newer record wins and
+        // the tilt signal is absent.
+        let results = db
+            .recall(
+                "deployment cadence note",
+                5,
+                Some(crate::scoring::RecallConfig::default()),
+            )
+            .unwrap();
+        assert!(!results.is_empty(), "NL recall returned nothing");
+        assert_eq!(
+            results[0].record.id, id_recent,
+            "natural-language ranking should be recency-led (unchanged), \
+             but got {:?}",
+            results[0].record.id
+        );
+        // No identifier tilt anywhere in the NL result set.
+        for r in &results {
+            assert!(
+                !r.explanation
+                    .signals
+                    .iter()
+                    .any(|(name, _)| name == "fts_identifier_tilt"),
+                "fts_identifier_tilt must not appear for a natural-language query"
+            );
+            assert_eq!(
+                r.explanation.query_class.as_deref(),
+                Some("natural-language"),
+                "NL query_class not surfaced"
+            );
+        }
+        let _ = id_exact;
     }
 }
