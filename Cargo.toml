@@ -22,7 +22,6 @@ members = [
     # Tier 2 — Extensions (capabilities built on Engines)
     "crates/extensions/axil-memory",
     "crates/extensions/axil-indexer",
-    "crates/extensions/axil-rerank",
     "crates/extensions/axil-scip",
     "crates/extensions/axil-docs",
     "crates/extensions/axil-checkpoint",
@@ -104,7 +103,6 @@ axil-fts = { path = "crates/engines/axil-fts", version = "1.1.0" }
 axil-timeseries = { path = "crates/engines/axil-timeseries", version = "1.1.0" }
 axil-memory = { path = "crates/extensions/axil-memory", version = "1.1.0" }
 axil-indexer = { path = "crates/extensions/axil-indexer", version = "1.1.0" }
-axil-rerank = { path = "crates/extensions/axil-rerank", version = "1.1.0" }
 axil-scip = { path = "crates/extensions/axil-scip", version = "1.1.0" }
 axil-docs = { path = "crates/extensions/axil-docs", version = "1.1.0" }
 axil-checkpoint = { path = "crates/extensions/axil-checkpoint", version = "1.1.0" }

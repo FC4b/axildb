@@ -338,22 +338,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "axil-rerank"
-version = "1.1.0"
-dependencies = [
- "axil-core",
- "ort",
- "parking_lot",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "thiserror 2.0.18",
- "tokenizers",
- "ureq",
-]
-
-[[package]]
 name = "axil-runtime"
 version = "1.1.0"
 dependencies = [
