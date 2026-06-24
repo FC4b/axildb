@@ -152,6 +152,18 @@ pub struct DedupConfig {
     /// Skip dedup for normalized text shorter than this many chars — short
     /// strings collide too readily under SimHash. Default 24.
     pub min_text_len: usize,
+    /// Completeness k-widening: after the top-k cut, compare how well the kept
+    /// subset compresses (DEFLATE level 1) against the full post-dedup
+    /// candidate pool. If the kept set is *materially more compressible* than
+    /// the pool — i.e. the pool holds diverse content that the cut dropped —
+    /// widen k by a bounded amount and re-trim once. Off by default so the raw
+    /// library result set is unchanged; the agent-facing recall paths opt in.
+    pub completeness_widen: bool,
+    /// Compression-ratio gap (pool ratio − kept ratio) above which a dropped
+    /// diverse cluster is inferred and k is widened. A higher kept-vs-pool gap
+    /// means the kept set is far more redundant than the pool it was cut from.
+    /// Default 0.15 (15 percentage points), per the spec heuristic.
+    pub widen_threshold: f32,
 }
 
 impl Default for DedupConfig {
@@ -160,6 +172,8 @@ impl Default for DedupConfig {
             enabled: false,
             hamming_threshold: 3,
             min_text_len: 24,
+            completeness_widen: false,
+            widen_threshold: 0.15,
         }
     }
 }

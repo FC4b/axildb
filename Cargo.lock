@@ -211,6 +211,7 @@ version = "1.1.0"
 dependencies = [
  "chrono",
  "criterion",
+ "flate2",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",

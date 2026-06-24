@@ -3675,8 +3675,18 @@ impl Axil {
             collapse_near_duplicates(&mut scored_results, &cfg.dedup);
         }
 
-        // Truncate to top_k
-        scored_results.truncate(top_k);
+        // Completeness k-widening: widen when the kept set is far more
+        // compressible than the post-dedup pool — a diverse cluster was cut.
+        // Runs after dedup so it operates on distinct candidates, and before
+        // truncation so it can recover a dropped cluster. One bounded
+        // compression pass, single re-trim — cheap on the hot path.
+        let mut effective_top_k = top_k;
+        if cfg.dedup.completeness_widen {
+            widen_k_for_completeness(&scored_results, &mut effective_top_k, &cfg.dedup);
+        }
+
+        // Truncate to the (possibly widened) top_k
+        scored_results.truncate(effective_top_k);
 
         // Bump activation for returned results (lazy decay on read).
         if cfg.weights.activation > 0.0 {
@@ -4859,6 +4869,101 @@ fn collapse_near_duplicates(
     *results = out;
 }
 
+/// Minimum kept-text length (chars) below which completeness widening is a
+/// no-op. DEFLATE ratios on a handful of bytes are dominated by header
+/// overhead and say nothing about content diversity.
+const WIDEN_MIN_KEPT_CHARS: usize = 64;
+
+/// DEFLATE (level 1) compression ratio of `text`: `compressed_len /
+/// original_len`. A *lower* ratio means more internal redundancy (more
+/// compressible). Returns `1.0` for empty input (nothing to compress).
+///
+/// Level 1 is the spec's "zlib L1" — cheapest pass, and the ratio *gap*
+/// between two texts is what matters, not the absolute ratio, so a fast level
+/// is sufficient.
+fn deflate_ratio(text: &str) -> f64 {
+    let bytes = text.as_bytes();
+    if bytes.is_empty() {
+        return 1.0;
+    }
+    use std::io::Write;
+    let mut encoder =
+        flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::new(1));
+    if encoder.write_all(bytes).is_err() {
+        return 1.0;
+    }
+    match encoder.finish() {
+        Ok(compressed) => compressed.len() as f64 / bytes.len() as f64,
+        Err(_) => 1.0,
+    }
+}
+
+/// Decide whether the top-`top_k` cut over `pool_texts` dropped a diverse
+/// cluster, and if so return the widened k to re-trim to.
+///
+/// `pool_texts` is the per-result text of the full (post-dedup) candidate pool,
+/// already sorted best-first. Returns `Some(new_k)` only when widening should
+/// happen, where `new_k > top_k`; `None` is a no-op.
+///
+/// Heuristic (spec 20.4): if the kept top-k subset compresses *materially
+/// better* than the whole pool — `pool_ratio - kept_ratio > threshold` — then
+/// the kept set is far more redundant than the larger pool, so a distinct
+/// diverse cluster was likely cut. Widen k conservatively (toward the pool, by
+/// a bounded amount) and re-trim once.
+fn completeness_widen_target(pool_texts: &[String], top_k: usize, threshold: f32) -> Option<usize> {
+    let candidate_count = pool_texts.len();
+    // Nothing past the cut to recover, or a degenerate cut.
+    if top_k == 0 || candidate_count <= top_k {
+        return None;
+    }
+
+    let kept: String = pool_texts[..top_k].join("\n");
+    // Too little kept text for a DEFLATE ratio to mean anything.
+    if kept.chars().count() < WIDEN_MIN_KEPT_CHARS {
+        return None;
+    }
+    let cand: String = pool_texts.join("\n");
+
+    let kept_ratio = deflate_ratio(&kept);
+    let pool_ratio = deflate_ratio(&cand);
+
+    // Widen when the kept set is far more compressible (redundant) than the
+    // pool it was cut from — a diverse cluster sits just past the cut.
+    if (pool_ratio - kept_ratio) as f32 > threshold {
+        // Conservative, bounded, single-shot: bump toward the pool by up to
+        // 1.5x top_k, capped by what's actually available.
+        let widened = ((top_k as f64) * 1.5).ceil() as usize;
+        let new_k = widened.min(candidate_count).max(top_k + 1);
+        Some(new_k)
+    } else {
+        None
+    }
+}
+
+/// Widen the top-k cut over `results` (sorted best-first) when the kept subset
+/// is suspiciously more compressible than the full candidate pool — a sign a
+/// distinct diverse cluster would be dropped by a naive `truncate(top_k)`.
+///
+/// Mutates `top_k` in place (the caller then truncates to it). Bounded to a
+/// single re-trim and one extra compression pass over the pool/kept text, so
+/// it stays cheap on the hot recall path.
+fn widen_k_for_completeness(
+    results: &[crate::scoring::RecallResult],
+    top_k: &mut usize,
+    cfg: &crate::scoring::DedupConfig,
+) {
+    if results.len() <= *top_k {
+        return;
+    }
+    let texts: Vec<String> = results
+        .iter()
+        .map(|r| crate::util::record_text(&r.record))
+        .collect();
+    if let Some(new_k) = completeness_widen_target(&texts, *top_k, cfg.widen_threshold) {
+        *top_k = new_k;
+    }
+}
+
 /// Split text into overlapping char windows. Respects UTF-8 boundaries.
 /// Returns a single chunk when text is shorter than `max_chars`.
 fn chunk_by_chars(text: &str, max_chars: usize, stride: usize) -> Vec<String> {
@@ -5498,6 +5603,142 @@ mod tests {
         let mut b = vec![rr("same text", 0.9), rr("same text", 0.8)];
         collapse_near_duplicates(&mut b, &lenient);
         assert_eq!(b.len(), 1, "identical text collapses once long enough to fingerprint");
+    }
+
+    // ── Completeness k-widening (20.4) ──────────────────────────
+
+    // A near-duplicate filler line long enough to clear WIDEN_MIN_KEPT_CHARS.
+    const DUP_LINE: &str = "Use RRF fusion for recall because it is rank-based and robust to outliers";
+    // High-entropy, distinct items (ids / codes / signatures) that share little
+    // with the dup cluster — DEFLATE can't fold them into the kept redundancy,
+    // so the pool ratio rises sharply when they sit past the cut.
+    const DIVERSE_A: &str = "df9a1c3e-7b20-4f51-a8e2-0c6d9b1f4e77 E_TIMEOUT_4096 commit b3f7e2a quux::Zephyr<'x>";
+    const DIVERSE_B: &str = "zx81 BBC micro 6502 assembly LDA #$FF STA $D020 raster interrupt vblank NMI handler";
+
+    #[test]
+    fn widen_target_fires_when_diverse_cluster_dropped() {
+        // top_k=3, but the top 3 are near-identical restatements (highly
+        // compressible) while a distinct, high-entropy cluster sits just past
+        // the cut. The kept subset compresses far better than the full pool, so
+        // k widens to recover the dropped cluster.
+        let texts = vec![
+            DUP_LINE.to_string(),
+            DUP_LINE.to_string(),
+            DUP_LINE.to_string(),
+            DIVERSE_A.to_string(),
+            DIVERSE_B.to_string(),
+        ];
+        let new_k = completeness_widen_target(&texts, 3, 0.15);
+        assert!(
+            new_k.is_some(),
+            "kept set far more compressible than pool → expected widen"
+        );
+        let new_k = new_k.unwrap();
+        assert!(new_k > 3, "widened k must exceed top_k (got {new_k})");
+        // Bounded: ceil(3 * 1.5) = 5, capped at the 5 available candidates.
+        assert!(new_k <= 5, "widen stays bounded by ceil(top_k*1.5) and pool size");
+    }
+
+    #[test]
+    fn widen_glue_retains_diverse_item_via_record_text() {
+        // End-to-end through the recall glue: build RecallResults the way the
+        // recall path delivers them (sorted, post-dedup), run the widener, and
+        // confirm the kept slice after truncation includes the diverse cluster
+        // that a plain truncate(top_k) would have dropped.
+        let mut results = vec![
+            rr(DUP_LINE, 0.9),
+            rr(DUP_LINE, 0.8),
+            rr(DUP_LINE, 0.7),
+            rr(DIVERSE_A, 0.6),
+            rr(DIVERSE_B, 0.5),
+        ];
+        let cfg = crate::scoring::DedupConfig {
+            completeness_widen: true,
+            ..Default::default()
+        };
+        let mut k = 3usize;
+        widen_k_for_completeness(&results, &mut k, &cfg);
+        assert!(k > 3, "expected k to widen past the diverse-cluster cut");
+        results.truncate(k);
+        let kept_texts: Vec<String> = results
+            .iter()
+            .map(|r| crate::util::record_text(&r.record))
+            .collect();
+        assert!(
+            kept_texts.iter().any(|t| t.contains("E_TIMEOUT_4096")),
+            "the distinct high-entropy item must survive the widened cut"
+        );
+    }
+
+    #[test]
+    fn widen_target_noop_on_already_diverse_results() {
+        // All four candidates are distinct prose — the kept top-k is no more
+        // compressible than the pool, so no cluster was dropped: no-op.
+        let texts = vec![
+            "Implemented SCIP code-graph ingest via prost protobuf parsing and edge emission"
+                .to_string(),
+            "Dependency doc memory pins versions from the resolved lockfile closure on disk"
+                .to_string(),
+            "Entity extraction writes a canonical id alongside scoped per-language aliases"
+                .to_string(),
+            "Session checkpoint records replace the free-text session summary pattern entirely"
+                .to_string(),
+        ];
+        assert_eq!(
+            completeness_widen_target(&texts, 3, 0.15),
+            None,
+            "already-diverse top-k must not widen"
+        );
+    }
+
+    #[test]
+    fn widen_target_noop_when_no_extra_candidates() {
+        // candidate_count <= top_k: nothing past the cut to recover.
+        let texts = vec![DUP_LINE.to_string(), DUP_LINE.to_string()];
+        assert_eq!(completeness_widen_target(&texts, 3, 0.15), None);
+        assert_eq!(completeness_widen_target(&texts, 2, 0.15), None);
+    }
+
+    #[test]
+    fn widen_target_noop_on_short_kept_text() {
+        // Even a perfect compress-gap is ignored when the kept text is too
+        // short for a DEFLATE ratio to mean anything (header overhead).
+        let texts = vec![
+            "a a a".to_string(),
+            "a a a".to_string(),
+            "a a a".to_string(),
+            "completely distinct longer diverse content sitting just past the cut".to_string(),
+        ];
+        assert_eq!(
+            completeness_widen_target(&texts, 3, 0.15),
+            None,
+            "short kept text must short-circuit before compressing"
+        );
+    }
+
+    #[test]
+    fn widen_glue_is_noop_when_config_disabled() {
+        // Library default: completeness_widen=false → k is never touched, even
+        // on a textbook diverse-cluster-dropped pool. Raw API result set
+        // unchanged.
+        let results = vec![
+            rr(DUP_LINE, 0.9),
+            rr(DUP_LINE, 0.8),
+            rr(DUP_LINE, 0.7),
+            rr(
+                "Switched the storage backend to redb for ACID single-file durability \
+                 with crash-safe write transactions and a custom edge-record layout",
+                0.6,
+            ),
+        ];
+        // Mirror recall: the widener only runs when the flag is on.
+        let cfg = crate::scoring::DedupConfig::default();
+        assert!(!cfg.completeness_widen, "default must be off");
+        let mut k = 3usize;
+        if cfg.completeness_widen {
+            widen_k_for_completeness(&results, &mut k, &cfg);
+        }
+        assert_eq!(k, 3, "disabled config must never widen k");
     }
 
     #[test]

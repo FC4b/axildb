@@ -1097,6 +1097,11 @@ enum Command {
         /// near-identical hits so they don't each consume a top-k slot.
         #[arg(long)]
         no_dedup: bool,
+        /// Disable completeness k-widening. By default, when the kept top-k
+        /// compresses much better than the candidate pool (a diverse cluster
+        /// was cut), recall widens k once and re-trims.
+        #[arg(long)]
+        no_widen: bool,
         /// Filter by agent name (matches `_agent` field in record data).
         #[arg(long)]
         agent: Option<String>,
@@ -6911,6 +6916,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             budget,
             recall_format,
             no_dedup,
+            no_widen,
             agent: agent_filter,
             min_importance,
             scope,
@@ -7026,6 +7032,10 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                 // restores the old behavior (used for before/after baselines).
                 dedup: axil_core::scoring::DedupConfig {
                     enabled: !no_dedup,
+                    // Widen k when the kept top-k compresses far better than the
+                    // candidate pool — a diverse cluster was cut. `--no-widen`
+                    // restores the plain top-k cut.
+                    completeness_widen: !no_widen,
                     ..Default::default()
                 },
                 ..Default::default()

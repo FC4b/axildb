@@ -16,6 +16,9 @@ thiserror = { workspace = true }
 toml = { workspace = true }
 ulid = { workspace = true }
 ureq = { workspace = true, optional = true }
+# DEFLATE compression for recall's completeness k-widening (pure-Rust backend).
+# Non-optional: k-widening is part of the default recall feature set.
+flate2 = { workspace = true }
 sha2 = "0.10"
 regex = "1"
 # Real-tokenizer token estimation (behind feature flag, opt-in only).

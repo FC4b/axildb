@@ -121,6 +121,9 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 chrono = { version = "0.4", features = ["serde"] }
 redb = "3"
 ulid = "1"
+# Pure-Rust DEFLATE via the miniz_oxide backend (no system zlib / C dep). Used
+# by recall's completeness k-widening to compare compression ratios.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 tempfile = "3"
 parking_lot = "0.12"
 toml = "0.8"
