@@ -1,0 +1,35 @@
+{
+  "benchmark": "axil-vs-sqlite-vec",
+  "dataset_size": 10000,
+  "dimensions": 384,
+  "axil": {
+    "engine": "axil-vector (HNSW)",
+    "insert_ms": 49260,
+    "insert_throughput_per_sec": 203.00446609825417,
+    "build_ms": 12550,
+    "queries": 500,
+    "top_k": 10,
+    "mean_us": 777.8931759999991,
+    "p50_us": 766.709,
+    "p95_us": 927.333,
+    "p99_us": 1028.583,
+    "max_us": 1169.0,
+    "qps": 1285.523553686504,
+    "disk_bytes": 24145920
+  },
+  "sqlite": {
+    "engine": "sqlite-vec (vec0, brute force)",
+    "insert_ms": 138,
+    "insert_throughput_per_sec": 72463.76811594203,
+    "build_ms": 0,
+    "queries": 500,
+    "top_k": 10,
+    "mean_us": 4996.131524000004,
+    "p50_us": 4923.3330000000005,
+    "p95_us": 5354.375,
+    "p99_us": 7371.25,
+    "max_us": 11600.5,
+    "qps": 200.1548588535515,
+    "disk_bytes": 16003072
+  }
+}

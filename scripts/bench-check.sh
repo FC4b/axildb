@@ -13,10 +13,10 @@ BASELINE_DIR="${BENCH_BASELINE_DIR:-target/criterion-baseline}"
 THRESHOLD="${BENCH_THRESHOLD:-5}" # percent
 
 # Map bench target -> package so cargo can find them from the workspace root.
-# Only in-tree workspace members are listed. The combined `criterion-suite`
-# bench crate lives under benchmarks/ (gitignored) and is no longer a
-# workspace member — run it via --manifest-path benchmarks/criterion-suite
-# when the dir is populated locally.
+# These are the per-crate benches under crates/*/benches/ (workspace members).
+# The combined `criterion-suite` crate under benchmarks/ is tracked but
+# `exclude`d from the workspace — run it via
+# `--manifest-path benchmarks/criterion-suite/Cargo.toml` when desired.
 declare -A BENCH_PKGS=(
     [core_benchmarks]=axil-core
     [vector_benchmarks]=axil-vector

@@ -1,0 +1,41 @@
+name: nightly-bench
+
+# Criterion latency regression watch (Phase 25 P0.5). Runs the 4 in-tree
+# hot-path suites (core/vector/graph/fts) via scripts/bench-check.sh and
+# surfaces >5% regressions vs the previous night's baseline as WARNINGS —
+# informational, never blocking. Criterion variance on shared CI runners is
+# real (eval-log.md classifies +6–10% single-run swings as noise), so this is
+# deliberately NOT a per-PR blocking gate.
+on:
+  schedule:
+    - cron: "0 7 * * *" # 07:00 UTC daily
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  criterion:
+    name: criterion latency watch (informational)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Persist the Criterion "main" baseline across nightly runs so --compare
+      # has something to diff against. restore-keys picks up the most recent
+      # prior baseline; the run-id-suffixed key writes a fresh one each night.
+      - name: restore criterion baseline
+        uses: actions/cache@v4
+        with:
+          path: target/criterion
+          key: criterion-baseline-${{ github.run_id }}
+          restore-keys: criterion-baseline-
+      # Compare against the restored baseline (if any). Non-blocking: a
+      # regression here is a heads-up, not a build failure.
+      - name: compare vs previous baseline (warn-only)
+        continue-on-error: true
+        run: scripts/bench-check.sh --compare
+      # Refresh the baseline so tomorrow compares against today.
+      - name: save fresh baseline
+        run: scripts/bench-check.sh --save

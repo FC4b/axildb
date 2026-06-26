@@ -18,7 +18,7 @@ use zerocopy::IntoBytes;
 
 use axil_core::plugin::VectorIndex;
 use axil_core::record::RecordId;
-use axil_vector::VectorPlugin;
+use axil_vector::VectorEngine;
 
 #[derive(Parser, Debug)]
 #[command(name = "sqlite-compare", about = "Axil vs SQLite+sqlite-vec benchmark")]
@@ -139,7 +139,7 @@ fn run_axil(args: &Args) -> EngineResult {
     eprintln!("[axil] inserting {} vectors...", args.n);
     let dir = TempDir::new().expect("tmpdir");
     let db_path = dir.path().join("bench.axil");
-    let plugin = VectorPlugin::open(&db_path, args.dims).expect("open plugin");
+    let plugin = VectorEngine::open(&db_path, args.dims).expect("open plugin");
 
     let insert_start = Instant::now();
     for i in 0..args.n {

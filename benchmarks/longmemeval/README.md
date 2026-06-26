@@ -76,14 +76,17 @@ Output is a single JSON `BenchmarkReport` on stdout (progress on stderr):
 
 ## Published numbers
 
-The 2026-05-17 row is the headline baseline — the first full 500-question
-run, committed at `benchmarks/results/baseline-500.json` and gated in CI via
-`benchmarks/longmemeval/baseline.jsonl`. The smaller rows are Phase 15 P0
-CPU verification runs.
+The Recall-QTC row is the headline baseline — it backs the README's **94.5 %**
+figure, is committed at `benchmarks/results/qtc-500.json`, and is the gate
+baseline copied to `benchmarks/longmemeval/baseline.jsonl` (so the gate
+compares the QTC strategy against it when the dataset is present). The vector
+500-question run (`benchmarks/results/baseline-500.json`) is kept for
+reference; the smaller rows are Phase 15 P0 CPU verification runs.
 
 | Run | Strategy | Questions | recall@5 | recall@1 | Notes |
 |-----|----------|-----------|----------|----------|-------|
-| 2026-05-17 | vector | **500 (full `s`)** | **0.936** | — | **Baseline.** bge-small, RTX 3080. hit_rate 96.4 %, precision@5 32.0 %. 15m19s wall. Clears the Phase 13 historical 94.4 %. |
+| 2026-05-17 | **recall-qtc** | **500 (full `s`)** | **0.945** | — | **Gate baseline.** bge-small, RTX 3080. hit_rate 97.2 %, precision@5 32.0 %. Backs the README 94.5 %. |
+| 2026-05-17 | vector | 500 (full `s`) | 0.936 | — | Reference. bge-small, RTX 3080. hit_rate 96.4 %. 15m19s wall. Clears the Phase 13 historical 94.4 %. |
 | 2026-05-16 | vector | 50 (single-session-user) | 0.880 | 0.760 | bge-small, P0 CPU verify |
 | 2026-05-16 | vector | 10 | 0.800 | — | gte-modernbert-base (P0.2 verify; ties bge-small, ~2× slower on CPU) |
 | 2026-05-16 | recall + rerank | 30 | — | 0.900 | answerai-colbert via P0.3 (+12.5 % vs no rerank) |

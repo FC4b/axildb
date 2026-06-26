@@ -12,7 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 axil-core = { path = "../../crates/axil-core" }
-axil-vector = { path = "../../crates/axil-vector" }
+axil-vector = { path = "../../crates/engines/axil-vector" }
 clap = { version = "4", features = ["derive"] }
 rusqlite = { version = "0.37", features = ["bundled"] }
 sqlite-vec = "0.1"

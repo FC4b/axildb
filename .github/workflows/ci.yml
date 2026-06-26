@@ -70,3 +70,18 @@ jobs:
         run: cargo build -p axildb
       - name: needle-retention recall gate
         run: AXIL_BIN="$PWD/target/debug/axil" scripts/needle-recall-gate.sh
+
+  sqlite-compare-gate:
+    name: vector-search speedup gate (sqlite-compare)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Keeps the README "~Nx faster vector search" claim honest: runs the
+      # in-tree sqlite-compare harness (Axil HNSW vs SQLite + sqlite-vec, all
+      # synthetic — no dataset, no model) at a reduced n and fails if Axil's
+      # p50 isn't at least 3x faster than sqlite-vec's. The full 100k/173x run
+      # stays a labeled local figure; this gate guards the direction.
+      - name: vector-search speedup floor
+        run: scripts/sqlite-compare-gate.sh

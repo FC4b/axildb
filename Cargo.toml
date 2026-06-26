@@ -34,16 +34,18 @@ members = [
     # Workspace-wide tests (not tier-classified)
     "crates/axil-tests",
 ]
-# Benchmark crates live under `benchmarks/` and are intentionally gitignored
-# (see .gitignore). They are not workspace members so clean checkouts still
-# build; developers can `cargo build --manifest-path benchmarks/<name>/Cargo.toml`
-# on demand when the dir is populated locally.
+# Benchmark crates live under `benchmarks/`. Their SOURCES ARE TRACKED (see
+# .gitignore: only generated data/, target/, out/ are ignored). They are
+# `exclude`d from the default workspace — not gitignored — so `cargo check
+# --workspace` stays fast and a clean checkout builds without them; run one on
+# demand with `cargo run --release --manifest-path benchmarks/<name>/Cargo.toml`.
+# CI gates them via explicit --manifest-path jobs (scripts/sqlite-compare-gate.sh,
+# scripts/bench-check.sh), never by adding them to the workspace.
 exclude = [
     # WASM guest component (built with cargo-component for wasm32-wasip2, not a
     # native workspace member) — a test fixture for the axil-runtime host.
     "crates/adapters/axil-runtime/test-guest",
     "benchmarks/longmemeval",
-    "benchmarks/convomem",
     "benchmarks/locomo",
     "benchmarks/criterion-suite",
     "benchmarks/vector-latency",

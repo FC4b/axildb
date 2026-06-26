@@ -151,7 +151,7 @@ Everything below normally means standing up a vector DB **and** Neo4j **and** El
 
 **💻 Built for code agents** — structural code index + `code-search` / `code-context` (pointer-shaped, token-frugal) · SCIP cross-reference graph · version-pinned dependency-doc memory · structured session checkpoints · AxilQL · MCP server (full CLI parity).
 
-**🔌 Optional LLM upgrade** — plug in Claude / GPT / Ollama (or Claude Code skills) to take extraction & consolidation from ~80% → ~95%. Everything above runs without it.
+**🔌 Optional LLM upgrade** — plug in Claude / GPT / Ollama (or Claude Code skills) to sharpen entity extraction & consolidation beyond the algorithmic defaults. Everything above runs without it.
 
 ## Benchmarks
 
@@ -172,11 +172,11 @@ Everything below normally means standing up a vector DB **and** Neo4j **and** El
 And it's small and fast where it counts:
 
 - **100% needle-recall (6/6), CI-enforced** — every build runs [`scripts/needle-recall-gate.sh`](scripts/needle-recall-gate.sh): a planted fact must come back in the top-5 with its distinctive token intact, or the build fails.
-- **~173× faster vector search** than SQLite + sqlite-vec at 100k vectors *(out-of-tree `sqlite-compare` harness)*.
+- **~173× faster vector search** than SQLite + sqlite-vec at 100k vectors *(in-tree [`sqlite-compare`](benchmarks/sqlite-compare) harness; CI gates a reduced-n speedup floor, the 100k figure is a local run)*.
 - Competitive recall at a fraction of the per-query token budget *(estimate — assumes ~950 tokens/query; see [methodology](docs/src/advanced/benchmarks.md))*.
 - **<100 ms** commands from a **~5–10 MB** offline binary — no LLM call, no network, no daemon.
 
-> *Competitor figures (MemPalace, Hindsight, Mem0, Zep, Memvid) are cited from the published LongMemEval landscape as of April 2026 — not measured by Axil.* Axil's own LongMemEval rows are the **last committed run on the now-archived 500-question harness** (dataset out-of-tree, not regenerated here); the latency/vector figures come from the out-of-tree `sqlite-compare` harness. The **needle-recall gate and the Criterion hot-path suites run in-tree** (`cargo bench` / CI). → Full tables, per-category breakdown, and methodology: **[Benchmarks](docs/src/advanced/benchmarks.md)**.
+> *Competitor figures (MemPalace, Hindsight, Mem0, Zep, Memvid) are cited from the published LongMemEval landscape as of April 2026 — not measured by Axil.* Axil's LongMemEval harness is **in-tree** at [`benchmarks/longmemeval`](benchmarks/longmemeval); the Recall-QTC **94.5%** matches the committed 500-question baseline [`benchmarks/results/qtc-500.json`](benchmarks/results/qtc-500.json). The LongMemEval-S dataset is out-of-tree, so the CI gate skips-loud (a green run never means it re-verified); re-run locally with the dataset present. The Recall-fusion **90.9%** is a historical 500-question run not in the committed baseline set. The `sqlite-compare`, **needle-recall**, and Criterion hot-path harnesses are all in-tree (the first two CI-gated). → Full tables, per-category breakdown, and methodology: **[Benchmarks](docs/src/advanced/benchmarks.md)**.
 
 ## How it works
 

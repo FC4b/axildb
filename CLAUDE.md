@@ -346,14 +346,23 @@ local, gitignored `tasks/` dir — they are not shipped in the public repo.)
   LongMemEval benchmark, A/B testing framework
 - Deferred: examples (vector_search, graph_queries, agent_memory), documentation site. (CI/CD shipped post-1.0: `.github/workflows/ci.yml` build/test/recall-quality gate + `release-plz.yml` auto-publish.)
 
-> **Benchmark numbers are historical.** The LoCoMo / LongMemEval / SQLite-compare
-> harnesses were untracked from git (see `.gitignore`: `/benchmarks/`) and are
-> no longer workspace members, so CI cannot regenerate these numbers. The
-> scores above reflect the last run on the in-tree harness. To re-verify,
-> pull the benchmark dir from the project's benchmark archive and run it
-> via `cargo bench --manifest-path benchmarks/<name>/Cargo.toml`. The
-> in-tree `scripts/bench-check.sh` still guards the Criterion hot-path
-> suites (`core`, `vector`, `graph`, `fts`) against >5% latency regressions.
+> **Benchmark harnesses are tracked and in-tree** (Phase 25). The LoCoMo /
+> LongMemEval / SQLite-compare / vector-latency / criterion-suite harnesses
+> live under `benchmarks/` with their sources committed (`git ls-files
+> benchmarks/`); only generated `data/`, `target/`, and `out/` are gitignored.
+> They are `exclude`d from the default workspace (so `cargo check --workspace`
+> stays fast/clean), not removed — run one with
+> `cargo run --release --manifest-path benchmarks/<name>/Cargo.toml`.
+> Regeneration in CI splits by data dependency:
+> - **Dataset-free, CI-gated:** `sqlite-compare` (reduced-n speedup floor) and
+>   the needle-recall gate run on every PR; `bench-check.sh` (Criterion
+>   `core`/`vector`/`graph`/`fts`, >5% latency regression) runs nightly.
+> - **Dataset-gated, skip-loud:** LongMemEval / LoCoMo / ConvoMem need an
+>   out-of-tree dataset; their gates emit a loud `::warning` skip when it's
+>   absent (a green CI run never means they verified anything). Committed
+>   500-question baselines live in `benchmarks/results/` (e.g.
+>   `qtc-500.json` backs the 94.5% Recall-QTC figure); the LongMemEval gate
+>   compares against them when the dataset is present.
 
 ### Phase 7c: Web UI ✅
 - React 19 + Vite 6 + rust-embed. Database explorer with graph/vector viz, query console.
