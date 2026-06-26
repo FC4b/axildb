@@ -82,3 +82,8 @@ pub struct Record {
 ```
 
 Records are stored in tables (like collections). Internal tables start with `_` (e.g., `_entities`, `_sessions`).
+
+The `table` is the record's top-level category, and how you choose it (by
+*function*, not topic) is what makes retrieval fast. See
+[Memory Taxonomy](./memory-taxonomy.md) for the categorization model and the
+`--type` facet filter.

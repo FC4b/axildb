@@ -989,6 +989,20 @@ enum Command {
 
     // ── Agent-friendly CRUD (4b.2) ──────────────────────────────────
     /// Store a record. Use "-" as json_data to read from stdin.
+    ///
+    /// Categorize by FUNCTION, not TOPIC. The table is the record's kind —
+    /// the question it answers / when you reach for it: `decisions`
+    /// (a choice + rationale), `errors` (a failure + fix), `rules`
+    /// (constraints to obey), `context` (durable how-it-works knowledge).
+    /// TOPIC ("the auth feature", a module name) is already handled by
+    /// embeddings + entities + `--scope` — do NOT encode it as a category.
+    ///
+    /// `context` records may carry a `type` facet to scope retrieval
+    /// (filterable via `axil recall --type <t>`). Recommended values:
+    /// architecture, gotcha, howto, reference. The vocabulary is a
+    /// recommendation, not enforced — any string is accepted. `decisions`
+    /// and `errors` don't need a `type`; their field shape already encodes
+    /// their function.
     #[command(visible_alias = "insert")]
     Store {
         /// Table name.
@@ -1097,6 +1111,12 @@ enum Command {
         /// Filter by table name.
         #[arg(long)]
         table: Option<String>,
+        /// Filter by the record's `type` facet (matches `data.type`,
+        /// case-insensitive exact). Records without a `type` field are
+        /// excluded when this is set. See `axil store --help` for the
+        /// recommended `context` vocabulary.
+        #[arg(long = "type")]
+        r#type: Option<String>,
         /// Token budget: truncate results to fit within this many tokens (1 token ≈ 4 bytes).
         #[arg(long)]
         budget: Option<usize>,
@@ -1189,8 +1209,9 @@ enum Command {
         /// indexed repo size (tiny→1500, large monorepo→4000, capped).
         #[arg(long)]
         budget: Option<usize>,
-        /// Output: `compact` (lean pointer lines, default — ~10× smaller)
-        /// or `json` (full bundle with scores/ids/sections).
+        /// Output: `compact` (lean pointer lines, default — much smaller; drops
+        /// the JSON bundle's scores/ids/section bookkeeping) or `json` (full
+        /// bundle with scores/ids/sections).
         #[arg(long = "context-format", default_value = "compact")]
         context_format: String,
     },
@@ -6810,6 +6831,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             explain,
             feedback: _feedback_flag,
             table: table_filter,
+            r#type: type_filter,
             budget,
             recall_format,
             no_dedup,
@@ -6987,10 +7009,27 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                 db.recall(&query, top_k, Some(cfg))?
             };
 
-            // Apply table, time, and freshness filters.
+            // Normalize the --type facet filter once (case-insensitive,
+            // trimmed). Matched against `data.type` as a plain where-clause —
+            // no index, no scoring change. Records without a `type` field are
+            // excluded when --type is set.
+            let type_filter = type_filter.map(|t| t.trim().to_lowercase());
+
+            // Apply table, type, time, and freshness filters.
             recall_results.retain(|rr| {
                 if let Some(ref tf) = table_filter {
                     if rr.record.table != *tf {
+                        return false;
+                    }
+                }
+                if let Some(ref tf) = type_filter {
+                    let record_type = rr
+                        .record
+                        .data
+                        .get("type")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.trim().to_lowercase());
+                    if record_type.as_deref() != Some(tf.as_str()) {
                         return false;
                     }
                 }
@@ -7061,6 +7100,17 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                     rs.retain(|rr| {
                         if let Some(ref tf) = table_filter {
                             if rr.record.table != *tf {
+                                return false;
+                            }
+                        }
+                        if let Some(ref tf) = type_filter {
+                            let record_type = rr
+                                .record
+                                .data
+                                .get("type")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.trim().to_lowercase());
+                            if record_type.as_deref() != Some(tf.as_str()) {
                                 return false;
                             }
                         }

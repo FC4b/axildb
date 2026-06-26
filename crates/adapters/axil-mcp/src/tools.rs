@@ -28,6 +28,10 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
                         "type": "string",
                         "description": "Filter by table name"
                     },
+                    "type": {
+                        "type": "string",
+                        "description": "Filter by the record's `type` facet (matches data.type, case-insensitive exact). Records without a `type` field are excluded when set."
+                    },
                     "across": {
                         "type": "array",
                         "items": { "type": "string" },
@@ -394,6 +398,11 @@ fn handle_recall(db: &Axil, args: &Value) -> ToolCallResult {
     };
     let top_k = args.get("top_k").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
     let table = args.get("table").and_then(|v| v.as_str());
+    // --type facet filter, normalized case-insensitive (matches the CLI).
+    let type_filter = args
+        .get("type")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_lowercase());
     let across: Vec<String> = args
         .get("across")
         .and_then(|v| v.as_array())
@@ -413,7 +422,7 @@ fn handle_recall(db: &Axil, args: &Value) -> ToolCallResult {
     }
 
     const TABLE_FILTER_INFLATION: usize = 5;
-    let fetch_k = if table.is_some() {
+    let fetch_k = if table.is_some() || type_filter.is_some() {
         top_k * TABLE_FILTER_INFLATION
     } else {
         top_k
@@ -441,6 +450,17 @@ fn handle_recall(db: &Axil, args: &Value) -> ToolCallResult {
                 }
                 if let Some(t) = table {
                     if result.record.table != t {
+                        continue;
+                    }
+                }
+                if let Some(ref tf) = type_filter {
+                    let record_type = result
+                        .record
+                        .data
+                        .get("type")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.trim().to_lowercase());
+                    if record_type.as_deref() != Some(tf.as_str()) {
                         continue;
                     }
                 }

@@ -39,6 +39,17 @@ axil --db ./memory.axil <command>
 - **Bugs to fixes**: link error records to fix records
 - **Superseding**: when a decision changes, store new record + link to old
 
+### Categorize by FUNCTION, not TOPIC
+- The **table** is the record's *kind* — the question it answers: `decisions`
+  (choice + why), `errors` (failure + fix), `rules` (constraints), `context`
+  (how-it-works knowledge). Pick the table by function.
+- **Topic ≠ category.** "The auth feature", a module/file name, an area — those
+  are topics, already found by semantic recall + auto-extracted entities. Don't
+  encode them as a table name or `type`; let entities capture them, or use `--scope`.
+- `context` records may carry an optional `type` facet (recommended:
+  `architecture`, `gotcha`, `howto`, `reference`) to scope retrieval — filter with
+  `axil recall "<q>" --type architecture`. Recommended, not enforced.
+
 ### What NOT to Store
 - File contents already in git (use git, not Axil)
 - Ephemeral chatter or trivial questions

@@ -13,6 +13,7 @@
 - [Architecture](./concepts/architecture.md)
 - [Use Cases](./concepts/use-cases.md)
 - [Memory Types](./concepts/memory-types.md)
+- [Memory Taxonomy](./concepts/memory-taxonomy.md)
 - [Engines (Storage Plugins)](./concepts/plugins.md)
 - [Storage Model](./concepts/storage.md)
 
