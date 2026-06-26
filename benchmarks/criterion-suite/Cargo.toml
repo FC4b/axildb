@@ -1,8 +1,14 @@
 [package]
 name = "criterion-suite"
-version.workspace = true
-edition.workspace = true
+version = "0.5.0"
+edition = "2021"
 publish = false
+
+# Standalone: this crate is `exclude`d from the root workspace (kept out so
+# `cargo check --workspace` stays fast), so it is its own workspace root and
+# cannot inherit version/edition/deps from the root. Run via
+# `cargo bench --manifest-path benchmarks/criterion-suite/Cargo.toml`.
+[workspace]
 
 [[bench]]
 name = "combined"
@@ -10,9 +16,9 @@ harness = false
 
 [dependencies]
 axil-core = { path = "../../crates/axil-core" }
-axil-vector = { path = "../../crates/axil-vector" }
-axil-graph = { path = "../../crates/axil-graph" }
-axil-fts = { path = "../../crates/axil-fts" }
+axil-vector = { path = "../../crates/engines/axil-vector" }
+axil-graph = { path = "../../crates/engines/axil-graph" }
+axil-fts = { path = "../../crates/engines/axil-fts" }
 criterion = { version = "0.5", features = ["html_reports"] }
-serde_json = { workspace = true }
-tempfile = { workspace = true }
+serde_json = "1"
+tempfile = "3"

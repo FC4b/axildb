@@ -163,7 +163,7 @@ fn main() {
                 continue;
             }
         };
-        let builder = match builder.with_fts_plugin() {
+        let builder = match builder.with_fts_engine() {
             Ok(b) => b,
             Err(e) => {
                 eprintln!("\n  WARN: FTS init failed: {e}");

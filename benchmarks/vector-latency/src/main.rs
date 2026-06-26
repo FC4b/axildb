@@ -16,7 +16,7 @@ use tempfile::TempDir;
 
 use axil_core::plugin::VectorIndex;
 use axil_core::record::RecordId;
-use axil_vector::VectorPlugin;
+use axil_vector::VectorEngine;
 
 #[derive(Parser, Debug)]
 #[command(name = "vector-latency", about = "Vector latency benchmark for Axil")]
@@ -94,7 +94,7 @@ fn percentile(sorted: &[Duration], p: f64) -> f64 {
     sorted[idx.min(sorted.len() - 1)].as_secs_f64() * 1_000_000.0
 }
 
-fn run_topk(plugin: &VectorPlugin, queries: &[Vec<f32>], warmup: usize, top_k: usize) -> TopKReport {
+fn run_topk(plugin: &VectorEngine, queries: &[Vec<f32>], warmup: usize, top_k: usize) -> TopKReport {
     for q in queries.iter().take(warmup) {
         let _ = plugin.search(q, top_k).unwrap();
     }
@@ -138,7 +138,7 @@ fn main() {
 
     let dir = TempDir::new().expect("tmpdir");
     let db_path = dir.path().join("bench.axil");
-    let plugin = VectorPlugin::open(&db_path, args.dims).expect("open vector plugin");
+    let plugin = VectorEngine::open(&db_path, args.dims).expect("open vector plugin");
 
     // 1. Insert phase.
     eprintln!("[1/3] inserting {} vectors...", args.n);

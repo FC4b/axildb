@@ -456,7 +456,7 @@ fn evaluate_question(q: &Question, args: &Args, embedder: &Arc<Embedder>, model:
     // insert time (Tantivy add + commit per record) on dead weight.
     let needs_fts = matches!(args.strategy.as_str(), "fts" | "ask");
     let builder = if needs_fts {
-        match builder.with_fts_plugin() {
+        match builder.with_fts_engine() {
             Ok(b) => b,
             Err(_) => return question_failure(q, Vec::new(), Vec::new()),
         }

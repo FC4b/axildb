@@ -38,9 +38,9 @@ fn open_full_db() -> (Axil, TempDir) {
     let db = Axil::open(&path)
         .with_vector(DIMS)
         .unwrap()
-        .with_graph_plugin()
+        .with_graph_engine()
         .unwrap()
-        .with_fts_plugin()
+        .with_fts_engine()
         .unwrap()
         .build()
         .unwrap();
