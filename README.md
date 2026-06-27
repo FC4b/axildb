@@ -155,16 +155,20 @@ Everything below normally means standing up a vector DB **and** Neo4j **and** El
 
 ## Benchmarks
 
-**Top-tier retrieval recall — with no LLM and no server.** Axil beats every LLM- and server-dependent system on the board — Hindsight (PostgreSQL + LLM), Mem0, Zep — from a file you embed, and trails only MemPalace, itself a local system, by a couple of points. SQLite-shaped accuracy, no daemon to run.
+**Top-tier retrieval recall — with no LLM and no server.** Axil beats every LLM- and server-dependent system on the board — Hindsight (PostgreSQL + LLM), Mem0, Zep — from a file you embed, and trails only MemPalace, itself a local system, by ~3 points. SQLite-shaped accuracy, no daemon to run.
 
 **LongMemEval** — retrieval recall over 500 questions (top-k=5), vs comparable memory systems:
+
+<div align="center">
+  <img src="assets/longmemeval-recall.png" alt="LongMemEval-S retrieval recall @ top-5 (500 questions): MemPalace 96.6, Axil Recall-QTC 93.5, Axil Recall-fusion 91.5, Hindsight 91.4, Memvid 85.7, Mem0 68.4, Zep 66.0" width="840">
+</div>
 
 | System | Recall | No LLM | No server |
 |--------|-------:|:------:|:---------:|
 | MemPalace | 96.6% | ✅ | ✅ |
-| **Axil — Recall-QTC** | **94.5%** | ✅ | ✅ |
+| **Axil — Recall-QTC** | **93.5%** | ✅ | ✅ |
+| **Axil — Recall (fusion)** | **91.5%** | ✅ | ✅ |
 | Hindsight | 91.4% | ❌ | ❌ (PostgreSQL) |
-| **Axil — Recall (fusion)** | **90.9%** | ✅ | ✅ |
 | Memvid | 85.7% | ✅ | ✅ |
 | Mem0 | 68.4% | ❌ | ❌ (3 DBs) |
 | Zep | 66.0% | ❌ | ❌ |
@@ -176,7 +180,7 @@ And it's small and fast where it counts:
 - Competitive recall at a fraction of the per-query token budget *(estimate — assumes ~950 tokens/query; see [methodology](docs/src/advanced/benchmarks.md))*.
 - **<100 ms** commands from a **~5–10 MB** offline binary — no LLM call, no network, no daemon.
 
-> *Competitor figures (MemPalace, Hindsight, Mem0, Zep, Memvid) are cited from the published LongMemEval landscape as of April 2026 — not measured by Axil.* Axil's LongMemEval harness is **in-tree** at [`benchmarks/longmemeval`](benchmarks/longmemeval); the Recall-QTC **94.5%** matches the committed 500-question baseline [`benchmarks/results/qtc-500.json`](benchmarks/results/qtc-500.json). The LongMemEval-S dataset is out-of-tree, so the CI gate skips-loud (a green run never means it re-verified); re-run locally with the dataset present. The Recall-fusion **90.9%** is a historical 500-question run not in the committed baseline set. The `sqlite-compare`, **needle-recall**, and Criterion hot-path harnesses are all in-tree (the first two CI-gated). → Full tables, per-category breakdown, and methodology: **[Benchmarks](docs/src/advanced/benchmarks.md)**.
+> *Competitor figures (MemPalace, Hindsight, Mem0, Zep, Memvid) are cited from the published LongMemEval landscape as of April 2026 — not measured by Axil.* Axil's LongMemEval harness is **in-tree** at [`benchmarks/longmemeval`](benchmarks/longmemeval); both Axil figures are committed 500-question baselines — Recall-QTC **93.5%** ([`qtc-500.json`](benchmarks/results/qtc-500.json)) and Recall-fusion **91.5%** ([`fusion-500.json`](benchmarks/results/fusion-500.json)) — re-measured 2026-06-27 on the current build (`bge-small`, top-k 5, ONNX Runtime CUDA on an RTX 3080). The LongMemEval-S dataset is out-of-tree, so the CI gate skips-loud (a green run never means it re-verified); re-run locally with the dataset present. HNSW retrieval is approximate, so recall varies ~1pp build-to-build. The `sqlite-compare`, **needle-recall**, and Criterion hot-path harnesses are all in-tree (the first two CI-gated). → Full tables, per-category breakdown, and methodology: **[Benchmarks](docs/src/advanced/benchmarks.md)**.
 
 ## How it works
 
