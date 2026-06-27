@@ -11,12 +11,20 @@ haystack sessions each). Vector strategy uses BGE-small embeddings with HNSW
 recall; FTS uses Tantivy BM25. Hit rate = at least one answer-bearing session
 retrieved in top-k; recall = fraction of answer sessions retrieved.
 
+> **Note (re-baselined 2026-06-27):** the headline 500-Q figures were re-measured
+> on the current build to **Recall-QTC 93.5% / Recall-fusion 91.5%** (committed
+> `benchmarks/results/qtc-500.json` / `fusion-500.json`; ±~1pp vs the prior
+> 94.5% / 90.9% — HNSW retrieval is approximate, so recall wobbles ~1pp
+> build-to-build). The strategy table just below and the Comparison + MemEfficiency
+> sections are updated; the **per-category breakdowns and investigation notes**
+> further down still reflect the earlier run and are pending a refresh.
+
 | Strategy | Variant | Questions | top-k | Hit Rate | Recall |
 |----------|---------|-----------|-------|----------|--------|
 | **Vector (BGE-small)** | Oracle | 50 | 5 | **100%** | **100%** |
 | **FTS (BM25)** | Oracle | 50 | 5 | **100%** | **100%** |
-| **Recall-QTC (query-time chunk)** | S (500 Qs) | 500 | 5 | **97.2%** | **94.5%** |
-| **Recall (full pipeline)** | S (500 Qs) | 500 | 5 | **94.4%** | **90.9%** |
+| **Recall-QTC (query-time chunk)** | S (500 Qs) | 500 | 5 | **96.4%** | **93.5%** |
+| **Recall (full pipeline)** | S (500 Qs) | 500 | 5 | **96.2%** | **91.5%** |
 | **Vector (BGE-small)** | S (500 Qs) | 500 | 5 | **92.2%** | **88.0%** |
 | **FTS (BM25)** | S (500 Qs) | 500 | 5 | **85.8%** | **79.0%** |
 
@@ -57,28 +65,30 @@ bench.
 
 ### Comparison (LongMemEval landscape, April 2026)
 
-| System | Recall | Requires LLM | Requires Server |
-|--------|--------|-------------|-----------------|
-| **Axil (Recall-QTC, 500-Q)** | **94.5%** | **No** | **No** |
-| Hindsight | 91.4% | Yes | Yes (PostgreSQL) |
-| MemPalace | 96.6% | No | No |
-| **Axil (Recall, fusion, 500-Q)** | **90.9%** | **No** | **No** |
-| **Axil (Vector only, 500-Q)** | **88.0%** | **No** | **No** |
-| Memvid | 85.7% | No | No |
-| Mem0 | 68.4% | Yes | Yes |
-| Zep | 66.0% | Yes | Yes |
+Two different metrics share this benchmark — **retrieval recall@5** (did the
+answer-bearing session land in the top-5? — what the no-LLM systems report) and
+**end-to-end QA accuracy** (did the system answer correctly? — what the
+LLM/server systems report). Recall is always the higher number, so the table is
+grouped by metric. **Compare within a metric, not across.**
 
-Recall-QTC is among the strongest no-LLM, no-server systems here — within a
-couple of points of MemPalace's recall while using **~1/8th the context
-tokens** (see [MemEfficiency](#memefficiency-axils-unique-metric)), and well
-ahead of every LLM/server-dependent system. The
-full 500-Q run matches the 150-Q spot-check (97.3% / 94.0%) within noise,
-confirming the technique generalizes across all six question categories. The
-biggest improvement over plain recall fusion is on `single-session-preference`
-(+16.6 pp) — questions that use paraphrased wording (e.g. "what do I prefer
-for breakfast?" against a session where the user said "I usually eat toast") —
-because chunk-level cosine finds semantic overlap that a single-session
-embedding dilutes.
+| System | Score | Metric | Requires LLM | Requires Server |
+|--------|------:|--------|:-----------:|:--------------:|
+| MemPalace | 96.6% | recall@5 | No | No |
+| **Axil (Recall-QTC, 500-Q)** | **93.5%** | recall@5 | **No** | **No** |
+| **Axil (Recall fusion, 500-Q)** | **91.5%** | recall@5 | **No** | **No** |
+| Memvid | 85.7% | recall@5 | No | No |
+| Hindsight | 91.4% | QA accuracy | Yes | Yes (PostgreSQL) |
+| Mem0 | 68.4% | QA accuracy | Yes | Yes |
+| Zep | 66.0% | QA accuracy | Yes | Yes |
+
+Among no-LLM, no-server systems measured on **retrieval recall@5**, Axil is the
+strongest *structured* memory — within ~3 points of MemPalace and ahead of
+Memvid. MemPalace's 96.6% is a verbatim-text + ChromaDB config (its own palace
+architecture, with features enabled, scores lower — 84–89%) sitting near this
+dataset's ~96% retrieval ceiling. The LLM/server systems (Hindsight, Mem0, Zep)
+report **end-to-end QA accuracy**, which is not directly comparable to recall@5.
+Per [Vectorize's analysis](https://vectorize.io/articles/mempalace-benchmarks):
+MemPalace recall@5 96.6, Hindsight QA 94.6, Zep QA 63.8, Mem0 QA 49.0.
 
 ### Investigation notes (2026-04-20): why the simple tweaks failed
 
@@ -118,19 +128,20 @@ embedding dilutes.
 ## MemEfficiency (Axil's unique metric)
 
 ```
-MemEfficiency = accuracy% / avg_context_tokens × 1000
+MemEfficiency = score% / avg_context_tokens × 1000
 
-Axil (QTC):  94.5% / 950 tok  = 99.5 efficiency
-Axil:        90.9% / 950 tok  = 95.7 efficiency
-MemPalace:   96.6% / 8000 tok = 12.1 efficiency  (8.2× worse)
-Mem0:        68.4% / 6000 tok = 11.4 efficiency
+Axil (QTC):  93.5% recall@5 / 950 tok  = 98.4 efficiency
+Axil:        91.5% recall@5 / 950 tok  = 96.3 efficiency
+MemPalace:   96.6% recall@5 / 8000 tok = 12.1 efficiency  (8× worse)
+Mem0:        68.4% QA acc   / 6000 tok = 11.4 efficiency
 ```
 
-**Axil (QTC) delivers 94.5% recall at a small fraction of the per-query token
-cost of comparable systems** — *estimate: Axil's ~950 tok/query is measured from
-its compact recall output, but the competitor token budgets above (8000 / 6000)
-are assumed, not measured from those systems, so the "~1/8th" ratio is
-illustrative, not a head-to-head measurement.*
+**Axil (QTC) delivers 93.5% recall@5 at a small fraction of the per-query token
+cost of comparable systems** — *estimate, illustrative not head-to-head:* Axil's
+~950 tok/query is measured from its compact recall output, but the competitor
+token budgets (8000 / 6000) are **assumed, not measured**, and the scores mix
+metrics (Axil/MemPalace = recall@5, Mem0 = QA accuracy). Treat this as a
+positioning aid, not a benchmark.
 
 ## Vector search latency (100k vectors, 384 dims)
 
