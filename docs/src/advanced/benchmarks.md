@@ -15,9 +15,10 @@ retrieved in top-k; recall = fraction of answer sessions retrieved.
 > on the current build to **Recall-QTC 93.5% / Recall-fusion 91.5%** (committed
 > `benchmarks/results/qtc-500.json` / `fusion-500.json`; ±~1pp vs the prior
 > 94.5% / 90.9% — HNSW retrieval is approximate, so recall wobbles ~1pp
-> build-to-build). The strategy table just below and the Comparison + MemEfficiency
-> sections are updated; the **per-category breakdowns and investigation notes**
-> further down still reflect the earlier run and are pending a refresh.
+> build-to-build). The **Recall-QTC and Recall-fusion** rows below, the
+> per-category breakdowns, Comparison, and MemEfficiency sections reflect this
+> run; the Vector / FTS / Oracle strategy rows and the investigation notes are
+> from earlier runs — treat their specific percentages as illustrative.
 
 | Strategy | Variant | Questions | top-k | Hit Rate | Recall |
 |----------|---------|-----------|-------|----------|--------|
@@ -41,27 +42,32 @@ overhead stays manageable. Exposed as `RecallConfig::qtc =
 Some(QtcConfig::default())` in `axil-core` or `--strategy recall-qtc` in the
 bench.
 
-### Per-category (Recall fusion, LongMemEvalS, 500 questions, top-k=5 — historical baseline)
+### Per-category (Recall fusion, LongMemEvalS, 500 questions, top-k=5)
 
 | Category | N | Hit Rate | Recall |
 |----------|--:|---------:|-------:|
-| Knowledge update | 78 | 100.0% | 97.4% |
+| Knowledge update | 78 | 98.7% | 92.3% |
 | Single-session assistant | 56 | 100.0% | 100.0% |
-| Multi-session | 133 | 98.5% | 89.8% |
+| Multi-session | 133 | 97.0% | 86.7% |
 | Single-session user | 70 | 94.3% | 94.3% |
-| Temporal reasoning | 133 | 88.7% | 85.7% |
-| Single-session preference | 30 | 76.7% | 76.7% |
+| Temporal reasoning | 133 | 95.5% | 91.9% |
+| Single-session preference | 30 | 86.7% | 86.7% |
 
-### Per-category (Recall-QTC, LongMemEvalS, all 500 questions, top-k=5 — current best)
+### Per-category (Recall-QTC, LongMemEvalS, 500 questions, top-k=5)
 
 | Category | N | Hit Rate | Recall | vs. Recall (fusion) |
 |----------|--:|---------:|-------:|--------------------:|
-| Knowledge update | 78 | **100.0%** | **98.1%** | hit = / recall +0.7 pp |
+| Knowledge update | 78 | **100.0%** | **98.7%** | hit +1.3 / recall +6.4 pp |
 | Single-session assistant | 56 | **100.0%** | **100.0%** | = (both at ceiling) |
-| Multi-session | 133 | **99.2%** | **93.6%** | hit +0.7 / recall +3.8 pp |
-| Single-session user | 70 | **97.1%** | **97.1%** | hit +2.8 / recall +2.8 pp |
-| Temporal reasoning | 133 | **93.2%** | **90.1%** | hit +4.5 / recall +4.4 pp |
-| Single-session preference | 30 | **93.3%** | **93.3%** | hit +16.6 / recall +16.6 pp |
+| Multi-session | 133 | **99.2%** | **93.1%** | hit +2.3 / recall +6.4 pp |
+| Single-session user | 70 | **95.7%** | **95.7%** | hit +1.4 / recall +1.4 pp |
+| Temporal reasoning | 133 | **91.7%** | **87.9%** | hit -3.8 / recall -4.0 pp |
+| Single-session preference | 30 | **90.0%** | **90.0%** | hit +3.3 / recall +3.3 pp |
+
+QTC isn't uniformly better than fusion — it lifts `knowledge-update` and
+`multi-session` (+6.4 pp recall each) but costs ~4 pp on `temporal-reasoning`,
+for a net **+2.0 pp** overall recall (93.5% vs 91.5%). Both runs are the
+2026-06-27 re-baseline (committed `qtc-500.json` / `fusion-500.json`).
 
 ### Comparison (LongMemEval landscape, April 2026)
 
@@ -95,7 +101,7 @@ MemPalace recall@5 96.6, Hindsight QA 94.6, Zep QA 63.8, Mem0 QA 49.0.
 1. **Ceiling check.** Querying with the concatenated `has_answer` turn text as
    the retrieval query reaches hit_rate = 96.7% / recall = 96.3% on the 150-Q
    slice — that is the upper bound on retrieval-only improvements for this
-   dataset + bge-small embedder. Recall-QTC matches it.
+   dataset + bge-small embedder. Recall-QTC lands close (93.5% recall at 500-Q).
 2. **Cross-encoder rerank (MS-MARCO MiniLM-L-6-v2)** dropped hit_rate to 85.3%
    (CPU) / 44.0% (CUDA) — domain mismatch: the reranker rewards surface-level
    topic overlap, which is exactly *not* what picks out answer-bearing sessions
@@ -110,8 +116,8 @@ MemPalace recall@5 96.6, Hindsight QA 94.6, Zep QA 63.8, Mem0 QA 49.0.
    embed each chunk, and rescore the session using the best chunk's cosine.
    Session identity is preserved, timestamps aren't shared across competing
    candidates, and the embedder already runs on CUDA — so the fine-grained
-   match surfaces without recency pollution. Result: **97.2% hit / 94.5%
-   recall** at 500-Q, matching the oracle ceiling within noise.
+   match surfaces without recency pollution. Result: **96.4% hit / 93.5%
+   recall** at 500-Q (vs fusion's 96.2% / 91.5%).
 
 ## Axil-specific memory tests (7 benchmarks, all passing)
 
