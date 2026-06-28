@@ -280,6 +280,29 @@ impl McpServer {
         Ok(())
     }
 
+    /// Drive a single raw JSON-RPC frame the way the stdio `run` loop does and
+    /// return the serialized response line, or `None` for a notification (a
+    /// request with no `id`) that takes no reply.
+    ///
+    /// This is the in-process equivalent of piping one newline-delimited frame
+    /// into `axil --db <DB> mcp`: it parses the line, routes it through
+    /// [`McpServer::handle_request`], and serializes the response back to a
+    /// JSON string — without touching stdin/stdout. It lets a host (or a test)
+    /// exercise the exact `initialize` / `tools/list` / `tools/call` frames the
+    /// docs document. A malformed frame yields a JSON-RPC parse-error response
+    /// rather than an `Err`, matching the serve loop's behavior.
+    pub fn handle_frame(&self, frame: &str) -> Option<String> {
+        let request: JsonRpcRequest = match serde_json::from_str(frame.trim()) {
+            Ok(req) => req,
+            Err(_) => {
+                let resp = JsonRpcResponse::error(None, PARSE_ERROR, "Parse error");
+                return Some(serde_json::to_string(&resp).unwrap_or_default());
+            }
+        };
+        let resp = self.handle_request(&request)?;
+        Some(serde_json::to_string(&resp).unwrap_or_default())
+    }
+
     /// Handle a single JSON-RPC request and return an optional response.
     fn handle_request(&self, req: &JsonRpcRequest) -> Option<JsonRpcResponse> {
         match req.method.as_str() {

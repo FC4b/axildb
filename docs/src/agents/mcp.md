@@ -24,7 +24,16 @@ responses to stdout.
 
 ## Configuration
 
-Add to your MCP client configuration:
+For Claude Code, the one-liner registers the server in a single step (note the
+`--` separator — everything after it is the server command, so the global
+`--db` flag lands on `axil`, not on `claude`):
+
+```bash
+claude mcp add axil -- axil --db ./.axil/memory.axil mcp
+```
+
+For any other MCP client, add the equivalent block to its configuration. Keep
+the `--db` value and the literal `mcp` subcommand as the last argument:
 
 ```json
 {
@@ -36,6 +45,40 @@ Add to your MCP client configuration:
   }
 }
 ```
+
+## Smoke test (no client required)
+
+Before wiring up a client, confirm the server speaks the protocol by piping
+three newline-delimited JSON-RPC frames — `initialize`, `tools/list`, and a
+`tools/call` of `recall` — straight into its stdin. No MCP client, SDK, or
+network is involved; the server reads each line and writes one response line.
+
+```bash
+printf '%s\n' \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
+  '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
+  '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"recall","arguments":{"query":"auth timeout","top_k":3}}}' \
+  | axil --db ./.axil/memory.axil mcp
+```
+
+You get three response lines. The first confirms the handshake — look for
+`serverInfo.name == "axil-mcp"`:
+
+```json
+{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"axil-mcp","version":"…"},"instructions":"…"}}
+```
+
+The second lists every registered tool (`recall`, `store`, `boot`, …). The
+third is the `recall` result, wrapped as MCP tool-call content — its `text`
+field is a JSON array of hits (`[]` against a fresh, empty database):
+
+```json
+{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"[]"}]}}
+```
+
+A non-empty array (each hit carrying `id`, `table`, `data`, `score`) means the
+server is reading real memory. If the handshake frame is missing or
+`serverInfo.name` is anything else, the wrong binary is on `PATH`.
 
 ## The tool surface
 
