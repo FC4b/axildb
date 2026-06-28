@@ -8082,7 +8082,8 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                                 "expired_records" | "superseded_records" | "storage_bloat" => {
                                     compact
                                 }
-                                "vector_deletion_ratio" | "index_size_mismatch" => reindex,
+                                "vector_deletion_ratio" | "index_size_mismatch"
+                                | "missing_embeddings" | "missing_fts" => reindex,
                                 "orphaned_edges" => orphans,
                                 _ => compact || orphans,
                             };
@@ -8137,6 +8138,25 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                                 rebuild_report.deleted_removed,
                             ),
                         }));
+                    }
+
+                    if reindex {
+                        // Re-embed / re-index records lost by a torn insert
+                        // (committed to storage but missing their vector
+                        // embedding and/or FTS document). vector_rebuild above
+                        // only compacts tombstones — it cannot regenerate a
+                        // missing embedding.
+                        let (reembedded, refts) =
+                            db.reembed_missing().context("reembed missing failed")?;
+                        if reembedded > 0 || refts > 0 {
+                            actions.push(json!({
+                                "action": "reembed_missing",
+                                "result": format!(
+                                    "restored {} missing embeddings, {} missing FTS docs",
+                                    reembedded, refts
+                                ),
+                            }));
+                        }
                     }
                 }
 

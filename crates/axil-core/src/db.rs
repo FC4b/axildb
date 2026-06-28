@@ -598,6 +598,128 @@ impl Axil {
         Ok(record)
     }
 
+    /// Whether a record would be auto-embedded into the vector index on insert.
+    ///
+    /// Mirrors the auto-embed gate in [`Axil::insert_record`] **exactly**
+    /// (non-internal table, `searchable_text` non-empty, length > 5). The
+    /// reverse-orphan reconciliation in [`Axil::count_missing_embeddings`] /
+    /// [`Axil::reembed_missing`] depends on this matching the insert gate, or it
+    /// false-positives on records that were never meant to be embedded. Kept next
+    /// to the insert path so any drift is immediately visible.
+    fn is_embeddable(record: &Record) -> bool {
+        if record.table.starts_with('_') {
+            return false;
+        }
+        let text = crate::util::searchable_text(&record.data);
+        !text.is_empty() && text.len() > 5
+    }
+
+    /// Whether a record would be indexed into the FTS index on insert.
+    ///
+    /// Mirrors the FTS gate in [`Axil::run_insert_hooks`] (non-internal table).
+    /// Used by the reverse-orphan reconciliation to count records that committed
+    /// to core storage but never got their FTS document.
+    fn is_fts_indexable(record: &Record) -> bool {
+        !record.table.starts_with('_')
+    }
+
+    /// Count records that should have a vector embedding but don't.
+    ///
+    /// Takes an already-scanned record slice so the caller can share one full
+    /// scan across reconciliation checks. Returns 0 unless both a vector index
+    /// and an embedder are configured — a user who only ever calls `add_vector`
+    /// manually (no embedder) must not be flagged as missing embeddings.
+    fn count_missing_embeddings(&self, records: &[Record]) -> usize {
+        if !self.has_vector_index() || self.embedder.is_none() {
+            return 0;
+        }
+        let Some(ref vi) = self.vector_index else {
+            return 0;
+        };
+        let indexed: std::collections::HashSet<RecordId> =
+            vi.all_ids().unwrap_or_default().into_iter().collect();
+        records
+            .iter()
+            .filter(|r| Self::is_embeddable(r) && !indexed.contains(&r.id))
+            .count()
+    }
+
+    /// Count records that should have an FTS document but don't.
+    ///
+    /// Takes an already-scanned record slice so the caller can share one full
+    /// scan across reconciliation checks. Returns 0 unless an FTS index is
+    /// configured.
+    fn count_missing_fts(&self, records: &[Record]) -> usize {
+        let Some(ref fi) = self.fts_index else {
+            return 0;
+        };
+        let indexed: std::collections::HashSet<RecordId> =
+            fi.all_indexed_ids().unwrap_or_default().into_iter().collect();
+        records
+            .iter()
+            .filter(|r| Self::is_fts_indexable(r) && !indexed.contains(&r.id))
+            .count()
+    }
+
+    /// Re-embed and re-index records that committed to storage but are missing
+    /// their vector embedding and/or FTS document.
+    ///
+    /// This closes the reverse-orphan gap: [`Axil::insert_record`] commits the
+    /// core record first and then fans out to the secondary indexes, swallowing
+    /// embed/index failures. A torn insert can therefore leave a stored memory
+    /// permanently invisible to recall. `reembed_missing` reconciles the live
+    /// records against the vector and FTS indexes and regenerates the missing
+    /// entries.
+    ///
+    /// Returns `(embeddings_restored, fts_docs_restored)`. Best-effort per
+    /// record — a single failure does not abort the sweep. A no-op (returns
+    /// `(0, 0)`) when no embedder/vector index/FTS index is configured.
+    pub fn reembed_missing(&self) -> Result<(usize, usize)> {
+        let records = self.storage.scan_all_records()?;
+
+        let mut embeddings_restored = 0usize;
+        if self.has_vector_index() && self.embedder.is_some() {
+            if let Some(ref vi) = self.vector_index {
+                let indexed: std::collections::HashSet<RecordId> =
+                    vi.all_ids().unwrap_or_default().into_iter().collect();
+                for record in &records {
+                    if !Self::is_embeddable(record) || indexed.contains(&record.id) {
+                        continue;
+                    }
+                    let text = crate::util::searchable_text(&record.data);
+                    if self.embed_text(&record.id, &text).is_ok() {
+                        embeddings_restored += 1;
+                    }
+                }
+            }
+        }
+
+        let mut fts_restored = 0usize;
+        if let Some(ref fi) = self.fts_index {
+            let indexed: std::collections::HashSet<RecordId> =
+                fi.all_indexed_ids().unwrap_or_default().into_iter().collect();
+            for record in &records {
+                if !Self::is_fts_indexable(record) || indexed.contains(&record.id) {
+                    continue;
+                }
+                if fi.on_record_insert(record).is_ok() {
+                    fts_restored += 1;
+                }
+            }
+        }
+
+        if embeddings_restored > 0 || fts_restored > 0 {
+            self.audit_heal_action(
+                "reembed_missing",
+                &format!(
+                    "restored {embeddings_restored} missing embeddings, {fts_restored} missing FTS docs"
+                ),
+            );
+        }
+
+        Ok((embeddings_restored, fts_restored))
+    }
+
     /// Insert a new record into the given table.
     ///
     /// The record is always committed to storage first. Engine hooks run
@@ -2372,6 +2494,46 @@ impl Axil {
             }
         }
 
+        // Reverse-orphan reconciliation: records that committed to core storage
+        // but never got their vector embedding and/or FTS document. A torn
+        // insert fan-out (insert commits first, then swallows embed/index
+        // failures) can otherwise leave a stored memory invisible to recall.
+        // One scan feeds both the embedding and FTS reconciliation.
+        if self.vector_index.is_some() || self.fts_index.is_some() {
+            if let Ok(records) = self.storage.scan_all_records() {
+                let missing_embeddings = self.count_missing_embeddings(&records);
+                if missing_embeddings > 0 {
+                    // Only auto-fixable when an embedder can regenerate them; a
+                    // manual `add_vector` user with no embedder is already gated
+                    // out by `count_missing_embeddings`, but guard the flag too.
+                    problems.push(crate::diagnostics::ProblemDetection {
+                        detector: "missing_embeddings".to_string(),
+                        severity: Severity::Warning,
+                        message: format!(
+                            "{} record(s) committed without a vector embedding",
+                            missing_embeddings
+                        ),
+                        recommendation: "Re-embed missing records: axil heal --reindex".to_string(),
+                        auto_fixable: self.embedder.is_some(),
+                    });
+                }
+
+                let missing_fts = self.count_missing_fts(&records);
+                if missing_fts > 0 {
+                    problems.push(crate::diagnostics::ProblemDetection {
+                        detector: "missing_fts".to_string(),
+                        severity: Severity::Warning,
+                        message: format!(
+                            "{} record(s) committed without an FTS document",
+                            missing_fts
+                        ),
+                        recommendation: "Re-index missing records: axil heal --reindex".to_string(),
+                        auto_fixable: true,
+                    });
+                }
+            }
+        }
+
         // Orphaned edges (count passed in by the caller)
         if orphaned > 0 {
             problems.push(crate::diagnostics::ProblemDetection {
@@ -2649,6 +2811,19 @@ impl Axil {
                     });
                 }
             }
+        }
+
+        // 3. Re-embed / re-index records lost by a torn insert fan-out (records
+        // that committed to core storage but never got their vector embedding
+        // and/or FTS document).
+        let (reembedded, refts) = self.reembed_missing()?;
+        if reembedded > 0 || refts > 0 {
+            actions.push(crate::diagnostics::HealAction {
+                action: "reembed_missing".to_string(),
+                result: format!(
+                    "restored {reembedded} missing embeddings, {refts} missing FTS docs"
+                ),
+            });
         }
 
         Ok(crate::diagnostics::SelfHealReport {
@@ -3095,18 +3270,44 @@ impl Axil {
             });
         }
 
+        // Reconcile the vector and FTS indexes against live records once: a
+        // torn insert can commit a record but skip its embedding/FTS document,
+        // leaving the memory invisible to recall. Scan a single time and share
+        // the slice between both index checks below.
+        let index_scan = if self.vector_index.is_some() || self.fts_index.is_some() {
+            self.storage.scan_all_records().ok()
+        } else {
+            None
+        };
+
         // 3. Vector index sync
         if let Some(ref vi) = self.vector_index {
             let vec_count = vi.count();
-            checks.push(CheckResult {
-                name: "vector_index".to_string(),
-                status: Severity::Ok,
-                detail: format!(
-                    "{vec_count} vectors indexed, dimensions={}",
-                    vi.dimensions()
-                ),
-                fix: None,
-            });
+            let missing = index_scan
+                .as_ref()
+                .map(|recs| self.count_missing_embeddings(recs))
+                .unwrap_or(0);
+            if missing == 0 {
+                checks.push(CheckResult {
+                    name: "vector_index".to_string(),
+                    status: Severity::Ok,
+                    detail: format!(
+                        "{vec_count} vectors indexed, dimensions={}",
+                        vi.dimensions()
+                    ),
+                    fix: None,
+                });
+            } else {
+                checks.push(CheckResult {
+                    name: "vector_index".to_string(),
+                    status: Severity::Warning,
+                    detail: format!(
+                        "{vec_count} vectors indexed, dimensions={}; {missing} record(s) missing an embedding",
+                        vi.dimensions()
+                    ),
+                    fix: Some("axil heal --reindex".to_string()),
+                });
+            }
         }
 
         // 4. Graph: orphaned edges
@@ -3152,12 +3353,25 @@ impl Axil {
 
         // 6. FTS index
         if self.fts_index.is_some() {
-            checks.push(CheckResult {
-                name: "fts_index".to_string(),
-                status: Severity::Ok,
-                detail: "FTS index present".to_string(),
-                fix: None,
-            });
+            let missing = index_scan
+                .as_ref()
+                .map(|recs| self.count_missing_fts(recs))
+                .unwrap_or(0);
+            if missing == 0 {
+                checks.push(CheckResult {
+                    name: "fts_index".to_string(),
+                    status: Severity::Ok,
+                    detail: "FTS index present".to_string(),
+                    fix: None,
+                });
+            } else {
+                checks.push(CheckResult {
+                    name: "fts_index".to_string(),
+                    status: Severity::Warning,
+                    detail: format!("FTS index present; {missing} record(s) missing an FTS document"),
+                    fix: Some("axil heal --reindex".to_string()),
+                });
+            }
         }
 
         // 7. Storage fragmentation estimate
