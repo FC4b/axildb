@@ -32,9 +32,6 @@ pub struct WorkerReport {
     pub inferred_facts: usize,
     /// Number of stale records detected (no access in 90+ days).
     pub stale_detected: usize,
-    /// Number of records whose effective importance was updated by decay.
-    #[serde(default)]
-    pub decayed_records: usize,
     /// Number of vector tombstones reclaimed by a background compaction.
     /// `0` when the tombstone ratio was below `vector_rebuild_threshold`.
     #[serde(default)]
@@ -83,8 +80,7 @@ impl<'a> AxilWorker<'a> {
     /// 2. Strengthen connections by counting co-mentions
     /// 3. Run inference if graph is available
     /// 4. Detect stale records (no access in 90+ days)
-    /// 5. Apply importance decay
-    /// 5b. Compact the vector index if tombstones exceed threshold
+    /// 5. Compact the vector index if tombstones exceed threshold
     /// 6. (Brain mode) Detect stale beliefs
     /// 7. (Brain mode) Extract candidate procedures
     /// 8. (Brain mode) Extract candidate preferences
@@ -97,7 +93,6 @@ impl<'a> AxilWorker<'a> {
         let new_connections = self.strengthen_connections();
         let inferred_facts = self.run_inference();
         let stale_detected = self.detect_stale();
-        let decayed_records = self.run_decay();
         let vectors_compacted = self.compact_vector_index();
 
         // Brain consolidation tasks.
@@ -122,7 +117,6 @@ impl<'a> AxilWorker<'a> {
             new_connections,
             inferred_facts,
             stale_detected,
-            decayed_records,
             vectors_compacted,
             stale_beliefs,
             candidate_procedures,
@@ -305,76 +299,6 @@ impl<'a> AxilWorker<'a> {
         0
     }
 
-    /// Apply importance decay to all records, updating `_effective_importance`.
-    fn run_decay(&self) -> usize {
-        let now = Utc::now();
-        let default_half_life = crate::importance::DEFAULT_HALF_LIFE_DAYS;
-        // Config is best-effort: workers run whether or not axil.toml exists.
-        // Start the search from the current working directory so a project
-        // config picks up even when the worker thread is spawned inside a
-        // CLI invocation.
-        let decay_cfg = std::env::current_dir()
-            .ok()
-            .and_then(|cwd| crate::config::load_config_from(&cwd).ok())
-            .map(|c| c.decay);
-        let tables = match self.db.tables() {
-            Ok(t) => t,
-            Err(_) => return 0,
-        };
-
-        let mut updated = 0usize;
-        for table in &tables {
-            if table.starts_with('_') {
-                continue;
-            }
-            // Per-table half-life: errors/code-memory decay faster than
-            // preferences. Resolved once per table so the inner loop stays
-            // a single f64.
-            let half_life = decay_cfg
-                .as_ref()
-                .map(|d| d.half_life_for(table))
-                .unwrap_or(default_half_life);
-            let records = match self.db.list(table) {
-                Ok(r) => r,
-                Err(_) => continue,
-            };
-            for record in &records {
-                if crate::importance::is_pinned(&record.data) {
-                    continue;
-                }
-                if record.data.get("_importance").is_none() {
-                    continue;
-                }
-                let age_days = (now - record.created_at).num_seconds() as f64 / 86400.0;
-                let effective =
-                    crate::importance::effective_importance(&record.data, age_days, half_life);
-                // Only update if effective importance differs from stored value.
-                let stored_effective = record
-                    .data
-                    .get("_effective_importance")
-                    .and_then(|v| v.as_f64())
-                    .map(|v| v as f32);
-                let needs_update = match stored_effective {
-                    Some(old) => (old - effective).abs() > 0.01,
-                    None => true,
-                };
-                if needs_update {
-                    let mut data = record.data.clone();
-                    if let Some(obj) = data.as_object_mut() {
-                        obj.insert(
-                            "_effective_importance".to_string(),
-                            serde_json::json!(effective),
-                        );
-                    }
-                    if self.db.update(&record.id, data).is_ok() {
-                        updated += 1;
-                    }
-                }
-            }
-        }
-        updated
-    }
-
     /// Compact the vector index when tombstones have piled up past the
     /// configured ratio. Off the write path: deletes only tombstone the graph,
     /// and this background sweep reclaims them once they outweigh the live set.
@@ -384,7 +308,7 @@ impl<'a> AxilWorker<'a> {
             return 0;
         }
         // Config is best-effort — fall back to the default threshold when no
-        // axil.toml is present, mirroring `run_decay`.
+        // axil.toml is present.
         let threshold = std::env::current_dir()
             .ok()
             .and_then(|cwd| crate::config::load_config_from(&cwd).ok())

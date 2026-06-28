@@ -12378,7 +12378,6 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                         "candidate_procedures": report.candidate_procedures,
                         "candidate_preferences": report.candidate_preferences,
                         "duplicate_clusters": report.duplicate_clusters,
-                        "decayed_records": report.decayed_records,
                         "duration_ms": report.duration_ms,
                     }));
                     Ok(EXIT_OK)

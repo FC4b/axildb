@@ -311,19 +311,20 @@ impl Axil {
             .into_iter()
             .filter(|r| record_in_scope(r, scope))
             .collect();
+        // Effective importance is computed lazily from age + half-life (a pure
+        // function), so boot ordering reflects current decay without relying on
+        // a background write-sweep having stamped `_effective_importance`.
+        let now = chrono::Utc::now();
+        let half_life = std::env::current_dir()
+            .ok()
+            .and_then(|cwd| crate::config::load_config_from(&cwd).ok())
+            .map(|c| c.decay.half_life_for(table))
+            .unwrap_or(crate::importance::DEFAULT_HALF_LIFE_DAYS);
         records.sort_by(|a, b| {
-            let ia = a
-                .data
-                .get("_effective_importance")
-                .or_else(|| a.data.get("_importance"))
-                .and_then(|v| v.as_f64())
-                .unwrap_or(0.5);
-            let ib = b
-                .data
-                .get("_effective_importance")
-                .or_else(|| b.data.get("_importance"))
-                .and_then(|v| v.as_f64())
-                .unwrap_or(0.5);
+            let age_a = (now - a.created_at).num_seconds() as f64 / 86400.0;
+            let age_b = (now - b.created_at).num_seconds() as f64 / 86400.0;
+            let ia = crate::importance::effective_importance(&a.data, age_a, half_life);
+            let ib = crate::importance::effective_importance(&b.data, age_b, half_life);
             ib.partial_cmp(&ia).unwrap_or(std::cmp::Ordering::Equal)
         });
         records.truncate(n);
