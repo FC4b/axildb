@@ -1,7 +1,10 @@
 use std::path::Path;
 
 use chrono::Utc;
-use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition};
+use redb::{
+    Database, ReadOnlyDatabase, ReadTransaction, ReadableDatabase, ReadableTable,
+    ReadableTableMetadata, TableDefinition, WriteTransaction,
+};
 
 use crate::error::{AxilError, Result};
 use crate::record::{Record, RecordId};
@@ -21,13 +24,28 @@ const AUDIT_LOG: TableDefinition<&str, &[u8]> = TableDefinition::new("_audit_log
 /// redb table: key (timestamp) → serialized JSON (bytes) for metrics history snapshots.
 const METRICS_HISTORY: TableDefinition<&str, &[u8]> = TableDefinition::new("_metrics_history");
 
-/// Low-level storage backend wrapping a `redb::Database`.
+/// Backing redb handle — either a writable database (the normal single-writer
+/// process) or a read-only view of a committed-but-unheld file.
+///
+/// Axil is single-writer: redb takes an **exclusive** file lock on
+/// `Database::create`, so a second writer fails with
+/// [`AxilError::Busy`](crate::AxilError::Busy). A [`ReadOnlyDatabase`] requests
+/// a *shared* lock, which cannot coexist with that exclusive lock — so a
+/// read-only open also fails with `Busy` while a writer is live, and succeeds
+/// only once the writer has closed. Hot read commands use it as a fallback for
+/// the gap between short-lived writer sessions, after a bounded busy-retry.
+enum StorageDb {
+    Writable(Database),
+    ReadOnly(ReadOnlyDatabase),
+}
+
+/// Low-level storage backend wrapping a `redb` database handle.
 pub struct Storage {
-    db: Database,
+    db: StorageDb,
 }
 
 impl Storage {
-    /// Open (or create) a database at the given path.
+    /// Open (or create) a writable database at the given path.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let db = Database::create(path.as_ref())?;
 
@@ -42,7 +60,49 @@ impl Storage {
         }
         txn.commit()?;
 
-        Ok(Self { db })
+        Ok(Self {
+            db: StorageDb::Writable(db),
+        })
+    }
+
+    /// Open an existing database read-only, without taking the exclusive
+    /// single-writer lock.
+    ///
+    /// This never creates or modifies the file. It serves committed records to
+    /// hot read commands in the gap between writer sessions; it requests a
+    /// *shared* lock, so it fails with [`AxilError::Busy`](crate::AxilError::Busy)
+    /// while a writer holds the exclusive lock (no read-through of a live
+    /// writer). Any mutation method on the returned `Storage` also fails with
+    /// `Busy` — a read-only handle cannot open a write transaction. The file
+    /// must already exist (it is created only on the writable
+    /// [`Storage::open`] path).
+    pub fn open_read_only(path: impl AsRef<Path>) -> Result<Self> {
+        let db = ReadOnlyDatabase::open(path.as_ref())?;
+        Ok(Self {
+            db: StorageDb::ReadOnly(db),
+        })
+    }
+
+    /// True if this handle is read-only (cannot accept write transactions).
+    pub fn is_read_only(&self) -> bool {
+        matches!(self.db, StorageDb::ReadOnly(_))
+    }
+
+    /// Begin a read transaction. Works on both writable and read-only handles.
+    fn begin_read(&self) -> Result<ReadTransaction> {
+        match &self.db {
+            StorageDb::Writable(db) => Ok(db.begin_read()?),
+            StorageDb::ReadOnly(db) => Ok(db.begin_read()?),
+        }
+    }
+
+    /// Begin a write transaction. Fails with [`AxilError::Busy`] on a read-only
+    /// handle — those are opened precisely because a writer is already active.
+    fn begin_write(&self) -> Result<WriteTransaction> {
+        match &self.db {
+            StorageDb::Writable(db) => Ok(db.begin_write()?),
+            StorageDb::ReadOnly(_) => Err(AxilError::Busy),
+        }
     }
 
     /// Insert a record. Returns its ID.
@@ -50,7 +110,7 @@ impl Storage {
         let bytes = record.to_bytes()?;
         let id = record.id.as_str();
 
-        let txn = self.db.begin_write()?;
+        let txn = self.begin_write()?;
         {
             let mut records = txn.open_table(RECORDS)?;
 
@@ -98,7 +158,7 @@ impl Storage {
             return Ok(Vec::new());
         }
 
-        let txn = self.db.begin_write()?;
+        let txn = self.begin_write()?;
         {
             let mut tbl = txn.open_table(RECORDS)?;
             let mut idx = txn.open_table(TABLE_INDEX)?;
@@ -139,7 +199,7 @@ impl Storage {
 
     /// Get a record by ID.
     pub fn get(&self, id: &RecordId) -> Result<Option<Record>> {
-        let txn = self.db.begin_read()?;
+        let txn = self.begin_read()?;
         let table = txn.open_table(RECORDS)?;
 
         match table.get(id.as_str())? {
@@ -157,7 +217,7 @@ impl Storage {
     /// Uses a single write transaction to ensure atomicity between
     /// reading the record, removing it, and updating the table index.
     pub fn delete(&self, id: &RecordId) -> Result<bool> {
-        let txn = self.db.begin_write()?;
+        let txn = self.begin_write()?;
         {
             let mut records = txn.open_table(RECORDS)?;
 
@@ -191,7 +251,7 @@ impl Storage {
 
     /// List records in a table with optional limit and offset.
     pub fn list(&self, table: &str, limit: usize, offset: usize) -> Result<Vec<Record>> {
-        let txn = self.db.begin_read()?;
+        let txn = self.begin_read()?;
         let idx_table = txn.open_table(TABLE_INDEX)?;
         let ids = Self::read_index(&idx_table, table)?;
 
@@ -213,7 +273,7 @@ impl Storage {
     ///
     /// Uses a single write transaction to ensure atomicity.
     pub fn update(&self, id: &RecordId, data: serde_json::Value) -> Result<Record> {
-        let txn = self.db.begin_write()?;
+        let txn = self.begin_write()?;
         let record = {
             let mut records = txn.open_table(RECORDS)?;
 
@@ -248,7 +308,7 @@ impl Storage {
         id: &RecordId,
         metadata: Option<serde_json::Value>,
     ) -> Result<Record> {
-        let txn = self.db.begin_write()?;
+        let txn = self.begin_write()?;
         let record = {
             let mut records = txn.open_table(RECORDS)?;
             let mut record = match records.get(id.as_str())? {
@@ -269,7 +329,7 @@ impl Storage {
 
     /// Count all record IDs in a given table.
     pub fn count(&self, table: &str) -> Result<usize> {
-        let txn = self.db.begin_read()?;
+        let txn = self.begin_read()?;
         let idx = txn.open_table(TABLE_INDEX)?;
         let ids = Self::read_index(&idx, table)?;
         Ok(ids.len())
@@ -277,7 +337,7 @@ impl Storage {
 
     /// List all table names that have records.
     pub fn tables(&self) -> Result<Vec<String>> {
-        let txn = self.db.begin_read()?;
+        let txn = self.begin_read()?;
         let idx = txn.open_table(TABLE_INDEX)?;
         let mut names = Vec::new();
         let iter = idx.iter()?;
@@ -290,7 +350,7 @@ impl Storage {
 
     /// List all table names with their record counts in a single transaction.
     pub fn tables_with_counts(&self) -> Result<Vec<(String, usize)>> {
-        let txn = self.db.begin_read()?;
+        let txn = self.begin_read()?;
         let idx = txn.open_table(TABLE_INDEX)?;
         let mut result = Vec::new();
         let iter = idx.iter()?;
@@ -305,7 +365,7 @@ impl Storage {
 
     /// Total number of records across all tables.
     pub fn total_records(&self) -> Result<usize> {
-        let txn = self.db.begin_read()?;
+        let txn = self.begin_read()?;
         let table = txn.open_table(RECORDS)?;
         Ok(table.len()? as usize)
     }
@@ -314,7 +374,7 @@ impl Storage {
 
     /// Append a slow query entry. Key format: timestamp + counter for ordering.
     pub fn append_slow_query(&self, key: &str, entry: &[u8]) -> Result<()> {
-        let txn = self.db.begin_write()?;
+        let txn = self.begin_write()?;
         {
             let mut table = txn.open_table(SLOW_QUERIES)?;
             table.insert(key, entry)?;
@@ -325,7 +385,7 @@ impl Storage {
 
     /// Read all slow query entries, ordered by key (timestamp).
     pub fn list_slow_queries(&self, limit: usize) -> Result<Vec<(String, Vec<u8>)>> {
-        let txn = self.db.begin_read()?;
+        let txn = self.begin_read()?;
         let table = txn.open_table(SLOW_QUERIES)?;
         let mut results = Vec::new();
         // Iterate in reverse (newest first) using rev().
@@ -341,7 +401,7 @@ impl Storage {
 
     /// Clear all slow query entries.
     pub fn clear_slow_queries(&self) -> Result<()> {
-        let txn = self.db.begin_write()?;
+        let txn = self.begin_write()?;
         {
             let mut table = txn.open_table(SLOW_QUERIES)?;
             // Drain all entries.
@@ -364,7 +424,7 @@ impl Storage {
 
     /// Trim slow query log to keep at most `max` entries (removes oldest).
     pub fn trim_slow_queries(&self, max: usize) -> Result<()> {
-        let txn = self.db.begin_write()?;
+        let txn = self.begin_write()?;
         {
             let mut table = txn.open_table(SLOW_QUERIES)?;
             let count = table.len()? as usize;
@@ -393,7 +453,7 @@ impl Storage {
 
     /// Append an audit log entry.
     pub fn append_audit(&self, key: &str, entry: &[u8]) -> Result<()> {
-        let txn = self.db.begin_write()?;
+        let txn = self.begin_write()?;
         {
             let mut table = txn.open_table(AUDIT_LOG)?;
             table.insert(key, entry)?;
@@ -404,7 +464,7 @@ impl Storage {
 
     /// Read audit log entries, ordered newest first.
     pub fn list_audit(&self, limit: usize) -> Result<Vec<(String, Vec<u8>)>> {
-        let txn = self.db.begin_read()?;
+        let txn = self.begin_read()?;
         let table = txn.open_table(AUDIT_LOG)?;
         let mut results = Vec::new();
         for entry in table.iter()?.rev() {
@@ -419,7 +479,7 @@ impl Storage {
 
     /// Clear all audit log entries.
     pub fn clear_audit(&self) -> Result<()> {
-        let txn = self.db.begin_write()?;
+        let txn = self.begin_write()?;
         {
             let mut table = txn.open_table(AUDIT_LOG)?;
             let keys: Vec<String> = {
@@ -441,7 +501,7 @@ impl Storage {
 
     /// Trim audit log to keep at most `max` entries (removes oldest).
     pub fn trim_audit(&self, max: usize) -> Result<()> {
-        let txn = self.db.begin_write()?;
+        let txn = self.begin_write()?;
         {
             let mut table = txn.open_table(AUDIT_LOG)?;
             let count = table.len()? as usize;
@@ -472,7 +532,7 @@ impl Storage {
 
     /// Append a metrics history snapshot.
     pub fn append_metrics_snapshot(&self, key: &str, entry: &[u8]) -> Result<()> {
-        let txn = self.db.begin_write()?;
+        let txn = self.begin_write()?;
         {
             let mut table = txn.open_table(METRICS_HISTORY)?;
             table.insert(key, entry)?;
@@ -483,7 +543,7 @@ impl Storage {
 
     /// Read metrics history entries, ordered newest first.
     pub fn list_metrics_history(&self, limit: usize) -> Result<Vec<(String, Vec<u8>)>> {
-        let txn = self.db.begin_read()?;
+        let txn = self.begin_read()?;
         let table = txn.open_table(METRICS_HISTORY)?;
         let mut results = Vec::new();
         for entry in table.iter()?.rev() {
@@ -498,7 +558,7 @@ impl Storage {
 
     /// Trim metrics history to keep at most `max` entries (removes oldest).
     pub fn trim_metrics_history(&self, max: usize) -> Result<()> {
-        let txn = self.db.begin_write()?;
+        let txn = self.begin_write()?;
         {
             let mut table = txn.open_table(METRICS_HISTORY)?;
             let count = table.len()? as usize;
@@ -527,7 +587,7 @@ impl Storage {
 
     /// Get all record IDs across all tables (for bulk operations).
     pub fn all_record_ids(&self) -> Result<Vec<RecordId>> {
-        let txn = self.db.begin_read()?;
+        let txn = self.begin_read()?;
         let table = txn.open_table(RECORDS)?;
         let mut ids = Vec::new();
         for entry in table.iter()? {
@@ -540,7 +600,7 @@ impl Storage {
     /// Scan all records in a single pass (deserializes values directly).
     /// More efficient than all_record_ids() + get() for each.
     pub fn scan_all_records(&self) -> Result<Vec<Record>> {
-        let txn = self.db.begin_read()?;
+        let txn = self.begin_read()?;
         let table = txn.open_table(RECORDS)?;
         let mut records = Vec::new();
         for entry in table.iter()? {

@@ -4685,6 +4685,95 @@ fn open_with_all_detected(path: &Path) -> Result<Axil> {
     builder.build().context("failed to open database")
 }
 
+/// Number of times a hot read command retries the writable open when the
+/// single-writer lock is contended before falling back to a read-only open.
+const BUSY_RETRY_ATTEMPTS: u32 = 3;
+
+/// Base backoff between busy-retry attempts. Grows linearly per attempt
+/// (~50ms, ~100ms, ~150ms), so a short-lived writer's lock is usually clear
+/// before the read-only fallback is needed.
+const BUSY_RETRY_BASE: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// True if an `anyhow` error chain bottoms out in
+/// [`axil_core::AxilError::Busy`] — the single-writer lock is contended.
+///
+/// Open helpers wrap the core error with `.context(...)`, so the `Busy` is
+/// nested in the chain rather than the outermost error; this walks the chain
+/// to find it.
+fn is_busy_chain(err: &anyhow::Error) -> bool {
+    err.chain()
+        .any(|c| matches!(c.downcast_ref::<axil_core::AxilError>(), Some(e) if e.is_busy()))
+}
+
+/// Retry a database open that may hit the single-writer lock.
+///
+/// Runs `open` up to [`BUSY_RETRY_ATTEMPTS`] times, sleeping a short linear
+/// backoff between attempts but only when the failure chain bottoms out in
+/// [`axil_core::AxilError::Busy`] (another process holds the writable handle).
+/// Any other error returns immediately. A still-contended result returns the
+/// last `Busy` error so the caller can fall back to a read-only open.
+fn retry_busy_open(mut open: impl FnMut() -> Result<Axil>) -> Result<Axil> {
+    let mut last = None;
+    for attempt in 0..BUSY_RETRY_ATTEMPTS {
+        match open() {
+            Ok(db) => return Ok(db),
+            Err(e) if is_busy_chain(&e) => {
+                if attempt + 1 < BUSY_RETRY_ATTEMPTS {
+                    std::thread::sleep(BUSY_RETRY_BASE * (attempt + 1));
+                }
+                last = Some(e);
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Err(last.unwrap_or_else(|| anyhow::Error::from(axil_core::AxilError::Busy)))
+}
+
+/// Open for a hot read command, tolerating a concurrent writer.
+///
+/// Axil is single-writer: while another process holds the writable handle, a
+/// normal open fails with [`axil_core::AxilError::Busy`]. This helper first
+/// retries the full writable open (with detected engines) a few times with a
+/// short linear backoff — most writers commit in well under that window. Only
+/// if the writer is *still* active after the retry budget does it fall back to
+/// a **core-only read-only** open, which succeeds only in the gap between
+/// writer sessions (redb's shared lock can't coexist with a live writer's
+/// exclusive lock). The fallback serves committed records (boot/get/list) but
+/// attaches no companion engines, so vector/FTS-backed features degrade to what
+/// the core store alone can answer.
+fn open_read_command(path: &Path) -> Result<Axil> {
+    match retry_busy_open(|| open_with_all_detected(path)) {
+        Ok(db) => Ok(db),
+        Err(e) if is_busy_chain(&e) => {
+            // Writer still holds the lock after the retry budget — serve
+            // committed records read-only without contending for the lock.
+            Axil::open(path)
+                .read_only(true)
+                .build()
+                .context("failed to open database read-only")
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Open with FTS for a hot read command, tolerating a concurrent writer.
+///
+/// Same bounded busy-retry as [`open_read_command`], but with no read-only
+/// fallback: full-text search is engine-backed, and a core-only read-only
+/// handle can't serve it. If the writer is still active after the retry budget
+/// this surfaces a clear "busy" message rather than silently degrading to an
+/// empty result.
+#[cfg(feature = "fts")]
+fn open_read_command_fts(path: &Path) -> Result<Axil> {
+    match retry_busy_open(|| open_with_fts(path)) {
+        Ok(db) => Ok(db),
+        Err(e) if is_busy_chain(&e) => Err(anyhow::anyhow!(
+            "database busy: another process holds the writer lock — retry shortly"
+        )),
+        Err(e) => Err(e),
+    }
+}
+
 /// Like `open_with_all_detected`, but force-attaches the graph plugin
 /// (creating `.axil.graph` if missing). SCIP ingest writes thousands
 /// of `calls` / `references` / `implements` / `type_of` edges, and
@@ -6722,7 +6811,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
         // ── Get ─────────────────────────────────────────────────────
         Command::Get { id } => {
             let db_path = require_db(&db_opt)?;
-            let db = open_with_all_detected(&db_path)?;
+            let db = open_read_command(&db_path)?;
             let rid = RecordId::from_string(&id).context("invalid record ID")?;
 
             match db.get(&rid).context("get failed")? {
@@ -6774,7 +6863,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             include_archived,
         } => {
             let db_path = require_db(&db_opt)?;
-            let db = open_with_all_detected(&db_path)?;
+            let db = open_read_command(&db_path)?;
 
             let filter_archived = |records: Vec<axil_core::Record>| -> Vec<axil_core::Record> {
                 if include_archived {
@@ -6860,7 +6949,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             };
 
             #[allow(unused_mut)]
-            let mut db = open_with_all_detected(&db_path)?;
+            let mut db = open_read_command(&db_path)?;
 
             // Expand BEFORE the similarity fetch so every downstream stage sees the same query.
             let query = if expand {
@@ -7426,7 +7515,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             trace_graph,
         } => {
             let db_path = require_db(&db_opt)?;
-            let db = open_with_all_detected(&db_path)?;
+            let db = open_read_command(&db_path)?;
             // Fetch a larger pool so non-proxy hits (project/file index)
             // don't crowd proxies out before we filter.
             let pool = top_k.saturating_mul(5).max(15);
@@ -7696,7 +7785,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
         #[cfg(feature = "fts")]
         Command::Fts { query, limit } => {
             let db_path = require_db(&db_opt)?;
-            let db = open_with_fts(&db_path)?;
+            let db = open_read_command_fts(&db_path)?;
 
             let start = std::time::Instant::now();
             let results = db
@@ -10669,7 +10758,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             schema,
         } => {
             let db_path = require_db(&db_opt)?;
-            let db = std::sync::Arc::new(open_with_all_detected(&db_path)?);
+            let db = std::sync::Arc::new(open_read_command(&db_path)?);
             // Register installed WASM plugins so their boot_block contributions
             // render in `axil boot`, like a native Extension's.
             register_installed_plugins(&db, &db_path);

@@ -87,7 +87,16 @@ data snapshot — see
 
 - **Atomicity**: Mutations to the core database are atomic via redb transactions
 - **Consistency**: Schema-free — JSON records are always valid
-- **Isolation**: Single-writer, multiple-reader
+- **Isolation**: One writer process at a time. redb takes an **exclusive** OS
+  lock when a process opens the core `.axil` for writing, so a second writer
+  fails fast with `AxilError::Busy` (`is_busy()` returns true) — there is **no**
+  shared-WAL coordinator brokering concurrent writers. The exclusive lock also
+  blocks a *read-only* open (redb's shared lock can't coexist with it), so a
+  reader cannot read *through* a live writer. Because writers are short-lived,
+  the hot read CLI commands (`boot`/`get`/`list`/`recall`/`code-search`) do a
+  bounded busy-retry on the writable open first; if the writer is still active
+  after the retry budget, they fall back to a read-only open of the last
+  committed state (which succeeds only in the gap between writer sessions).
 - **Durability**: fsync on commit (redb default)
 
 Companion engines maintain their own consistency relative to the core.

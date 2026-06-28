@@ -154,6 +154,9 @@ pub struct AxilBuilder {
     extensions: Vec<Arc<dyn Extension>>,
     /// Set by FTS plugin when schema migration required a rebuild.
     pub needs_fts_reindex: bool,
+    /// Open the core store read-only (no single-writer lock), serving committed
+    /// records while another process holds the writable handle.
+    read_only: bool,
 }
 
 /// Best-effort sink for canonical IDs published to a workspace control
@@ -304,10 +307,29 @@ impl AxilBuilder {
         self
     }
 
+    /// Open the core store read-only, without taking the exclusive
+    /// single-writer lock.
+    ///
+    /// The resulting handle serves committed records (get/list/recall) and
+    /// every mutation fails with [`AxilError::Busy`](crate::AxilError::Busy).
+    /// redb's read-only open requests a shared lock that cannot coexist with a
+    /// live writer's exclusive lock, so this also fails with `Busy` while a
+    /// writer is active — it is a fallback for the gap between short-lived
+    /// writer sessions, not a way to read through a live writer. The file must
+    /// already exist — a read-only open never creates it.
+    pub fn read_only(mut self, read_only: bool) -> Self {
+        self.read_only = read_only;
+        self
+    }
+
     /// Open the database and return the handle.
     pub fn build(self) -> Result<Axil> {
         let needs_fts_reindex = self.needs_fts_reindex;
-        let storage = Storage::open(&self.path)?;
+        let storage = if self.read_only {
+            Storage::open_read_only(&self.path)?
+        } else {
+            Storage::open(&self.path)?
+        };
         let llm_usage = Arc::new(crate::llm::LlmUsageTracker::new(
             self.llm_config.cost_per_1m_input,
             self.llm_config.cost_per_1m_output,
@@ -341,15 +363,19 @@ impl AxilBuilder {
         // via a marker row in `_axil_migrations` — without the marker this
         // would full-scan `_entities` on every open. Fresh DBs (no
         // `_entities` table) skip both the scan and the marker write so
-        // we don't materialize system tables for nothing.
-        if db.entities_table_nonempty() && !db.entity_migration_done() {
+        // we don't materialize system tables for nothing. A read-only handle
+        // can't write the marker, so skip the migration entirely — the writer
+        // process owns it.
+        if !db.storage.is_read_only() && db.entities_table_nonempty() && !db.entity_migration_done()
+        {
             let _ = db
                 .migrate_entity_canonical_id()
                 .and_then(|_| db.mark_entity_migration_done());
         }
 
-        // Auto-reindex FTS if schema migration rebuilt the index.
-        if needs_fts_reindex {
+        // Auto-reindex FTS if schema migration rebuilt the index. Never on a
+        // read-only handle (it can't write the index, and the writer owns it).
+        if needs_fts_reindex && !db.storage.is_read_only() {
             if let Some(ref fi) = db.fts_index {
                 let mut reindex_count = 0usize;
                 let mut reindex_errors = 0usize;
@@ -436,6 +462,7 @@ impl Axil {
             canonical_publisher: None,
             extensions: Vec::new(),
             needs_fts_reindex: false,
+            read_only: false,
         }
     }
 
