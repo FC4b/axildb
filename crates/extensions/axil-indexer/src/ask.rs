@@ -761,6 +761,9 @@ pub async fn ask_parallel(
 /// For each item across all strategy lists, its RRF score is:
 ///   `sum over strategies of 1 / (k + rank_in_strategy)`
 /// where `k` is a constant (default 60).
+///
+/// Ties (equal RRF score) are broken by ascending item `id`, so the fused
+/// order is deterministic regardless of `HashMap` iteration order.
 fn reciprocal_rank_fusion(strategy_results: &[StrategyResult], top_k: usize) -> Vec<Value> {
     const K: f64 = 60.0;
     let mut scores: std::collections::HashMap<String, (f64, Value)> =
@@ -780,13 +783,22 @@ fn reciprocal_rank_fusion(strategy_results: &[StrategyResult], top_k: usize) -> 
         }
     }
 
-    let mut fused: Vec<(f64, Value)> = scores.into_values().collect();
-    fused.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    let mut fused: Vec<(String, f64, Value)> = scores
+        .into_iter()
+        .map(|(id, (score, item))| (id, score, item))
+        .collect();
+    // Sort descending by RRF score; break ties on ascending id so the fused
+    // order is deterministic across HashMap iteration orders.
+    fused.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.0.cmp(&b.0))
+    });
     fused.truncate(top_k);
 
     fused
         .into_iter()
-        .map(|(rrf_score, mut item)| {
+        .map(|(_id, rrf_score, mut item)| {
             if let Some(o) = item.as_object_mut() {
                 o.insert(
                     "rrf_score".to_string(),
@@ -1365,6 +1377,31 @@ mod tests {
         let results: Vec<StrategyResult> = vec![];
         let fused = reciprocal_rank_fusion(&results, 5);
         assert!(fused.is_empty());
+    }
+
+    #[test]
+    fn rrf_ties_break_by_id_ascending() {
+        // Three disjoint single-item strategies → every item ties on RRF
+        // (1/61). Feed them in descending id order; output must be ascending.
+        let results = vec![
+            StrategyResult {
+                name: "vector".to_string(),
+                items: vec![json!({"id": "c", "score": 0.1})],
+            },
+            StrategyResult {
+                name: "fts".to_string(),
+                items: vec![json!({"id": "b", "score": 0.2})],
+            },
+            StrategyResult {
+                name: "graph".to_string(),
+                items: vec![json!({"id": "a", "score": 0.3})],
+            },
+        ];
+        let fused = reciprocal_rank_fusion(&results, 5);
+        assert_eq!(fused.len(), 3);
+        assert_eq!(fused[0]["id"], "a");
+        assert_eq!(fused[1]["id"], "b");
+        assert_eq!(fused[2]["id"], "c");
     }
 
     // ── Query planner tests ────────────────────────────────────

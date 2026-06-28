@@ -1411,19 +1411,23 @@ impl<'a> QueryBuilder<'a> {
         if let Some((ref field, ref dir)) = self.order_by {
             results.sort_by(|a, b| {
                 let cmp = compare_json_values(a.data.get(field), b.data.get(field));
-                match dir {
+                let cmp = match dir {
                     SortDirection::Asc => cmp,
                     SortDirection::Desc => cmp.reverse(),
-                }
+                };
+                // Break ties on ascending RecordId so equal sort keys produce a
+                // deterministic order regardless of upstream fusion order.
+                cmp.then_with(|| a.id.cmp(&b.id))
             });
         }
         if let Some(ref dir) = self.time_sort {
             results.sort_by(|a, b| {
                 let cmp = a.created_at.cmp(&b.created_at);
-                match dir {
+                let cmp = match dir {
                     SortDirection::Asc => cmp,
                     SortDirection::Desc => cmp.reverse(),
-                }
+                };
+                cmp.then_with(|| a.id.cmp(&b.id))
             });
         }
     }
@@ -1485,6 +1489,11 @@ fn build_profile(total_ms: f64, steps: Vec<ProfileStep>) -> QueryProfile {
 ///
 /// Documents absent from a list receive no contribution from that list (not
 /// penalized), which naturally handles asymmetric result sets.
+///
+/// Ties (equal RRF score — common when lists are disjoint and every document
+/// sits at rank 1 in exactly one list) are broken by ascending `RecordId`, so
+/// the fused order is fully deterministic regardless of `HashMap` iteration
+/// order.
 fn reciprocal_rank_fusion(
     ranked_lists: &[Vec<(RecordId, f32)>],
     _base_k: usize,
@@ -1504,8 +1513,13 @@ fn reciprocal_rank_fusion(
 
     let mut fused: Vec<(RecordId, f32)> = scores.into_iter().collect();
 
-    // Sort descending by RRF score.
-    fused.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    // Sort descending by RRF score; break ties on ascending RecordId so the
+    // result is deterministic across HashMap iteration orders.
+    fused.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.0.cmp(&b.0))
+    });
     fused
 }
 
@@ -1900,6 +1914,68 @@ mod tests {
             assert_eq!(result[0].0.as_str(), "00000000-0000-0000-0000-000000000001");
             assert_eq!(result[1].0.as_str(), "00000000-0000-0000-0000-000000000002");
             assert_eq!(result[2].0.as_str(), "00000000-0000-0000-0000-000000000003");
+        }
+    }
+
+    #[test]
+    fn rrf_ties_break_by_record_id_ascending() {
+        // Three disjoint single-element lists → every record gets the same RRF
+        // score (1/61). Insert them in descending id order; the fused output
+        // must still come back ascending by RecordId.
+        let list1 = vec![(rid("00000000-0000-0000-0000-000000000003"), 0.1)];
+        let list2 = vec![(rid("00000000-0000-0000-0000-000000000002"), 0.2)];
+        let list3 = vec![(rid("00000000-0000-0000-0000-000000000001"), 0.3)];
+        let result = reciprocal_rank_fusion(&[list1, list2, list3], 60);
+        assert_eq!(result.len(), 3);
+        // All equal score → deterministic ascending-id tie-break.
+        assert_eq!(result[0].0.as_str(), "00000000-0000-0000-0000-000000000001");
+        assert_eq!(result[1].0.as_str(), "00000000-0000-0000-0000-000000000002");
+        assert_eq!(result[2].0.as_str(), "00000000-0000-0000-0000-000000000003");
+        // Scores are genuinely tied.
+        let eps = 1e-6;
+        assert!((result[0].1 - result[2].1).abs() < eps);
+    }
+
+    proptest::proptest! {
+        /// RRF fusion is byte-stable: fusing the same tie-heavy corpus twice
+        /// yields identical orderings. `reciprocal_rank_fusion` is private, so
+        /// this proptest must live in-module rather than under
+        /// `crates/axil-tests/`.
+        #[test]
+        fn rrf_ranking_is_deterministic(seed in proptest::prelude::any::<u64>()) {
+            // Deterministic splitmix64 PRNG (no `rand` dep in the workspace).
+            let mut state = seed;
+            let mut next = || {
+                state = state.wrapping_add(0x9E3779B97F4A7C15);
+                let mut z = state;
+                z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+                z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+                z ^ (z >> 31)
+            };
+
+            // Build a tie-heavy corpus: a small id pool quantized scores so
+            // many records collide on the same fused RRF value.
+            let n_lists = (next() % 4) as usize + 1;
+            let mut lists: Vec<Vec<(RecordId, f32)>> = Vec::with_capacity(n_lists);
+            for _ in 0..n_lists {
+                let len = (next() % 8) as usize + 1;
+                let mut list = Vec::with_capacity(len);
+                for _ in 0..len {
+                    // Id pool of 12 so records recur across lists (ties).
+                    let id_n = next() % 12;
+                    let id = rid(&format!("00000000-0000-0000-0000-{id_n:012}"));
+                    // Coarse score buckets amplify score ties.
+                    let score = (next() % 5) as f32 / 5.0;
+                    list.push((id, score));
+                }
+                lists.push(list);
+            }
+
+            let first = reciprocal_rank_fusion(&lists, 60);
+            let second = reciprocal_rank_fusion(&lists, 60);
+            let first_ids: Vec<&str> = first.iter().map(|(id, _)| id.as_str()).collect();
+            let second_ids: Vec<&str> = second.iter().map(|(id, _)| id.as_str()).collect();
+            proptest::prop_assert_eq!(first_ids, second_ids);
         }
     }
 }

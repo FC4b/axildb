@@ -135,3 +135,4 @@ ureq = "3"
 axum = "0.8"
 tower-http = { version = "0.6", features = ["cors"] }
 indicatif = "0.17"
+proptest = "1"
