@@ -86,6 +86,20 @@ pub trait VectorIndex: Engine {
     /// Add a vector for a record.
     fn add(&self, id: RecordId, vector: &[f32]) -> Result<()>;
 
+    /// Add many vectors in one call.
+    ///
+    /// The default implementation simply loops over [`add`](Self::add), so
+    /// existing implementors keep working unchanged. Backends with an
+    /// independent durable store (e.g. a companion `.vec` file) should override
+    /// this to persist the whole batch under a single write transaction,
+    /// amortizing the per-record fsync over the entire batch.
+    fn add_batch(&self, items: &[(RecordId, &[f32])]) -> Result<()> {
+        for (id, vector) in items {
+            self.add(id.clone(), vector)?;
+        }
+        Ok(())
+    }
+
     /// Search for the top-k most similar vectors.
     fn search(&self, query: &[f32], top_k: usize) -> Result<Vec<(RecordId, f32)>>;
 

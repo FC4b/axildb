@@ -752,9 +752,11 @@ impl Axil {
 
     /// Insert multiple records in a single transaction.
     ///
-    /// Much faster than calling `insert()` in a loop because all records
-    /// share one storage transaction. Engine hooks (vector, FTS, timeseries)
-    /// still run per-record after the batch commit.
+    /// Much faster than calling `insert()` in a loop because all records share
+    /// one storage transaction. Vector embedding is micro-batched and indexed
+    /// through a single `add_batch` per micro-batch (one `.vec` commit), and
+    /// FTS indexing is batched too — so the whole batch costs a handful of
+    /// fsyncs rather than one per record.
     pub fn insert_batch(&self, table: &str, data_items: Vec<Value>) -> Result<Vec<Record>> {
         let timer = self.metrics.start_timer(OpType::Insert);
         let skip_internal = !table.starts_with('_');
@@ -865,11 +867,15 @@ impl Axil {
                                 .collect::<Result<Vec<_>>>()
                         });
                         if let Ok(vecs) = vectors {
-                            for (vec_idx, &(rec_idx, _)) in chunk.iter().enumerate() {
-                                if vec_idx < vecs.len() {
-                                    let _ = vi.add(records[rec_idx].id.clone(), &vecs[vec_idx]);
-                                }
-                            }
+                            let batch: Vec<(RecordId, &[f32])> = chunk
+                                .iter()
+                                .enumerate()
+                                .filter(|(vec_idx, _)| *vec_idx < vecs.len())
+                                .map(|(vec_idx, &(rec_idx, _))| {
+                                    (records[rec_idx].id.clone(), vecs[vec_idx].as_slice())
+                                })
+                                .collect();
+                            let _ = vi.add_batch(&batch);
                         }
                     }
                 }
@@ -947,11 +953,15 @@ impl Axil {
                                 .collect::<Result<Vec<_>>>()
                         });
                         if let Ok(vecs) = vectors {
-                            for (vec_idx, &(rec_idx, _)) in chunk.iter().enumerate() {
-                                if vec_idx < vecs.len() {
-                                    let _ = vi.add(records[rec_idx].id.clone(), &vecs[vec_idx]);
-                                }
-                            }
+                            let batch: Vec<(RecordId, &[f32])> = chunk
+                                .iter()
+                                .enumerate()
+                                .filter(|(vec_idx, _)| *vec_idx < vecs.len())
+                                .map(|(vec_idx, &(rec_idx, _))| {
+                                    (records[rec_idx].id.clone(), vecs[vec_idx].as_slice())
+                                })
+                                .collect();
+                            let _ = vi.add_batch(&batch);
                         }
                     }
                 }
@@ -1318,6 +1328,53 @@ impl Axil {
         let vector = embedder.embed(text)?;
         vi.add(id.clone(), &vector)?;
         Ok(())
+    }
+
+    /// Embed many `(record, text)` pairs and store the vectors in one pass.
+    ///
+    /// Micro-batches the ONNX inference and indexes every vector through a
+    /// single `add_batch` per micro-batch (one `.vec` commit), so ingesting N
+    /// chunks costs a handful of fsyncs instead of one per chunk. Callers that
+    /// already hold the text (e.g. dep-docs chunk ingest) should prefer this
+    /// over a loop of [`Axil::embed_text`]. Records are assumed to exist —
+    /// pass ids from records you just inserted. A no-op when no vector index or
+    /// embedder is configured.
+    pub fn embed_fields_batch(&self, entries: &[(&RecordId, &str)]) -> Result<()> {
+        if entries.is_empty() || !self.has_vector_index() || self.embedder.is_none() {
+            return Ok(());
+        }
+        let embedder = self.require_embedder()?;
+        let vi = self.require_vector_index()?;
+
+        const MICRO_BATCH: usize = 32;
+        for chunk in entries.chunks(MICRO_BATCH) {
+            let texts: Vec<&str> = chunk.iter().map(|(_, t)| *t).collect();
+            let vectors = embedder.embed_batch(&texts).or_else(|_| {
+                texts
+                    .iter()
+                    .map(|t| embedder.embed(t))
+                    .collect::<Result<Vec<_>>>()
+            })?;
+            let batch: Vec<(RecordId, &[f32])> = chunk
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| *i < vectors.len())
+                .map(|(i, (id, _))| ((*id).clone(), vectors[i].as_slice()))
+                .collect();
+            vi.add_batch(&batch)?;
+        }
+        Ok(())
+    }
+
+    /// FTS-index the same named field across many records in one commit.
+    ///
+    /// Thin wrapper over the buffered `index_field_batch` plugin hook — turns N
+    /// per-chunk commits into one. A no-op when no FTS index is configured.
+    pub fn index_text_batch(&self, field: &str, entries: &[(&RecordId, &str)]) -> Result<()> {
+        if entries.is_empty() || !self.has_fts_index() {
+            return Ok(());
+        }
+        self.require_fts_index()?.index_field_batch(field, entries)
     }
 
     /// Embed arbitrary text and associate the vector with a record.
@@ -5437,12 +5494,16 @@ impl Axil {
                             .collect::<Result<Vec<_>>>()
                     });
                     if let Ok(vecs) = vectors {
-                        for (i, vec) in vecs.into_iter().enumerate() {
-                            let global = cursor + i;
-                            if let Some(id) = flat_ids.get(global) {
-                                let _ = vi.add(id.clone(), &vec);
-                            }
-                        }
+                        let batch: Vec<(RecordId, &[f32])> = vecs
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(i, vec)| {
+                                flat_ids
+                                    .get(cursor + i)
+                                    .map(|id| (id.clone(), vec.as_slice()))
+                            })
+                            .collect();
+                        let _ = vi.add_batch(&batch);
                     }
                     cursor = end;
                 }
@@ -5535,11 +5596,13 @@ impl Axil {
                         .collect::<Result<Vec<_>>>()
                 });
                 if let Ok(vecs) = vectors {
-                    for (i, vec) in vecs.into_iter().enumerate() {
-                        if i < chunk_records.len() {
-                            let _ = vi.add(chunk_records[i].id.clone(), &vec);
-                        }
-                    }
+                    let batch: Vec<(RecordId, &[f32])> = vecs
+                        .iter()
+                        .enumerate()
+                        .filter(|(i, _)| *i < chunk_records.len())
+                        .map(|(i, vec)| (chunk_records[i].id.clone(), vec.as_slice()))
+                        .collect();
+                    let _ = vi.add_batch(&batch);
                 }
             }
         }

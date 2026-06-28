@@ -217,6 +217,21 @@ impl VectorIndex for VectorEngine {
         Ok(())
     }
 
+    fn add_batch(&self, items: &[(RecordId, &[f32])]) -> axil_core::Result<()> {
+        if items.is_empty() {
+            return Ok(());
+        }
+        // Persist the whole batch to disk first (one fsync) so a crash can't
+        // leave the in-memory index ahead of storage, then add to the live index.
+        persist_vectors_batch(&self.vector_db, items)?;
+        let mut idx = self.index.write();
+        for (id, vector) in items {
+            idx.add(id.clone(), vector.to_vec())
+                .map_err(AxilError::plugin)?;
+        }
+        Ok(())
+    }
+
     fn search(&self, query: &[f32], top_k: usize) -> axil_core::Result<Vec<(RecordId, f32)>> {
         // The graph is always live and searchable, including immediately after
         // an incremental `add` and despite accumulated tombstones — so search
@@ -315,6 +330,28 @@ fn persist_vector(db: &Database, id: &RecordId, vector: &[f32]) -> axil_core::Re
         table
             .insert(id.as_str(), bytes.as_slice())
             .map_err(plugin_err)?;
+    }
+    txn.commit().map_err(plugin_err)?;
+    Ok(())
+}
+
+/// Persist many vectors to the vector database under a single write transaction.
+///
+/// One `begin_write`/`commit` for the whole batch amortizes the per-record
+/// fsync, which dominates the per-chunk ingest cost on boot/scip/deps-refresh.
+fn persist_vectors_batch(
+    db: &Database,
+    items: &[(RecordId, &[f32])],
+) -> axil_core::Result<()> {
+    let txn = db.begin_write().map_err(plugin_err)?;
+    {
+        let mut table = txn.open_table(VECTORS_TABLE).map_err(plugin_err)?;
+        for (id, vector) in items {
+            let bytes = vector_to_bytes(vector);
+            table
+                .insert(id.as_str(), bytes.as_slice())
+                .map_err(plugin_err)?;
+        }
     }
     txn.commit().map_err(plugin_err)?;
     Ok(())
@@ -525,6 +562,65 @@ mod tests {
             let plugin = VectorEngine::open(&path, 3).unwrap();
             assert_eq!(plugin.vector_count(), 0);
         }
+    }
+
+    #[test]
+    fn add_batch_parity_with_add_loop() {
+        // The same vectors added via add_batch must be searchable identically
+        // to the per-record add path.
+        let (plugin, _dir) = temp_engine(3);
+        let id1 = RecordId::new();
+        let id2 = RecordId::new();
+        let id3 = RecordId::new();
+        let v1 = [1.0_f32, 0.0, 0.0];
+        let v2 = [0.0_f32, 1.0, 0.0];
+        let v3 = [0.0_f32, 0.0, 1.0];
+
+        plugin
+            .add_batch(&[
+                (id1.clone(), v1.as_slice()),
+                (id2.clone(), v2.as_slice()),
+                (id3.clone(), v3.as_slice()),
+            ])
+            .unwrap();
+
+        assert_eq!(plugin.vector_count(), 3);
+        assert_eq!(plugin.search(&v1, 1).unwrap()[0].0, id1);
+        assert_eq!(plugin.search(&v2, 1).unwrap()[0].0, id2);
+        assert_eq!(plugin.search(&v3, 1).unwrap()[0].0, id3);
+    }
+
+    #[test]
+    fn add_batch_persists_across_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("batch_persist.axil");
+        let id1 = RecordId::new();
+        let id2 = RecordId::new();
+
+        {
+            let plugin = VectorEngine::open(&path, 3).unwrap();
+            plugin
+                .add_batch(&[
+                    (id1.clone(), [1.0_f32, 0.0, 0.0].as_slice()),
+                    (id2.clone(), [0.0_f32, 1.0, 0.0].as_slice()),
+                ])
+                .unwrap();
+            assert_eq!(plugin.vector_count(), 2);
+        }
+
+        {
+            let plugin = VectorEngine::open(&path, 3).unwrap();
+            assert_eq!(plugin.vector_count(), 2);
+            assert_eq!(plugin.search(&[1.0, 0.0, 0.0], 1).unwrap()[0].0, id1);
+            assert_eq!(plugin.search(&[0.0, 1.0, 0.0], 1).unwrap()[0].0, id2);
+        }
+    }
+
+    #[test]
+    fn add_batch_empty_is_noop() {
+        let (plugin, _dir) = temp_engine(3);
+        plugin.add_batch(&[]).unwrap();
+        assert_eq!(plugin.vector_count(), 0);
     }
 
     #[test]

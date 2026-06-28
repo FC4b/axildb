@@ -11,7 +11,7 @@
 
 use std::collections::BTreeMap;
 
-use axil_core::Axil;
+use axil_core::{Axil, RecordId};
 use serde_json::json;
 
 use crate::manifest::{Dependency, Ecosystem};
@@ -251,6 +251,7 @@ pub fn ingest_dep_docs(
     chunks.truncate(max_chunks);
     let chunk_count = chunks.len();
 
+    let mut ids = Vec::with_capacity(chunks.len());
     for (idx, chunk) in chunks.iter().enumerate() {
         let data = json!({
             "dep_name": dep.name,
@@ -267,12 +268,19 @@ pub fn ingest_dep_docs(
         let record = db
             .insert(TABLE_DEP_DOCS, data)
             .map_err(|e| DocsError::Db(e.to_string()))?;
-        // `_`-prefixed tables skip the auto insert-hooks, so drive
-        // embedding + FTS indexing explicitly. A missing vector/FTS
-        // plugin is not an error — the chunk is still stored.
-        let _ = db.embed_field(&record.id, "content");
-        let _ = db.index_text(&record.id, "content", &chunk.content);
+        ids.push(record.id);
     }
+    // `_`-prefixed tables skip the auto insert-hooks, so drive embedding +
+    // FTS indexing explicitly. Batch both so the whole chunk set costs a
+    // handful of fsyncs, not one per chunk. A missing vector/FTS plugin is
+    // not an error — the chunks are still stored.
+    let entries: Vec<(&RecordId, &str)> = ids
+        .iter()
+        .zip(chunks.iter())
+        .map(|(id, chunk)| (id, chunk.content.as_str()))
+        .collect();
+    let _ = db.embed_fields_batch(&entries);
+    let _ = db.index_text_batch("content", &entries);
 
     write_dep_row(
         db,
@@ -455,6 +463,7 @@ pub fn ingest_migration_note(
     chunks.truncate(DEFAULT_MAX_MIGRATION_CHUNKS);
     let chunk_count = chunks.len();
 
+    let mut ids = Vec::with_capacity(chunks.len());
     for (idx, chunk) in chunks.iter().enumerate() {
         let data = json!({
             "dep_name": dep.name,
@@ -473,9 +482,15 @@ pub fn ingest_migration_note(
         let record = db
             .insert(TABLE_DEP_DOCS, data)
             .map_err(|e| DocsError::Db(e.to_string()))?;
-        let _ = db.embed_field(&record.id, "content");
-        let _ = db.index_text(&record.id, "content", &chunk.content);
+        ids.push(record.id);
     }
+    let entries: Vec<(&RecordId, &str)> = ids
+        .iter()
+        .zip(chunks.iter())
+        .map(|(id, chunk)| (id, chunk.content.as_str()))
+        .collect();
+    let _ = db.embed_fields_batch(&entries);
+    let _ = db.index_text_batch("content", &entries);
     Ok(chunk_count)
 }
 
@@ -915,5 +930,173 @@ Use the derive macro to implement the traits automatically.
         dep.version = Some("2.0.0".to_string());
         let n = diff_dep_docs(&db, &dep, "2.0.0").unwrap();
         assert_eq!(n, 0, "same version is not a diff");
+    }
+
+    // ── Deterministic test engines ──────────────────────────────────
+    //
+    // axil-docs depends only on axil-core, so retrieval coverage uses
+    // in-test fake engines (no ONNX, no Tantivy) that record which record
+    // ids were indexed. This verifies the *batched* ingest path drives both
+    // embed + FTS for every chunk — the thing that breaks if a refactor
+    // forgets a chunk.
+
+    use axil_core::plugin::{Capability, Engine, SearchIndex, TextEmbedder, VectorIndex};
+    use std::collections::HashSet;
+    use std::sync::{Arc, Mutex};
+
+    type IdSet = Arc<Mutex<HashSet<String>>>;
+
+    #[derive(Default)]
+    struct FakeVector {
+        added: IdSet,
+    }
+
+    impl Engine for FakeVector {
+        fn name(&self) -> &str {
+            "fake-vector"
+        }
+        fn capabilities(&self) -> Vec<Capability> {
+            vec![Capability::VectorSearch]
+        }
+        fn on_record_insert(&self, _record: &axil_core::Record) -> axil_core::Result<()> {
+            Ok(())
+        }
+        fn on_record_delete(&self, _id: &RecordId) -> axil_core::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl VectorIndex for FakeVector {
+        fn add(&self, id: RecordId, _vector: &[f32]) -> axil_core::Result<()> {
+            self.added.lock().unwrap().insert(id.to_string());
+            Ok(())
+        }
+        fn search(&self, _query: &[f32], _top_k: usize) -> axil_core::Result<Vec<(RecordId, f32)>> {
+            Ok(Vec::new())
+        }
+        fn count(&self) -> usize {
+            self.added.lock().unwrap().len()
+        }
+        fn dimensions(&self) -> usize {
+            8
+        }
+    }
+
+    impl TextEmbedder for FakeVector {
+        fn embed(&self, text: &str) -> axil_core::Result<Vec<f32>> {
+            // Deterministic 8-dim vector from a content hash — enough for the
+            // ingest path to have something to store.
+            let mut v = vec![0.0_f32; 8];
+            for (i, b) in text.bytes().enumerate() {
+                v[i % 8] += b as f32;
+            }
+            Ok(v)
+        }
+    }
+
+    #[derive(Default)]
+    struct FakeFts {
+        indexed: IdSet,
+    }
+
+    impl Engine for FakeFts {
+        fn name(&self) -> &str {
+            "fake-fts"
+        }
+        fn capabilities(&self) -> Vec<Capability> {
+            vec![Capability::FullTextSearch]
+        }
+        fn on_record_insert(&self, _record: &axil_core::Record) -> axil_core::Result<()> {
+            Ok(())
+        }
+        fn on_record_delete(&self, _id: &RecordId) -> axil_core::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl SearchIndex for FakeFts {
+        fn index_text(&self, id: &RecordId, _field: &str, _text: &str) -> axil_core::Result<()> {
+            self.indexed.lock().unwrap().insert(id.to_string());
+            Ok(())
+        }
+        fn search_text(&self, _query: &str, _limit: usize) -> axil_core::Result<Vec<(RecordId, f32)>> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[test]
+    fn batched_ingest_embeds_and_fts_indexes_every_chunk() {
+        let dir = tempfile::tempdir().unwrap();
+        // Keep handles to the engines' recorded-id sets; the engines themselves
+        // are moved into the builder.
+        let embedded: IdSet = IdSet::default();
+        let fts_indexed: IdSet = IdSet::default();
+        let db = axil_core::Axil::open(dir.path().join("m.axil"))
+            .with_vector_and_embedder(FakeVector {
+                added: embedded.clone(),
+            })
+            .with_fts_index(Arc::new(FakeFts {
+                indexed: fts_indexed.clone(),
+            }))
+            .build()
+            .unwrap();
+
+        // Multi-section doc → multiple chunks through one batched ingest.
+        let text = "\
+# Serde
+
+Serde is a framework for serializing and deserializing Rust data structures.
+
+## Derive
+
+Use the derive macro to implement the traits automatically for your types.
+
+## Performance
+
+Serde generates efficient code with no runtime reflection overhead at all.
+";
+        let n = ingest_dep_docs(&db, &sample_dep(), text, "local", 80).unwrap();
+        assert!(n >= 3, "expected several heading sections to chunk, got {n}");
+
+        // Every stored doc chunk must be both vector- and FTS-indexed.
+        let chunk_ids: HashSet<String> = db
+            .list(TABLE_DEP_DOCS)
+            .unwrap()
+            .iter()
+            .map(|r| r.id.to_string())
+            .collect();
+        assert_eq!(chunk_ids.len(), n);
+
+        assert_eq!(
+            *embedded.lock().unwrap(),
+            chunk_ids,
+            "every chunk is vector-indexed"
+        );
+        assert_eq!(
+            *fts_indexed.lock().unwrap(),
+            chunk_ids,
+            "every chunk is FTS-indexed"
+        );
+
+        // The migration-note path batches too.
+        let changelog = "## 1.0.210\n\nFixed a soundness hole in the derive macro this release.\n";
+        let m = ingest_migration_note(&db, &sample_dep(), "1.0.200", changelog).unwrap();
+        assert!(m >= 1);
+        let all_chunk_ids: HashSet<String> = db
+            .list(TABLE_DEP_DOCS)
+            .unwrap()
+            .iter()
+            .map(|r| r.id.to_string())
+            .collect();
+        assert_eq!(
+            *embedded.lock().unwrap(),
+            all_chunk_ids,
+            "migration chunks are vector-indexed too"
+        );
+        assert_eq!(
+            *fts_indexed.lock().unwrap(),
+            all_chunk_ids,
+            "migration chunks are FTS-indexed too"
+        );
     }
 }
