@@ -284,6 +284,178 @@ impl HnswIndex {
 mod tests {
     use super::*;
 
+    /// Minimal xorshift64* PRNG so the oracle is fully seeded and deterministic
+    /// without pulling `rand` into the dependency graph.
+    struct Rng(u64);
+
+    impl Rng {
+        fn new(seed: u64) -> Self {
+            // Avoid the zero fixed-point of xorshift.
+            Rng(seed | 1)
+        }
+
+        fn next_u64(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x >> 12;
+            x ^= x << 25;
+            x ^= x >> 27;
+            self.0 = x;
+            x.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        }
+
+        /// Uniform f32 in [-1.0, 1.0).
+        fn next_f32(&mut self) -> f32 {
+            // Top 24 bits → [0,1), then map to [-1,1).
+            let bits = (self.next_u64() >> 40) as f32 / (1u32 << 24) as f32;
+            bits * 2.0 - 1.0
+        }
+    }
+
+    /// Generate `n` deterministic vectors with stable, lexically sortable ids.
+    fn make_vectors(n: usize, dims: usize, seed: u64) -> Vec<(RecordId, Vec<f32>)> {
+        let mut rng = Rng::new(seed);
+        (0..n)
+            .map(|i| {
+                let v: Vec<f32> = (0..dims).map(|_| rng.next_f32()).collect();
+                (RecordId(format!("v{i:08}")), v)
+            })
+            .collect()
+    }
+
+    /// Exact brute-force top-k oracle: rank all candidates by `cosine_sim`,
+    /// breaking ties deterministically by id so the order is reproducible.
+    fn brute_force_topk(
+        corpus: &[(RecordId, Vec<f32>)],
+        query: &[f32],
+        top_k: usize,
+    ) -> Vec<RecordId> {
+        let mut scored: Vec<(&RecordId, f32)> = corpus
+            .iter()
+            .map(|(id, v)| (id, cosine_sim(query, v)))
+            .collect();
+        scored.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0 .0.cmp(&b.0 .0))
+        });
+        scored.into_iter().take(top_k).map(|(id, _)| id.clone()).collect()
+    }
+
+    /// Fraction of brute-force top-k ids that also appear in the approximate top-k.
+    fn recall_overlap(approx: &[RecordId], exact: &[RecordId]) -> f32 {
+        if exact.is_empty() {
+            return 1.0;
+        }
+        let approx_set: std::collections::HashSet<&RecordId> = approx.iter().collect();
+        let hits = exact.iter().filter(|id| approx_set.contains(id)).count();
+        hits as f32 / exact.len() as f32
+    }
+
+    /// Oracle scale, overridable for nightly runs via `AXIL_ORACLE_N`.
+    fn oracle_n(default: usize) -> usize {
+        std::env::var("AXIL_ORACLE_N")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(default)
+    }
+
+    /// HNSW recall@10 floor. instant-distance at N~2k/dims=64 measures ~0.95+;
+    /// pinned below first observation to absorb graph-construction variance.
+    const RECALL_FLOOR_K10: f32 = 0.90;
+
+    #[test]
+    fn hnsw_recall_matches_brute_force() {
+        let n = oracle_n(2000);
+        let dims = 64;
+        let top_k = 10;
+        let queries = 50;
+
+        let corpus = make_vectors(n, dims, 0xA11CE);
+        let mut index = HnswIndex::new(dims);
+        for (id, v) in &corpus {
+            index.add(id.clone(), v.clone()).unwrap();
+        }
+        index.rebuild_if_needed();
+
+        let mut query_rng = Rng::new(0xB0B);
+        let mut total = 0.0f32;
+        for _ in 0..queries {
+            let q: Vec<f32> = (0..dims).map(|_| query_rng.next_f32()).collect();
+            let approx: Vec<RecordId> = index
+                .search_clean(&q, top_k)
+                .unwrap()
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect();
+            let exact = brute_force_topk(&corpus, &q, top_k);
+            total += recall_overlap(&approx, &exact);
+        }
+        let mean = total / queries as f32;
+        assert!(
+            mean >= RECALL_FLOOR_K10,
+            "HNSW mean recall@{top_k} {mean:.4} below floor {RECALL_FLOOR_K10} (N={n})"
+        );
+    }
+
+    #[test]
+    fn recall_correct_after_deletes_without_rebuild() {
+        let n = oracle_n(1500);
+        let dims = 64;
+        let top_k = 10;
+        let queries = 50;
+
+        let corpus = make_vectors(n, dims, 0xDE1E7E);
+        let mut index = HnswIndex::new(dims);
+        for (id, v) in &corpus {
+            index.add(id.clone(), v.clone()).unwrap();
+        }
+        index.rebuild_if_needed();
+
+        // Remove ~20% deterministically without a manual rebuild — `search`
+        // must auto-rebuild and never surface a deleted id.
+        let mut del_rng = Rng::new(0xCAFE);
+        let mut removed: std::collections::HashSet<RecordId> = std::collections::HashSet::new();
+        let target = n / 5;
+        while removed.len() < target {
+            let i = (del_rng.next_u64() as usize) % n;
+            let id = corpus[i].0.clone();
+            if removed.insert(id.clone()) {
+                index.remove(&id);
+            }
+        }
+
+        let survivors: Vec<(RecordId, Vec<f32>)> = corpus
+            .iter()
+            .filter(|(id, _)| !removed.contains(id))
+            .cloned()
+            .collect();
+
+        let mut query_rng = Rng::new(0xF00D);
+        let mut total = 0.0f32;
+        for _ in 0..queries {
+            let q: Vec<f32> = (0..dims).map(|_| query_rng.next_f32()).collect();
+            let approx: Vec<RecordId> = index
+                .search(&q, top_k)
+                .unwrap()
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect();
+            for id in &approx {
+                assert!(
+                    !removed.contains(id),
+                    "removed id {id:?} reappeared in search results after delete"
+                );
+            }
+            let exact = brute_force_topk(&survivors, &q, top_k);
+            total += recall_overlap(&approx, &exact);
+        }
+        let mean = total / queries as f32;
+        assert!(
+            mean >= RECALL_FLOOR_K10,
+            "survivor mean recall@{top_k} {mean:.4} below floor {RECALL_FLOOR_K10} after deletes"
+        );
+    }
+
     #[test]
     fn new_empty_index() {
         let index = HnswIndex::new(3);
