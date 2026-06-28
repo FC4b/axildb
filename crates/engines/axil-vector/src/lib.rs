@@ -218,17 +218,14 @@ impl VectorIndex for VectorEngine {
     }
 
     fn search(&self, query: &[f32], top_k: usize) -> axil_core::Result<Vec<(RecordId, f32)>> {
-        // Fast path: read lock when the HNSW graph is current.
-        {
-            let idx = self.index.read();
-            if !idx.needs_rebuild() {
-                return idx.search_clean(query, top_k).map_err(AxilError::plugin);
-            }
-        }
-        // Slow path: write lock to rebuild, then search.
-        let mut idx = self.index.write();
-        idx.rebuild_if_needed();
-        idx.search_clean(query, top_k).map_err(AxilError::plugin)
+        // The graph is always live and searchable, including immediately after
+        // an incremental `add` and despite accumulated tombstones — so search
+        // never needs the write lock. Compaction (tombstone reclaim) is the
+        // background worker's job, off this hot path.
+        self.index
+            .read()
+            .search_clean(query, top_k)
+            .map_err(AxilError::plugin)
     }
 
     fn count(&self) -> usize {

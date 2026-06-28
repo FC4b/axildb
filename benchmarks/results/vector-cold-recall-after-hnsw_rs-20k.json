@@ -1,0 +1,47 @@
+{
+  "_meta": {
+    "label": "AFTER — incremental hnsw_rs backend at 20k (Phase 26 T7)",
+    "machine": "same machine as the before-2k baseline",
+    "cmd": "vector-latency.exe --n 20000 --queries 200 --top-k 1,10 --top-k-cold 10 --format json",
+    "note": "Acceptance evidence: cold-recall p95 at 20k = 516us, mean 249us — flat in n (O(log n)). The instant-distance full-rebuild backend could not complete a 20k cold-recall run in reasonable time (each iteration rebuilt all 20k vectors), so there is no comparable before-20k figure."
+  },
+  "benchmark": "vector-latency",
+  "dataset_size": 20000,
+  "dimensions": 384,
+  "insert_ms": 39001,
+  "insert_throughput_per_sec": 512.8073639137458,
+  "rebuild_ms": 0,
+  "search": [
+    {
+      "top_k": 1,
+      "queries": 200,
+      "mean_us": 384.909,
+      "min_us": 252.4,
+      "p50_us": 336.2,
+      "p95_us": 666.1,
+      "p99_us": 882.1999999999999,
+      "max_us": 897.4,
+      "qps": 2598.016674071014
+    },
+    {
+      "top_k": 10,
+      "queries": 200,
+      "mean_us": 394.69050000000004,
+      "min_us": 251.5,
+      "p50_us": 349.5,
+      "p95_us": 697.5,
+      "p99_us": 871.8000000000001,
+      "max_us": 916.6,
+      "qps": 2533.6307815870914
+    }
+  ],
+  "cold_recall_after_single_store": {
+    "iterations": 200,
+    "top_k": 10,
+    "mean_us": 248.71700000000004,
+    "p50_us": 208.1,
+    "p95_us": 515.7,
+    "p99_us": 649.8,
+    "max_us": 742.0
+  }
+}

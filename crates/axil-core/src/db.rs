@@ -2376,6 +2376,34 @@ impl Axil {
         (expired, superseded)
     }
 
+    /// Compact the vector index only when the tombstone ratio exceeds
+    /// `threshold` (e.g. `HealingConfig::vector_rebuild_threshold`).
+    ///
+    /// Incremental inserts keep the live graph searchable, so deletes only
+    /// accumulate tombstoned nodes; this reclaims them in one rebuild once they
+    /// outweigh the live set enough to matter. Returns `Ok(true)` when a
+    /// compaction ran, `Ok(false)` when the ratio was below threshold or there
+    /// is no vector index. Returns the number of tombstones reclaimed (`0`
+    /// when no compaction ran). Intended for the background worker — off the
+    /// write path.
+    pub fn compact_vector_index_if_needed(&self, threshold: f64) -> Result<usize> {
+        let Some(ref vi) = self.vector_index else {
+            return Ok(0);
+        };
+        let deleted = vi.deleted_count();
+        let live = vi.count();
+        let total = live + deleted;
+        if total == 0 {
+            return Ok(0);
+        }
+        let ratio = deleted as f64 / total as f64;
+        if ratio <= threshold {
+            return Ok(0);
+        }
+        self.vector_rebuild()?;
+        Ok(deleted)
+    }
+
     /// Rebuild the vector index to compact tombstones.
     pub fn vector_rebuild(&self) -> Result<crate::diagnostics::VectorRebuildReport> {
         let start = std::time::Instant::now();

@@ -35,6 +35,10 @@ pub struct WorkerReport {
     /// Number of records whose effective importance was updated by decay.
     #[serde(default)]
     pub decayed_records: usize,
+    /// Number of vector tombstones reclaimed by a background compaction.
+    /// `0` when the tombstone ratio was below `vector_rebuild_threshold`.
+    #[serde(default)]
+    pub vectors_compacted: usize,
     // ── Brain consolidation fields ──
     /// Number of stale beliefs detected and auto-doubted.
     #[serde(default)]
@@ -80,6 +84,7 @@ impl<'a> AxilWorker<'a> {
     /// 3. Run inference if graph is available
     /// 4. Detect stale records (no access in 90+ days)
     /// 5. Apply importance decay
+    /// 5b. Compact the vector index if tombstones exceed threshold
     /// 6. (Brain mode) Detect stale beliefs
     /// 7. (Brain mode) Extract candidate procedures
     /// 8. (Brain mode) Extract candidate preferences
@@ -93,6 +98,7 @@ impl<'a> AxilWorker<'a> {
         let inferred_facts = self.run_inference();
         let stale_detected = self.detect_stale();
         let decayed_records = self.run_decay();
+        let vectors_compacted = self.compact_vector_index();
 
         // Brain consolidation tasks.
         let (stale_beliefs, candidate_procedures, candidate_preferences, duplicate_clusters) =
@@ -117,6 +123,7 @@ impl<'a> AxilWorker<'a> {
             inferred_facts,
             stale_detected,
             decayed_records,
+            vectors_compacted,
             stale_beliefs,
             candidate_procedures,
             candidate_preferences,
@@ -366,6 +373,27 @@ impl<'a> AxilWorker<'a> {
             }
         }
         updated
+    }
+
+    /// Compact the vector index when tombstones have piled up past the
+    /// configured ratio. Off the write path: deletes only tombstone the graph,
+    /// and this background sweep reclaims them once they outweigh the live set.
+    /// Returns the number of tombstones reclaimed (`0` if below threshold).
+    fn compact_vector_index(&self) -> usize {
+        if !self.db.has_vector_index() {
+            return 0;
+        }
+        // Config is best-effort — fall back to the default threshold when no
+        // axil.toml is present, mirroring `run_decay`.
+        let threshold = std::env::current_dir()
+            .ok()
+            .and_then(|cwd| crate::config::load_config_from(&cwd).ok())
+            .map(|c| c.healing.vector_rebuild_threshold)
+            .unwrap_or_else(|| crate::config::HealingConfig::default().vector_rebuild_threshold);
+
+        self.db
+            .compact_vector_index_if_needed(threshold)
+            .unwrap_or(0)
     }
 
     // ── Brain consolidation tasks ──────────────────────

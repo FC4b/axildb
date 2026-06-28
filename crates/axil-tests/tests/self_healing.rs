@@ -611,6 +611,47 @@ fn temp_db_with_mock_vector_and_fts() -> (Axil, tempfile::TempDir) {
     (db, dir)
 }
 
+#[test]
+fn compact_vector_index_respects_threshold() {
+    let (db, _dir) = temp_db_with_mock_vector();
+
+    // Insert several auto-embedded records, then delete most of them so they
+    // become vector tombstones (incremental deletes never compact on their own).
+    let mut ids = Vec::new();
+    for i in 0..10 {
+        let rec = db
+            .insert("sessions", json!({"summary": format!("auth timeout {i}")}))
+            .unwrap();
+        db.embed_field(&rec.id, "summary").unwrap();
+        ids.push(rec.id);
+    }
+
+    // Delete 3/10 → ratio 0.3 > default threshold 0.2. Incremental deletes
+    // only tombstone, so nothing is reclaimed until a compaction runs.
+    for id in ids.iter().take(3) {
+        db.delete(id).unwrap();
+    }
+
+    // Below the (higher) custom threshold: no compaction, no tombstone reclaim.
+    assert_eq!(
+        db.compact_vector_index_if_needed(0.5).unwrap(),
+        0,
+        "below-threshold call must not compact"
+    );
+
+    // Above-threshold (default 0.2): compaction reclaims the 3 tombstones.
+    let reclaimed = db.compact_vector_index_if_needed(0.2).unwrap();
+    assert_eq!(reclaimed, 3);
+
+    // A second call is a no-op — the ratio is now zero.
+    assert_eq!(db.compact_vector_index_if_needed(0.2).unwrap(), 0);
+
+    // Live vectors survive: a forced rebuild reports 7 remaining, 0 removed.
+    let report = db.vector_rebuild().unwrap();
+    assert_eq!(report.new_size, 7);
+    assert_eq!(report.deleted_removed, 0);
+}
+
 /// Simulate a torn insert: commit the core record directly via storage (which
 /// bypasses the auto-embed / FTS fan-out the normal `insert` path runs), so the
 /// record exists but has no vector embedding and no FTS document — exactly the

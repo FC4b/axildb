@@ -1,0 +1,36 @@
+{
+  "_meta": {
+    "label": "BEFORE — instant-distance full-rebuild backend (Phase 26 T7 baseline)",
+    "machine": "captured on the T7 dev machine; relative win is the point, not absolute us",
+    "cmd": "vector-latency.exe --n 2000 --queries 50 --top-k 10 --top-k-cold 10 --format json",
+    "note": "cold_recall_after_single_store pays a full O(n) HNSW rebuild on every store-then-recall iteration. A 20k run did not finish in a reasonable time, which is why the baseline is captured at n=2000."
+  },
+  "benchmark": "vector-latency",
+  "dataset_size": 2000,
+  "dimensions": 384,
+  "insert_ms": 1231,
+  "insert_throughput_per_sec": 1624.6953696181965,
+  "rebuild_ms": 1392,
+  "search": [
+    {
+      "top_k": 10,
+      "queries": 50,
+      "mean_us": 536.088,
+      "min_us": 476.9,
+      "p50_us": 533.8,
+      "p95_us": 589.2,
+      "p99_us": 704.9,
+      "max_us": 704.9,
+      "qps": 1865.365387772157
+    }
+  ],
+  "cold_recall_after_single_store": {
+    "iterations": 50,
+    "top_k": 10,
+    "mean_us": 1449148.3740000003,
+    "p50_us": 1453872.2,
+    "p95_us": 1496155.9,
+    "p99_us": 1505059.9,
+    "max_us": 1505059.9
+  }
+}
