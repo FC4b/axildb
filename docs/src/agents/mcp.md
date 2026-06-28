@@ -53,6 +53,7 @@ updating this table fails the build.
 | Tool | Params | When to use |
 |------|--------|-------------|
 | `boot` | `budget?` int, `topic?` string, `scope?` string[] | **First call of a session.** Returns a stable `BootContext` (schema v1): current scope, constraints, recent decisions, active failures, open threads, preferences, confidence notes. Token-budget aware — lower-priority sections drop when over budget. |
+| `inspect` | (none) | Read-only overview of what kinds of memory this brain holds and whether it is healthy. Returns a per-record-type census (e.g. `decisions`, `errors`, `sessions`; all internal bookkeeping tables collapse into one `_internal` bucket) plus a light health verdict (`ok`/`warning`/`error`) drawn from the same checks as `axil doctor`. Performs zero writes — the MCP-only equivalent of glancing at `axil tables` + `axil doctor`. |
 
 ### Intent-native writes — store cognition, not rows
 

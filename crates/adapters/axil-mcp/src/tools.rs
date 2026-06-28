@@ -292,6 +292,15 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
                 }
             }),
         },
+        // ─── Read-only census + light health ────────────────────────
+        ToolDefinition {
+            name: "inspect".into(),
+            description: "Read-only overview of what kinds of memory this brain holds and whether it is healthy. Returns a per-record-type census (e.g. decisions, errors, sessions; all internal bookkeeping tables collapse into one `_internal` bucket) plus a light health verdict (`ok`/`warning`/`error`) drawn from the same checks as `axil doctor`. Performs zero writes — use it when you only have MCP access and can't shell out to `axil tables`/`axil doctor`.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {}
+            }),
+        },
     ]
 }
 
@@ -331,6 +340,7 @@ pub fn dispatch(db: &Axil, tool_name: &str, args: &Value) -> ToolCallResult {
         "set_preference" => handle_set_preference(db, args),
         "close_session" => handle_close_session(db, args),
         "boot" => handle_boot(db, args),
+        "inspect" => handle_inspect(db, args),
         "code_search" => handle_code_search(db, args),
         "code_context" => handle_code_context(db, args),
         // `dep_docs` / `deps_status` are handled by DocsExtension via
@@ -1045,6 +1055,65 @@ fn handle_boot(db: &Axil, args: &Value) -> ToolCallResult {
     }
 }
 
+/// Read-only census of record types plus a light health verdict.
+///
+/// Answers "what kinds of memory does this brain hold, and is it healthy?"
+/// without any shell access: per-table counts framed as the memory model
+/// (not SQL columns), with every `_`-prefixed bookkeeping table rolled into a
+/// single `_internal` bucket, and the overall `axil doctor` verdict reduced to
+/// its read-only checks. Issues zero writes.
+fn handle_inspect(db: &Axil, _args: &Value) -> ToolCallResult {
+    let tables = match db.tables_with_counts() {
+        Ok(t) => t,
+        Err(e) => return ToolCallResult::error(format!("inspect failed: {e}")),
+    };
+
+    // Roll the user-facing tables out individually, collapsing every
+    // `_`-prefixed bookkeeping table (entities, indexes, dep-docs, …) into one
+    // opaque `_internal` bucket so the census reads as the memory model, not the
+    // physical schema.
+    let mut record_types = serde_json::Map::new();
+    let mut internal_total: usize = 0;
+    let mut total: usize = 0;
+    for (name, count) in &tables {
+        total += count;
+        if name.starts_with('_') {
+            internal_total += count;
+        } else {
+            record_types.insert(name.clone(), json!(count));
+        }
+    }
+    if internal_total > 0 {
+        record_types.insert("_internal".to_string(), json!(internal_total));
+    }
+
+    // `doctor()` is read-only (it only scans and counts); reuse its verdict and
+    // per-check details for the light health summary.
+    let health = match db.doctor() {
+        Ok(report) => {
+            let checks: Vec<Value> = report
+                .checks
+                .iter()
+                .map(|c| {
+                    json!({
+                        "name": c.name,
+                        "status": c.status,
+                        "detail": c.detail,
+                    })
+                })
+                .collect();
+            json!({ "status": report.status, "checks": checks })
+        }
+        Err(e) => json!({ "status": "error", "detail": format!("doctor failed: {e}") }),
+    };
+
+    ToolCallResult::json(&json!({
+        "record_types": record_types,
+        "total_records": total,
+        "health": health,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1170,5 +1239,50 @@ mod tests {
         let names: Vec<String> = tool_definitions().into_iter().map(|d| d.name).collect();
         assert!(names.iter().any(|n| n == "code_search"));
         assert!(names.iter().any(|n| n == "code_context"));
+    }
+
+    #[test]
+    fn inspect_tool_reports_census_and_health() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Axil::open(dir.path().join("inspect.axil")).build().unwrap();
+        // Two user-facing tables plus whatever internal bookkeeping a bare
+        // insert produces (`_`-prefixed rows must collapse, not leak).
+        db.insert("decisions", json!({"summary": "chose redb"})).unwrap();
+        db.insert("decisions", json!({"summary": "chose tantivy"})).unwrap();
+        db.insert("errors", json!({"error": "lock contention"})).unwrap();
+
+        let result = dispatch(&db, "inspect", &json!({}));
+        assert!(result.is_error.is_none(), "inspect returned error: {result:?}");
+        let body = parse_json_payload(&result);
+
+        let record_types = body["record_types"]
+            .as_object()
+            .expect("record_types must be an object");
+        assert_eq!(record_types["decisions"].as_u64(), Some(2));
+        assert_eq!(record_types["errors"].as_u64(), Some(1));
+        // No raw `_`-prefixed table name leaks; internal rows are bucketed.
+        assert!(
+            record_types.keys().all(|k| k == "_internal" || !k.starts_with('_')),
+            "raw internal table leaked into census: {record_types:?}"
+        );
+
+        assert!(body["total_records"].as_u64().unwrap() >= 3);
+        let status = body["health"]["status"]
+            .as_str()
+            .expect("health.status must be a string");
+        assert!(
+            matches!(status, "ok" | "warning" | "error"),
+            "unexpected health status: {status}"
+        );
+        assert!(
+            body["health"]["checks"].is_array(),
+            "health.checks must be an array"
+        );
+    }
+
+    #[test]
+    fn inspect_tool_is_advertised() {
+        let names: Vec<String> = tool_definitions().into_iter().map(|d| d.name).collect();
+        assert!(names.iter().any(|n| n == "inspect"));
     }
 }
