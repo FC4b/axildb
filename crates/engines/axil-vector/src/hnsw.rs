@@ -759,10 +759,12 @@ mod tests {
     }
 
     #[test]
-    fn incremental_matches_rebuild_top1() {
-        // Engine-layer parity: a graph grown purely by incremental `add`s must
-        // return the same top-1 as one built fresh from the same corpus via a
-        // full rebuild. Correctness, not just speed.
+    fn incremental_graph_recall_matches_brute_force() {
+        // Engine-layer correctness: a graph grown purely by incremental `add`s
+        // (never compacted) must still find the true nearest neighbors. The
+        // reference is the DETERMINISTIC brute-force top-k — comparing against a
+        // second rayon-built HNSW graph is flaky under parallel test load, since
+        // both graphs are approximate and independently constructed.
         let n = oracle_n(800);
         let dims = 48;
         let queries = 100;
@@ -773,31 +775,26 @@ mod tests {
         for (id, v) in &corpus {
             incremental.add(id.clone(), v.clone()).unwrap();
         }
+        // The "not just fast" half: incremental adds never dirty the index.
         assert!(!incremental.needs_rebuild());
 
-        // Rebuilt: load all, then force a full graph rebuild.
-        let map: HashMap<RecordId, Vec<f32>> = corpus.iter().cloned().collect();
-        let mut rebuilt = HnswIndex::from_vectors(dims, map);
-        rebuilt.rebuild_if_needed();
-
         let mut query_rng = Rng::new(0xA11);
-        let mut agree = 0usize;
+        let mut total = 0.0f32;
         for _ in 0..queries {
             let q: Vec<f32> = (0..dims).map(|_| query_rng.next_f32()).collect();
-            let a = incremental.search_clean(&q, 1).unwrap();
-            let b = rebuilt.search_clean(&q, 1).unwrap();
-            if let (Some((ia, _)), Some((ib, _))) = (a.first(), b.first()) {
-                if ia == ib {
-                    agree += 1;
-                }
-            }
+            let exact = brute_force_topk(&corpus, &q, 10);
+            let got: Vec<RecordId> = incremental
+                .search_clean(&q, 10)
+                .unwrap()
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect();
+            total += recall_overlap(&got, &exact);
         }
-        // Two independently-constructed HNSW graphs are both approximate, so
-        // demand high — not perfect — top-1 agreement.
-        let rate = agree as f32 / queries as f32;
+        let recall = total / queries as f32;
         assert!(
-            rate >= 0.90,
-            "incremental vs rebuild top-1 agreement {rate:.3} below 0.90"
+            recall >= 0.90,
+            "incremental graph recall@10 {recall:.3} below 0.90"
         );
     }
 }
