@@ -2782,6 +2782,23 @@ enum ScipCommand {
 enum ExtCommand {
     /// List installed WASM plugins and whether each loads.
     List,
+    /// Scaffold a new WASM plugin crate ready to `cargo component build`.
+    /// Emits a detached (own `[workspace]`) cdylib crate with the bundled
+    /// `axil:plugin` WIT, the `sdk::Plugin` authoring layer, and a `lib.rs`
+    /// stub overriding one high-value hook. Needs no database.
+    New {
+        /// Plugin name (kebab-case, e.g. `my-plugin`). Becomes the crate name,
+        /// the plugin id, and the table prefix `_<name>_`.
+        name: String,
+        /// Directory to create the crate in. Defaults to `./<name>`.
+        #[arg(long)]
+        path: Option<PathBuf>,
+        /// Comma-separated host capabilities the plugin will request
+        /// (e.g. `recall,records.write`). Recorded in the generated README so
+        /// the operator knows what to `axil ext grant` after install.
+        #[arg(long)]
+        caps: Option<String>,
+    },
     /// Install a `.wasm` component plugin: validate it loads, then copy it into
     /// the plugins dir. No rebuild.
     Install {
@@ -14199,6 +14216,12 @@ fn atomic_replace_with_rollback(
 fn run_ext(cmd: ExtCommand, db_opt: &Option<PathBuf>, out: &Output) -> Result<i32> {
     use std::sync::Arc;
 
+    // `ext new` only writes files — it must work in a fresh checkout with no
+    // database, so handle it before `require_db` opens anything.
+    if let ExtCommand::New { name, path, caps } = &cmd {
+        return scaffold_plugin(name, path.as_deref(), caps.as_deref(), out);
+    }
+
     let db_path = require_db(db_opt)?;
     // Grants + disabled lists live in the db's own dir, not the process cwd.
     let config = plugin_config_for_db(&db_path);
@@ -14400,7 +14423,242 @@ fn run_ext(cmd: ExtCommand, db_opt: &Option<PathBuf>, out: &Output) -> Result<i3
         ExtCommand::Revoke { key, capability } => {
             set_plugin_cap(&key, &capability, false, &db_path, out)
         }
+        // Handled above `require_db` (needs no DB); unreachable here.
+        ExtCommand::New { .. } => unreachable!("`ext new` is handled before require_db"),
     }
+}
+
+/// The canonical `axil:plugin` WIT contract, bundled into the binary so a
+/// scaffolded plugin carries its own copy and builds detached from this repo.
+#[cfg(feature = "wasm-host")]
+const PLUGIN_WIT: &str = include_str!("../../../../wit/axil-plugin.wit");
+
+/// The single canonical `sdk::Plugin` + `export_plugin!` source. The reference
+/// guest, the conformance guest, and every `ext new` scaffold all consume this
+/// one physical file — there is no second copy of the trait or the macro.
+#[cfg(feature = "wasm-host")]
+const PLUGIN_SDK_RS: &str = include_str!("../../axil-runtime/test-guest/src/sdk.rs");
+
+/// Scaffold a buildable, detached WASM-plugin crate at `dest` (default
+/// `./<name>`). Emits `Cargo.toml` (own `[workspace]`, cdylib, component target
+/// pinned at the bundled WIT), `src/lib.rs` (a `sdk::Plugin` stub overriding
+/// `handle_cli`), `src/sdk.rs` (the canonical authoring layer), `wit/`, a
+/// `build.sh`, a `.gitignore`, and a `README.md` listing requested caps. Needs
+/// no database. The result builds with `cargo component build --release`.
+#[cfg(feature = "wasm-host")]
+fn scaffold_plugin(
+    name: &str,
+    path: Option<&Path>,
+    caps: Option<&str>,
+    out: &Output,
+) -> Result<i32> {
+    // The plugin id is the kebab-case name; the crate name and prefix derive
+    // from it deterministically so install + grant key are predictable.
+    let id = name.trim();
+    if id.is_empty()
+        || !id
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        || id.starts_with('-')
+        || id.ends_with('-')
+    {
+        anyhow::bail!(
+            "invalid plugin name `{name}` — use kebab-case (lowercase letters, \
+             digits, single hyphens), e.g. `my-plugin`"
+        );
+    }
+    // `_<name>_` with hyphens as underscores keeps the prefix a valid, reserved
+    // table namespace the host's prefix jail accepts.
+    let prefix = format!("_{}_", id.replace('-', "_"));
+    let crate_name = id; // cargo accepts hyphens in package names
+
+    let dest = match path {
+        Some(p) => p.to_path_buf(),
+        None => PathBuf::from(id),
+    };
+    if dest.exists() {
+        anyhow::bail!(
+            "`{}` already exists — choose a fresh directory or pass `--path`",
+            dest.display()
+        );
+    }
+
+    let caps_list: Vec<&str> = caps
+        .map(|c| {
+            c.split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // Files.
+    std::fs::create_dir_all(dest.join("src"))
+        .with_context(|| format!("failed to create `{}`", dest.join("src").display()))?;
+    std::fs::create_dir_all(dest.join("wit"))
+        .with_context(|| format!("failed to create `{}`", dest.join("wit").display()))?;
+
+    let cargo_toml = format!(
+        r#"# {id} — an Axil WASM plugin (Tier-2 Extension).
+#
+# Detached from any parent workspace (own `[workspace]`) because it builds for
+# wasm32-wasip1 via `cargo component`, not as a native member.
+[package]
+name = "{crate_name}"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+wit-bindgen-rt = {{ version = "0.41", features = ["bitflags"] }}
+
+[lib]
+crate-type = ["cdylib"]
+
+[package.metadata.component]
+package = "axil:{id}"
+
+[package.metadata.component.target]
+# The bundled copy of Axil's `axil:plugin` WIT — keeps the build self-contained.
+path = "wit"
+world = "plugin"
+
+[package.metadata.component.dependencies]
+
+[profile.release]
+codegen-units = 1
+opt-level = "s"
+strip = true
+"#
+    );
+    std::fs::write(dest.join("Cargo.toml"), cargo_toml)
+        .with_context(|| format!("failed to write `{}`", dest.join("Cargo.toml").display()))?;
+
+    let lib_rs = format!(
+        r#"//! {id} — an Axil WASM plugin.
+//!
+//! Implement [`sdk::Plugin`] and override only the hooks you need; every other
+//! method falls back to a "decline / empty / no-op" default. `export_plugin!`
+//! then generates the real `axil:plugin` `Guest` impl and the component export.
+
+#[allow(warnings)]
+mod bindings;
+mod sdk;
+
+use bindings::axil::plugin::types::{{CliInvocation, CliOutput, CliSurface, DispatchCli, PluginError}};
+use sdk::Plugin;
+
+struct Component;
+
+impl Plugin for Component {{
+    fn id() -> String {{
+        "{id}".to_string()
+    }}
+
+    fn table_prefixes() -> Vec<String> {{
+        // This plugin owns tables under `{prefix}` (the host's prefix jail
+        // rejects writes outside it).
+        vec!["{prefix}".to_string()]
+    }}
+
+    fn cli_commands() -> Option<CliSurface> {{
+        Some(CliSurface {{
+            command: "{id}".to_string(),
+            about: "an Axil WASM plugin".to_string(),
+            subcommands: vec![],
+        }})
+    }}
+
+    fn handle_cli(inv: CliInvocation) -> Result<DispatchCli, PluginError> {{
+        Ok(DispatchCli::Handled(CliOutput {{
+            exit_code: 0,
+            stdout: format!("hello from {id}; args={{:?}}", inv.args),
+            stderr: String::new(),
+        }}))
+    }}
+}}
+
+export_plugin!(Component);
+"#
+    );
+    std::fs::write(dest.join("src").join("lib.rs"), lib_rs)
+        .with_context(|| format!("failed to write `{}`", dest.join("src/lib.rs").display()))?;
+
+    // The canonical SDK + WIT, copied verbatim from the bundled sources.
+    std::fs::write(dest.join("src").join("sdk.rs"), PLUGIN_SDK_RS)
+        .with_context(|| format!("failed to write `{}`", dest.join("src/sdk.rs").display()))?;
+    std::fs::write(dest.join("wit").join("axil-plugin.wit"), PLUGIN_WIT)
+        .with_context(|| format!("failed to write `{}`", dest.join("wit/axil-plugin.wit").display()))?;
+
+    let build_sh = format!(
+        "#!/usr/bin/env bash\n\
+         # Build the {id} plugin into a `.wasm` component.\n\
+         # Requires: cargo-component (it provisions the wasm32-wasip1 target itself).\n\
+         set -euo pipefail\n\
+         cd \"$(dirname \"$0\")\"\n\
+         cargo component build --release\n\
+         echo \"built: target/wasm32-wasip1/release/{wasm}.wasm\"\n\
+         echo \"install with: axil ext install target/wasm32-wasip1/release/{wasm}.wasm\"\n",
+        id = id,
+        wasm = crate_name.replace('-', "_"),
+    );
+    std::fs::write(dest.join("build.sh"), build_sh)
+        .with_context(|| format!("failed to write `{}`", dest.join("build.sh").display()))?;
+
+    std::fs::write(dest.join(".gitignore"), "/target\n/src/bindings.rs\nCargo.lock\n")
+        .with_context(|| format!("failed to write `{}`", dest.join(".gitignore").display()))?;
+
+    let caps_section = if caps_list.is_empty() {
+        "This plugin requests no host capabilities — it runs fully sandboxed.\n".to_string()
+    } else {
+        let mut s = String::from(
+            "After install, grant the host capabilities this plugin needs \
+             (deny-by-default):\n\n```sh\n",
+        );
+        for cap in &caps_list {
+            s.push_str(&format!("axil ext grant {id} {cap}\n"));
+        }
+        s.push_str("```\n");
+        s
+    };
+    let readme = format!(
+        "# {id}\n\n\
+         An Axil WASM plugin (Tier-2 Extension). Edit `src/lib.rs`, then:\n\n\
+         ```sh\n\
+         cargo component build --release\n\
+         axil ext install target/wasm32-wasip1/release/{wasm}.wasm\n\
+         axil {id} <args>\n\
+         ```\n\n\
+         ## Capabilities\n\n\
+         {caps_section}\n\
+         ## Authoring\n\n\
+         Implement `sdk::Plugin` in `src/lib.rs` and override only the hooks you \
+         need (`handle_cli`, `handle_mcp`, `boot_block`, `refresh`, \
+         `recall_for_file`, `mcp_tools`). `src/sdk.rs` and `wit/` are the bundled \
+         Axil contract — leave them as-is.\n",
+        id = id,
+        wasm = crate_name.replace('-', "_"),
+        caps_section = caps_section,
+    );
+    std::fs::write(dest.join("README.md"), readme)
+        .with_context(|| format!("failed to write `{}`", dest.join("README.md").display()))?;
+
+    out.print(&json!({
+        "created": id,
+        "path": dest.display().to_string(),
+        "prefix": prefix,
+        "caps": caps_list,
+        "build": "cargo component build --release",
+    }));
+    if !out.quiet {
+        out.status(&format!(
+            "scaffolded plugin `{id}` at `{}` — `cd` in and run `cargo component build --release`",
+            dest.display()
+        ));
+    }
+    Ok(EXIT_OK)
 }
 
 /// Grant or revoke a capability for a plugin by editing `[plugins.<key>]
@@ -17015,5 +17273,101 @@ mod upgrade_helper_tests {
             .contains("new version refused to load"));
         // The original plugin is restored byte-for-byte; the broken upgrade is gone.
         assert_eq!(std::fs::read(&target).unwrap(), b"OLD");
+    }
+}
+
+#[cfg(all(test, feature = "wasm-host"))]
+mod scaffold_plugin_tests {
+    use super::*;
+
+    fn out() -> Output {
+        Output {
+            format: OutputFormat::Json,
+            quiet: true,
+            jsonl: false,
+        }
+    }
+
+    #[test]
+    fn emits_a_complete_buildable_crate() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("myplug");
+        let code = scaffold_plugin("myplug", Some(&dest), Some("recall,records.write"), &out())
+            .expect("scaffold should succeed");
+        assert_eq!(code, EXIT_OK);
+
+        // Every file cargo-component needs to build a detached guest is present.
+        for rel in [
+            "Cargo.toml",
+            "src/lib.rs",
+            "src/sdk.rs",
+            "wit/axil-plugin.wit",
+            "build.sh",
+            ".gitignore",
+            "README.md",
+        ] {
+            assert!(dest.join(rel).exists(), "missing scaffolded file: {rel}");
+        }
+
+        // The bundled SDK + WIT are the canonical copies, byte-for-byte.
+        assert_eq!(
+            std::fs::read_to_string(dest.join("src/sdk.rs")).unwrap(),
+            PLUGIN_SDK_RS
+        );
+        assert_eq!(
+            std::fs::read_to_string(dest.join("wit/axil-plugin.wit")).unwrap(),
+            PLUGIN_WIT
+        );
+
+        let cargo = std::fs::read_to_string(dest.join("Cargo.toml")).unwrap();
+        assert!(cargo.contains("name = \"myplug\""));
+        assert!(cargo.contains("[workspace]"), "must be a detached workspace");
+        assert!(cargo.contains("crate-type = [\"cdylib\"]"));
+        assert!(cargo.contains("package = \"axil:myplug\""));
+        // Component target points at the bundled WIT, not a repo-relative path.
+        assert!(cargo.contains("path = \"wit\""));
+        assert!(!cargo.contains("wasip2"), "no wasip2 lie");
+
+        let lib = std::fs::read_to_string(dest.join("src/lib.rs")).unwrap();
+        assert!(lib.contains("use sdk::Plugin;"));
+        assert!(lib.contains("export_plugin!(Component);"));
+        assert!(lib.contains("\"_myplug_\""), "prefix derived from name");
+
+        // Requested caps land in the README as grant hints.
+        let readme = std::fs::read_to_string(dest.join("README.md")).unwrap();
+        assert!(readme.contains("axil ext grant myplug recall"));
+        assert!(readme.contains("axil ext grant myplug records.write"));
+    }
+
+    #[test]
+    fn hyphenated_name_underscores_the_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("my-plug");
+        scaffold_plugin("my-plug", Some(&dest), None, &out()).unwrap();
+        let lib = std::fs::read_to_string(dest.join("src/lib.rs")).unwrap();
+        assert!(lib.contains("\"_my_plug_\""), "hyphens become underscores in the prefix");
+        let cargo = std::fs::read_to_string(dest.join("Cargo.toml")).unwrap();
+        assert!(cargo.contains("name = \"my-plug\""), "crate name keeps hyphens");
+    }
+
+    #[test]
+    fn rejects_invalid_names() {
+        let dir = tempfile::tempdir().unwrap();
+        for bad in ["", "My-Plug", "-leading", "trailing-", "has space", "under_score"] {
+            let dest = dir.path().join("x");
+            let _ = std::fs::remove_dir_all(&dest);
+            assert!(
+                scaffold_plugin(bad, Some(&dest), None, &out()).is_err(),
+                "name `{bad}` should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn refuses_to_overwrite_an_existing_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("exists");
+        std::fs::create_dir_all(&dest).unwrap();
+        assert!(scaffold_plugin("exists", Some(&dest), None, &out()).is_err());
     }
 }

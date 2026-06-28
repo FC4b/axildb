@@ -8,16 +8,27 @@
 //! that returns an error is propagated with `?`, so the host observes a typed
 //! `plugin-error` — exactly what a denied capability or prefix violation looks
 //! like end-to-end.
+//!
+//! It consumes the shared [`sdk::Plugin`] layer (one physical `sdk.rs`, included
+//! by `#[path]` from the reference guest) and `export_plugin!` — so this fixture
+//! also proves the authoring SDK round-trips every export, not just the minimal
+//! hello plugin.
 
 #[allow(warnings)]
 mod bindings;
 
+// One canonical `sdk.rs` lives in the reference (hello) guest; both guests and
+// `axil ext new`'s scaffold consume that single copy. Including it by path here
+// keeps the conformance fixture honest about the same SDK plugin authors use.
+#[path = "../../test-guest/src/sdk.rs"]
+mod sdk;
+
 use bindings::axil::plugin::host;
 use bindings::axil::plugin::types::{
     CliInvocation, CliOutput, CliSurface, Direction, DispatchCli, DispatchMcp, Hit, LogLevel,
-    McpCall, McpSurface, PluginError, RefreshOpts, RefreshReport,
+    McpCall, PluginError, RefreshOpts, RefreshReport,
 };
-use bindings::exports::axil::plugin::extension::Guest;
+use sdk::Plugin;
 
 struct Component;
 
@@ -33,7 +44,7 @@ fn handled(stdout: String) -> Result<DispatchCli, PluginError> {
     }))
 }
 
-impl Guest for Component {
+impl Plugin for Component {
     fn id() -> String {
         "conformance".to_string()
     }
@@ -52,10 +63,6 @@ impl Guest for Component {
             about: "host-ABI conformance harness".to_string(),
             subcommands: vec![],
         })
-    }
-
-    fn mcp_tools() -> Option<McpSurface> {
-        None
     }
 
     fn handle_cli(inv: CliInvocation) -> Result<DispatchCli, PluginError> {
@@ -154,4 +161,4 @@ impl Guest for Component {
     }
 }
 
-bindings::export!(Component with_types_in bindings);
+export_plugin!(Component);

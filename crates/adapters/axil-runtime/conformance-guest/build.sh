@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Rebuild the conformance-guest WASM component fixture from source.
-# Requires: cargo-component + the wasm32-wasip2 target.
+# Requires: cargo-component (it provisions the wasm32-wasip1 target itself).
 set -euo pipefail
 cd "$(dirname "$0")"
 cargo component build --release
