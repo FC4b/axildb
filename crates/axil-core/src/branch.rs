@@ -42,6 +42,12 @@ fn branch_path(db_path: &Path, name: &str) -> PathBuf {
 ///
 /// The branch is stored at `<db_path>.branch.<name>` with companion files
 /// at `<db_path>.branch.<name>.vec`, etc.
+///
+/// This is a sequential file copy, not a coordinated snapshot: it is
+/// point-in-time consistent only when the database is quiescent (Axil's
+/// single-writer model). A copy taken while another process is mid-write can
+/// capture the core and companion files at slightly different logical points,
+/// so branch when no writer is active for a reliable backup.
 pub fn branch_create(db_path: &Path, name: &str) -> Result<PathBuf> {
     validate_branch_name(name)?;
 
