@@ -10,6 +10,24 @@ description = "CLI binary for Axil — the primary agent interface"
 name = "axil"
 path = "src/main.rs"
 
+# `cargo binstall axildb` resolves the prebuilt archive the release workflow
+# uploads (`.github/workflows/release.yml`) instead of compiling from source.
+# The pkg-url MUST match the archive naming that workflow produces
+# (`axildb-<target>.<ext>`) and the release-plz per-crate tag (`axildb-v<version>`).
+# If you regenerate the release workflow with `dist init`/`dist generate`,
+# let cargo-dist manage this block so the URLs stay in sync with the archive
+# layout, then drop this hand-authored copy.
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/axildb-v{ version }/axildb-{ target }.{ archive-suffix }"
+bin-dir = "axildb-{ target }/{ bin }{ binary-ext }"
+pkg-fmt = "tgz"
+
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-fmt = "zip"
+
+[package.metadata.binstall.overrides.aarch64-pc-windows-msvc]
+pkg-fmt = "zip"
+
 [dependencies]
 axil-core.workspace = true
 axil-bundle.workspace = true

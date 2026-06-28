@@ -39,3 +39,19 @@ jobs:
       # Refresh the baseline so tomorrow compares against today.
       - name: save fresh baseline
         run: scripts/bench-check.sh --save
+
+  vector-oracle:
+    name: HNSW recall oracle (large N)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # The per-PR `test` job runs the recall oracle at the default N=2000 for
+      # fast signal; nightly re-runs the same env-scalable tests at N=20000 in
+      # release so a recall floor that only droops at scale still trips. Tests
+      # are seeded/deterministic and model-free — no dataset, no network.
+      - name: HNSW-vs-brute-force recall at N=20000
+        env:
+          AXIL_ORACLE_N: "20000"
+        run: cargo test -p axil-vector --release recall

@@ -1,16 +1,43 @@
 # Installation
 
-## From crates.io
+## Prebuilt binary (recommended)
+
+A prebuilt `axil` — no Rust toolchain, no multi-minute compile, and the
+**onnxruntime shared library is bundled next to the binary** so vector search
+and embeddings work out of the box on every platform (including Windows):
 
 ```bash
-cargo install axildb
+# macOS / Linux
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/FC4b/axildb/releases/latest/download/axildb-installer.sh | sh
+
+# Windows (PowerShell)
+powershell -c "irm https://github.com/FC4b/axildb/releases/latest/download/axildb-installer.ps1 | iex"
 ```
 
-This installs the `axil` binary with the **default** feature set — every component in the table below except `rerank`, `web-docs`, and `otel`.
+The installers drop `axil` into `~/.axil/bin` (alongside the `~/.axil/models/`
+embedding-model cache) and install an `axil-update` self-updater. This is the
+**default** feature set — every component in the table below except `rerank`,
+`web-docs`, and `otel`.
+
+### Via cargo-binstall
+
+[`cargo binstall`](https://github.com/cargo-bins/cargo-binstall) fetches the
+same prebuilt archive (no source build):
+
+```bash
+cargo binstall axildb
+```
 
 ## From source
 
+`cargo install` and `cargo build` compile from source — they need a C toolchain
+and take a few minutes. Prefer the prebuilt installers above unless you need a
+custom feature set.
+
 ```bash
+cargo install axildb                                            # from crates.io, default features
+
+# from a checkout:
 git clone https://github.com/FC4b/axildb.git
 cd axildb
 cargo install --path crates/adapters/axil-cli                   # default features
@@ -18,6 +45,14 @@ cargo install --path crates/adapters/axil-cli --features full   # everything
 ```
 
 `cargo build --release -p axildb` works too; the binary lands at `target/release/axil`.
+
+> **Windows + ONNX.** A from-source `cargo install axildb` copies only `axil.exe`
+> to `~/.cargo/bin` and leaves the `download-binaries`-produced `onnxruntime.dll`
+> behind in `target/`. The Windows loader then finds a stale system
+> `onnxruntime.dll` and the embedder fails ONNX init
+> (`Failed to initialize ORT API … version [22] is not supported`). See the
+> [Windows + ONNX](#windows--onnx) note below for the fix — or just use the
+> prebuilt installers, which bundle a matching runtime.
 
 ## Picking components
 
@@ -90,6 +125,29 @@ Available models:
 | `bge-small-en-v1.5` | 384 | 33MB | Good (default) |
 | `bge-base-en-v1.5` | 768 | 130MB | Better |
 | `nomic-embed-text-v1.5` | 768 | 130MB | Best |
+
+## Windows + ONNX
+
+The prebuilt installers and `cargo binstall` **bundle a known-good
+`onnxruntime.dll` next to `axil.exe`** in the release archive, so the embedder
+loads the sibling runtime first — no manual DLL copy, and no SmartScreen-free
+guarantee aside (the binaries are provenance-attested but not Authenticode
+code-signed, so an unsigned-publisher SmartScreen prompt is expected on first
+run).
+
+If you instead built from source with `cargo install axildb`, only `axil.exe`
+lands in `~/.cargo/bin` — the `download-binaries`-produced `onnxruntime.dll`
+stays in `target/`, and the Windows loader falls back to a stale system copy
+whose ORT API version `ort` can't use. The fix is to put a matching runtime next
+to the binary:
+
+```powershell
+# copy the runtime the build already downloaded next to the installed binary
+copy target\release\onnxruntime.dll $env:USERPROFILE\.cargo\bin\
+```
+
+Use ONNX Runtime ≥ 1.22 (API 22); `ORT_DYLIB_PATH` does **not** help under the
+`download-binaries` feature. The prebuilt installers avoid all of this.
 
 ## Verify installation
 

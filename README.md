@@ -40,12 +40,30 @@ Your coding agent is brilliant and amnesiac. Every session it re-reads the same 
 
 ## Quick start
 
-**1. Install:**
+**1. Install** — a prebuilt `axil` binary, no toolchain, no ~3-min compile. The archives **bundle a known-good ONNX runtime next to the binary**, so vector search and embeddings work out of the box (including on Windows):
+
+```bash
+# macOS / Linux
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/FC4b/axildb/releases/latest/download/axildb-installer.sh | sh
+
+# Windows (PowerShell)
+powershell -c "irm https://github.com/FC4b/axildb/releases/latest/download/axildb-installer.ps1 | iex"
+
+# or, via cargo-binstall (fetches the same prebuilt archive — no source build)
+cargo binstall axildb
+```
+
+<details>
+<summary><b>Build from source instead</b> (needs a C toolchain; <code>cargo install</code> compiles ONNX)</summary>
 
 ```bash
 cargo install axildb                     # installs the `axil` binary · default features ≈ everything
-# or from source: git clone https://github.com/FC4b/axildb.git && cd axildb && cargo build --release -p axildb
+# or: git clone https://github.com/FC4b/axildb.git && cd axildb && cargo build --release -p axildb
 ```
+
+`cargo install` builds from source and copies only the binary to `~/.cargo/bin` — on Windows it leaves the `download-binaries` `onnxruntime.dll` behind in `target/`, so the embedder fails ONNX init at first use. Prefer the prebuilt installers / `cargo binstall` above, which bundle the runtime. If you must `cargo install`, drop a matching `onnxruntime.dll` (ORT ≥ 1.22) next to `axil.exe`. See [Installation](docs/src/getting-started/installation.md#windows--onnx).
+
+</details>
 
 **2. Wire it into your project** (recommended — agent memory). One command wires Axil into your Claude Code / Cursor / Codex project and indexes your code. From there the agent does the work: hooks inject context before each turn, capture decisions and errors as you go, and write a checkpoint at the end.
 
@@ -70,7 +88,13 @@ axil checkpoint      '{"goal":"ship auth","state":"tests green","next_steps":["w
 
 The DB auto-detects at `.axil/memory.axil`, so everyday commands need no `--db`.
 
-→ Full install options (feature flags, SCIP indexers, manual setup): [Installation](docs/src/getting-started/installation.md). Using Cursor, Windsurf, Codex, or another MCP client? See the [Agent Integration guide](docs/src/agents/claude-code.md) and [MCP Server](docs/src/agents/mcp.md).
+→ Full install options (feature flags, SCIP indexers, manual setup): [Installation](docs/src/getting-started/installation.md).
+
+**Using another editor?** The same one-command setup wires the matching rules file — `axil install --cursor` (`.cursor/rules`), `axil install --windsurf` (`.windsurfrules`), or `axil install --codex` (`AGENTS.md`). For any MCP client, register the stdio server in one step — see the **[MCP Server guide](docs/src/agents/mcp.md)**:
+
+```bash
+claude mcp add axil -- axil --db ./.axil/memory.axil mcp   # the DB is the global --db flag, not positional
+```
 
 <details>
 <summary><b>Path B — standalone CLI</b> (drive Axil directly as a memory store)</summary>

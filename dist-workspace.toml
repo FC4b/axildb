@@ -1,0 +1,65 @@
+# cargo-dist configuration — prebuilt `axil` archives + shell/powershell
+# installers + `cargo binstall` support. Generated workflow lives at
+# .github/workflows/release.yml (run `dist init`/`dist generate` to refresh it).
+#
+# Why this exists: `cargo install axildb` builds from source (~3 min, needs a C
+# toolchain) and on Windows produces an `axil.exe` whose ONNX embedder fails to
+# initialize — `cargo install` copies only the `.exe` to ~/.cargo/bin, leaving
+# the `download-binaries`-produced `onnxruntime.dll` behind in `target/`, so the
+# loader falls back to a stale System32 copy with an incompatible ORT API
+# version. The prebuilt archives below bundle a known-good onnxruntime shared
+# library next to `axil` in every archive, so the loader finds the sibling first
+# and a fresh install needs no manual DLL copy (Strategy A — no Cargo change).
+
+[workspace]
+members = ["cargo:."]
+
+[dist]
+# Pin a stable cargo-dist. Bump deliberately; `dist init` rewrites release.yml.
+cargo-dist-version = "0.31.0"
+# Only ship the publishable CLI crate (binary `axil`); the umbrella facade and
+# library crates are not user-facing artifacts.
+packages = ["axildb"]
+# Generate GitHub Actions CI for releases.
+ci = "github"
+# One-line shell + powershell installers.
+installers = ["shell", "powershell"]
+# Prebuilt targets: x86_64 + aarch64 across the three desktop OSes.
+# NOTE: aarch64-pc-windows-msvc may lack a prebuilt `ort` download-binaries
+# artifact — if the first `dist plan` dry-run can't resolve onnxruntime for it,
+# drop that single triple here (the rest still ship).
+targets = [
+    "x86_64-pc-windows-msvc",
+    "aarch64-pc-windows-msvc",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+]
+# Install alongside the existing `~/.axil/models/` convention.
+install-path = "~/.axil/bin"
+# Ship a self-update path so users can `axil-update` to the next release.
+install-updater = true
+# GitHub build provenance attestations (supply-chain integrity). Code SIGNING
+# (an Authenticode cert) is out of scope for v1 — unsigned Windows binaries show
+# a SmartScreen warning; documented in installation.md.
+github-attestations = true
+# Build each target in its own job for a clean per-triple artifact set.
+precise-builds = true
+# release-plz emits PER-CRATE tags (`axildb-vX.Y.Z`), never a bare `vX`. The
+# release workflow must trigger on that exact pattern or it never fires.
+tag-namespace = "axildb"
+
+# Bundle the onnxruntime shared library `ort`'s `download-binaries` feature
+# drops next to the compiled binary into each archive, so the dynamic loader
+# resolves the sibling first instead of a stale system copy. The filename
+# differs per OS; cargo-dist expands these globs against the build output dir.
+# This is the load-bearing step that fixes the Windows ORT-init failure — verify
+# the exact produced filename per target in the first `dist plan` dry-run.
+include = [
+    "onnxruntime.dll",
+    "libonnxruntime.dylib",
+    "libonnxruntime.so",
+]
+# Don't fail the archive when a given OS lacks the other OSes' lib names.
+auto-includes = false
