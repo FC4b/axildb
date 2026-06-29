@@ -121,6 +121,8 @@ pub use scoring::{
     SignalValues,
 };
 pub use storage::Storage;
+#[cfg(feature = "cdc")]
+pub use storage::{ChangeEntry, SyncMeta};
 
 // Re-exports
 pub use llm::{

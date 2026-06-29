@@ -4837,6 +4837,28 @@ impl Axil {
         &self.storage
     }
 
+    /// Read change-data-capture events from the durable `_changelog` tape, in
+    /// commit order, for changes strictly after `cursor` (a ULID `change_id`).
+    ///
+    /// Pass `None` to read from the oldest retained entry. The `change_id` of
+    /// the last returned entry is the cursor for the next pull. Only available
+    /// with the off-by-default `cdc` feature; without it there is no tape.
+    #[cfg(feature = "cdc")]
+    pub fn changes_since(
+        &self,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<crate::storage::ChangeEntry>> {
+        self.storage.changes_since(cursor, limit)
+    }
+
+    /// Enable or disable full-body (`before`/`after`) capture on the CDC tape.
+    /// Id-only capture is the default; value capture roughly doubles write cost.
+    #[cfg(feature = "cdc")]
+    pub fn set_cdc_capture_values(&self, enabled: bool) {
+        self.storage.set_cdc_capture_values(enabled);
+    }
+
     /// Append one `insert` audit-log entry per record. Mirrors what
     /// `Axil::insert` does inside the per-record path so bulk-import
     /// flows (e.g. SCIP ingest) keep the audit trail complete without

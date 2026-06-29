@@ -49,3 +49,7 @@ llm-http = ["dep:ureq"]
 # loads a local tokenizer.json). Default builds keep the chars/4 heuristic.
 real-tokenizer = ["dep:tokenizers"]
 otel = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp"]
+# Durable, opt-in change-data-capture tape (`_changelog`). Off by default — the
+# default build is byte-identical and incurs zero write-path overhead. The
+# keystone for the future Atlas sync product and cheaper `branch_merge`.
+cdc = []

@@ -24,6 +24,72 @@ const AUDIT_LOG: TableDefinition<&str, &[u8]> = TableDefinition::new("_audit_log
 /// redb table: key (timestamp) → serialized JSON (bytes) for metrics history snapshots.
 const METRICS_HISTORY: TableDefinition<&str, &[u8]> = TableDefinition::new("_metrics_history");
 
+/// redb table: key (ULID `change_id`) → serialized [`ChangeEntry`] (bytes).
+///
+/// Off-by-default change-data-capture tape. Written inside the same write
+/// transaction as the record it describes, so a crash can never desync the two.
+/// The ULID key is itself the replay cursor (ULIDs are monotonic).
+#[cfg(feature = "cdc")]
+const CHANGELOG: TableDefinition<&str, &[u8]> = TableDefinition::new("_changelog");
+
+/// Maximum `_changelog` entries retained before the oldest are pruned in-txn.
+///
+/// Bounds the tape on the existing write path (no separate worker) so an
+/// always-on CDC build can't grow the core file unboundedly. A consumer that
+/// falls further behind than this loses the ability to replay from an old
+/// cursor and must do a full resync.
+#[cfg(feature = "cdc")]
+const MAX_CHANGELOG_ENTRIES: usize = 100_000;
+
+/// A single change-data-capture event on the durable `_changelog` tape.
+///
+/// Default capture is id-only (`before`/`after` are `None`); full-body capture
+/// is opt-in via [`Storage::set_cdc_capture_values`] because serializing both
+/// sides roughly doubles per-write cost.
+#[cfg(feature = "cdc")]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ChangeEntry {
+    /// ULID change identifier — also the monotonic replay cursor.
+    pub change_id: String,
+    /// Mutation kind: `"insert"`, `"update"`, or `"delete"`.
+    pub op: String,
+    /// Table the record belongs to.
+    pub table: String,
+    /// Affected record ID.
+    pub record_id: String,
+    /// Pre-image record body — `Some` only when value capture is enabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before: Option<serde_json::Value>,
+    /// Post-image record body — `Some` only when value capture is enabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<serde_json::Value>,
+}
+
+/// Reserved per-client sync bookkeeping for the future Atlas control plane.
+///
+/// This is a **shape reservation only** — no sync, replication, or push/pull
+/// machinery is built here. It exists so Atlas can adopt a stable, versioned
+/// `_sync_meta` record layout without a later on-disk migration. One row per
+/// `client_id`, keyed in a future `_sync_meta` table; nothing in-tree writes it
+/// yet.
+#[cfg(feature = "cdc")]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SyncMeta {
+    /// Schema version of this record's shape (start at 1).
+    pub version: u32,
+    /// Opaque identifier of the syncing client/replica.
+    pub client_id: String,
+    /// The last `_changelog` cursor (ULID `change_id`) this client has applied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub synced_revision: Option<String>,
+    /// RFC3339 timestamp of the last successful pull, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_pull: Option<String>,
+    /// RFC3339 timestamp of the last successful push, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_push: Option<String>,
+}
+
 /// Backing redb handle — either a writable database (the normal single-writer
 /// process) or a read-only view of a committed-but-unheld file.
 ///
@@ -42,6 +108,10 @@ enum StorageDb {
 /// Low-level storage backend wrapping a `redb` database handle.
 pub struct Storage {
     db: StorageDb,
+    /// When `true` (and the `cdc` feature is on), `_changelog` entries carry the
+    /// full pre/post record body. Off by default — id-only capture.
+    #[cfg(feature = "cdc")]
+    cdc_capture_values: std::sync::atomic::AtomicBool,
 }
 
 impl Storage {
@@ -57,11 +127,15 @@ impl Storage {
             let _ = txn.open_table(SLOW_QUERIES)?;
             let _ = txn.open_table(AUDIT_LOG)?;
             let _ = txn.open_table(METRICS_HISTORY)?;
+            #[cfg(feature = "cdc")]
+            let _ = txn.open_table(CHANGELOG)?;
         }
         txn.commit()?;
 
         Ok(Self {
             db: StorageDb::Writable(db),
+            #[cfg(feature = "cdc")]
+            cdc_capture_values: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -80,6 +154,8 @@ impl Storage {
         let db = ReadOnlyDatabase::open(path.as_ref())?;
         Ok(Self {
             db: StorageDb::ReadOnly(db),
+            #[cfg(feature = "cdc")]
+            cdc_capture_values: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -114,6 +190,17 @@ impl Storage {
         {
             let mut records = txn.open_table(RECORDS)?;
 
+            // Pre-image for CDC value capture (read before the overwrite below).
+            #[cfg(feature = "cdc")]
+            let cdc_before: Option<serde_json::Value> = if self.cdc_capture_values() {
+                records
+                    .get(id)?
+                    .and_then(|g| Record::from_bytes(g.value()).ok())
+                    .map(|r| r.data)
+            } else {
+                None
+            };
+
             // If this ID already exists under a different table, clean up the old index.
             if let Some(guard) = records.get(id)? {
                 let old_bytes: &[u8] = guard.value();
@@ -143,6 +230,16 @@ impl Storage {
             }
             let idx_bytes = serde_json::to_vec(&ids)?;
             idx.insert(record.table.as_str(), idx_bytes.as_slice())?;
+
+            #[cfg(feature = "cdc")]
+            self.append_changelog(
+                &txn,
+                "insert",
+                &record.table,
+                id,
+                cdc_before,
+                self.cdc_capture_values().then(|| record.data.clone()),
+            )?;
         }
         txn.commit()?;
 
@@ -174,6 +271,16 @@ impl Storage {
                     .entry(&record.table)
                     .or_default()
                     .push(record.id.clone());
+
+                #[cfg(feature = "cdc")]
+                self.append_changelog(
+                    &txn,
+                    "insert",
+                    &record.table,
+                    record.id.as_str(),
+                    None,
+                    self.cdc_capture_values().then(|| record.data.clone()),
+                )?;
             }
 
             // Append new IDs to each table's index with dedup.
@@ -221,12 +328,17 @@ impl Storage {
         {
             let mut records = txn.open_table(RECORDS)?;
 
-            // Read the record within the write transaction to get table name.
-            let table_name = match records.get(id.as_str())? {
+            // Read the record within the write transaction to get table name
+            // (and, for CDC value capture, its pre-image body).
+            let (table_name, _cdc_before) = match records.get(id.as_str())? {
                 Some(guard) => {
                     let bytes: &[u8] = guard.value();
                     let record = Record::from_bytes(bytes)?;
-                    record.table
+                    #[cfg(feature = "cdc")]
+                    let before = self.cdc_capture_values().then(|| record.data.clone());
+                    #[cfg(not(feature = "cdc"))]
+                    let before: Option<serde_json::Value> = None;
+                    (record.table, before)
                 }
                 None => return Ok(false),
             };
@@ -243,6 +355,9 @@ impl Storage {
                 let idx_bytes = serde_json::to_vec(&ids)?;
                 idx.insert(table_name.as_str(), idx_bytes.as_slice())?;
             }
+
+            #[cfg(feature = "cdc")]
+            self.append_changelog(&txn, "delete", &table_name, id.as_str(), _cdc_before, None)?;
         }
         txn.commit()?;
 
@@ -286,11 +401,25 @@ impl Storage {
                 None => return Err(AxilError::NotFound(format!("record {id}"))),
             };
 
+            #[cfg(feature = "cdc")]
+            let cdc_before: Option<serde_json::Value> =
+                self.cdc_capture_values().then(|| record.data.clone());
+
             record.data = data;
             record.updated_at = Utc::now();
 
             let bytes = record.to_bytes()?;
             records.insert(id.as_str(), bytes.as_slice())?;
+
+            #[cfg(feature = "cdc")]
+            self.append_changelog(
+                &txn,
+                "update",
+                &record.table,
+                id.as_str(),
+                cdc_before,
+                self.cdc_capture_values().then(|| record.data.clone()),
+            )?;
             record
         };
         txn.commit()?;
@@ -612,6 +741,125 @@ impl Storage {
         Ok(records)
     }
 
+    // ── change-data-capture (cdc feature) ──────────────────────────────
+
+    /// Whether full pre/post record bodies are captured on the `_changelog`
+    /// tape (vs. the default id-only entries).
+    #[cfg(feature = "cdc")]
+    fn cdc_capture_values(&self) -> bool {
+        self.cdc_capture_values
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Enable or disable full-body (`before`/`after`) capture on the
+    /// `_changelog` tape. Id-only capture is the default; enabling value
+    /// capture roughly doubles per-write cost, so it is opt-in.
+    #[cfg(feature = "cdc")]
+    pub fn set_cdc_capture_values(&self, enabled: bool) {
+        self.cdc_capture_values
+            .store(enabled, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Append one `_changelog` entry inside the caller's open write
+    /// transaction, then prune the oldest entries past the retention bound.
+    ///
+    /// Because this runs in the same `txn` that mutates `records`, the change
+    /// event commits atomically with the record — a crash cannot leave one
+    /// without the other.
+    #[cfg(feature = "cdc")]
+    fn append_changelog(
+        &self,
+        txn: &WriteTransaction,
+        op: &str,
+        table: &str,
+        record_id: &str,
+        before: Option<serde_json::Value>,
+        after: Option<serde_json::Value>,
+    ) -> Result<()> {
+        let change_id = ulid::Ulid::new().to_string();
+        let entry = ChangeEntry {
+            change_id: change_id.clone(),
+            op: op.to_string(),
+            table: table.to_string(),
+            record_id: record_id.to_string(),
+            before,
+            after,
+        };
+        let bytes = serde_json::to_vec(&entry)?;
+        let mut log = txn.open_table(CHANGELOG)?;
+        log.insert(change_id.as_str(), bytes.as_slice())?;
+
+        // Self-prune the oldest entries to keep the tape bounded on the write
+        // path. ULID keys sort oldest-first, so removing from the front evicts
+        // the oldest changes.
+        let count = log.len()? as usize;
+        if count > MAX_CHANGELOG_ENTRIES {
+            let to_remove = count - MAX_CHANGELOG_ENTRIES;
+            let mut keys = Vec::with_capacity(to_remove);
+            for entry in log.iter()? {
+                let (key, _): (redb::AccessGuard<'_, &str>, redb::AccessGuard<'_, &[u8]>) = entry?;
+                keys.push(key.value().to_string());
+                if keys.len() >= to_remove {
+                    break;
+                }
+            }
+            for key in &keys {
+                log.remove(key.as_str())?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Ordered range scan over the `_changelog` tape for entries strictly after
+    /// `cursor` (a ULID `change_id`), oldest first. Pass `None` to read from the
+    /// beginning of the retained tape.
+    ///
+    /// The returned `change_id` of the last entry is the cursor to pass on the
+    /// next pull. If the requested cursor has already been pruned past the
+    /// retention bound, the scan resumes from the oldest retained entry — the
+    /// consumer is responsible for detecting the gap (e.g. via `_sync_meta`).
+    #[cfg(feature = "cdc")]
+    pub fn changes_since(&self, cursor: Option<&str>, limit: usize) -> Result<Vec<ChangeEntry>> {
+        let txn = self.begin_read()?;
+        let log = txn.open_table(CHANGELOG)?;
+        let mut out = Vec::new();
+        match cursor {
+            // Exclusive lower bound: skip the cursor key itself.
+            Some(c) => {
+                let bounds: (std::ops::Bound<&str>, std::ops::Bound<&str>) =
+                    (std::ops::Bound::Excluded(c), std::ops::Bound::Unbounded);
+                let range = log.range::<&str>(bounds)?;
+                for entry in range {
+                    let (_, val): (redb::AccessGuard<'_, &str>, redb::AccessGuard<'_, &[u8]>) =
+                        entry?;
+                    out.push(serde_json::from_slice(val.value())?);
+                    if out.len() >= limit {
+                        break;
+                    }
+                }
+            }
+            None => {
+                for entry in log.iter()? {
+                    let (_, val): (redb::AccessGuard<'_, &str>, redb::AccessGuard<'_, &[u8]>) =
+                        entry?;
+                    out.push(serde_json::from_slice(val.value())?);
+                    if out.len() >= limit {
+                        break;
+                    }
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Total number of retained entries on the `_changelog` tape.
+    #[cfg(feature = "cdc")]
+    pub fn changelog_len(&self) -> Result<usize> {
+        let txn = self.begin_read()?;
+        let log = txn.open_table(CHANGELOG)?;
+        Ok(log.len()? as usize)
+    }
+
     // ── helpers ──────────────────────────────────────────────────────
 
     fn read_index<T: ReadableTable<&'static str, &'static [u8]>>(
@@ -778,5 +1026,133 @@ mod tests {
         let storage = Storage::open(&path).unwrap();
         let fetched = storage.get(&id).unwrap().unwrap();
         assert_eq!(fetched.data["persisted"], true);
+    }
+
+    #[cfg(feature = "cdc")]
+    mod cdc {
+        use super::*;
+
+        #[test]
+        fn insert_appends_exactly_one_entry() {
+            let (storage, _dir) = temp_storage();
+            assert_eq!(storage.changelog_len().unwrap(), 0);
+            let r = Record::new("notes", json!({"v": 1}));
+            storage.insert(&r).unwrap();
+            assert_eq!(storage.changelog_len().unwrap(), 1);
+            let changes = storage.changes_since(None, 100).unwrap();
+            assert_eq!(changes.len(), 1);
+            assert_eq!(changes[0].op, "insert");
+            assert_eq!(changes[0].table, "notes");
+            assert_eq!(changes[0].record_id, r.id.to_string());
+            // Id-only capture by default — no bodies.
+            assert!(changes[0].before.is_none());
+            assert!(changes[0].after.is_none());
+        }
+
+        #[test]
+        fn update_appends_exactly_one_entry() {
+            let (storage, _dir) = temp_storage();
+            let r = Record::new("notes", json!({"v": 1}));
+            let id = storage.insert(&r).unwrap();
+            storage.update(&id, json!({"v": 2})).unwrap();
+            assert_eq!(storage.changelog_len().unwrap(), 2);
+            let changes = storage.changes_since(None, 100).unwrap();
+            assert_eq!(changes[1].op, "update");
+            assert_eq!(changes[1].record_id, id.to_string());
+        }
+
+        #[test]
+        fn delete_appends_exactly_one_entry() {
+            let (storage, _dir) = temp_storage();
+            let r = Record::new("notes", json!({"v": 1}));
+            let id = storage.insert(&r).unwrap();
+            storage.delete(&id).unwrap();
+            assert_eq!(storage.changelog_len().unwrap(), 2);
+            let changes = storage.changes_since(None, 100).unwrap();
+            assert_eq!(changes[1].op, "delete");
+            assert_eq!(changes[1].record_id, id.to_string());
+        }
+
+        #[test]
+        fn changes_are_in_commit_order() {
+            let (storage, _dir) = temp_storage();
+            let a = Record::new("t", json!({"n": "a"}));
+            let b = Record::new("t", json!({"n": "b"}));
+            let ida = storage.insert(&a).unwrap();
+            let idb = storage.insert(&b).unwrap();
+            storage.update(&ida, json!({"n": "a2"})).unwrap();
+            storage.delete(&idb).unwrap();
+
+            let changes = storage.changes_since(None, 100).unwrap();
+            let ops: Vec<&str> = changes.iter().map(|c| c.op.as_str()).collect();
+            assert_eq!(ops, vec!["insert", "insert", "update", "delete"]);
+            // ULID cursors are strictly increasing.
+            for w in changes.windows(2) {
+                assert!(w[0].change_id < w[1].change_id);
+            }
+        }
+
+        #[test]
+        fn changes_since_cursor_is_exclusive() {
+            let (storage, _dir) = temp_storage();
+            for i in 0..5 {
+                storage.insert(&Record::new("t", json!({ "i": i }))).unwrap();
+            }
+            let all = storage.changes_since(None, 100).unwrap();
+            assert_eq!(all.len(), 5);
+            let cursor = &all[1].change_id;
+            let rest = storage.changes_since(Some(cursor), 100).unwrap();
+            // Strictly after index 1 → indices 2,3,4.
+            assert_eq!(rest.len(), 3);
+            assert_eq!(rest[0].change_id, all[2].change_id);
+        }
+
+        #[test]
+        fn value_capture_is_opt_in() {
+            let (storage, _dir) = temp_storage();
+            storage.set_cdc_capture_values(true);
+            let r = Record::new("t", json!({"v": 1}));
+            let id = storage.insert(&r).unwrap();
+            storage.update(&id, json!({"v": 2})).unwrap();
+            let changes = storage.changes_since(None, 100).unwrap();
+            // insert: after = {v:1}
+            assert_eq!(changes[0].after, Some(json!({"v": 1})));
+            // update: before = {v:1}, after = {v:2}
+            assert_eq!(changes[1].before, Some(json!({"v": 1})));
+            assert_eq!(changes[1].after, Some(json!({"v": 2})));
+        }
+
+        #[test]
+        fn record_and_changelog_share_one_txn() {
+            // The changelog entry must commit atomically with the record: after a
+            // reopen, the persisted record and its changelog entry are both present
+            // (or both absent). We assert co-presence across a close/reopen cycle.
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("cdc.axil");
+            let id = {
+                let storage = Storage::open(&path).unwrap();
+                let r = Record::new("t", json!({"v": 1}));
+                storage.insert(&r).unwrap()
+            };
+            let storage = Storage::open(&path).unwrap();
+            assert!(storage.get(&id).unwrap().is_some());
+            let changes = storage.changes_since(None, 100).unwrap();
+            assert_eq!(changes.len(), 1);
+            assert_eq!(changes[0].record_id, id.to_string());
+        }
+
+        #[test]
+        fn batch_insert_appends_one_entry_per_record() {
+            let (storage, _dir) = temp_storage();
+            let recs = vec![
+                Record::new("t", json!({"i": 0})),
+                Record::new("t", json!({"i": 1})),
+                Record::new("t", json!({"i": 2})),
+            ];
+            storage.insert_batch(&recs).unwrap();
+            assert_eq!(storage.changelog_len().unwrap(), 3);
+            let changes = storage.changes_since(None, 100).unwrap();
+            assert!(changes.iter().all(|c| c.op == "insert"));
+        }
     }
 }

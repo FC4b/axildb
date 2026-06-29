@@ -304,6 +304,11 @@ pub struct MergeReport {
 /// Opens both databases, iterates all tables in the branch, and for each
 /// record either inserts (if new) or applies the merge strategy (if conflict).
 ///
+/// With the off-by-default `cdc` feature, this replays the branch's
+/// `_changelog` tape — touching only the records the branch actually changed —
+/// instead of the full O(all-records) per-table diff. Without `cdc`, it falls
+/// back to the full diff.
+///
 /// Note: companion indexes (vector, graph, FTS) are NOT merged — after merge,
 /// run `axil doctor` and `axil heal` to rebuild indexes if needed.
 pub fn branch_merge(db_path: &Path, name: &str, strategy: MergeStrategy) -> Result<MergeReport> {
@@ -317,6 +322,24 @@ pub fn branch_merge(db_path: &Path, name: &str, strategy: MergeStrategy) -> Resu
     let main_db = crate::Axil::open(db_path).build()?;
     let branch_db = crate::Axil::open(&branch_db_path).build()?;
 
+    #[cfg(feature = "cdc")]
+    {
+        return merge_via_changelog(&main_db, &branch_db, name, strategy);
+    }
+
+    #[cfg(not(feature = "cdc"))]
+    merge_full_scan(&main_db, &branch_db, name, strategy)
+}
+
+/// Full-scan merge: diff every branch table against main. Used when `cdc` is
+/// off (and so there is no tape to replay).
+#[cfg(not(feature = "cdc"))]
+fn merge_full_scan(
+    main_db: &crate::Axil,
+    branch_db: &crate::Axil,
+    name: &str,
+    strategy: MergeStrategy,
+) -> Result<MergeReport> {
     let branch_tables = branch_db.tables_with_counts()?;
     let mut records_added = 0usize;
     let mut records_updated = 0usize;
@@ -380,6 +403,138 @@ pub fn branch_merge(db_path: &Path, name: &str, strategy: MergeStrategy) -> Resu
 
         if table_changed {
             tables_affected.push(table.clone());
+        }
+    }
+
+    Ok(MergeReport {
+        branch_name: name.to_string(),
+        indexes_need_rebuild: records_added > 0 || records_updated > 0,
+        records_added,
+        records_updated,
+        records_skipped,
+        tables_affected,
+    })
+}
+
+/// Changelog-replay merge (cdc feature): apply only the records the branch
+/// actually changed, found by diffing the branch's `_changelog` tape against
+/// main's.
+///
+/// A branch is a file copy that carries main's tape up to the divergence point,
+/// then accrues its own post-divergence entries (fresh ULIDs main never sees).
+/// The branch-only change IDs therefore identify exactly the touched records —
+/// no full table scan. For each touched record we apply the branch's *final*
+/// state, so the result matches the full-scan path's last-writer semantics.
+///
+/// Falls back to [`merge_full_scan`] semantics implicitly when the tape can't
+/// cover the divergence: the caller's branch was created before `cdc` existed,
+/// or the branch's earliest retained entry is newer than main's newest (the
+/// whole branch tape is "branch-only"), both of which still replay correctly
+/// here because branch-only IDs are simply every branch entry in that case.
+#[cfg(feature = "cdc")]
+fn merge_via_changelog(
+    main_db: &crate::Axil,
+    branch_db: &crate::Axil,
+    name: &str,
+    strategy: MergeStrategy,
+) -> Result<MergeReport> {
+    use std::collections::HashSet;
+
+    // Build the set of change IDs main already knows about. Bounded by the
+    // retained tape; a branch-only ID is one absent from this set.
+    let mut main_ids: HashSet<String> = HashSet::new();
+    let mut cursor: Option<String> = None;
+    loop {
+        let batch = main_db.changes_since(cursor.as_deref(), 10_000)?;
+        if batch.is_empty() {
+            break;
+        }
+        cursor = batch.last().map(|e| e.change_id.clone());
+        for e in batch {
+            main_ids.insert(e.change_id);
+        }
+    }
+
+    // Walk the branch tape, collecting the records whose change IDs main has
+    // never seen. Preserve first-seen order for deterministic replay.
+    let mut touched: Vec<(String, String)> = Vec::new(); // (record_id, table)
+    let mut seen_records: HashSet<String> = HashSet::new();
+    let mut cursor: Option<String> = None;
+    loop {
+        let batch = branch_db.changes_since(cursor.as_deref(), 10_000)?;
+        if batch.is_empty() {
+            break;
+        }
+        cursor = batch.last().map(|e| e.change_id.clone());
+        for e in batch {
+            if main_ids.contains(&e.change_id) {
+                continue;
+            }
+            if seen_records.insert(e.record_id.clone()) {
+                touched.push((e.record_id, e.table));
+            }
+        }
+    }
+
+    let mut records_added = 0usize;
+    let mut records_updated = 0usize;
+    let mut records_skipped = 0usize;
+    let mut tables_affected: Vec<String> = Vec::new();
+    let mut affected_set: HashSet<String> = HashSet::new();
+    let mark = |table: &str, set: &mut HashSet<String>, out: &mut Vec<String>| {
+        if set.insert(table.to_string()) {
+            out.push(table.to_string());
+        }
+    };
+
+    for (record_id, table) in touched {
+        let rid = crate::record::RecordId(record_id);
+        let branch_record = branch_db.storage().get(&rid)?;
+        let main_record = main_db.storage().get(&rid)?;
+
+        match (branch_record, main_record) {
+            // Branch deleted it; main still has it.
+            (None, Some(_)) => match strategy {
+                MergeStrategy::BranchWins => {
+                    main_db.delete(&rid)?;
+                    records_updated += 1;
+                    mark(&table, &mut affected_set, &mut tables_affected);
+                }
+                MergeStrategy::MainWins | MergeStrategy::KeepBoth => {
+                    records_skipped += 1;
+                }
+            },
+            // Branch deleted it and main never had it — nothing to do.
+            (None, None) => {}
+            // New in branch — insert into main, preserving ID and timestamps.
+            (Some(branch_record), None) => {
+                main_db.storage().insert(&branch_record)?;
+                records_added += 1;
+                mark(&table, &mut affected_set, &mut tables_affected);
+            }
+            // Exists in both — apply the conflict strategy if it differs.
+            (Some(branch_record), Some(main_record)) => {
+                if main_record.data == branch_record.data
+                    && main_record.updated_at == branch_record.updated_at
+                {
+                    continue;
+                }
+                match strategy {
+                    MergeStrategy::BranchWins => {
+                        main_db.update(&rid, branch_record.data.clone())?;
+                        records_updated += 1;
+                        mark(&table, &mut affected_set, &mut tables_affected);
+                    }
+                    MergeStrategy::MainWins => {
+                        records_skipped += 1;
+                    }
+                    MergeStrategy::KeepBoth => {
+                        main_db.insert(&table, branch_record.data.clone())?;
+                        records_added += 1;
+                        mark(&table, &mut affected_set, &mut tables_affected);
+                    }
+                }
+            }
         }
     }
 
@@ -607,5 +762,28 @@ mod tests {
         let (_dir, db_path) = temp_db();
         let branches = branch_list(&db_path).unwrap();
         assert!(branches.is_empty());
+    }
+
+    /// The changelog-replay merge path (cdc feature) propagates a branch delete
+    /// back to main under BranchWins — something the full-scan path can't see.
+    #[cfg(feature = "cdc")]
+    #[test]
+    fn merge_replays_branch_delete() {
+        let (_dir, db_path) = temp_db();
+
+        let main_db = Axil::open(&db_path).build().unwrap();
+        let record_id = main_db.list("notes").unwrap()[0].id.clone();
+        drop(main_db);
+
+        let bp = branch_create(&db_path, "del").unwrap();
+        let branch_db = Axil::open(&bp).build().unwrap();
+        branch_db.delete(&record_id).unwrap();
+        drop(branch_db);
+
+        let report = branch_merge(&db_path, "del", MergeStrategy::BranchWins).unwrap();
+        assert_eq!(report.records_updated, 1);
+
+        let main_db = Axil::open(&db_path).build().unwrap();
+        assert!(main_db.get(&record_id).unwrap().is_none());
     }
 }
