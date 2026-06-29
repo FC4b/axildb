@@ -565,7 +565,7 @@ fn healing_config_set_via_api() {
     assert!((cfg.healing.compact_live_ratio_threshold - 0.5).abs() < f64::EPSILON);
 }
 
-// ── T2: reverse-orphan (torn insert) detection + heal ───────────────────
+// ── reverse-orphan (torn insert) detection + heal ──────────────────────
 
 /// Deterministic 4-dim mock embedder (no ONNX model needed). Mirrors the
 /// `FrontWindowEmbedder` used in `intelligent_db.rs` so missing-embedding

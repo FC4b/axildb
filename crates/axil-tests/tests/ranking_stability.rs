@@ -1,6 +1,6 @@
 //! Ranking-stability and storage-invariant property tests.
 //!
-//! T3 made RRF fusion + final-sort deterministic. The unit/proptest coverage
+//! RRF fusion and final-sort are deterministic. The unit/proptest coverage
 //! for the fusion comparators themselves lives next to the private
 //! `reciprocal_rank_fusion` fn inside `axil-core::query` (it can't be reached
 //! from here). This file holds the cross-cutting *storage invariant* proptest:
