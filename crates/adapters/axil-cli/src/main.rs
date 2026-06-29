@@ -12758,7 +12758,13 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
 
             match command {
                 BranchCommand::Create { name } => {
-                    let branch_path = axil_core::branch_create(&db_path, &name)
+                    // Open the live handle so the branch is point-in-time
+                    // consistent: holding it takes redb's exclusive write lock
+                    // (no other process can mutate), and `branch_create`
+                    // flushes the engines and closes the handles before copying.
+                    let db = open_with_all_detected(&db_path)?;
+                    let branch_path = db
+                        .branch_create(&name)
                         .context("failed to create branch")?;
                     out.print(&json!({
                         "branch": name,

@@ -3113,6 +3113,64 @@ impl Axil {
         &self.path
     }
 
+    /// Flush every engine's buffered state to its backing file.
+    ///
+    /// Most engines commit each write synchronously, so this is a no-op for
+    /// them; the Tantivy FTS engine buffers documents and overrides
+    /// [`Engine::flush`] to commit. Called before [`Axil::branch_create`] copies
+    /// the companion files so each one reflects every committed record.
+    fn flush_engines(&self) -> Result<()> {
+        for plugin in &self.plugins {
+            plugin.flush()?;
+        }
+        if let Some(ref v) = self.vector_index {
+            v.flush()?;
+        }
+        if let Some(ref g) = self.graph_index {
+            g.flush()?;
+        }
+        if let Some(ref ts) = self.timeseries_index {
+            ts.flush()?;
+        }
+        if let Some(ref f) = self.fts_index {
+            f.flush()?;
+        }
+        Ok(())
+    }
+
+    /// Create a point-in-time-consistent branch from this live handle.
+    ///
+    /// A branch is a file-level copy of the core `.axil` plus every companion
+    /// file ([`branch_create`](crate::branch::branch_create) documents the
+    /// layout). Driving it from the live handle makes the copy internally
+    /// consistent under Axil's single-writer model:
+    ///
+    /// 1. While this handle is open it holds redb's **exclusive** OS write lock,
+    ///    so no other process can mutate the database.
+    /// 2. [`flush_engines`](Self::flush_engines) commits any buffered engine
+    ///    state (notably the FTS index) so every companion file is current.
+    /// 3. The handle is then **dropped**, releasing the OS lock, and only then
+    ///    are the files copied. On Windows, redb holds a byte-range lock on the
+    ///    core file for the lifetime of the [`Database`], so an open file cannot
+    ///    be copied (`fs::copy` fails with a sharing-violation); the
+    ///    flush-then-close-then-copy sequence is what makes this work
+    ///    cross-platform. Single-writer means a brief in-process quiesce is
+    ///    sufficient — there is no need to hold the OS lock during the byte copy.
+    ///
+    /// Taking `self` by value enforces at the type level that no mutation method
+    /// can run on this handle once the branch operation has begun.
+    pub fn branch_create(self, name: &str) -> Result<PathBuf> {
+        // Validate before flushing/closing so a bad name is a cheap rejection.
+        crate::branch::validate_branch_name(name)?;
+        self.flush_engines()?;
+        let db_path = self.path.clone();
+        // Drop every redb handle (core + companions) so the files are unlocked
+        // for copying. This is the quiesce point: no writer is active and all
+        // committed state is on disk.
+        drop(self);
+        crate::branch::copy_branch_files(&db_path, name)
+    }
+
     /// List all files belonging to this database (core + companions).
     pub fn files(&self) -> Vec<PathBuf> {
         self.files_with_roles()

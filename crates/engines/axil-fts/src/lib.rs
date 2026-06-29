@@ -129,6 +129,14 @@ impl Engine for FtsEngine {
     fn on_record_delete(&self, id: &RecordId) -> Result<()> {
         self.index.remove_document(id)
     }
+
+    /// Flush the Tantivy write buffer so the on-disk index reflects every
+    /// document indexed so far. The per-record `index_text`/`on_record_*` paths
+    /// already commit, but a caller copying the `.fts` directory needs a hard
+    /// guarantee the segments on disk are current.
+    fn flush(&self) -> Result<()> {
+        self.index.commit()
+    }
 }
 
 impl SearchIndex for FtsEngine {

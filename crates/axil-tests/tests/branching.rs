@@ -2,6 +2,8 @@
 
 use axil_core::branch::{branch_create, branch_delete, branch_diff, branch_list};
 use axil_core::Axil;
+use axil_fts::AxilBuilderFtsExt;
+use axil_vector::AxilBuilderVectorExt;
 use serde_json::json;
 use tempfile::TempDir;
 
@@ -162,4 +164,75 @@ fn diff_detects_new_table_in_branch() {
         "expected 'experiments' in new_tables: {:?}",
         diff.new_tables
     );
+}
+
+// ── Point-in-time consistency ──────────────────────────────────────────────
+
+/// A branch taken from the live handle is internally consistent: the core
+/// record count must match what both the vector and FTS companion indexes
+/// reflect. This exercises the cross-platform copy path — on Windows redb holds
+/// a byte-range lock on an open core file, so `Axil::branch_create` must flush
+/// the engines and close every handle before copying.
+#[test]
+fn live_branch_is_internally_consistent() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("test.axil");
+
+    const DIMS: usize = 4;
+    const N: usize = 8;
+
+    let db = Axil::open(&path)
+        .with_vector(DIMS)
+        .unwrap()
+        .with_fts_engine()
+        .unwrap()
+        .build()
+        .unwrap();
+
+    // Insert N records, each with a unique FTS term and a manual vector. The
+    // insert path auto-indexes the text field for FTS; add a vector per record.
+    let mut ids = Vec::with_capacity(N);
+    for i in 0..N {
+        let rec = db
+            .insert("notes", json!({"text": format!("alpharecord{i}")}))
+            .unwrap();
+        db.add_vector(&rec.id, &[i as f32, 1.0, 0.0, 0.0]).unwrap();
+        ids.push(rec.id);
+    }
+
+    // Branch from the live handle (consumes it: flush engines, close, copy).
+    let bp = db.branch_create("snap").unwrap();
+    assert!(bp.exists(), "branch core file should exist");
+
+    // Reopen the branch with the same engines and verify all three stores agree.
+    let branch = Axil::open(&bp)
+        .with_vector(DIMS)
+        .unwrap()
+        .with_fts_engine()
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let core_count = branch.list("notes").unwrap().len();
+    assert_eq!(core_count, N, "branch core should hold every record");
+
+    // Vector index: every record must be searchable by its own embedding.
+    for (i, id) in ids.iter().enumerate() {
+        let hits = branch
+            .similar_to_vector(&[i as f32, 1.0, 0.0, 0.0], N)
+            .unwrap();
+        assert!(
+            hits.iter().any(|(r, _)| r.id == *id),
+            "vector index in branch missing record {id}"
+        );
+    }
+
+    // FTS index: every record's unique term must resolve in the branch.
+    for (i, id) in ids.iter().enumerate() {
+        let hits = branch.search_text(&format!("alpharecord{i}"), N).unwrap();
+        assert!(
+            hits.iter().any(|(r, _)| r.id == *id),
+            "FTS index in branch missing record {id}"
+        );
+    }
 }

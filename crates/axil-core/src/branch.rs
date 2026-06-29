@@ -43,14 +43,26 @@ fn branch_path(db_path: &Path, name: &str) -> PathBuf {
 /// The branch is stored at `<db_path>.branch.<name>` with companion files
 /// at `<db_path>.branch.<name>.vec`, etc.
 ///
-/// This is a sequential file copy, not a coordinated snapshot: it is
-/// point-in-time consistent only when the database is quiescent (Axil's
-/// single-writer model). A copy taken while another process is mid-write can
-/// capture the core and companion files at slightly different logical points,
-/// so branch when no writer is active for a reliable backup.
+/// This copies the files **off a path** without opening the database, so it is
+/// point-in-time consistent only when the database is already quiescent (no
+/// writer active). For a guaranteed-consistent branch from a live process,
+/// prefer [`Axil::branch_create`](crate::Axil::branch_create), which flushes the
+/// engines and closes the handles before copying.
+///
+/// On Windows this also requires that no live [`Axil`](crate::Axil) handle holds
+/// the core file open: redb takes a byte-range lock for the lifetime of the
+/// `Database`, so `fs::copy` of a held-open file fails with a sharing violation.
 pub fn branch_create(db_path: &Path, name: &str) -> Result<PathBuf> {
     validate_branch_name(name)?;
+    copy_branch_files(db_path, name)
+}
 
+/// Copy the core `.axil` and every companion file/dir to the branch location.
+///
+/// The caller must have already validated `name` and ensured the database is
+/// quiescent (no open writer). Shared copy step behind both the free
+/// [`branch_create`] function and [`Axil::branch_create`](crate::Axil::branch_create).
+pub(crate) fn copy_branch_files(db_path: &Path, name: &str) -> Result<PathBuf> {
     let dest = branch_path(db_path, name);
     if dest.exists() {
         return Err(AxilError::plugin(format!(
@@ -223,7 +235,7 @@ pub fn branch_diff(db_path: &Path, name: &str) -> Result<BranchDiff> {
 }
 
 /// Validate branch name: alphanumeric, hyphens, underscores only.
-fn validate_branch_name(name: &str) -> Result<()> {
+pub(crate) fn validate_branch_name(name: &str) -> Result<()> {
     if name.is_empty() {
         return Err(AxilError::InvalidQuery(
             "branch name cannot be empty".to_string(),
