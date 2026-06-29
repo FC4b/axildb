@@ -284,7 +284,14 @@ impl HnswIndex {
             .iter()
             .map(|(id, v)| (id.clone(), cosine_sim(query, v)))
             .collect();
-        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        // Tie-break equal similarities by RecordId so results are byte-stable
+        // across runs (self.vectors is a HashMap with nondeterministic order) —
+        // the same determinism guarantee the fusion path carries.
+        scored.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0.cmp(&b.0))
+        });
         scored.truncate(top_k);
         scored
     }
@@ -768,6 +775,30 @@ mod tests {
                 "search returned a tombstoned id {id:?}"
             );
         }
+    }
+
+    #[test]
+    fn brute_force_breaks_ties_by_id() {
+        // Two records share an identical vector → identical similarity to any
+        // query, so only the RecordId tie-break decides their order. Inserted
+        // in descending id order to defeat any incidental insertion ordering.
+        let mut index = HnswIndex::new(4);
+        index
+            .add(RecordId("id-c".to_string()), vec![1.0, 0.0, 0.0, 0.0])
+            .unwrap();
+        index
+            .add(RecordId("id-b".to_string()), vec![1.0, 0.0, 0.0, 0.0])
+            .unwrap();
+        index
+            .add(RecordId("id-a".to_string()), vec![0.0, 1.0, 0.0, 0.0])
+            .unwrap();
+        let res = index.brute_force(&[1.0, 0.0, 0.0, 0.0], 2);
+        let ids: Vec<&str> = res.iter().map(|(id, _)| id.0.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["id-b", "id-c"],
+            "tied similarities must order by ascending RecordId"
+        );
     }
 
     #[test]
