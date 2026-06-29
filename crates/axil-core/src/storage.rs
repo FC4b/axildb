@@ -121,6 +121,14 @@ pub struct Storage {
     /// full pre/post record body. Off by default — id-only capture.
     #[cfg(feature = "cdc")]
     cdc_capture_values: std::sync::atomic::AtomicBool,
+    /// Monotonic ULID source for `_changelog` cursors. `ulid::Generator`
+    /// guarantees each id is strictly greater than the last even within one
+    /// millisecond — the property a resumable CDC cursor needs. Plain
+    /// `Ulid::new()` would let two same-millisecond changes sort out of order,
+    /// so a consumer could skip one past an exclusive cursor and merge-replay
+    /// could reorder two same-ms updates to the same record.
+    #[cfg(feature = "cdc")]
+    changelog_cursor: std::sync::Mutex<ulid::Generator>,
     /// Optional encryption-at-rest cipher for core record bodies. When `Some`
     /// (and the `encryption` feature is on), each record body is sealed with
     /// XChaCha20-Poly1305 before it is written to the `records` table and
@@ -154,6 +162,8 @@ impl Storage {
             db: StorageDb::Writable(db),
             #[cfg(feature = "cdc")]
             cdc_capture_values: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(feature = "cdc")]
+            changelog_cursor: std::sync::Mutex::new(ulid::Generator::new()),
             #[cfg(feature = "encryption")]
             cipher: None,
         })
@@ -176,6 +186,8 @@ impl Storage {
             db: StorageDb::ReadOnly(db),
             #[cfg(feature = "cdc")]
             cdc_capture_values: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(feature = "cdc")]
+            changelog_cursor: std::sync::Mutex::new(ulid::Generator::new()),
             #[cfg(feature = "encryption")]
             cipher: None,
         })
@@ -847,6 +859,22 @@ impl Storage {
             .store(enabled, std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// Next monotonic `_changelog` cursor — strictly increasing even within one
+    /// millisecond. On the astronomically rare per-millisecond random overflow,
+    /// falls back to a fresh ULID (a single out-of-order id beats dropping the
+    /// change; the next call re-establishes order).
+    #[cfg(feature = "cdc")]
+    fn next_change_id(&self) -> String {
+        let mut generator = match self.changelog_cursor.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        match generator.generate() {
+            Ok(ulid) => ulid.to_string(),
+            Err(_) => ulid::Ulid::new().to_string(),
+        }
+    }
+
     /// Append one `_changelog` entry inside the caller's open write
     /// transaction, then prune the oldest entries past the retention bound.
     ///
@@ -863,7 +891,7 @@ impl Storage {
         before: Option<serde_json::Value>,
         after: Option<serde_json::Value>,
     ) -> Result<()> {
-        let change_id = ulid::Ulid::new().to_string();
+        let change_id = self.next_change_id();
         let entry = ChangeEntry {
             change_id: change_id.clone(),
             op: op.to_string(),
@@ -1214,6 +1242,25 @@ mod tests {
     #[cfg(feature = "cdc")]
     mod cdc {
         use super::*;
+
+        #[test]
+        fn changelog_cursor_is_strictly_monotonic() {
+            // `ulid::Ulid::new()` is NOT monotonic within a millisecond — two
+            // same-ms ids can sort out of order, which would let `changes_since`
+            // skip a change past an exclusive cursor and let merge-replay reorder
+            // two same-ms updates to one record. The monotonic generator forbids
+            // that: every id is strictly greater than the last across rapid calls.
+            let (storage, _dir) = temp_storage();
+            let mut prev = String::new();
+            for _ in 0..2000 {
+                let id = storage.next_change_id();
+                assert!(
+                    id > prev,
+                    "change ids must be strictly increasing: {prev:?} >= {id:?}"
+                );
+                prev = id;
+            }
+        }
 
         #[test]
         fn insert_appends_exactly_one_entry() {
