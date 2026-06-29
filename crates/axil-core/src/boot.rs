@@ -321,8 +321,10 @@ impl Axil {
             .map(|c| c.decay.half_life_for(table))
             .unwrap_or(crate::importance::DEFAULT_HALF_LIFE_DAYS);
         records.sort_by(|a, b| {
-            let age_a = (now - a.created_at).num_seconds() as f64 / 86400.0;
-            let age_b = (now - b.created_at).num_seconds() as f64 / 86400.0;
+            // Clamp age at 0 so a future-dated (clock-skewed) record can't get a
+            // >1 decay factor and jump to the top of the ranking.
+            let age_a = ((now - a.created_at).num_seconds() as f64 / 86400.0).max(0.0);
+            let age_b = ((now - b.created_at).num_seconds() as f64 / 86400.0).max(0.0);
             let ia = crate::importance::effective_importance(&a.data, age_a, half_life);
             let ib = crate::importance::effective_importance(&b.data, age_b, half_life);
             ib.partial_cmp(&ia).unwrap_or(std::cmp::Ordering::Equal)

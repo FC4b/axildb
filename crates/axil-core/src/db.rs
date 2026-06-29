@@ -1387,11 +1387,18 @@ impl Axil {
                     .map(|t| embedder.embed(t))
                     .collect::<Result<Vec<_>>>()
             })?;
+            if vectors.len() != chunk.len() {
+                return Err(AxilError::plugin(format!(
+                    "embedder returned {} vectors for {} texts — refusing to \
+                     silently drop the remainder",
+                    vectors.len(),
+                    chunk.len()
+                )));
+            }
             let batch: Vec<(RecordId, &[f32])> = chunk
                 .iter()
-                .enumerate()
-                .filter(|(i, _)| *i < vectors.len())
-                .map(|(i, (id, _))| ((*id).clone(), vectors[i].as_slice()))
+                .zip(&vectors)
+                .map(|((id, _), v)| ((*id).clone(), v.as_slice()))
                 .collect();
             vi.add_batch(&batch)?;
         }
@@ -2470,11 +2477,9 @@ impl Axil {
     ///
     /// Incremental inserts keep the live graph searchable, so deletes only
     /// accumulate tombstoned nodes; this reclaims them in one rebuild once they
-    /// outweigh the live set enough to matter. Returns `Ok(true)` when a
-    /// compaction ran, `Ok(false)` when the ratio was below threshold or there
-    /// is no vector index. Returns the number of tombstones reclaimed (`0`
-    /// when no compaction ran). Intended for the background worker — off the
-    /// write path.
+    /// outweigh the live set enough to matter. Returns the number of tombstones
+    /// reclaimed (`0` when the ratio was below threshold or there is no vector
+    /// index). Intended for the background worker — off the write path.
     pub fn compact_vector_index_if_needed(&self, threshold: f64) -> Result<usize> {
         let Some(ref vi) = self.vector_index else {
             return Ok(0);
