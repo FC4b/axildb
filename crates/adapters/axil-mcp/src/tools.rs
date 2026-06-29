@@ -301,6 +301,20 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
                 "properties": {}
             }),
         },
+        // ─── Pull-based cross-agent delta (event-log feature only) ───
+        #[cfg(feature = "event-log")]
+        ToolDefinition {
+            name: "recall_delta".into(),
+            description: "Pull committed semantic events that happened after a cursor, oldest first. Surfaces high-signal cross-agent changes — a belief was revised, a decision superseded, an error fixed, a checkpoint written — so a second agent can ask 'what changed since I last looked' without re-scanning. Each event carries a monotonic `cursor`; pass the last one back in as `since_cursor` to resume. `exclude_agent` drops events written by that agent (e.g. skip your own). Returns committed facts only — it does not read record bodies and does not relax cross-agent session isolation; resolve a returned `record_id` through the normal access path.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "since_cursor": {"type": "string", "description": "Return only events strictly after this cursor. Omit to read from the oldest retained event."},
+                    "exclude_agent": {"type": "string", "description": "Drop events tagged with this agent_id (e.g. your own)."},
+                    "limit": {"type": "integer", "description": "Max events to return (default 50)."}
+                }
+            }),
+        },
     ]
 }
 
@@ -341,6 +355,8 @@ pub fn dispatch(db: &Axil, tool_name: &str, args: &Value) -> ToolCallResult {
         "close_session" => handle_close_session(db, args),
         "boot" => handle_boot(db, args),
         "inspect" => handle_inspect(db, args),
+        #[cfg(feature = "event-log")]
+        "recall_delta" => handle_recall_delta(db, args),
         "code_search" => handle_code_search(db, args),
         "code_context" => handle_code_context(db, args),
         // `dep_docs` / `deps_status` are handled by DocsExtension via
@@ -1114,6 +1130,34 @@ fn handle_inspect(db: &Axil, _args: &Value) -> ToolCallResult {
     }))
 }
 
+/// Pull-based "what changed since I last looked" over the durable semantic
+/// event log. Returns committed facts only — never another agent's private
+/// record body — so it surfaces cross-agent signals without relaxing session
+/// isolation. The trailing `cursor` is the resume point for the next pull.
+#[cfg(feature = "event-log")]
+fn handle_recall_delta(db: &Axil, args: &Value) -> ToolCallResult {
+    let since = args.get("since_cursor").and_then(|v| v.as_str());
+    let exclude_agent = args.get("exclude_agent").and_then(|v| v.as_str());
+    let limit = args
+        .get("limit")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(50)
+        .clamp(1, 1000) as usize;
+
+    match db.recall_delta(since, exclude_agent, limit) {
+        Ok(events) => {
+            let next_cursor = events.last().map(|e| e.cursor.clone());
+            let v = serde_json::to_value(&events).unwrap_or(json!([]));
+            ToolCallResult::json(&json!({
+                "events": v,
+                "next_cursor": next_cursor,
+                "count": events.len(),
+            }))
+        }
+        Err(e) => ToolCallResult::error(format!("recall_delta failed: {e}")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1284,5 +1328,46 @@ mod tests {
     fn inspect_tool_is_advertised() {
         let names: Vec<String> = tool_definitions().into_iter().map(|d| d.name).collect();
         assert!(names.iter().any(|n| n == "inspect"));
+    }
+
+    #[cfg(feature = "event-log")]
+    #[test]
+    fn recall_delta_tool_is_advertised_and_filters() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Axil::open(dir.path().join("delta.axil")).build().unwrap();
+        db.set_event_log_enabled(true);
+
+        // The tool is in the advertised surface when the feature is on.
+        let names: Vec<String> = tool_definitions().into_iter().map(|d| d.name).collect();
+        assert!(names.iter().any(|n| n == "recall_delta"));
+
+        // Two allowlisted events by different agents.
+        db.insert(
+            "errors",
+            json!({"error": "a", "fix": "f", "_agent_id": "agent-a"}),
+        )
+        .unwrap();
+        db.insert(
+            "errors",
+            json!({"error": "b", "fix": "f", "_agent_id": "agent-b"}),
+        )
+        .unwrap();
+
+        // Full pull returns both events plus a resumable cursor.
+        let all = dispatch(&db, "recall_delta", &json!({}));
+        assert!(all.is_error.is_none(), "recall_delta errored: {all:?}");
+        let body = parse_json_payload(&all);
+        assert_eq!(body["count"].as_u64(), Some(2));
+        assert!(body["next_cursor"].is_string());
+
+        // exclude_agent drops that agent's event.
+        let filtered = dispatch(&db, "recall_delta", &json!({"exclude_agent": "agent-a"}));
+        let body = parse_json_payload(&filtered);
+        assert_eq!(body["count"].as_u64(), Some(1));
+        assert_eq!(
+            body["events"][0]["agent_id"].as_str(),
+            Some("agent-b"),
+            "exclude_agent must drop agent-a's event"
+        );
     }
 }

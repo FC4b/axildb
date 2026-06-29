@@ -95,6 +95,12 @@ impl<'a> AxilWorker<'a> {
         let stale_detected = self.detect_stale();
         let vectors_compacted = self.compact_vector_index();
 
+        // The maintenance thread owns the durable event-log tape's bound: keep it
+        // off the per-write path so an always-on event log can't grow the core
+        // file unboundedly. No-op when the feature is off or the tape is empty.
+        #[cfg(feature = "event-log")]
+        self.trim_event_log();
+
         // Brain consolidation tasks.
         let (stale_beliefs, candidate_procedures, candidate_preferences, duplicate_clusters) =
             if self.brain_mode {
@@ -318,6 +324,24 @@ impl<'a> AxilWorker<'a> {
         self.db
             .compact_vector_index_if_needed(threshold)
             .unwrap_or(0)
+    }
+
+    /// Trim the durable semantic event-log tape to its retention bound.
+    ///
+    /// Best-effort and off the write path. The bound reuses the audit log's
+    /// configured `max_audit_log_entries` (default 10k) so the two background
+    /// tapes share one tunable; a consumer that falls further behind than this
+    /// must do a full re-pull from the oldest retained cursor.
+    #[cfg(feature = "event-log")]
+    fn trim_event_log(&self) {
+        let max = std::env::current_dir()
+            .ok()
+            .and_then(|cwd| crate::config::load_config_from(&cwd).ok())
+            .map(|c| c.healing.metrics.max_audit_log_entries)
+            .unwrap_or_else(|| {
+                crate::config::MetricsHealingConfig::default().max_audit_log_entries
+            });
+        let _ = self.db.trim_event_log(max);
     }
 
     // ── Brain consolidation tasks ──────────────────────

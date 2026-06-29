@@ -128,6 +128,9 @@ web-docs = ["deps", "axil-docs/web-docs"]
 memory = ["dep:axil-memory"]
 llm-http = ["axil-core/llm-http"]
 otel = ["axil-core/otel"]
+# Durable semantic event log + `recall_delta` (pull-based cross-agent delta).
+# Off by default — write-amplifier; enabling it changes no default behavior.
+event-log = ["axil-core/event-log", "axil-mcp?/event-log"]
 mcp = ["dep:axil-mcp"]
 ql = ["dep:axil-ql", "dep:rustyline"]
 rerank = ["indexer", "axil-indexer/rerank"]

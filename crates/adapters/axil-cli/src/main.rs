@@ -4699,7 +4699,20 @@ fn attach_detected_engines(mut builder: axil_core::AxilBuilder) -> Result<axil_c
 /// Open a database with all detected plugins.
 fn open_with_all_detected(path: &Path) -> Result<Axil> {
     let builder = attach_detected_engines(Axil::open(path))?;
-    builder.build().context("failed to open database")
+    let db = builder.build().context("failed to open database")?;
+    // Honor the `[healing] event_log` config flag (no-op unless the `event-log`
+    // feature is compiled in). Off by default — opt-in write-amplifier.
+    #[cfg(feature = "event-log")]
+    {
+        let cfg = path
+            .parent()
+            .and_then(|d| axil_core::config::load_config_from(d).ok())
+            .unwrap_or_default();
+        if cfg.healing.event_log {
+            db.set_event_log_enabled(true);
+        }
+    }
+    Ok(db)
 }
 
 /// Number of times a hot read command retries the writable open when the
@@ -11264,6 +11277,32 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                 }
             }
 
+            // Recent cross-agent changes from the durable semantic event log.
+            // Off by default (feature-gated, write-amplifier); when enabled this
+            // surfaces what other agents committed — belief revisions, decision
+            // supersessions, error fixes, checkpoint writes — so boot replays
+            // the delta, not just this agent's own history.
+            #[cfg(feature = "event-log")]
+            if db.event_log_enabled() {
+                if let Ok(events) = db.recall_delta(None, None, 10) {
+                    if !events.is_empty() {
+                        let change_vals: Vec<Value> = events
+                            .iter()
+                            .map(|e| {
+                                json!({
+                                    "cursor": e.cursor,
+                                    "kind": e.kind,
+                                    "table": e.table,
+                                    "record_id": e.record_id,
+                                    "agent_id": e.agent_id,
+                                })
+                            })
+                            .collect();
+                        sections.insert("recent_changes".into(), json!(change_vals));
+                    }
+                }
+            }
+
             // Render Extension boot_blocks first so high-signal blocks
             // (e.g. "Resume Here") land before rules / sessions / decisions.
             // Shape is `Array<{id, text}>` — a Map would silently sort
@@ -16635,6 +16674,27 @@ fn boot_to_narrative(data: &Value) -> String {
                 out.push_str(trimmed);
                 out.push_str("\n\n");
             }
+        }
+    }
+
+    // Cross-agent delta from the semantic event log (present only when the
+    // `event-log` feature is enabled and the log is on; absent otherwise, so
+    // this renders nothing by default).
+    if let Some(changes) = data.get("recent_changes").and_then(|v| v.as_array()) {
+        if !changes.is_empty() {
+            out.push_str("## Recent Changes (since last session)\n");
+            for c in changes {
+                let kind = c.get("kind").and_then(|v| v.as_str()).unwrap_or("?");
+                let table = c.get("table").and_then(|v| v.as_str()).unwrap_or("");
+                let rec = c.get("record_id").and_then(|v| v.as_str()).unwrap_or("");
+                match c.get("agent_id").and_then(|v| v.as_str()) {
+                    Some(agent) => {
+                        out.push_str(&format!("- {kind} [{table}] {rec} (by {agent})\n"))
+                    }
+                    None => out.push_str(&format!("- {kind} [{table}] {rec}\n")),
+                }
+            }
+            out.push('\n');
         }
     }
 

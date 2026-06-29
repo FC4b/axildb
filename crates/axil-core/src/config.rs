@@ -402,6 +402,13 @@ pub struct HealingConfig {
     pub metrics: MetricsHealingConfig,
     /// Auto-supersede similarity threshold.
     pub supersede_similarity_threshold: f64,
+    /// Enable the durable semantic event log (the `recall_delta` pull feed).
+    ///
+    /// Off by default — it is a write-amplifier (an extra committed write per
+    /// allowlisted event). Only takes effect in builds compiled with the
+    /// `event-log` feature; ignored otherwise so `axil.toml` stays portable
+    /// across feature sets.
+    pub event_log: bool,
 }
 
 impl Default for HealingConfig {
@@ -417,6 +424,7 @@ impl Default for HealingConfig {
             maintenance_interval: "1h".to_string(),
             metrics: MetricsHealingConfig::default(),
             supersede_similarity_threshold: 0.92,
+            event_log: false,
         }
     }
 }
@@ -573,6 +581,7 @@ pub fn default_config_toml() -> String {
 # background_maintenance = false           # periodic auto-heal (for long-running)
 # maintenance_interval = "1h"             # how often to check (if background on)
 # supersede_similarity_threshold = 0.92   # auto-supersede above this
+# event_log = false                        # durable semantic event log (recall_delta); needs `event-log` build
 
 [healing.metrics]
 # snapshot_interval = "daily"              # how often to snapshot for trends

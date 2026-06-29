@@ -553,6 +553,12 @@ mod adapter_tests {
                 names.insert(tool.name);
             }
         }
+        // `recall_delta` only exists under the off-by-default `event-log` feature,
+        // so it is documented in a prose subsection of mcp.md (not the tool
+        // table) to keep the doc portable across feature sets. Exclude it from
+        // the strict table-equality drift check; its presence is asserted
+        // separately by the feature-gated `recall_delta_tool_*` tests.
+        names.remove("recall_delta");
         names
     }
 

@@ -42,6 +42,8 @@ pub mod detectors;
 pub mod diagnostics;
 pub mod entity;
 pub mod error;
+#[cfg(feature = "event-log")]
+pub mod event_log;
 pub mod extension;
 pub mod feedback;
 pub mod importance;
@@ -123,6 +125,8 @@ pub use scoring::{
 pub use storage::Storage;
 #[cfg(feature = "cdc")]
 pub use storage::{ChangeEntry, SyncMeta};
+#[cfg(feature = "event-log")]
+pub use event_log::{EventCursor, SemanticEvent};
 
 // Re-exports
 pub use llm::{

@@ -32,6 +32,15 @@ const METRICS_HISTORY: TableDefinition<&str, &[u8]> = TableDefinition::new("_met
 #[cfg(feature = "cdc")]
 const CHANGELOG: TableDefinition<&str, &[u8]> = TableDefinition::new("_changelog");
 
+/// redb table: key (monotonic ULID cursor) → serialized [`SemanticEvent`] bytes.
+///
+/// Off-by-default semantic event log. Unlike the per-record audit log, this
+/// captures only a curated allowlist of agent-meaningful events and is keyed by
+/// a monotonic ULID cursor (same-millisecond writes still sort in commit order),
+/// so a second agent can pull "what changed since I last looked" deterministically.
+#[cfg(feature = "event-log")]
+const EVENT_LOG: TableDefinition<&str, &[u8]> = TableDefinition::new("_event_log");
+
 /// Maximum `_changelog` entries retained before the oldest are pruned in-txn.
 ///
 /// Bounds the tape on the existing write path (no separate worker) so an
@@ -129,6 +138,8 @@ impl Storage {
             let _ = txn.open_table(METRICS_HISTORY)?;
             #[cfg(feature = "cdc")]
             let _ = txn.open_table(CHANGELOG)?;
+            #[cfg(feature = "event-log")]
+            let _ = txn.open_table(EVENT_LOG)?;
         }
         txn.commit()?;
 
@@ -857,6 +868,102 @@ impl Storage {
     pub fn changelog_len(&self) -> Result<usize> {
         let txn = self.begin_read()?;
         let log = txn.open_table(CHANGELOG)?;
+        Ok(log.len()? as usize)
+    }
+
+    /// Append one serialized [`SemanticEvent`](crate::event_log::SemanticEvent)
+    /// to the `_event_log` tape under a monotonic ULID `cursor` key.
+    ///
+    /// The caller owns cursor generation (via [`Axil`](crate::Axil)'s shared
+    /// monotonic generator) so same-millisecond writes stay strictly ordered.
+    /// The entry commits in its own write transaction — it is durable independent
+    /// of the record write it describes, which is acceptable for a pull-based
+    /// "what changed" feed (a torn write at most drops the trailing event, never
+    /// corrupts the cursor ordering).
+    #[cfg(feature = "event-log")]
+    pub fn append_event(&self, cursor: &str, entry: &[u8]) -> Result<()> {
+        let txn = self.begin_write()?;
+        {
+            let mut log = txn.open_table(EVENT_LOG)?;
+            log.insert(cursor, entry)?;
+        }
+        txn.commit()?;
+        Ok(())
+    }
+
+    /// Ordered range scan over the `_event_log` tape for entries strictly after
+    /// `cursor` (a monotonic ULID), oldest first. Pass `None` to read from the
+    /// oldest retained entry.
+    ///
+    /// The cursor of the last returned entry is what the consumer passes on its
+    /// next pull. If the requested cursor has already been trimmed past the
+    /// retention bound the scan resumes from the oldest retained entry.
+    #[cfg(feature = "event-log")]
+    pub fn events_since(&self, cursor: Option<&str>, limit: usize) -> Result<Vec<Vec<u8>>> {
+        let txn = self.begin_read()?;
+        let log = txn.open_table(EVENT_LOG)?;
+        let mut out = Vec::new();
+        match cursor {
+            // Exclusive lower bound: skip the cursor key itself.
+            Some(c) => {
+                let bounds: (std::ops::Bound<&str>, std::ops::Bound<&str>) =
+                    (std::ops::Bound::Excluded(c), std::ops::Bound::Unbounded);
+                for entry in log.range::<&str>(bounds)? {
+                    let (_, val): (redb::AccessGuard<'_, &str>, redb::AccessGuard<'_, &[u8]>) =
+                        entry?;
+                    out.push(val.value().to_vec());
+                    if out.len() >= limit {
+                        break;
+                    }
+                }
+            }
+            None => {
+                for entry in log.iter()? {
+                    let (_, val): (redb::AccessGuard<'_, &str>, redb::AccessGuard<'_, &[u8]>) =
+                        entry?;
+                    out.push(val.value().to_vec());
+                    if out.len() >= limit {
+                        break;
+                    }
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Trim the `_event_log` tape to keep at most `max` entries (removes the
+    /// oldest). ULID keys sort oldest-first, so the front of the table is evicted.
+    #[cfg(feature = "event-log")]
+    pub fn trim_event_log(&self, max: usize) -> Result<()> {
+        let txn = self.begin_write()?;
+        {
+            let mut log = txn.open_table(EVENT_LOG)?;
+            let count = log.len()? as usize;
+            if count > max {
+                let to_remove = count - max;
+                let mut keys = Vec::with_capacity(to_remove);
+                for entry in log.iter()? {
+                    let (key, _): (redb::AccessGuard<'_, &str>, redb::AccessGuard<'_, &[u8]>) =
+                        entry?;
+                    keys.push(key.value().to_string());
+                    if keys.len() >= to_remove {
+                        break;
+                    }
+                }
+                for key in &keys {
+                    log.remove(key.as_str())?;
+                }
+            }
+        }
+        txn.commit()?;
+        Ok(())
+    }
+
+    /// Total number of retained entries on the `_event_log` tape.
+    #[cfg(feature = "event-log")]
+    pub fn event_log_len(&self) -> Result<usize> {
+        let txn = self.begin_read()?;
+        let log = txn.open_table(EVENT_LOG)?;
         Ok(log.len()? as usize)
     }
 

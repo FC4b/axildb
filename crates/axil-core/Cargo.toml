@@ -53,3 +53,9 @@ otel = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp"]
 # default build is byte-identical and incurs zero write-path overhead. The
 # keystone for the future Atlas sync product and cheaper `branch_merge`.
 cdc = []
+# Durable, opt-in semantic event log (`_event_log`). Off by default — the
+# default build is byte-identical and incurs zero write-path overhead. Captures
+# a curated allowlist of agent-meaningful events (belief revised, decision
+# superseded, error fixed, checkpoint written) under a monotonic ULID cursor so
+# a second agent can pull "what changed since I last looked" via `recall_delta`.
+event-log = []

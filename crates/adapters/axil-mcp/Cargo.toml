@@ -44,3 +44,7 @@ timeseries = ["dep:axil-timeseries"]
 checkpoint = ["dep:axil-checkpoint", "axil-bundle/checkpoint"]
 # Vector with embedder (bge-small/etc.) for plugin-attach parity with CLI.
 embed = ["vector", "axil-vector/embed"]
+# Durable semantic event log + the `recall_delta` MCP tool. Off by default —
+# the tape is a write-amplifier, so the assembled tool surface is unchanged
+# unless explicitly enabled.
+event-log = ["axil-core/event-log"]

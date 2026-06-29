@@ -144,6 +144,25 @@ an error, or a preference: they auto-embed, auto-supersede, and dedupe.
 | `checkpoint` | `goal?`, `state?`, `next_steps?` string[], `open_questions?` string[], `references?` object[], `summary?`, `session?`, `final?` bool | Write a structured checkpoint so a fresh agent can resume. `references[]` are typed pointers (`{kind, ref, note?}`), not copies; `record` kinds resolve live at boot. Replaces the old free-text session summary. |
 | `checkpoint_show` | (none) | Return the current checkpoint — the stored one if present, otherwise one derived from the latest session. |
 
+### Cross-agent delta — `recall_delta` (`event-log` feature, off by default)
+
+When the server is built with the `event-log` feature, it exposes one more
+tool: **`recall_delta`**. It is **off by default** — the feature drives a
+write-amplifying durable event log, so it is opt-in and the default tool surface
+is unchanged without it.
+
+`recall_delta(since_cursor?, exclude_agent?, limit?)` pulls committed *semantic
+events* that happened after a cursor, oldest first — a belief revised, a
+decision superseded, an error fixed, a checkpoint written. Each event carries a
+monotonic `cursor`; pass the last one back in as `since_cursor` to resume. Use
+`exclude_agent` to drop a given agent's own writes. It is the pull-based "what
+changed since I last looked" feed for a second agent sharing the brain.
+
+Isolation: `recall_delta` returns **committed facts only** — a notification that
+a record changed, never another agent's private record body. It does not relax
+cross-agent session isolation; resolve a returned `record_id` through the normal
+access path.
+
 ## HTTP API alternative
 
 For non-stdio environments, use the HTTP API:

@@ -356,6 +356,10 @@ impl AxilBuilder {
             feedback_store: crate::feedback::FeedbackStore::new(),
             canonical_publisher: self.canonical_publisher,
             extensions: std::sync::RwLock::new(self.extensions),
+            #[cfg(feature = "event-log")]
+            event_log_enabled: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(feature = "event-log")]
+            event_cursor: crate::event_log::EventCursor::new(),
         };
 
         // Backfill `_entities.canonical_id` for rows written before the
@@ -444,6 +448,15 @@ pub struct Axil {
     /// `Axil` handle (WASM plugins) can register *after* the database is open,
     /// not only at builder time.
     extensions: std::sync::RwLock<Vec<Arc<dyn Extension>>>,
+    /// Runtime gate for the durable semantic event log. Off by default even when
+    /// the `event-log` feature is compiled in — it is a write-amplifier, so the
+    /// caller opts in explicitly via [`Axil::set_event_log_enabled`].
+    #[cfg(feature = "event-log")]
+    event_log_enabled: std::sync::atomic::AtomicBool,
+    /// Monotonic ULID cursor source for the event tape. Same-millisecond events
+    /// still sort in commit order.
+    #[cfg(feature = "event-log")]
+    event_cursor: crate::event_log::EventCursor,
 }
 
 impl Axil {
@@ -573,6 +586,8 @@ impl Axil {
         }
         self.storage.insert(&record)?;
         self.audit("insert", &record.id, &table);
+        #[cfg(feature = "event-log")]
+        self.capture_semantic_event("insert", &record);
         self.run_insert_hooks(&record)?;
 
         self.publish_canonical_for_record(&record);
@@ -1266,6 +1281,8 @@ impl Axil {
         }
 
         self.audit("update", id, &record.table);
+        #[cfg(feature = "event-log")]
+        self.capture_semantic_event("update", &record);
         timer.finish();
         Ok(record)
     }
@@ -4859,6 +4876,115 @@ impl Axil {
         self.storage.set_cdc_capture_values(enabled);
     }
 
+    /// Enable or disable the durable semantic event log.
+    ///
+    /// Off by default even with the `event-log` feature compiled in: the tape is
+    /// a write-amplifier (an extra committed write per allowlisted event), so the
+    /// caller opts in. When off, the capture hook is a single relaxed atomic load
+    /// and never touches storage.
+    #[cfg(feature = "event-log")]
+    pub fn set_event_log_enabled(&self, enabled: bool) {
+        self.event_log_enabled
+            .store(enabled, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Whether the semantic event log is currently capturing.
+    #[cfg(feature = "event-log")]
+    pub fn event_log_enabled(&self) -> bool {
+        self.event_log_enabled
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Capture a committed write as a semantic event when it matches the curated
+    /// allowlist. No-op unless the event log is enabled.
+    ///
+    /// Called from `insert` / `update` / `delete` *after* the storage write
+    /// commits, so it only ever records facts that are already durable. Captures
+    /// allowlisted `_`-prefixed events (belief revisions, checkpoint writes) that
+    /// the per-record audit log deliberately skips. Best-effort: a failed append
+    /// never fails the originating write.
+    #[cfg(feature = "event-log")]
+    fn capture_semantic_event(&self, op: &str, record: &Record) {
+        if !self.event_log_enabled() {
+            return;
+        }
+        let Some(kind) = crate::event_log::classify(op, record) else {
+            return;
+        };
+        let cursor = self.event_cursor.next();
+        let event = crate::event_log::SemanticEvent {
+            cursor: cursor.clone(),
+            kind: kind.to_string(),
+            op: op.to_string(),
+            table: record.table.clone(),
+            record_id: record.id.to_string(),
+            agent_id: crate::event_log::agent_id_of(record),
+        };
+        if let Ok(bytes) = serde_json::to_vec(&event) {
+            let _ = self.storage.append_event(&cursor, &bytes);
+        }
+    }
+
+    /// Pull committed semantic events strictly after `cursor`, oldest first.
+    ///
+    /// This is the engine behind the `recall_delta` MCP tool: a second agent
+    /// passes the last cursor it saw and gets back what changed since — belief
+    /// revisions, decision supersessions, error fixes, checkpoint writes — under
+    /// a monotonic ULID order it can resume from. Pass `None` to read from the
+    /// oldest retained event.
+    ///
+    /// `exclude_agent` drops events whose `agent_id` matches (e.g. "skip my own
+    /// writes"). This is an ergonomic filter over **committed facts only** — it
+    /// does not read record bodies and does not relax cross-agent session
+    /// isolation; an agent still resolves a returned `record_id` through the
+    /// normal access path. Only available with the `event-log` feature.
+    #[cfg(feature = "event-log")]
+    pub fn recall_delta(
+        &self,
+        cursor: Option<&str>,
+        exclude_agent: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<crate::event_log::SemanticEvent>> {
+        // Over-read when filtering so an excluded run can't starve the page; the
+        // tape is a high-signal feed so the slop is small.
+        let scan_limit = if exclude_agent.is_some() {
+            limit.saturating_mul(4).max(limit)
+        } else {
+            limit
+        };
+        let raw = self.storage.events_since(cursor, scan_limit)?;
+        let mut out = Vec::with_capacity(raw.len().min(limit));
+        for bytes in raw {
+            let Ok(event) = serde_json::from_slice::<crate::event_log::SemanticEvent>(&bytes) else {
+                continue;
+            };
+            if let Some(excl) = exclude_agent {
+                if event.agent_id.as_deref() == Some(excl) {
+                    continue;
+                }
+            }
+            out.push(event);
+            if out.len() >= limit {
+                break;
+            }
+        }
+        Ok(out)
+    }
+
+    /// Trim the semantic event log to at most `max` retained entries (oldest
+    /// evicted). Driven off the write path by the maintenance thread so an
+    /// always-on event log can't grow the core file unboundedly.
+    #[cfg(feature = "event-log")]
+    pub fn trim_event_log(&self, max: usize) -> Result<()> {
+        self.storage.trim_event_log(max)
+    }
+
+    /// Number of retained entries on the semantic event log tape.
+    #[cfg(feature = "event-log")]
+    pub fn event_log_len(&self) -> Result<usize> {
+        self.storage.event_log_len()
+    }
+
     /// Append one `insert` audit-log entry per record. Mirrors what
     /// `Axil::insert` does inside the per-record path so bulk-import
     /// flows (e.g. SCIP ingest) keep the audit trail complete without
@@ -6669,5 +6795,146 @@ mod tests {
             );
         }
         let _ = id_exact;
+    }
+
+    #[cfg(feature = "event-log")]
+    mod event_log {
+        use super::*;
+
+        #[test]
+        fn off_by_default_captures_nothing() {
+            let (db, _dir) = temp_db();
+            // Even an allowlisted write is a no-op while the log is disabled.
+            db.insert("_checkpoint_records", json!({"goal": "x"}))
+                .unwrap();
+            assert_eq!(db.event_log_len().unwrap(), 0);
+            assert!(db.recall_delta(None, None, 50).unwrap().is_empty());
+        }
+
+        #[test]
+        fn captures_allowlisted_underscore_table_events() {
+            let (db, _dir) = temp_db();
+            db.set_event_log_enabled(true);
+
+            // Checkpoint write — an allowlisted `_`-prefixed table the plain
+            // audit log would skip.
+            db.insert("_checkpoint_records", json!({"goal": "ship T14"}))
+                .unwrap();
+            // Belief revision — also `_`-prefixed.
+            db.insert("_beliefs", json!({"statement": "x", "doubted": true}))
+                .unwrap();
+            // An ordinary write is NOT captured.
+            db.insert("notes", json!({"text": "noise"})).unwrap();
+
+            let events = db.recall_delta(None, None, 50).unwrap();
+            let kinds: Vec<&str> = events.iter().map(|e| e.kind.as_str()).collect();
+            assert!(kinds.contains(&crate::event_log::kind::CHECKPOINT_WRITTEN));
+            assert!(kinds.contains(&crate::event_log::kind::BELIEF_REVISED));
+            assert_eq!(events.len(), 2, "ordinary `notes` write must not be captured");
+        }
+
+        #[test]
+        fn captures_decision_superseded_and_error_fixed() {
+            let (db, _dir) = temp_db();
+            db.set_event_log_enabled(true);
+
+            let dec = db
+                .insert("decisions", json!({"summary": "old"}))
+                .unwrap();
+            // Mark it superseded via update → decision-superseded.
+            db.update(&dec.id, json!({"summary": "old", "_superseded": true}))
+                .unwrap();
+            // An error with a fix → error-fixed.
+            db.insert("errors", json!({"error": "boom", "fix": "patch"}))
+                .unwrap();
+
+            let events = db.recall_delta(None, None, 50).unwrap();
+            let kinds: Vec<&str> = events.iter().map(|e| e.kind.as_str()).collect();
+            assert!(kinds.contains(&crate::event_log::kind::DECISION_SUPERSEDED));
+            assert!(kinds.contains(&crate::event_log::kind::ERROR_FIXED));
+        }
+
+        #[test]
+        fn recall_delta_returns_only_post_cursor_events() {
+            let (db, _dir) = temp_db();
+            db.set_event_log_enabled(true);
+
+            for i in 0..5 {
+                db.insert("errors", json!({"error": format!("e{i}"), "fix": "f"}))
+                    .unwrap();
+            }
+            let all = db.recall_delta(None, None, 50).unwrap();
+            assert_eq!(all.len(), 5);
+
+            // Resume strictly after the 2nd event → events 3,4,5.
+            let cursor = all[1].cursor.clone();
+            let rest = db.recall_delta(Some(&cursor), None, 50).unwrap();
+            assert_eq!(rest.len(), 3);
+            assert_eq!(rest[0].cursor, all[2].cursor);
+            // Every returned cursor is strictly greater than the resume cursor.
+            for e in &rest {
+                assert!(e.cursor > cursor);
+            }
+        }
+
+        #[test]
+        fn recall_delta_respects_exclude_agent() {
+            let (db, _dir) = temp_db();
+            db.set_event_log_enabled(true);
+
+            db.insert("errors", json!({"error": "a", "fix": "f", "_agent_id": "agent-a"}))
+                .unwrap();
+            db.insert("errors", json!({"error": "b", "fix": "f", "_agent_id": "agent-b"}))
+                .unwrap();
+            db.insert("errors", json!({"error": "c", "fix": "f", "_agent_id": "agent-a"}))
+                .unwrap();
+
+            // Excluding agent-a leaves only agent-b's single event.
+            let filtered = db.recall_delta(None, Some("agent-a"), 50).unwrap();
+            assert_eq!(filtered.len(), 1);
+            assert_eq!(filtered[0].agent_id.as_deref(), Some("agent-b"));
+
+            // No exclusion → all three.
+            assert_eq!(db.recall_delta(None, None, 50).unwrap().len(), 3);
+        }
+
+        #[test]
+        fn cursor_is_monotonic_across_same_millisecond_writes() {
+            let (db, _dir) = temp_db();
+            db.set_event_log_enabled(true);
+
+            // A tight insert loop forces many same-millisecond commits; the
+            // cursors must still be strictly increasing in commit order.
+            for i in 0..200 {
+                db.insert("errors", json!({"error": format!("e{i}"), "fix": "f"}))
+                    .unwrap();
+            }
+            let events = db.recall_delta(None, None, 1000).unwrap();
+            assert_eq!(events.len(), 200);
+            for w in events.windows(2) {
+                assert!(
+                    w[0].cursor < w[1].cursor,
+                    "cursor not monotonic: {} should be < {}",
+                    w[0].cursor,
+                    w[1].cursor
+                );
+            }
+        }
+
+        #[test]
+        fn trim_keeps_newest_within_bound() {
+            let (db, _dir) = temp_db();
+            db.set_event_log_enabled(true);
+            for i in 0..10 {
+                db.insert("errors", json!({"error": format!("e{i}"), "fix": "f"}))
+                    .unwrap();
+            }
+            assert_eq!(db.event_log_len().unwrap(), 10);
+            db.trim_event_log(4).unwrap();
+            assert_eq!(db.event_log_len().unwrap(), 4);
+            // Trimming evicts the oldest, so the surviving events are the newest 4.
+            let remaining = db.recall_delta(None, None, 50).unwrap();
+            assert_eq!(remaining.len(), 4);
+        }
     }
 }

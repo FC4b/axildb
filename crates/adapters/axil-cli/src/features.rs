@@ -192,6 +192,14 @@ pub const CATALOG: &[FeatureInfo] = &[
         in_default: false,
         in_full: false,
     },
+    FeatureInfo {
+        name: "event-log",
+        tier: "opt-in",
+        description: "Durable semantic event log + `recall_delta` (write-amplifier => off)",
+        requires: &[],
+        in_default: false,
+        in_full: false,
+    },
 ];
 
 /// Was `name` compiled into this binary? `cfg!` needs literals, hence the match.
@@ -216,6 +224,7 @@ fn is_compiled(name: &str) -> bool {
         "web-docs" => cfg!(feature = "web-docs"),
         "otel" => cfg!(feature = "otel"),
         "wasm-host" => cfg!(feature = "wasm-host"),
+        "event-log" => cfg!(feature = "event-log"),
         _ => false,
     }
 }
