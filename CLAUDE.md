@@ -555,6 +555,9 @@ axil/
   the code is the way it is* — which phase shipped it is git-history noise that
   goes stale. Write the rationale, drop the bookkeeping. (Phase numbers belong
   in `tasks/`, commit messages, and Axil memory — not the source.)
+- **Per-task contributor mechanics** (which tier, which gate, which parity test,
+  how to fuzz) live in [docs/agent-guides/](docs/agent-guides/README.md) — a thin
+  pointer index, so this file stays lean.
 
 ## Licensing & Business Model
 

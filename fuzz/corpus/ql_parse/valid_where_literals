@@ -1,0 +1,1 @@
+RECALL "x" TOP 1 WHERE active = true AND deleted = false AND meta = null

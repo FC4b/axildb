@@ -55,3 +55,28 @@ jobs:
         env:
           AXIL_ORACLE_N: "20000"
         run: cargo test -p axil-vector --release recall
+
+  ql-fuzz:
+    name: AxilQL parser fuzz smoke (informational)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      # `axil_ql::parse` is the one genuinely untrusted byte surface (a query
+      # string from a console / MCP / argv). cargo-fuzz needs nightly +
+      # libFuzzer, so this is nightly-only and warn-only: a short bounded run
+      # over the committed seed corpus that flags a crash/hang as a WARNING, not
+      # a build failure (variance and false floors don't belong on the per-PR
+      # gate). The fuzz crate is detached from the workspace — build it via its
+      # own manifest. A real finding lands as a reproducible artifact under
+      # fuzz/artifacts/.
+      - name: install cargo-fuzz
+        continue-on-error: true
+        run: cargo install cargo-fuzz --locked
+      - name: ql_parse fuzz smoke (60s, warn-only)
+        continue-on-error: true
+        run: |
+          cd fuzz
+          cargo +nightly fuzz run ql_parse -- -max_total_time=60 -rss_limit_mb=2048 \
+            || echo "::warning::ql_parse fuzz smoke reported a finding or failed to run — inspect fuzz/artifacts/"
