@@ -4,29 +4,27 @@
 
 A prebuilt `axil` — no Rust toolchain, no multi-minute compile, and the
 **onnxruntime shared library is bundled next to the binary** so vector search
-and embeddings work out of the box on every platform (including Windows):
-
-```bash
-# macOS / Linux
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/FC4b/axildb/releases/latest/download/axildb-installer.sh | sh
-
-# Windows (PowerShell)
-powershell -c "irm https://github.com/FC4b/axildb/releases/latest/download/axildb-installer.ps1 | iex"
-```
-
-The installers drop `axil` into `~/.axil/bin` (alongside the `~/.axil/models/`
-embedding-model cache) and install an `axil-update` self-updater. This is the
-**default** feature set — every component in the table below except `rerank`,
-`web-docs`, and `otel`.
+and embeddings work out of the box on every platform (including Windows). The
+prebuilt archive ships the **default** feature set — every component in the
+table below except `rerank`, `web-docs`, and `otel`.
 
 ### Via cargo-binstall
 
 [`cargo binstall`](https://github.com/cargo-bins/cargo-binstall) fetches the
-same prebuilt archive (no source build):
+prebuilt archive and installs the `axil` binary — no source build:
 
 ```bash
 cargo binstall axildb
 ```
+
+### Direct download
+
+Grab the archive for your platform from the
+[latest release](https://github.com/FC4b/axildb/releases/latest) —
+`axildb-<target>.tar.gz` (or `axildb-<target>.zip` on Windows) — extract it, and
+put the `axil` binary on your `PATH`. The `onnxruntime` shared library ships
+**inside the archive next to `axil`**; keep the two together so the loader
+resolves the bundled runtime first.
 
 ## From source
 
@@ -128,12 +126,11 @@ Available models:
 
 ## Windows + ONNX
 
-The prebuilt installers and `cargo binstall` **bundle a known-good
-`onnxruntime.dll` next to `axil.exe`** in the release archive, so the embedder
-loads the sibling runtime first — no manual DLL copy, and no SmartScreen-free
-guarantee aside (the binaries are provenance-attested but not Authenticode
-code-signed, so an unsigned-publisher SmartScreen prompt is expected on first
-run).
+The prebuilt archives (via `cargo binstall` or direct download) **bundle a
+known-good `onnxruntime.dll` next to `axil.exe`**, so the embedder loads the
+sibling runtime first — no manual DLL copy, and no SmartScreen-free guarantee
+aside (the binaries are provenance-attested but not Authenticode code-signed, so
+an unsigned-publisher SmartScreen prompt is expected on first run).
 
 If you instead built from source with `cargo install axildb`, only `axil.exe`
 lands in `~/.cargo/bin` — the `download-binaries`-produced `onnxruntime.dll`
@@ -147,7 +144,7 @@ copy target\release\onnxruntime.dll $env:USERPROFILE\.cargo\bin\
 ```
 
 Use ONNX Runtime ≥ 1.22 (API 22); `ORT_DYLIB_PATH` does **not** help under the
-`download-binaries` feature. The prebuilt installers avoid all of this.
+`download-binaries` feature. The prebuilt archives avoid all of this.
 
 ## Verify installation
 

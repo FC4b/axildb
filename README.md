@@ -43,14 +43,12 @@ Your coding agent is brilliant and amnesiac. Every session it re-reads the same 
 **1. Install** — a prebuilt `axil` binary, no toolchain, no ~3-min compile. The archives **bundle a known-good ONNX runtime next to the binary**, so vector search and embeddings work out of the box (including on Windows):
 
 ```bash
-# macOS / Linux
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/FC4b/axildb/releases/latest/download/axildb-installer.sh | sh
+# Prebuilt binary, no source build — fetches the platform archive from the releases page.
+cargo binstall axildb          # https://github.com/cargo-bins/cargo-binstall
 
-# Windows (PowerShell)
-powershell -c "irm https://github.com/FC4b/axildb/releases/latest/download/axildb-installer.ps1 | iex"
-
-# or, via cargo-binstall (fetches the same prebuilt archive — no source build)
-cargo binstall axildb
+# …or download an archive for your platform from the releases page and extract it
+# (keep the bundled onnxruntime library next to `axil`):
+#   https://github.com/FC4b/axildb/releases/latest
 ```
 
 <details>
@@ -61,7 +59,7 @@ cargo install axildb                     # installs the `axil` binary · default
 # or: git clone https://github.com/FC4b/axildb.git && cd axildb && cargo build --release -p axildb
 ```
 
-`cargo install` builds from source and copies only the binary to `~/.cargo/bin` — on Windows it leaves the `download-binaries` `onnxruntime.dll` behind in `target/`, so the embedder fails ONNX init at first use. Prefer the prebuilt installers / `cargo binstall` above, which bundle the runtime. If you must `cargo install`, drop a matching `onnxruntime.dll` (ORT ≥ 1.22) next to `axil.exe`. See [Installation](docs/src/getting-started/installation.md#windows--onnx).
+`cargo install` builds from source and copies only the binary to `~/.cargo/bin` — on Windows it leaves the `download-binaries` `onnxruntime.dll` behind in `target/`, so the embedder fails ONNX init at first use. Prefer `cargo binstall` above, which bundles the runtime. If you must `cargo install`, drop a matching `onnxruntime.dll` (ORT ≥ 1.22) next to `axil.exe`. See [Installation](docs/src/getting-started/installation.md#windows--onnx).
 
 </details>
 
