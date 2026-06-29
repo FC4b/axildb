@@ -252,7 +252,9 @@ impl VectorIndex for VectorEngine {
     }
 
     fn deleted_count(&self) -> usize {
-        self.index.read().deletes_since_rebuild()
+        // Total reclaimable tombstones (removes AND re-adds), so the background
+        // compactor fires on update-heavy workloads, not just deletes.
+        self.index.read().tombstones()
     }
 
     fn all_ids(&self) -> axil_core::Result<Vec<RecordId>> {
@@ -508,6 +510,27 @@ mod tests {
         let path = dir.path().join("test.axil");
         let plugin = VectorEngine::open(&path, dims).unwrap();
         (plugin, dir)
+    }
+
+    #[test]
+    fn re_add_counts_as_reclaimable_for_compaction() {
+        // A re-add (every update / re-embed) tombstones the old graph node.
+        // The background compactor gates on deleted_count(), so re-add
+        // tombstones MUST surface there — otherwise an update-heavy workload
+        // accumulates dead nodes that never compact (regression: deleted_count
+        // previously returned deletes_since_rebuild, bumped only by remove).
+        let (plugin, _dir) = temp_engine(4);
+        let id = RecordId::new();
+        plugin.add(id.clone(), &[1.0, 0.0, 0.0, 0.0]).unwrap();
+        assert_eq!(plugin.deleted_count(), 0);
+        for _ in 0..5 {
+            plugin.add(id.clone(), &[0.0, 1.0, 0.0, 0.0]).unwrap();
+        }
+        assert!(
+            plugin.deleted_count() >= 5,
+            "re-add tombstones must count toward compaction, got {}",
+            plugin.deleted_count()
+        );
     }
 
     #[test]

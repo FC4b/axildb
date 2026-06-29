@@ -187,6 +187,18 @@ impl HnswIndex {
         self.deletes_since_rebuild
     }
 
+    /// Total tombstoned graph nodes since the last rebuild — counting both
+    /// removed ids and the stale nodes left by re-adding an existing id.
+    ///
+    /// This, not `deletes_since_rebuild`, is what the compactor must consult: a
+    /// re-add (every update / re-embed) bumps `tombstones` but NOT
+    /// `deletes_since_rebuild`, so gating compaction on the latter would let an
+    /// update-heavy workload grow the graph unbounded while the search
+    /// over-fetch (`top_k + tombstones`) keeps widening.
+    pub fn tombstones(&self) -> usize {
+        self.tombstones
+    }
+
     /// Vector count at last rebuild (for computing deletion ratio).
     pub fn count_at_last_rebuild(&self) -> usize {
         self.count_at_last_rebuild
