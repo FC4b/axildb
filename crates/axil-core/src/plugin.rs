@@ -524,6 +524,18 @@ pub trait SearchIndex: Engine {
         Ok(Vec::new())
     }
 
+    /// Whether [`Engine::on_record_insert`] would actually create a document
+    /// for this record (i.e. it has extractable text). Default `true`.
+    ///
+    /// Reverse-orphan reconciliation uses this so it never flags a record the
+    /// engine would skip anyway — a record with no string fields produces no
+    /// document, so counting it as "missing" would warn forever and a re-index
+    /// would be a phantom no-op.
+    fn would_index(&self, record: &Record) -> bool {
+        let _ = record;
+        true
+    }
+
     /// Commit pending writes and optimize the index.
     ///
     /// Default: no-op. Implementations with write buffers should flush and

@@ -136,6 +136,12 @@ impl SearchIndex for FtsEngine {
         self.index.index_field(id, field, text)
     }
 
+    fn would_index(&self, record: &Record) -> bool {
+        // Mirror on_record_insert: a record with no extractable text fields
+        // produces no document, so it must not be flagged as a missing doc.
+        !Self::extract_text_fields(&record.data).is_empty()
+    }
+
     /// Buffers every document with `add_document_deferred`, then commits once.
     fn index_records_batch(&self, records: &[Record]) -> Result<()> {
         for record in records {

@@ -641,11 +641,13 @@ impl Axil {
         !text.is_empty() && text.len() > 5
     }
 
-    /// Whether a record would be indexed into the FTS index on insert.
+    /// The table-prefix half of the FTS insert gate: non-internal tables only.
     ///
-    /// Mirrors the FTS gate in [`Axil::run_insert_hooks`] (non-internal table).
-    /// Used by the reverse-orphan reconciliation to count records that committed
-    /// to core storage but never got their FTS document.
+    /// The FTS engine ALSO skips records with no extractable text (see
+    /// [`SearchIndex::would_index`]), so reverse-orphan reconciliation must
+    /// combine this with `would_index` — otherwise a text-less record (e.g.
+    /// `{"n": 5}`) is flagged "missing an FTS document" forever and a re-index
+    /// is a phantom no-op.
     fn is_fts_indexable(record: &Record) -> bool {
         !record.table.starts_with('_')
     }
@@ -684,7 +686,7 @@ impl Axil {
             fi.all_indexed_ids().unwrap_or_default().into_iter().collect();
         records
             .iter()
-            .filter(|r| Self::is_fts_indexable(r) && !indexed.contains(&r.id))
+            .filter(|r| Self::is_fts_indexable(r) && fi.would_index(r) && !indexed.contains(&r.id))
             .count()
     }
 
@@ -726,7 +728,10 @@ impl Axil {
             let indexed: std::collections::HashSet<RecordId> =
                 fi.all_indexed_ids().unwrap_or_default().into_iter().collect();
             for record in &records {
-                if !Self::is_fts_indexable(record) || indexed.contains(&record.id) {
+                if !Self::is_fts_indexable(record)
+                    || !fi.would_index(record)
+                    || indexed.contains(&record.id)
+                {
                     continue;
                 }
                 if fi.on_record_insert(record).is_ok() {

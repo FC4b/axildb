@@ -612,6 +612,28 @@ fn temp_db_with_mock_vector_and_fts() -> (Axil, tempfile::TempDir) {
 }
 
 #[test]
+fn text_less_record_not_flagged_missing_fts() {
+    // A non-internal record with no string fields produces no FTS document
+    // (the engine skips an empty extract_text_fields), so it must NOT be
+    // counted as a missing FTS doc — otherwise doctor warns forever and
+    // reembed_missing reports a phantom restoration that never converges.
+    let (db, _dir) = temp_db_with_mock_vector_and_fts();
+    db.insert("counters", json!({"n": 5, "active": true})).unwrap();
+
+    let problems = db.detect_problems();
+    assert!(
+        !problems.iter().any(|p| p.detector == "missing_fts"),
+        "text-less record must not be flagged missing_fts"
+    );
+
+    let (_embeddings, fts_restored) = db.reembed_missing().unwrap();
+    assert_eq!(
+        fts_restored, 0,
+        "no FTS doc should be restored for a text-less record"
+    );
+}
+
+#[test]
 fn compact_vector_index_respects_threshold() {
     let (db, _dir) = temp_db_with_mock_vector();
 
@@ -622,7 +644,9 @@ fn compact_vector_index_respects_threshold() {
         let rec = db
             .insert("sessions", json!({"summary": format!("auth timeout {i}")}))
             .unwrap();
-        db.embed_field(&rec.id, "summary").unwrap();
+        // insert auto-embeds; a redundant embed_field here would re-add the
+        // vector and create an extra tombstone (now correctly counted toward
+        // compaction since review fix #1), skewing the ratio under test.
         ids.push(rec.id);
     }
 
