@@ -55,9 +55,12 @@ targets = [
     "x86_64-unknown-linux-gnu",
     "aarch64-unknown-linux-gnu",
 ]
-# GitHub build provenance attestations (supply-chain integrity). Code SIGNING
-# (an Authenticode cert) is out of scope for v1 — unsigned Windows binaries show
-# a SmartScreen warning; documented in installation.md.
+# GitHub build provenance attestations (supply-chain integrity). INERT under the
+# hand-authored workflow (like `include` below) — release.yml runs its own
+# `actions/attest-build-provenance` step; this key documents intent and is only
+# consumed if a full cargo-dist adoption is ever validated. Code SIGNING (an
+# Authenticode cert) is out of scope for v1 — unsigned Windows binaries show a
+# SmartScreen warning; documented in installation.md.
 github-attestations = true
 # Build each target in its own job for a clean per-triple artifact set.
 precise-builds = true

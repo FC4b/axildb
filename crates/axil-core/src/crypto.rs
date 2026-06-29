@@ -17,7 +17,14 @@
 //! - `.fts` companion tokens (the full-text index stores tokenized terms in the
 //!   clear),
 //! - table names and record IDs (these remain visible in the core file's key
-//!   space and table index).
+//!   space and table index),
+//! - the CDC `_changelog` tape **when value-capture is on** (the `cdc` feature
+//!   *and* [`set_cdc_capture_values(true)`](crate::Axil::set_cdc_capture_values)):
+//!   it persists the before/after record bodies into the core `.axil` via plain
+//!   serde, bypassing this cipher. Encryption covers the live `records` table,
+//!   not the change tape. Leave CDC value-capture off (the default) when
+//!   encryption must cover every on-disk copy of a body, or treat the changelog
+//!   as out of the encrypted boundary.
 //!
 //! The honest pitch is therefore *"encrypted record bodies"*, not *"encrypted
 //! memory"*. An operator who needs the embeddings and FTS index encrypted as

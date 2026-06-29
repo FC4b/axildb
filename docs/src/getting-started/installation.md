@@ -29,8 +29,8 @@ resolves the bundled runtime first.
 ## From source
 
 `cargo install` and `cargo build` compile from source — they need a C toolchain
-and take a few minutes. Prefer the prebuilt installers above unless you need a
-custom feature set.
+and take a few minutes. Prefer the prebuilt binary (`cargo binstall` / archive
+download) above unless you need a custom feature set.
 
 ```bash
 cargo install axildb                                            # from crates.io, default features
@@ -50,7 +50,8 @@ cargo install --path crates/adapters/axil-cli --features full   # everything
 > `onnxruntime.dll` and the embedder fails ONNX init
 > (`Failed to initialize ORT API … version [22] is not supported`). See the
 > [Windows + ONNX](#windows--onnx) note below for the fix — or just use the
-> prebuilt installers, which bundle a matching runtime.
+> prebuilt binary (`cargo binstall` / archive download), which bundles a
+> matching runtime.
 
 ## Picking components
 

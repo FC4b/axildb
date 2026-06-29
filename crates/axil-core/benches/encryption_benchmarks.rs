@@ -8,7 +8,9 @@
 //! Encryption lives at the `Storage` layer (`Storage::with_cipher`), which is the
 //! layer these benches drive directly.
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{
+    black_box, criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput,
+};
 use serde_json::json;
 use tempfile::TempDir;
 
@@ -45,26 +47,40 @@ fn bench_aead(c: &mut Criterion) {
 
 // (b) Full Storage insert path (includes serde + redb write/commit), cleartext
 // vs cipher-attached — the overhead in real-operation context.
+//
+// Each timed iteration inserts the FIRST record into a FRESH store via
+// `iter_batched(.., PerIteration)`: the TempDir + `Storage::open` happen in the
+// untimed setup, so the measurement is a single stable insert. (Reusing one
+// store and inserting across `b.iter` would grow the redb table every iteration,
+// folding B-tree growth + index re-serialization into the timing and producing
+// noise that can read as "encrypted faster than cleartext".) The setup tuple
+// returns the `TempDir` so it outlives — and drops only after — the timed insert.
 fn bench_storage_insert(c: &mut Criterion) {
     let mut group = c.benchmark_group("storage_insert");
     for &size in &[256usize, 4096] {
         group.bench_with_input(BenchmarkId::new("cleartext", size), &size, |b, &size| {
-            let dir = TempDir::new().unwrap();
-            let storage = Storage::open(dir.path().join("c.axil")).unwrap();
-            b.iter(|| {
-                let r = record_of_size(size);
-                black_box(storage.insert(black_box(&r)).unwrap())
-            });
+            b.iter_batched(
+                || {
+                    let dir = TempDir::new().unwrap();
+                    let storage = Storage::open(dir.path().join("c.axil")).unwrap();
+                    (dir, storage, record_of_size(size))
+                },
+                |(_dir, storage, r)| black_box(storage.insert(black_box(&r)).unwrap()),
+                BatchSize::PerIteration,
+            );
         });
         group.bench_with_input(BenchmarkId::new("encrypted", size), &size, |b, &size| {
-            let dir = TempDir::new().unwrap();
-            let storage = Storage::open(dir.path().join("e.axil"))
-                .unwrap()
-                .with_cipher(bench_cipher());
-            b.iter(|| {
-                let r = record_of_size(size);
-                black_box(storage.insert(black_box(&r)).unwrap())
-            });
+            b.iter_batched(
+                || {
+                    let dir = TempDir::new().unwrap();
+                    let storage = Storage::open(dir.path().join("e.axil"))
+                        .unwrap()
+                        .with_cipher(bench_cipher());
+                    (dir, storage, record_of_size(size))
+                },
+                |(_dir, storage, r)| black_box(storage.insert(black_box(&r)).unwrap()),
+                BatchSize::PerIteration,
+            );
         });
     }
     group.finish();

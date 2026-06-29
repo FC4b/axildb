@@ -16,6 +16,14 @@ that each record stores. It deliberately does **not** encrypt:
   clear.
 - **Table names and record IDs.** These remain visible in the core file's key
   space and table index.
+- **The CDC `_changelog` tape, when value-capture is on.** With the `cdc`
+  feature *and* `set_cdc_capture_values(true)`, the change tape records the
+  before/after record bodies into the core `.axil` via plain serialization —
+  it does **not** go through the cipher. Encryption covers the live `records`
+  table, not the change log. Keep CDC value-capture off (the default) when every
+  on-disk copy of a body must be encrypted, or treat the changelog as outside
+  the encrypted boundary. (The semantic `_event_log` tape is unaffected — its
+  events carry IDs and metadata, not record bodies.)
 
 The honest pitch is therefore *"encrypted record bodies"*, not *"encrypted
 memory"*. An operator who needs the embeddings and FTS index encrypted as well
@@ -126,30 +134,33 @@ clear.
 
 ## Performance
 
-Measured with `cargo bench -p axil-core --features encryption --bench
-encryption_benchmarks` (criterion 0.5) on the project's dev host (Windows,
-software XChaCha20-Poly1305 — no AES-NI assumption). Body = a JSON record with an
-N-byte string field. Treat the absolute numbers as host-specific; the *shape* of
-the result is the robust takeaway.
+Reproduce with `cargo bench -p axil-core --features encryption --bench
+encryption_benchmarks` (criterion 0.5). The figures below are estimates from one
+run on the project's dev host (Windows, software XChaCha20-Poly1305 — no AES-NI
+assumption); run it yourself for host-specific numbers. Two operations isolate
+the crypto cost cleanly; a third (`Storage::insert`) cannot — see below.
 
 | Operation | Cleartext | Encrypted | Delta |
 |---|---|---|---|
-| AEAD seal, 256 B body | — | ~1.55 µs | (fixed cost ≈ nonce draw) |
-| AEAD seal, 4 KB body | — | ~4.1 µs | ≈0.96 GiB/s |
+| AEAD seal, 256 B body | — | ~1.58 µs | fixed cost ≈ per-write nonce draw |
+| AEAD seal, 4 KB body | — | ~4.1 µs | ≈0.93 GiB/s |
 | AEAD seal, 16 KB body | — | ~12.4 µs | ≈1.2 GiB/s |
-| `Storage::insert`, 256 B (incl. redb commit) | ~582 µs | ~589 µs | **+~7 µs (~1.2 %)** |
-| `Storage::insert`, 4 KB | ~780 µs | ~680 µs | within measurement noise |
-| `Storage::get`, 256 B | ~1.50 µs | ~3.38 µs | +~1.9 µs |
-| `Storage::get`, 4 KB | ~2.09 µs | ~6.35 µs | +~4.3 µs |
+| `Storage::get`, 256 B | ~1.50 µs | ~3.36 µs | +~1.9 µs (the per-body decrypt) |
+| `Storage::get`, 4 KB | ~2.11 µs | ~6.38 µs | +~4.3 µs |
+
+AEAD *unseal* tracks seal closely (~1.55 µs at 256 B to ~12.0 µs at 16 KB), and
+the `Storage::get` deltas above match that decrypt cost, as expected.
 
 **Takeaways:**
 
-- **Writes are barely affected (~1 % or less).** Each insert is dominated by
-  redb's transaction commit (the fsync, ~0.6 ms), which encryption doesn't touch
-  — the ~1.5–4 µs of crypto is lost in that.
-- **Reads add a few microseconds per record body.** A `get` is cheap (no fsync),
-  so the per-record decrypt is a larger *relative* share (256 B: 1.5 → 3.4 µs),
-  but the absolute cost is still single-digit microseconds.
+- **Reads add the per-body decrypt — single-digit microseconds.** A `get` is
+  cheap (no fsync), so the decrypt is a larger *relative* share (256 B:
+  1.5 → 3.4 µs) but a tiny absolute one; the delta equals the AEAD unseal cost.
+- **Writes: the crypto is not separately resolvable.** A `Storage::insert` is
+  dominated by redb's transaction commit (fsync — milliseconds, and noisy across
+  runs), against which the ~1.6–4 µs AEAD seal is lost. The benchmark cannot
+  resolve a stable insert delta, so no insert-overhead figure is quoted here; the
+  seal cost is the AEAD row above, orders of magnitude below the commit.
 - **Recall / search latency is unchanged.** The `.vec` and `.fts` companion
   indexes stay cleartext, so the search itself (millisecond-scale) is unaffected;
   only the record bodies actually returned pay the per-record decrypt. For a

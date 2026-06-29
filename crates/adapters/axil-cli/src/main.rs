@@ -4646,7 +4646,12 @@ fn resolve_embedding_model(db_path: &Path) -> axil_vector::models::EmbeddingMode
 #[cfg(feature = "encryption")]
 fn init_default_cipher() -> Result<()> {
     use axil_core::crypto::{Cipher, CryptoError};
-    let key_file = std::env::var_os("AXIL_ENC_KEY_FILE").map(std::path::PathBuf::from);
+    // Treat an empty AXIL_ENC_KEY_FILE as unset (mirrors Cipher::from_env's
+    // empty-string guard for AXIL_ENC_KEY) — otherwise an empty value would
+    // resolve to `from_key_file("")` and fail every command on a bogus read.
+    let key_file = std::env::var_os("AXIL_ENC_KEY_FILE")
+        .filter(|s| !s.is_empty())
+        .map(std::path::PathBuf::from);
     match Cipher::resolve(key_file.as_deref()) {
         Ok(cipher) => {
             axil_core::crypto::set_default_cipher(cipher);
