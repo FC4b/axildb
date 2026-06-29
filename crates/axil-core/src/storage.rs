@@ -121,6 +121,13 @@ pub struct Storage {
     /// full pre/post record body. Off by default — id-only capture.
     #[cfg(feature = "cdc")]
     cdc_capture_values: std::sync::atomic::AtomicBool,
+    /// Optional encryption-at-rest cipher for core record bodies. When `Some`
+    /// (and the `encryption` feature is on), each record body is sealed with
+    /// XChaCha20-Poly1305 before it is written to the `records` table and
+    /// unsealed on read. `None` means cleartext bodies — the default. See
+    /// [`crate::crypto`] for the wire format and honest scope.
+    #[cfg(feature = "encryption")]
+    cipher: Option<crate::crypto::Cipher>,
 }
 
 impl Storage {
@@ -147,6 +154,8 @@ impl Storage {
             db: StorageDb::Writable(db),
             #[cfg(feature = "cdc")]
             cdc_capture_values: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(feature = "encryption")]
+            cipher: None,
         })
     }
 
@@ -167,7 +176,66 @@ impl Storage {
             db: StorageDb::ReadOnly(db),
             #[cfg(feature = "cdc")]
             cdc_capture_values: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(feature = "encryption")]
+            cipher: None,
         })
+    }
+
+    /// Attach an encryption-at-rest cipher to this storage handle.
+    ///
+    /// When set, every core record body is sealed with XChaCha20-Poly1305
+    /// before it is written and unsealed on read. This is a builder-style
+    /// consuming setter so it can be chained after [`Storage::open`]. Available
+    /// only under the off-by-default `encryption` feature — see [`crate::crypto`]
+    /// for the wire format, key sources, and honest scope (record bodies only).
+    #[cfg(feature = "encryption")]
+    pub fn with_cipher(mut self, cipher: crate::crypto::Cipher) -> Self {
+        self.cipher = Some(cipher);
+        self
+    }
+
+    /// Encode a record body for storage in the `records` table.
+    ///
+    /// Without the `encryption` feature (or with no cipher attached) this is the
+    /// plain serde body, byte-identical to a default build. With a cipher
+    /// attached the body is sealed and AAD-bound to the record ID.
+    #[cfg(feature = "encryption")]
+    fn encode_body(&self, record: &Record) -> Result<Vec<u8>> {
+        let plaintext = record.to_bytes()?;
+        match &self.cipher {
+            Some(cipher) => Ok(cipher.encrypt(&plaintext, record.id.as_str())?),
+            None => Ok(plaintext),
+        }
+    }
+
+    /// Decode a stored record body for the given record ID (the redb key).
+    ///
+    /// With a cipher attached, an AAD/key mismatch fails cleanly rather than
+    /// returning corrupt data.
+    #[cfg(feature = "encryption")]
+    fn decode_body(&self, id: &str, bytes: &[u8]) -> Result<Record> {
+        match &self.cipher {
+            Some(cipher) => {
+                let plaintext = cipher.decrypt(bytes, id)?;
+                Record::from_bytes(&plaintext)
+            }
+            None => Record::from_bytes(bytes),
+        }
+    }
+
+    /// Passthrough body encode for the default (no-`encryption`) build —
+    /// plain serde, byte-identical to calling `record.to_bytes()` directly.
+    #[cfg(not(feature = "encryption"))]
+    #[inline]
+    fn encode_body(&self, record: &Record) -> Result<Vec<u8>> {
+        record.to_bytes()
+    }
+
+    /// Passthrough body decode for the default (no-`encryption`) build.
+    #[cfg(not(feature = "encryption"))]
+    #[inline]
+    fn decode_body(&self, _id: &str, bytes: &[u8]) -> Result<Record> {
+        Record::from_bytes(bytes)
     }
 
     /// True if this handle is read-only (cannot accept write transactions).
@@ -194,7 +262,7 @@ impl Storage {
 
     /// Insert a record. Returns its ID.
     pub fn insert(&self, record: &Record) -> Result<RecordId> {
-        let bytes = record.to_bytes()?;
+        let bytes = self.encode_body(record)?;
         let id = record.id.as_str();
 
         let txn = self.begin_write()?;
@@ -206,7 +274,7 @@ impl Storage {
             let cdc_before: Option<serde_json::Value> = if self.cdc_capture_values() {
                 records
                     .get(id)?
-                    .and_then(|g| Record::from_bytes(g.value()).ok())
+                    .and_then(|g| self.decode_body(id, g.value()).ok())
                     .map(|r| r.data)
             } else {
                 None
@@ -215,7 +283,7 @@ impl Storage {
             // If this ID already exists under a different table, clean up the old index.
             if let Some(guard) = records.get(id)? {
                 let old_bytes: &[u8] = guard.value();
-                if let Ok(old_record) = Record::from_bytes(old_bytes) {
+                if let Ok(old_record) = self.decode_body(id, old_bytes) {
                     if old_record.table != record.table {
                         let mut idx = txn.open_table(TABLE_INDEX)?;
                         let mut old_ids = Self::read_index(&idx, &old_record.table)?;
@@ -276,7 +344,7 @@ impl Storage {
                 std::collections::HashMap::new();
 
             for record in records {
-                let bytes = record.to_bytes()?;
+                let bytes = self.encode_body(record)?;
                 tbl.insert(record.id.as_str(), bytes.as_slice())?;
                 table_ids
                     .entry(&record.table)
@@ -323,7 +391,7 @@ impl Storage {
         match table.get(id.as_str())? {
             Some(guard) => {
                 let bytes: &[u8] = guard.value();
-                let record = Record::from_bytes(bytes)?;
+                let record = self.decode_body(id.as_str(), bytes)?;
                 Ok(Some(record))
             }
             None => Ok(None),
@@ -344,7 +412,7 @@ impl Storage {
             let (table_name, _cdc_before) = match records.get(id.as_str())? {
                 Some(guard) => {
                     let bytes: &[u8] = guard.value();
-                    let record = Record::from_bytes(bytes)?;
+                    let record = self.decode_body(id.as_str(), bytes)?;
                     #[cfg(feature = "cdc")]
                     let before = self.cdc_capture_values().then(|| record.data.clone());
                     #[cfg(not(feature = "cdc"))]
@@ -387,7 +455,7 @@ impl Storage {
         for rid in ids.into_iter().skip(offset).take(limit) {
             if let Some(guard) = records_table.get(rid.as_str())? {
                 let bytes: &[u8] = guard.value();
-                let record = Record::from_bytes(bytes)?;
+                let record = self.decode_body(rid.as_str(), bytes)?;
                 results.push(record);
             }
         }
@@ -407,7 +475,7 @@ impl Storage {
             let mut record = match records.get(id.as_str())? {
                 Some(guard) => {
                     let bytes: &[u8] = guard.value();
-                    Record::from_bytes(bytes)?
+                    self.decode_body(id.as_str(), bytes)?
                 }
                 None => return Err(AxilError::NotFound(format!("record {id}"))),
             };
@@ -419,7 +487,7 @@ impl Storage {
             record.data = data;
             record.updated_at = Utc::now();
 
-            let bytes = record.to_bytes()?;
+            let bytes = self.encode_body(&record)?;
             records.insert(id.as_str(), bytes.as_slice())?;
 
             #[cfg(feature = "cdc")]
@@ -454,12 +522,12 @@ impl Storage {
             let mut record = match records.get(id.as_str())? {
                 Some(guard) => {
                     let bytes: &[u8] = guard.value();
-                    Record::from_bytes(bytes)?
+                    self.decode_body(id.as_str(), bytes)?
                 }
                 None => return Err(AxilError::NotFound(format!("record {id}"))),
             };
             record.metadata = metadata;
-            let bytes = record.to_bytes()?;
+            let bytes = self.encode_body(&record)?;
             records.insert(id.as_str(), bytes.as_slice())?;
             record
         };
@@ -744,8 +812,16 @@ impl Storage {
         let table = txn.open_table(RECORDS)?;
         let mut records = Vec::new();
         for entry in table.iter()? {
-            let (_, value): (redb::AccessGuard<'_, &str>, redb::AccessGuard<'_, &[u8]>) = entry?;
-            if let Ok(record) = Record::from_bytes(value.value()) {
+            let (key, value): (redb::AccessGuard<'_, &str>, redb::AccessGuard<'_, &[u8]>) = entry?;
+            // With encryption on, a decode failure means the wrong key (or a
+            // tampered body) — surface it rather than silently dropping rows,
+            // which would otherwise turn a key mismatch into an empty scan.
+            #[cfg(feature = "encryption")]
+            if self.cipher.is_some() {
+                records.push(self.decode_body(key.value(), value.value())?);
+                continue;
+            }
+            if let Ok(record) = self.decode_body(key.value(), value.value()) {
                 records.push(record);
             }
         }
@@ -1260,6 +1336,138 @@ mod tests {
             assert_eq!(storage.changelog_len().unwrap(), 3);
             let changes = storage.changes_since(None, 100).unwrap();
             assert!(changes.iter().all(|c| c.op == "insert"));
+        }
+    }
+
+    #[cfg(feature = "encryption")]
+    mod encryption {
+        use super::*;
+        use crate::crypto::Cipher;
+
+        fn key_a() -> Cipher {
+            Cipher::from_key_bytes(&[7u8; 32]).unwrap()
+        }
+
+        fn key_b() -> Cipher {
+            Cipher::from_key_bytes(&[9u8; 32]).unwrap()
+        }
+
+        /// insert-with-key → reopen-with-key → get returns plaintext.
+        #[test]
+        fn round_trip_with_correct_key() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("enc.axil");
+
+            let id = {
+                let storage = Storage::open(&path).unwrap().with_cipher(key_a());
+                let r = Record::new("secrets", json!({"summary": "classified"}));
+                storage.insert(&r).unwrap()
+            };
+
+            // Reopen with the same key.
+            let storage = Storage::open(&path).unwrap().with_cipher(key_a());
+            let fetched = storage.get(&id).unwrap().unwrap();
+            assert_eq!(fetched.data["summary"], "classified");
+            assert_eq!(fetched.table, "secrets");
+        }
+
+        /// The stored bytes on disk must not contain the plaintext.
+        #[test]
+        fn ciphertext_is_not_plaintext_on_disk() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("enc.axil");
+            let storage = Storage::open(&path).unwrap().with_cipher(key_a());
+            let r = Record::new("secrets", json!({"summary": "needle-marker-xyz"}));
+            let id = storage.insert(&r).unwrap();
+
+            // Reach into the raw redb body for this record and confirm the
+            // marker text is absent (it is sealed).
+            let txn = storage.begin_read().unwrap();
+            let table = txn.open_table(RECORDS).unwrap();
+            let guard = table.get(id.as_str()).unwrap().unwrap();
+            let raw: &[u8] = guard.value();
+            let haystack = String::from_utf8_lossy(raw);
+            assert!(!haystack.contains("needle-marker-xyz"));
+        }
+
+        /// Reopen with the WRONG key → get fails cleanly (no garbage, no panic).
+        #[test]
+        fn wrong_key_fails_cleanly() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("enc.axil");
+            let id = {
+                let storage = Storage::open(&path).unwrap().with_cipher(key_a());
+                storage
+                    .insert(&Record::new("t", json!({"v": 1})))
+                    .unwrap()
+            };
+
+            let storage = Storage::open(&path).unwrap().with_cipher(key_b());
+            let err = storage.get(&id).unwrap_err();
+            assert!(matches!(err, AxilError::Storage(_)));
+        }
+
+        /// Reopen with NO key (cleartext handle) → get of an encrypted body
+        /// fails cleanly rather than returning garbage.
+        #[test]
+        fn no_key_on_encrypted_db_fails_cleanly() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("enc.axil");
+            let id = {
+                let storage = Storage::open(&path).unwrap().with_cipher(key_a());
+                storage
+                    .insert(&Record::new("t", json!({"v": 1})))
+                    .unwrap()
+            };
+
+            // Opened without a cipher: the body is a nonce+ciphertext blob, not
+            // valid JSON, so from_bytes fails cleanly.
+            let storage = Storage::open(&path).unwrap();
+            assert!(storage.get(&id).is_err());
+        }
+
+        /// A ciphertext moved into a different record's slot fails to decrypt
+        /// (AAD is bound to the record ID).
+        #[test]
+        fn moved_ciphertext_fails_aad() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("enc.axil");
+            let storage = Storage::open(&path).unwrap().with_cipher(key_a());
+
+            let a = Record::new("t", json!({"v": "a"}));
+            let b = Record::new("t", json!({"v": "b"}));
+            let ida = storage.insert(&a).unwrap();
+            let idb = storage.insert(&b).unwrap();
+
+            // Pull A's raw sealed body and try to decrypt it under B's id.
+            let raw_a = {
+                let txn = storage.begin_read().unwrap();
+                let table = txn.open_table(RECORDS).unwrap();
+                table.get(ida.as_str()).unwrap().unwrap().value().to_vec()
+            };
+            // Decoding A's body under B's id must fail the AAD check.
+            assert!(storage.decode_body(idb.as_str(), &raw_a).is_err());
+            // Sanity: under A's own id it still decodes.
+            assert!(storage.decode_body(ida.as_str(), &raw_a).is_ok());
+        }
+
+        /// update and list round-trip through the cipher too.
+        #[test]
+        fn update_and_list_round_trip() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("enc.axil");
+            let storage = Storage::open(&path).unwrap().with_cipher(key_a());
+
+            let id = storage
+                .insert(&Record::new("t", json!({"v": 1})))
+                .unwrap();
+            storage.update(&id, json!({"v": 2})).unwrap();
+            let got = storage.get(&id).unwrap().unwrap();
+            assert_eq!(got.data["v"], 2);
+
+            let listed = storage.list("t", 10, 0).unwrap();
+            assert_eq!(listed.len(), 1);
+            assert_eq!(listed[0].data["v"], 2);
         }
     }
 }

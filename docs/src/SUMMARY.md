@@ -57,4 +57,5 @@
 - [Retrieval Pipeline](./advanced/retrieval-pipeline.md)
 - [Indexing & Scale](./advanced/indexing-and-scale.md)
 - [Memory Hygiene](./advanced/memory-hygiene.md)
+- [Encryption at Rest](./advanced/encryption-at-rest.md)
 - [Evaluation Log](./advanced/eval-log.md)

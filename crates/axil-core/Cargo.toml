@@ -21,6 +21,9 @@ ureq = { workspace = true, optional = true }
 flate2 = { workspace = true }
 sha2 = "0.10"
 regex = "1"
+# AEAD for opt-in encryption-at-rest (record bodies). Pure-Rust XChaCha20-Poly1305
+# — no AES-NI assumption. `getrandom` pulls the OS CSPRNG for per-write nonces.
+chacha20poly1305 = { version = "0.10", optional = true, features = ["getrandom"] }
 # Real-tokenizer token estimation (behind feature flag, opt-in only).
 tokenizers = { workspace = true, optional = true }
 
@@ -59,3 +62,11 @@ cdc = []
 # superseded, error fixed, checkpoint written) under a monotonic ULID cursor so
 # a second agent can pull "what changed since I last looked" via `recall_delta`.
 event-log = []
+# Opt-in encryption-at-rest for core record bodies (XChaCha20-Poly1305 AEAD,
+# per-record random nonce, AAD bound to the record ID). Off by default — the
+# default build is byte-identical and carries no crypto dependency. HONEST
+# SCOPE: encrypts record bodies only; `.vec` embeddings and `.fts` tokens stay
+# cleartext, and table names + record IDs remain visible. Keys come from
+# AXIL_ENC_KEY or a key file and never touch the `.axil` file. See
+# `crate::crypto` for the wire format and key sources.
+encryption = ["dep:chacha20poly1305"]

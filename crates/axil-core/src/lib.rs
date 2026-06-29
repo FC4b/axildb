@@ -37,6 +37,8 @@ pub mod branch;
 pub mod code_refs;
 pub mod config;
 pub mod consolidation;
+#[cfg(feature = "encryption")]
+pub mod crypto;
 pub mod db;
 pub mod detectors;
 pub mod diagnostics;
