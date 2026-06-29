@@ -4763,7 +4763,14 @@ fn open_read_command(path: &Path) -> Result<Axil> {
         Ok(db) => Ok(db),
         Err(e) if is_busy_chain(&e) => {
             // Writer still holds the lock after the retry budget — serve
-            // committed records read-only without contending for the lock.
+            // committed records read-only without contending for the lock. No
+            // companion engines are attached in this mode, so flag the
+            // degradation rather than silently returning core-only results.
+            eprintln!(
+                "axil: another process holds the writer lock — opening read-only \
+                 (engine-backed features like vector recall are unavailable until \
+                 the writer is idle)."
+            );
             Axil::open(path)
                 .read_only(true)
                 .build()
