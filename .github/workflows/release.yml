@@ -112,7 +112,7 @@ jobs:
           set -euo pipefail
           stage="axildb-${{ matrix.target }}"
           case "${{ matrix.target }}" in
-            *windows*) 7z a "$stage.zip" "./$stage/*" ;;
+            *windows*) 7z a "$stage.zip" "$stage" ;;
             *)         tar czf "$stage.tar.gz" "$stage" ;;
           esac
       - name: attest provenance
