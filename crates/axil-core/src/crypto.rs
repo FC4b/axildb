@@ -211,6 +211,37 @@ impl Cipher {
     }
 }
 
+/// Process-wide default cipher, installed once by an adapter at startup.
+///
+/// The encryption key is a property of the *process* (it comes from a
+/// process-wide source — the `AXIL_ENC_KEY` env var — and v1 is single-key), so
+/// it is modeled as a process global rather than threaded through every open.
+/// [`crate::db::AxilBuilder::build`] consults this when no explicit
+/// [`with_cipher`](crate::db::AxilBuilder::with_cipher) was set, which is what
+/// gives core-internal multi-database operations (e.g. `branch_merge`, the
+/// workspace fan-out) the same cipher without each call site having to resolve
+/// a key it has no access to.
+static DEFAULT_CIPHER: std::sync::OnceLock<Cipher> = std::sync::OnceLock::new();
+
+/// Install the process-wide default cipher. Returns `true` if this call set it,
+/// `false` if one was already installed (set-once; the first install wins).
+///
+/// Adapters (the CLI, an embedding host) call this once at startup after
+/// resolving the key. A library that wants per-database keys should skip this
+/// and pass an explicit cipher via
+/// [`AxilBuilder::with_cipher`](crate::db::AxilBuilder::with_cipher), which
+/// always takes precedence over the default.
+pub fn set_default_cipher(cipher: Cipher) -> bool {
+    DEFAULT_CIPHER.set(cipher).is_ok()
+}
+
+/// The process-wide default cipher, if one was installed via
+/// [`set_default_cipher`]. Cloned cheaply (the inner cipher is an `Arc`-free
+/// key schedule that is `Clone`).
+pub fn default_cipher() -> Option<Cipher> {
+    DEFAULT_CIPHER.get().cloned()
+}
+
 /// Decode a hex (64 chars) or standard base64 string into exactly 32 bytes.
 fn decode_key_str(s: &str) -> Result<Vec<u8>, CryptoError> {
     let s = s.trim();

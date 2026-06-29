@@ -4626,6 +4626,38 @@ fn resolve_embedding_model(db_path: &Path) -> axil_vector::models::EmbeddingMode
 // differs because the two crates resolve the embedder differently, but the
 // graph/fts/timeseries/extension blocks are identical). A divergence here is the
 // "MCP and CLI expose different engines for the same DB" bug.
+/// Install the process-wide encryption cipher from the environment, once, before
+/// any database is opened.
+///
+/// Key sources, in priority order (see [`axil_core::crypto`]):
+/// 1. `AXIL_ENC_KEY` — 32 raw key bytes as hex (64 chars) or standard base64.
+/// 2. `AXIL_ENC_KEY_FILE` — path to a key file (parsed hex/base64, else raw).
+///
+/// With no key set this is a no-op — the `encryption` feature is compiled in but
+/// databases open with cleartext bodies. A *malformed* key (wrong length/encoding,
+/// unreadable file) is a hard error rather than a silent cleartext fallback:
+/// encryption was asked for and could not be honored.
+///
+/// Installing it as a process default (rather than attaching at each open site)
+/// is what lets opens this code can't reach — core-internal `branch_merge`, the
+/// workspace federation fan-out, the in-process MCP server — seal/unseal with the
+/// same key. [`AxilBuilder::build`](axil_core::AxilBuilder::build) consults the
+/// default when no explicit cipher is set. No-op without the `encryption` feature.
+#[cfg(feature = "encryption")]
+fn init_default_cipher() -> Result<()> {
+    use axil_core::crypto::{Cipher, CryptoError};
+    let key_file = std::env::var_os("AXIL_ENC_KEY_FILE").map(std::path::PathBuf::from);
+    match Cipher::resolve(key_file.as_deref()) {
+        Ok(cipher) => {
+            axil_core::crypto::set_default_cipher(cipher);
+            Ok(())
+        }
+        Err(CryptoError::MissingKey) => Ok(()),
+        Err(e) => Err(anyhow::Error::new(e)
+            .context("failed to load encryption key (AXIL_ENC_KEY / AXIL_ENC_KEY_FILE)")),
+    }
+}
+
 fn attach_detected_engines(mut builder: axil_core::AxilBuilder) -> Result<axil_core::AxilBuilder> {
     let path = builder.path().to_path_buf();
     // Config (from the db dir) governs both which Engines attach
@@ -5119,6 +5151,13 @@ impl axil_core::Adapter for CliAdapter {
 /// Run the CLI command. Returns the exit code.
 fn run(cli: Cli, out: &Output) -> Result<i32> {
     let db_opt = cli.db;
+
+    // Install the process-wide encryption cipher before any command opens a
+    // database, so every open — including core-internal multi-DB ops and the
+    // in-process MCP server — seals/unseals with the same key. No-op when no key
+    // is configured or the `encryption` feature is off.
+    #[cfg(feature = "encryption")]
+    init_default_cipher()?;
 
     match cli.command {
         // ── Init ────────────────────────────────────────────────────

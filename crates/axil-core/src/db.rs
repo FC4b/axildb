@@ -157,6 +157,12 @@ pub struct AxilBuilder {
     /// Open the core store read-only (no single-writer lock), serving committed
     /// records while another process holds the writable handle.
     read_only: bool,
+    /// Optional encryption-at-rest cipher for core record bodies, applied to the
+    /// `Storage` handle at [`AxilBuilder::build`] time. `None` means cleartext
+    /// bodies — the default. Available only under the off-by-default
+    /// `encryption` feature; see [`crate::crypto`] for the honest scope.
+    #[cfg(feature = "encryption")]
+    cipher: Option<crate::crypto::Cipher>,
 }
 
 /// Best-effort sink for canonical IDs published to a workspace control
@@ -322,6 +328,34 @@ impl AxilBuilder {
         self
     }
 
+    /// Attach an encryption-at-rest cipher to the core record store.
+    ///
+    /// When set, every core record body is sealed with XChaCha20-Poly1305 before
+    /// it is written and unsealed on read; `.vec` embeddings and `.fts` tokens
+    /// stay cleartext (see [`crate::crypto`] for the honest scope). Available
+    /// only under the off-by-default `encryption` feature. Construct the cipher
+    /// from a key source via [`Cipher::from_env`](crate::crypto::Cipher::from_env),
+    /// [`Cipher::from_key_file`](crate::crypto::Cipher::from_key_file), or
+    /// [`Cipher::resolve`](crate::crypto::Cipher::resolve) — keys never touch the
+    /// `.axil` file.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "encryption")]
+    /// # fn demo() -> axil_core::error::Result<()> {
+    /// use axil_core::{Axil, crypto::Cipher};
+    /// let db = Axil::open("./memory.axil")
+    ///     .with_cipher(Cipher::from_env()?) // reads AXIL_ENC_KEY
+    ///     .build()?;
+    /// # let _ = db;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[cfg(feature = "encryption")]
+    pub fn with_cipher(mut self, cipher: crate::crypto::Cipher) -> Self {
+        self.cipher = Some(cipher);
+        self
+    }
+
     /// Open the database and return the handle.
     pub fn build(self) -> Result<Axil> {
         let needs_fts_reindex = self.needs_fts_reindex;
@@ -329,6 +363,19 @@ impl AxilBuilder {
             Storage::open_read_only(&self.path)?
         } else {
             Storage::open(&self.path)?
+        };
+        // Attach the encryption cipher (if configured) to the freshly opened
+        // core store before any read/write goes through it, so bodies seal and
+        // unseal transparently. An explicit `with_cipher` wins; otherwise fall
+        // back to the process-wide default installed by the adapter — that
+        // fallback is what covers raw `Axil::open(path).build()` opens this code
+        // can't reach (core-internal `branch_merge`, the workspace fan-out).
+        // No-op without the `encryption` feature — the rebinding is cfg'd out
+        // and the default build stays byte-identical.
+        #[cfg(feature = "encryption")]
+        let storage = match self.cipher.or_else(crate::crypto::default_cipher) {
+            Some(cipher) => storage.with_cipher(cipher),
+            None => storage,
         };
         let llm_usage = Arc::new(crate::llm::LlmUsageTracker::new(
             self.llm_config.cost_per_1m_input,
@@ -476,6 +523,8 @@ impl Axil {
             extensions: Vec::new(),
             needs_fts_reindex: false,
             read_only: false,
+            #[cfg(feature = "encryption")]
+            cipher: None,
         }
     }
 
@@ -6935,6 +6984,81 @@ mod tests {
             // Trimming evicts the oldest, so the surviving events are the newest 4.
             let remaining = db.recall_delta(None, None, 50).unwrap();
             assert_eq!(remaining.len(), 4);
+        }
+    }
+
+    /// Builder-level encryption wiring (`encryption` feature). Storage-level
+    /// sealing is covered in `storage.rs`; these prove `AxilBuilder::with_cipher`
+    /// actually threads the cipher into the core store, so a full `Axil` opened
+    /// through the builder round-trips — the integration the CLI/MCP rely on.
+    #[cfg(feature = "encryption")]
+    mod encryption {
+        use super::*;
+        use crate::crypto::Cipher;
+
+        fn key_a() -> Cipher {
+            Cipher::from_key_bytes(&[7u8; 32]).unwrap()
+        }
+        fn key_b() -> Cipher {
+            Cipher::from_key_bytes(&[9u8; 32]).unwrap()
+        }
+
+        /// insert through a cipher-attached builder → reopen with the same key →
+        /// the record reads back as plaintext.
+        #[test]
+        fn builder_round_trips_through_cipher() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("enc.axil");
+
+            // Scoped so the writer handle drops (releasing the single-writer
+            // lock) before we reopen the same file below.
+            let id = {
+                let db = Axil::open(&path).with_cipher(key_a()).build().unwrap();
+                db.insert("secrets", json!({"summary": "classified"}))
+                    .unwrap()
+                    .id
+            };
+
+            let db = Axil::open(&path).with_cipher(key_a()).build().unwrap();
+            let fetched = db.get(&id).unwrap().unwrap();
+            assert_eq!(fetched.data["summary"], "classified");
+            assert_eq!(fetched.table, "secrets");
+        }
+
+        /// A builder with no cipher cannot read a body that a cipher-attached
+        /// builder wrote — proves the builder genuinely encrypted on disk
+        /// (the wiring is not a silent no-op).
+        #[test]
+        fn cleartext_builder_cannot_read_encrypted_db() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("enc.axil");
+            let id = {
+                let db = Axil::open(&path).with_cipher(key_a()).build().unwrap();
+                db.insert("secrets", json!({"summary": "needle-xyz"}))
+                    .unwrap()
+                    .id
+            };
+
+            // Reopen with NO cipher: the sealed body fails to deserialize as a
+            // cleartext record, so `get` surfaces an error rather than plaintext.
+            let db = Axil::open(&path).build().unwrap();
+            assert!(db.get(&id).is_err());
+        }
+
+        /// Wrong key fails loud rather than returning corrupt or partial data.
+        #[test]
+        fn wrong_key_builder_fails_to_read() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("enc.axil");
+            let id = {
+                let db = Axil::open(&path).with_cipher(key_a()).build().unwrap();
+                db.insert("secrets", json!({"summary": "classified"}))
+                    .unwrap()
+                    .id
+            };
+
+            let db = Axil::open(&path).with_cipher(key_b()).build().unwrap();
+            assert!(db.get(&id).is_err());
         }
     }
 }

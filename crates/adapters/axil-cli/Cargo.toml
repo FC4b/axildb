@@ -131,6 +131,16 @@ otel = ["axil-core/otel"]
 # Durable semantic event log + `recall_delta` (pull-based cross-agent delta).
 # Off by default — write-amplifier; enabling it changes no default behavior.
 event-log = ["axil-core/event-log", "axil-mcp?/event-log"]
+# Opt-in encryption-at-rest for core record bodies (XChaCha20-Poly1305 AEAD).
+# Off by default — the default build is byte-identical and carries no crypto
+# dep. With the feature compiled in, the CLI resolves a key from AXIL_ENC_KEY
+# (or AXIL_ENC_KEY_FILE) once at startup and installs it as the process-wide
+# default cipher, so every database opened by the process — including the
+# in-process MCP server and core-internal multi-DB ops — seals/unseals record
+# bodies. No key set → cleartext bodies (no-op). HONEST SCOPE: bodies only;
+# `.vec`/`.fts` companions stay cleartext. Deliberately excluded from `full`
+# (like `event-log`) because it changes the on-disk body format.
+encryption = ["axil-core/encryption"]
 mcp = ["dep:axil-mcp"]
 ql = ["dep:axil-ql", "dep:rustyline"]
 rerank = ["indexer", "axil-indexer/rerank"]
