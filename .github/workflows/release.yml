@@ -85,26 +85,19 @@ jobs:
         include:
           - target: x86_64-pc-windows-msvc
             os: windows-latest
-            lib: onnxruntime.dll
           - target: aarch64-pc-windows-msvc
             os: windows-latest
-            lib: onnxruntime.dll
           - target: x86_64-apple-darwin
             os: macos-13
-            lib: libonnxruntime.dylib
           - target: aarch64-apple-darwin
             os: macos-latest
-            lib: libonnxruntime.dylib
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
-            lib: libonnxruntime.so
           - target: aarch64-unknown-linux-gnu
             # Native ARM runner: cross-linking aarch64-linux on an x86 runner has
-            # no cross-linker (the `build axil` step fails), and ort's
-            # download-binaries fetches the matching native aarch64 onnxruntime
-            # here. Requires GitHub's public-repo ARM runners.
+            # no cross-linker (the `build axil` step fails). Requires GitHub's
+            # public-repo ARM runners.
             os: ubuntu-24.04-arm
-            lib: libonnxruntime.so
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -115,14 +108,14 @@ jobs:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
       # Build the `axil` binary with default features (includes `embed`, which
-      # pulls onnxruntime via ort's `download-binaries`; the lib is cached under
-      # the OS cache dir — NOT target/ — so the stage step below locates it).
+      # STATICALLY links onnxruntime via ort's `download-binaries` — the binary
+      # is self-contained, no runtime onnxruntime library needed).
       - name: build axil
         run: cargo build --release -p axildb --target ${{ matrix.target }}
-      # Stage the binary + its sibling onnxruntime lib into the archive root so
-      # the loader finds the bundled lib first. This is the load-bearing step
-      # that fixes the Windows ORT-init failure on a fresh install.
-      - name: stage archive (bundle onnxruntime next to axil)
+      # onnxruntime is statically linked into `axil` (the runner cache holds only
+      # libonnxruntime.a / onnxruntime.lib — there is NO .so/.dylib/.dll), so the
+      # archive is just the self-contained binary; nothing to bundle alongside.
+      - name: stage archive
         shell: bash
         run: |
           set -euo pipefail
@@ -130,28 +123,6 @@ jobs:
           stage="axildb-${{ matrix.target }}"
           mkdir -p "$stage"
           if [ -f "$out/axil.exe" ]; then cp "$out/axil.exe" "$stage/"; else cp "$out/axil" "$stage/"; fi
-          # `ort`'s `download-binaries` does NOT drop the onnxruntime lib in
-          # target/ — it caches it under the OS cache dir (~/.cache/ort.pyke.io on
-          # Linux, ~/Library/Caches/ort.pyke.io on macOS, %LOCALAPPDATA%\ort.pyke.io
-          # on Windows), and the filename is often VERSIONED (e.g.
-          # libonnxruntime.so.1.22.0). Match a version-tolerant glob across the
-          # build output, the home tree (every cache root on CI), and the runner
-          # temp, then bundle it under the canonical unversioned name the loader
-          # resolves as a sibling at runtime.
-          case "${{ matrix.target }}" in
-            *windows*) pat="onnxruntime*.dll" ;;
-            *apple*)   pat="libonnxruntime*.dylib" ;;
-            *)         pat="libonnxruntime.so*" ;;
-          esac
-          found=$(find "$out" "target/${{ matrix.target }}" "$HOME" "${RUNNER_TEMP:-/tmp}" \
-                    -name "$pat" -type f -print 2>/dev/null | head -n1 || true)
-          if [ -z "$found" ]; then
-            echo "::error::onnxruntime lib ($pat) not found for ${{ matrix.target }} — candidate paths:"
-            find "$HOME" "${RUNNER_TEMP:-/tmp}" /opt 2>/dev/null | grep -i onnxruntime | head -40 || true
-            exit 1
-          fi
-          cp "$found" "$stage/${{ matrix.lib }}"
-          echo "bundled onnxruntime: $found -> ${{ matrix.lib }}"
       - name: archive
         shell: bash
         run: |
