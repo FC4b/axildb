@@ -20,6 +20,33 @@ const BRUTE_FORCE_MAX: usize = 128;
 /// Minimum search-time candidate-list width (HNSW `ef`). Floors recall for
 /// small `top_k` queries where `top_k * 4` alone would be too narrow.
 const EF_SEARCH_MIN: usize = 64;
+/// Maximum search-time `ef`. Recall gains flatten while latency keeps climbing,
+/// so the population-adaptive widening below is capped here.
+const EF_SEARCH_MAX: usize = 512;
+/// Per-population-decade growth factor for the search `ef` (see [`adaptive_ef`]).
+/// Tuned so recall@10 stays at/above the 0.90 oracle floor from a few thousand
+/// up to tens of thousands of vectors.
+const EF_POP_GROWTH: f64 = 2.5;
+
+/// Search-time `ef` (HNSW candidate-list width) for a `population`-node graph
+/// returning `knbn` neighbours.
+///
+/// A FIXED `ef` loses recall as the graph grows — a constant beam can't navigate
+/// enough of a larger graph — so widen `ef` with the population (log-scaled in
+/// decades above 1k). This keeps recall@10 above the oracle floor from a few
+/// thousand to tens of thousands of vectors at a modest, bounded latency cost;
+/// small graphs are unaffected (they keep the `EF_SEARCH_MIN` base).
+fn adaptive_ef(knbn: usize, population: usize) -> usize {
+    let base = knbn.saturating_mul(4).max(EF_SEARCH_MIN);
+    // Decades of population above 1k: 0 at <=1k, 1 at 10k, ~1.3 at 20k, 2 at 100k.
+    let decades = ((population.max(1) as f64) / 1000.0).max(1.0).log10();
+    let widened = (base as f64 * (1.0 + EF_POP_GROWTH * decades)).round() as usize;
+    // Cap the population widening at EF_SEARCH_MAX — but never below `base`: a
+    // large `knbn` (over-fetching past many tombstones) legitimately needs `base`
+    // candidates even when that exceeds the cap, and `clamp(base, MAX)` would
+    // otherwise panic when base > MAX.
+    widened.min(base.max(EF_SEARCH_MAX))
+}
 
 /// Cosine similarity between two f32 slices (may have different lengths — uses min).
 /// Returns raw similarity in [-1.0, 1.0] — NOT clamped, so HNSW distance
@@ -249,9 +276,9 @@ impl HnswIndex {
         // for more than exists.
         let physical = self.vectors.len() + self.tombstones;
         let knbn = top_k.saturating_add(self.tombstones).min(physical);
-        // Candidate-list width drives recall. Keep it comfortably wider than
-        // both `knbn` and a fixed floor so recall@10 stays well above target.
-        let ef = knbn.saturating_mul(4).max(EF_SEARCH_MIN);
+        // Candidate-list width drives recall, and a fixed `ef` decays as the
+        // graph grows — so widen it with the live population (see `adaptive_ef`).
+        let ef = adaptive_ef(knbn, physical);
 
         let neighbours = self.graph.search(query, knbn, ef);
 
@@ -728,6 +755,23 @@ mod tests {
             "removed id reappeared in search before compaction"
         );
         assert!(results.iter().any(|(id, _)| id == &id2));
+    }
+
+    #[test]
+    fn adaptive_ef_widens_with_population_without_panicking() {
+        let base = (10usize * 4).max(EF_SEARCH_MIN); // knbn=10 -> 64
+        assert_eq!(adaptive_ef(10, 500), base, "<=1k graph keeps the base width");
+        let at10k = adaptive_ef(10, 10_000);
+        let at20k = adaptive_ef(10, 20_000);
+        assert!(at10k > base && at20k >= at10k, "ef widens monotonically with N");
+        assert!(at20k <= EF_SEARCH_MAX, "population widening is capped at EF_SEARCH_MAX");
+        // A large knbn (over-fetch past many tombstones) makes `base` exceed the
+        // cap; ef must equal that base, not panic on clamp(base, MAX).
+        assert_eq!(
+            adaptive_ef(460, 900),
+            (460 * 4).max(EF_SEARCH_MIN),
+            "base over-fetch width is honored even above the cap"
+        );
     }
 
     #[test]
