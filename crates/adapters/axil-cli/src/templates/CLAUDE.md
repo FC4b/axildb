@@ -74,6 +74,24 @@ axil store errors '{"error":"<what broke>","root_cause":"<why>","fix":"<how>"}'
 axil store context '{"type":"architecture","summary":"<what you learned>","files":["<key files>"]}'
 ```
 
+### How to categorize: by FUNCTION, not TOPIC
+
+The **table** is the record's *kind* — the question it answers / when you reach
+for it: `decisions` (a choice + why), `errors` (a failure + fix), `rules`
+(constraints to obey), `context` (durable how-it-works knowledge). Pick the
+table by function.
+
+**Never encode TOPIC as a category.** "The auth feature", a module or file
+name, an area — those are *topics*, already found by recall's semantic search +
+auto-extracted entities. Putting them in a table name or `type` just duplicates
+the embedding. Let entities capture them, or pass `--scope`.
+
+For `context` records, an optional `type` facet scopes later retrieval —
+recommended values: `architecture`, `gotcha`, `howto`, `reference`. Filter on it
+with `axil recall "<q>" --type architecture`. The vocabulary is a recommendation,
+not enforced (any string is accepted). `decisions`/`errors` don't need a `type` —
+their field shape already encodes their function.
+
 ### Rules
 
 1. **Store immediately, not in batches.** Don't wait until the end of a session to dump 6 records. Store each decision/error/summary right after it happens.

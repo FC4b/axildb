@@ -2,6 +2,13 @@
 //!
 //! File-copy based snapshots of the database and all companion files.
 //! Supports create, list, and restore operations.
+//!
+//! **Deprecated.** These helpers are unwired (no CLI/MCP surface routes through
+//! them) and duplicate the `branch` API, which already takes a point-in-time
+//! copy of every `.axil*` file (`axil branch create` / [`crate::branch_create`]).
+//! Prefer the branch API; the snapshot functions below are slated for removal in
+//! a future major version. Both share the same consistency caveat — a copy taken
+//! while a writer is mid-commit may be torn, so quiesce writers first.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -33,6 +40,11 @@ pub struct SnapshotMeta {
 ///
 /// Copies all `.axil*` files from the database directory into a timestamped
 /// subdirectory under `<db_path>.snapshots/`.
+#[deprecated(
+    note = "unwired and redundant with the branch API (`axil branch create` / \
+            `crate::branch_create` also copy every `.axil*` file); use that \
+            instead. Slated for removal in a future major version."
+)]
 pub fn create_snapshot(db_path: &Path, label: &str) -> io::Result<SnapshotMeta> {
     let now = Utc::now();
     let id = now.format("%Y%m%d_%H%M%S").to_string();
@@ -92,6 +104,10 @@ pub fn create_snapshot(db_path: &Path, label: &str) -> io::Result<SnapshotMeta> 
 }
 
 /// List all snapshots for a database.
+#[deprecated(
+    note = "unwired and redundant with the branch API (`axil branch list` / \
+            `crate::branch_list`); use that instead. Slated for removal."
+)]
 pub fn list_snapshots(db_path: &Path) -> io::Result<Vec<SnapshotMeta>> {
     let snap_dir = snapshots_dir(db_path);
     if !snap_dir.exists() {
@@ -120,6 +136,10 @@ pub fn list_snapshots(db_path: &Path) -> io::Result<Vec<SnapshotMeta>> {
 /// Restore a snapshot by copying files back to the database location.
 ///
 /// Validates checksums before overwriting to prevent restoring corrupt snapshots.
+#[deprecated(
+    note = "unwired and redundant with the branch API; use that instead. \
+            Slated for removal in a future major version."
+)]
 pub fn restore_snapshot(db_path: &Path, snapshot_id: &str) -> io::Result<SnapshotMeta> {
     let snap_dir = snapshots_dir(db_path).join(snapshot_id);
     if !snap_dir.exists() {
@@ -263,6 +283,9 @@ fn copy_dir_recursive(src: &Path, dest: &Path) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    // These tests exercise the deprecated snapshot helpers on purpose — keep
+    // them covered until the functions are removed in a future major version.
+    #![allow(deprecated)]
     use super::*;
 
     #[test]

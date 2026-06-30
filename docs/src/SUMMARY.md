@@ -13,6 +13,7 @@
 - [Architecture](./concepts/architecture.md)
 - [Use Cases](./concepts/use-cases.md)
 - [Memory Types](./concepts/memory-types.md)
+- [Memory Taxonomy](./concepts/memory-taxonomy.md)
 - [Engines (Storage Plugins)](./concepts/plugins.md)
 - [Storage Model](./concepts/storage.md)
 
@@ -56,4 +57,5 @@
 - [Retrieval Pipeline](./advanced/retrieval-pipeline.md)
 - [Indexing & Scale](./advanced/indexing-and-scale.md)
 - [Memory Hygiene](./advanced/memory-hygiene.md)
+- [Encryption at Rest](./advanced/encryption-at-rest.md)
 - [Evaluation Log](./advanced/eval-log.md)

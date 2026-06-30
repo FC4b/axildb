@@ -1,0 +1,5 @@
+# Seed corpus entries are exact byte fixtures (they include null bytes, a 100K
+# string, and UTF-8 sequences mirrored from the parser's adversarial tests).
+# Treat them as binary so Git never applies EOL/whitespace normalization that
+# would silently mutate the bytes the fuzzer feeds to the parser.
+corpus/** binary

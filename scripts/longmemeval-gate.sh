@@ -35,10 +35,14 @@ CANDIDATE_DIR="${HARNESS}/out"
 mkdir -p "${CANDIDATE_DIR}"
 
 VARIANT="s"
-QUESTIONS=20
+# Default to the full 500-question Recall-QTC run that backs the README's
+# 94.5% figure — the committed baseline (benchmarks/longmemeval/baseline.jsonl)
+# is that run, so a real (dataset-present) gate compares apples-to-apples.
+# Pass --questions 20 --strategy vector for a quick smoke instead.
+QUESTIONS=500
 TOP_K=5
 MODEL="bge-small"
-STRATEGY="vector"
+STRATEGY="recall-qtc"
 RERANK="off"
 EXTRA_FEATURES=""
 SAVE=0

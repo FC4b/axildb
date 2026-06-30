@@ -40,12 +40,28 @@ Your coding agent is brilliant and amnesiac. Every session it re-reads the same 
 
 ## Quick start
 
-**1. Install:**
+**1. Install** — a prebuilt `axil` binary, no toolchain, no ~3-min compile. The archives **bundle a known-good ONNX runtime next to the binary**, so vector search and embeddings work out of the box (including on Windows):
+
+```bash
+# Prebuilt binary, no source build — fetches the platform archive from the releases page.
+cargo binstall axildb          # https://github.com/cargo-bins/cargo-binstall
+
+# …or download an archive for your platform from the releases page and extract it
+# (keep the bundled onnxruntime library next to `axil`):
+#   https://github.com/FC4b/axildb/releases/latest
+```
+
+<details>
+<summary><b>Build from source instead</b> (needs a C toolchain; <code>cargo install</code> compiles ONNX)</summary>
 
 ```bash
 cargo install axildb                     # installs the `axil` binary · default features ≈ everything
-# or from source: git clone https://github.com/FC4b/axildb.git && cd axildb && cargo build --release -p axildb
+# or: git clone https://github.com/FC4b/axildb.git && cd axildb && cargo build --release -p axildb
 ```
+
+`cargo install` builds from source and copies only the binary to `~/.cargo/bin` — on Windows it leaves the `download-binaries` `onnxruntime.dll` behind in `target/`, so the embedder fails ONNX init at first use. Prefer `cargo binstall` above, which bundles the runtime. If you must `cargo install`, drop a matching `onnxruntime.dll` (ORT ≥ 1.22) next to `axil.exe`. See [Installation](docs/src/getting-started/installation.md#windows--onnx).
+
+</details>
 
 **2. Wire it into your project** (recommended — agent memory). One command wires Axil into your Claude Code / Cursor / Codex project and indexes your code. From there the agent does the work: hooks inject context before each turn, capture decisions and errors as you go, and write a checkpoint at the end.
 
@@ -70,7 +86,13 @@ axil checkpoint      '{"goal":"ship auth","state":"tests green","next_steps":["w
 
 The DB auto-detects at `.axil/memory.axil`, so everyday commands need no `--db`.
 
-→ Full install options (feature flags, SCIP indexers, manual setup): [Installation](docs/src/getting-started/installation.md). Using Cursor, Windsurf, Codex, or another MCP client? See the [Agent Integration guide](docs/src/agents/claude-code.md) and [MCP Server](docs/src/agents/mcp.md).
+→ Full install options (feature flags, SCIP indexers, manual setup): [Installation](docs/src/getting-started/installation.md).
+
+**Using another editor?** The same one-command setup wires the matching rules file — `axil install --cursor` (`.cursor/rules`), `axil install --windsurf` (`.windsurfrules`), or `axil install --codex` (`AGENTS.md`). For any MCP client, register the stdio server in one step — see the **[MCP Server guide](docs/src/agents/mcp.md)**:
+
+```bash
+claude mcp add axil -- axil --db ./.axil/memory.axil mcp   # the DB is the global --db flag, not positional
+```
 
 <details>
 <summary><b>Path B — standalone CLI</b> (drive Axil directly as a memory store)</summary>
@@ -151,32 +173,38 @@ Everything below normally means standing up a vector DB **and** Neo4j **and** El
 
 **💻 Built for code agents** — structural code index + `code-search` / `code-context` (pointer-shaped, token-frugal) · SCIP cross-reference graph · version-pinned dependency-doc memory · structured session checkpoints · AxilQL · MCP server (full CLI parity).
 
-**🔌 Optional LLM upgrade** — plug in Claude / GPT / Ollama (or Claude Code skills) to take extraction & consolidation from ~80% → ~95%. Everything above runs without it.
+**🔌 Optional LLM upgrade** — plug in Claude / GPT / Ollama (or Claude Code skills) to sharpen entity extraction & consolidation beyond the algorithmic defaults. Everything above runs without it.
 
 ## Benchmarks
 
-**Top-tier retrieval recall — with no LLM and no server.** Axil beats every LLM- and server-dependent system on the board — Hindsight (PostgreSQL + LLM), Mem0, Zep — from a file you embed, and trails only MemPalace, itself a local system, by a couple of points. SQLite-shaped accuracy, no daemon to run.
+**Top-tier retrieval recall — with no LLM and no server.** On LongMemEval retrieval recall@5, Axil is the strongest *structured* memory among no-LLM, no-server systems — within ~3 points of MemPalace (a verbatim-text + ChromaDB config near the retrieval ceiling) and ahead of Memvid — from a file you embed. The LLM/server systems (Hindsight, Mem0, Zep) report end-to-end QA accuracy, a different and always-lower metric, so they're landscape context, not a head-to-head. SQLite-shaped accuracy, no daemon to run.
 
-**LongMemEval** — retrieval recall over 500 questions (top-k=5), vs comparable memory systems:
+**LongMemEval** — 500 questions, grouped by metric (recall@5 is always higher than QA accuracy — compare within a metric, not across):
 
-| System | Recall | No LLM | No server |
-|--------|-------:|:------:|:---------:|
-| MemPalace | 96.6% | ✅ | ✅ |
-| **Axil — Recall-QTC** | **94.5%** | ✅ | ✅ |
-| Hindsight | 91.4% | ❌ | ❌ (PostgreSQL) |
-| **Axil — Recall (fusion)** | **90.9%** | ✅ | ✅ |
-| Memvid | 85.7% | ✅ | ✅ |
-| Mem0 | 68.4% | ❌ | ❌ (3 DBs) |
-| Zep | 66.0% | ❌ | ❌ |
+<div align="center">
+  <img src="assets/longmemeval-recall.png" alt="LongMemEval (500 questions), grouped by metric. Retrieval recall@5, no LLM: MemPalace 96.6, Axil Recall-QTC 93.5, Axil Recall-fusion 91.5, Memvid 85.7. End-to-end QA accuracy, LLM+server: Hindsight 91.4, Mem0 68.4, Zep 66.0." width="840">
+</div>
+
+| System | Score | Metric | No LLM | No server |
+|--------|------:|--------|:------:|:--------:|
+| MemPalace | 96.6% | recall@5 | ✅ | ✅ |
+| **Axil — Recall-QTC** | **93.5%** | recall@5 | ✅ | ✅ |
+| **Axil — Recall (fusion)** | **91.5%** | recall@5 | ✅ | ✅ |
+| Memvid | 85.7% | recall@5 | ✅ | ✅ |
+| Hindsight | 91.4% | QA accuracy | ❌ | ❌ (PostgreSQL) |
+| Mem0 | 68.4% | QA accuracy | ❌ | ❌ (3 DBs) |
+| Zep | 66.0% | QA accuracy | ❌ | ❌ |
+
+> **Two metrics — don't cross-compare.** Retrieval recall@5 asks *did the answer-bearing session land in the top-5?*; end-to-end QA accuracy asks *did the system answer correctly?* — and recall is always the higher number. Axil, MemPalace, and Memvid are no-LLM systems measured on recall; Hindsight, Mem0, and Zep report QA accuracy. MemPalace's 96.6% is a verbatim-text + ChromaDB recall config near this dataset's ~96% retrieval ceiling.
 
 And it's small and fast where it counts:
 
 - **100% needle-recall (6/6), CI-enforced** — every build runs [`scripts/needle-recall-gate.sh`](scripts/needle-recall-gate.sh): a planted fact must come back in the top-5 with its distinctive token intact, or the build fails.
-- **~173× faster vector search** than SQLite + sqlite-vec at 100k vectors *(out-of-tree `sqlite-compare` harness)*.
+- **~173× faster vector search** than SQLite + sqlite-vec at 100k vectors *(in-tree [`sqlite-compare`](benchmarks/sqlite-compare) harness; CI gates a reduced-n speedup floor, the 100k figure is a local run)*.
 - Competitive recall at a fraction of the per-query token budget *(estimate — assumes ~950 tokens/query; see [methodology](docs/src/advanced/benchmarks.md))*.
 - **<100 ms** commands from a **~5–10 MB** offline binary — no LLM call, no network, no daemon.
 
-> *Competitor figures (MemPalace, Hindsight, Mem0, Zep, Memvid) are cited from the published LongMemEval landscape as of April 2026 — not measured by Axil.* Axil's own LongMemEval rows are the **last committed run on the now-archived 500-question harness** (dataset out-of-tree, not regenerated here); the latency/vector figures come from the out-of-tree `sqlite-compare` harness. The **needle-recall gate and the Criterion hot-path suites run in-tree** (`cargo bench` / CI). → Full tables, per-category breakdown, and methodology: **[Benchmarks](docs/src/advanced/benchmarks.md)**.
+> *Competitor figures (MemPalace, Hindsight, Mem0, Zep, Memvid) are cited from the published LongMemEval landscape as of April 2026 — recall@5 for the no-LLM systems, end-to-end QA accuracy for the LLM/server ones — not measured by Axil.* Axil's LongMemEval harness is **in-tree** at [`benchmarks/longmemeval`](benchmarks/longmemeval); both Axil figures are committed 500-question baselines — Recall-QTC **93.5%** ([`qtc-500.json`](benchmarks/results/qtc-500.json)) and Recall-fusion **91.5%** ([`fusion-500.json`](benchmarks/results/fusion-500.json)) — re-measured 2026-06-27 on the current build (`bge-small`, top-k 5, ONNX Runtime CUDA on an RTX 3080). The LongMemEval-S dataset is out-of-tree, so the CI gate skips-loud (a green run never means it re-verified); re-run locally with the dataset present. HNSW retrieval is approximate, so recall varies ~1pp build-to-build. The `sqlite-compare`, **needle-recall**, and Criterion hot-path harnesses are all in-tree (the first two CI-gated). → Full tables, per-category breakdown, and methodology: **[Benchmarks](docs/src/advanced/benchmarks.md)**.
 
 ## How it works
 

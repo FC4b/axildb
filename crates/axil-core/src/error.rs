@@ -22,12 +22,31 @@ pub enum AxilError {
     /// Plugin error — preserves the original error source chain.
     #[error("plugin error: {0}")]
     Plugin(#[source] Box<dyn std::error::Error + Send + Sync>),
+
+    /// The database file is already opened for writing by another process.
+    ///
+    /// Axil is single-writer: only one process may hold a writable handle to a
+    /// given `.axil` (or companion) file at a time. A second writer that tries
+    /// to open the same file gets this variant rather than a generic storage
+    /// error, so callers can distinguish a transient contention failure (retry
+    /// or fall back to a read-only open) from a corrupt or missing file.
+    #[error("database busy: already opened for writing by another process")]
+    Busy,
 }
 
 impl AxilError {
     /// Create a plugin error from a message string.
     pub fn plugin(msg: impl Into<String>) -> Self {
         Self::Plugin(Box::new(PluginMessage(msg.into())))
+    }
+
+    /// True if this error means the database is held open for writing by
+    /// another process (the single-writer lock is contended).
+    ///
+    /// Hot read commands use this to decide between a bounded retry on the
+    /// writer and a read-only fallback open.
+    pub fn is_busy(&self) -> bool {
+        matches!(self, AxilError::Busy)
     }
 }
 
@@ -56,7 +75,14 @@ impl From<redb::Error> for AxilError {
 
 impl From<redb::DatabaseError> for AxilError {
     fn from(e: redb::DatabaseError) -> Self {
-        AxilError::Storage(Box::new(e))
+        // The single-writer lock is contended: another process holds a writable
+        // handle to this file. Surface it as the typed `Busy` variant so callers
+        // can retry or fall back to a read-only open. Everything else is opaque
+        // storage failure.
+        match e {
+            redb::DatabaseError::DatabaseAlreadyOpen => AxilError::Busy,
+            other => AxilError::Storage(Box::new(other)),
+        }
     }
 }
 

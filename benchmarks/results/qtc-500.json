@@ -6,11 +6,32 @@
   "top_k": 5,
   "total_questions": 500,
   "overall": {
-    "hit_rate": 0.972,
-    "avg_recall": 0.9454666666666666,
-    "avg_precision": 0.31920000000000076
+    "hit_rate": 0.964,
+    "avg_recall": 0.9354666666666666,
+    "avg_precision": 0.3168000000000008
   },
   "by_category": {
+    "temporal-reasoning": {
+      "total": 133,
+      "hits": 122,
+      "hit_rate": 0.9172932330827067,
+      "avg_recall": 0.8788220551378446,
+      "avg_precision": 0.3368421052631575
+    },
+    "single-session-preference": {
+      "total": 30,
+      "hits": 27,
+      "hit_rate": 0.9,
+      "avg_recall": 0.9,
+      "avg_precision": 0.18000000000000008
+    },
+    "single-session-user": {
+      "total": 70,
+      "hits": 67,
+      "hit_rate": 0.9571428571428572,
+      "avg_recall": 0.9571428571428572,
+      "avg_precision": 0.17428571428571413
+    },
     "single-session-assistant": {
       "total": 56,
       "hits": 56,
@@ -18,40 +39,19 @@
       "avg_recall": 1.0,
       "avg_precision": 0.19999999999999987
     },
-    "knowledge-update": {
-      "total": 78,
-      "hits": 78,
-      "hit_rate": 1.0,
-      "avg_recall": 0.9807692307692307,
-      "avg_precision": 0.35641025641025603
-    },
     "multi-session": {
       "total": 133,
       "hits": 132,
       "hit_rate": 0.9924812030075187,
-      "avg_recall": 0.9355889724310777,
-      "avg_precision": 0.4270676691729318
+      "avg_recall": 0.9312030075187969,
+      "avg_precision": 0.4270676691729319
     },
-    "temporal-reasoning": {
-      "total": 133,
-      "hits": 124,
-      "hit_rate": 0.9323308270676691,
-      "avg_recall": 0.9007518796992481,
-      "avg_precision": 0.3443609022556386
-    },
-    "single-session-user": {
-      "total": 70,
-      "hits": 68,
-      "hit_rate": 0.9714285714285714,
-      "avg_recall": 0.9714285714285714,
-      "avg_precision": 0.17714285714285696
-    },
-    "single-session-preference": {
-      "total": 30,
-      "hits": 28,
-      "hit_rate": 0.9333333333333333,
-      "avg_recall": 0.9333333333333333,
-      "avg_precision": 0.18666666666666673
+    "knowledge-update": {
+      "total": 78,
+      "hits": 78,
+      "hit_rate": 1.0,
+      "avg_recall": 0.9871794871794872,
+      "avg_precision": 0.3589743589743586
     }
   },
   "misses": [
@@ -62,11 +62,11 @@
       "recall": 0.0,
       "precision": 0.0,
       "retrieved_sessions": [
-        "session_44",
         "session_37",
-        "session_29",
+        "session_44",
+        "session_35",
         "session_40",
-        "session_28"
+        "session_29"
       ],
       "answer_sessions": [
         "session_26"
@@ -82,7 +82,7 @@
         "session_41",
         "session_43",
         "session_20",
-        "session_22",
+        "session_31",
         "session_14"
       ],
       "answer_sessions": [
@@ -90,22 +90,38 @@
       ]
     },
     {
-      "question_id": "gpt4_f2262a51",
-      "question_type": "multi-session",
-      "question_date": "2023/05/30 (Tue) 21:43",
+      "question_id": "1faac195",
+      "question_type": "single-session-user",
+      "question_date": "2023/05/30 (Tue) 19:50",
       "recall": 0.0,
       "precision": 0.0,
       "retrieved_sessions": [
-        "session_11",
+        "session_19",
         "session_43",
-        "session_30",
-        "session_42",
-        "session_32"
+        "session_23",
+        "session_41",
+        "session_7"
       ],
       "answer_sessions": [
-        "session_2",
-        "session_5",
-        "session_12"
+        "session_3"
+      ]
+    },
+    {
+      "question_id": "10d9b85a",
+      "question_type": "multi-session",
+      "question_date": "2023/05/01 (Mon) 23:15",
+      "recall": 0.0,
+      "precision": 0.0,
+      "retrieved_sessions": [
+        "session_14",
+        "session_10",
+        "session_22",
+        "session_8",
+        "session_23"
+      ],
+      "answer_sessions": [
+        "session_29",
+        "session_39"
       ]
     },
     {
@@ -116,10 +132,10 @@
       "precision": 0.0,
       "retrieved_sessions": [
         "session_37",
-        "session_40",
-        "session_28",
         "session_41",
-        "session_47"
+        "session_28",
+        "session_40",
+        "session_10"
       ],
       "answer_sessions": [
         "session_7"
@@ -132,14 +148,31 @@
       "recall": 0.0,
       "precision": 0.0,
       "retrieved_sessions": [
-        "session_29",
         "session_31",
+        "session_8",
         "session_25",
-        "session_27",
-        "session_15"
+        "session_15",
+        "session_27"
       ],
       "answer_sessions": [
         "session_12"
+      ]
+    },
+    {
+      "question_id": "1c0ddc50",
+      "question_type": "single-session-preference",
+      "question_date": "2023/05/30 (Tue) 13:09",
+      "recall": 0.0,
+      "precision": 0.0,
+      "retrieved_sessions": [
+        "session_13",
+        "session_6",
+        "session_1",
+        "session_10",
+        "session_16"
+      ],
+      "answer_sessions": [
+        "session_34"
       ]
     },
     {
@@ -150,8 +183,8 @@
       "precision": 0.0,
       "retrieved_sessions": [
         "session_35",
-        "session_2",
         "session_23",
+        "session_2",
         "session_13",
         "session_37"
       ],
@@ -167,13 +200,48 @@
       "precision": 0.0,
       "retrieved_sessions": [
         "session_35",
-        "session_26",
         "session_12",
+        "session_42",
         "session_24",
-        "session_42"
+        "session_26"
       ],
       "answer_sessions": [
         "session_10"
+      ]
+    },
+    {
+      "question_id": "gpt4_21adecb5",
+      "question_type": "temporal-reasoning",
+      "question_date": "2023/07/01 (Sat) 08:16",
+      "recall": 0.0,
+      "precision": 0.0,
+      "retrieved_sessions": [
+        "session_33",
+        "session_9",
+        "session_4",
+        "session_34",
+        "session_39"
+      ],
+      "answer_sessions": [
+        "session_24",
+        "session_37"
+      ]
+    },
+    {
+      "question_id": "gpt4_59149c78",
+      "question_type": "temporal-reasoning",
+      "question_date": "2023/02/01 (Wed) 08:41",
+      "recall": 0.0,
+      "precision": 0.0,
+      "retrieved_sessions": [
+        "session_22",
+        "session_2",
+        "session_43",
+        "session_35",
+        "session_46"
+      ],
+      "answer_sessions": [
+        "session_29"
       ]
     },
     {
@@ -183,11 +251,11 @@
       "recall": 0.0,
       "precision": 0.0,
       "retrieved_sessions": [
-        "session_45",
         "session_46",
-        "session_9",
+        "session_45",
         "session_35",
-        "session_39"
+        "session_20",
+        "session_9"
       ],
       "answer_sessions": [
         "session_14"
@@ -201,10 +269,10 @@
       "precision": 0.0,
       "retrieved_sessions": [
         "session_36",
-        "session_38",
-        "session_16",
         "session_29",
-        "session_6"
+        "session_16",
+        "session_38",
+        "session_39"
       ],
       "answer_sessions": [
         "session_35"
@@ -218,10 +286,10 @@
       "precision": 0.0,
       "retrieved_sessions": [
         "session_0",
-        "session_10",
         "session_9",
         "session_36",
-        "session_8"
+        "session_37",
+        "session_1"
       ],
       "answer_sessions": [
         "session_38"
@@ -236,9 +304,9 @@
       "retrieved_sessions": [
         "session_8",
         "session_9",
-        "session_15",
+        "session_20",
         "session_24",
-        "session_20"
+        "session_37"
       ],
       "answer_sessions": [
         "session_11"
@@ -253,12 +321,29 @@
       "retrieved_sessions": [
         "session_15",
         "session_10",
-        "session_26",
-        "session_18",
-        "session_11"
+        "session_11",
+        "session_7",
+        "session_17"
       ],
       "answer_sessions": [
         "session_40"
+      ]
+    },
+    {
+      "question_id": "gpt4_8279ba03",
+      "question_type": "temporal-reasoning",
+      "question_date": "2023/03/25 (Sat) 18:26",
+      "recall": 0.0,
+      "precision": 0.0,
+      "retrieved_sessions": [
+        "session_39",
+        "session_11",
+        "session_25",
+        "session_41",
+        "session_32"
+      ],
+      "answer_sessions": [
+        "session_33"
       ]
     },
     {
@@ -268,32 +353,14 @@
       "recall": 0.0,
       "precision": 0.0,
       "retrieved_sessions": [
-        "session_1",
+        "session_6",
         "session_34",
-        "session_25",
-        "session_11",
-        "session_35"
+        "session_5",
+        "session_40",
+        "session_25"
       ],
       "answer_sessions": [
         "session_31"
-      ]
-    },
-    {
-      "question_id": "gpt4_78cf46a3",
-      "question_type": "temporal-reasoning",
-      "question_date": "2023/05/26 (Fri) 12:55",
-      "recall": 0.0,
-      "precision": 0.0,
-      "retrieved_sessions": [
-        "session_26",
-        "session_29",
-        "session_25",
-        "session_12",
-        "session_30"
-      ],
-      "answer_sessions": [
-        "session_34",
-        "session_44"
       ]
     }
   ]

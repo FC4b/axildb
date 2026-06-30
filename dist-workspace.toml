@@ -1,0 +1,84 @@
+# cargo-dist config — used ONLY to back the `dist plan` sanity check in the
+# release workflow (it proves the six target triples resolve before a release).
+#
+# SOURCE OF TRUTH IS THE HAND-AUTHORED .github/workflows/release.yml — do NOT run
+# `dist init` / `dist generate`. cargo-dist's generated workflow would (a) be a
+# SECOND workflow (`axildb-release.yml`) triggering on the same `axildb-v*` tag,
+# racing the hand-authored one, and (b) archive only the files in `include`
+# below, which cargo-dist resolves repo-relative — it CANNOT reach the
+# build-time `onnxruntime.dll` that lands in `target/<triple>/release/`. The
+# hand-authored workflow stages that DLL next to `axil` with an explicit copy
+# step, which is the load-bearing fix for the Windows ORT-init failure. Until a
+# tagged-release CI run validates a full cargo-dist adoption (installers +
+# updater), the prebuilt distribution is: `cargo binstall axildb` + the archives
+# this workflow uploads. One-line `curl|sh` installers and `axil-update` are NOT
+# produced — don't advertise them.
+#
+# Why prebuilts exist at all: `cargo install axildb` builds from source (~3 min,
+# needs a C toolchain) and on Windows leaves the `download-binaries`-produced
+# `onnxruntime.dll` behind in `target/`, so the loader falls back to a stale
+# System32 copy with an incompatible ORT API version. The archives bundle a
+# known-good onnxruntime next to `axil`, so a fresh install needs no manual DLL
+# copy (Strategy A — no Cargo change).
+
+[workspace]
+members = ["cargo:."]
+
+[dist]
+# Pin a stable cargo-dist. Bump deliberately; `dist init` rewrites release.yml.
+cargo-dist-version = "0.31.0"
+# Only ship the publishable CLI crate (binary `axil`); the umbrella facade and
+# library crates are not user-facing artifacts.
+packages = ["axildb"]
+# Generate GitHub Actions CI for releases.
+ci = "github"
+# The CI workflow is HAND-AUTHORED (release.yml), not generated — tell cargo-dist
+# not to manage/consistency-check it, so `dist plan` validates targets/config
+# without demanding a generated `axildb-release.yml` (which we deliberately don't
+# ship). Without this, `dist plan` errors with "axildb-release.yml out of date".
+allow-dirty = ["ci"]
+# No cargo-dist installers: the hand-authored workflow ships archives only, and
+# `cargo binstall` consumes them via [package.metadata.binstall] in axil-cli's
+# Cargo.toml. One-line installers + `axil-update` are deferred until a tagged CI
+# run can validate a full cargo-dist adoption (which must also solve ONNX
+# bundling — see the header).
+installers = []
+# Prebuilt targets: x86_64 + aarch64 across the three desktop OSes.
+# NOTE: aarch64-pc-windows-msvc may lack a prebuilt `ort` download-binaries
+# artifact — if the first `dist plan` dry-run can't resolve onnxruntime for it,
+# drop that single triple here (the rest still ship).
+targets = [
+    "x86_64-pc-windows-msvc",
+    "aarch64-pc-windows-msvc",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+]
+# GitHub build provenance attestations (supply-chain integrity). INERT under the
+# hand-authored workflow (like `include` below) — release.yml runs its own
+# `actions/attest-build-provenance` step; this key documents intent and is only
+# consumed if a full cargo-dist adoption is ever validated. Code SIGNING (an
+# Authenticode cert) is out of scope for v1 — unsigned Windows binaries show a
+# SmartScreen warning; documented in installation.md.
+github-attestations = true
+# Build each target in its own job for a clean per-triple artifact set.
+precise-builds = true
+# release-plz emits PER-CRATE tags (`axildb-vX.Y.Z`), never a bare `vX`. The
+# release workflow must trigger on that exact pattern or it never fires.
+tag-namespace = "axildb"
+
+# NOTE: this `include` is INERT under the current hand-authored workflow — it is
+# kept only to document which onnxruntime library each OS bundles. cargo-dist
+# resolves `include` repo-relative and CANNOT reach the build-time lib in
+# `target/<triple>/release/`, which is exactly why the hand-authored release.yml
+# does the bundling itself (an explicit copy of the produced lib next to `axil`).
+# If a full cargo-dist adoption is ever validated, the ONNX-bundling problem must
+# be solved here first (e.g. a build hook that stages the lib repo-relative).
+include = [
+    "onnxruntime.dll",
+    "libonnxruntime.dylib",
+    "libonnxruntime.so",
+]
+# Don't fail the archive when a given OS lacks the other OSes' lib names.
+auto-includes = false

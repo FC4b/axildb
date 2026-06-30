@@ -1,0 +1,133 @@
+# Prebuilt-binary release workflow — HAND-AUTHORED, the source of truth.
+#
+# Do NOT run `dist init` / `dist generate` to "refresh" this. cargo-dist's
+# generated workflow would be a SECOND file (`axildb-release.yml`) triggering on
+# the same `axildb-v*` tag (racing this one), and it CANNOT bundle the
+# build-time `onnxruntime.dll` (cargo-dist's `include` is repo-relative; the lib
+# lands in `target/<triple>/release/`). The explicit copy step below is the
+# load-bearing fix for the Windows ORT-init failure, so this matrix stays
+# hand-authored. `dist-workspace.toml` is kept only to back the `dist plan`
+# sanity check job.
+#
+# Scope: this builds the six triples, bundles onnxruntime, and uploads the
+# ARCHIVES to the GitHub Release. It does NOT produce one-line `curl|sh`
+# installers or an `axil-update` self-updater — the prebuilt distribution is
+# `cargo binstall axildb` + these archives. Adding real installers means a full
+# cargo-dist adoption, which must first solve ONNX bundling and be validated by
+# an actual tagged-release CI run (see dist-workspace.toml header).
+#
+# Trigger: release-plz emits PER-CRATE tags like `axildb-v1.2.0` (NOT a bare
+# `v1.2.0`). This runs AFTER release-plz pushes that tag and UPLOADS assets to
+# the Release release-plz already created — the two coexist (release-plz owns
+# crate publishing + the Release object; this workflow owns the prebuilt
+# archives).
+name: release
+
+on:
+  push:
+    tags:
+      # Per-crate tag for the `axildb` CLI only (binary `axil`). Must match the
+      # `tag-namespace = "axildb"` in dist-workspace.toml — a bare `v*` would
+      # never recur under release-plz and the job would never fire.
+      - "axildb-v*"
+
+permissions:
+  contents: write
+  id-token: write # for github-attestations provenance
+  attestations: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Enumerate the planned artifacts; a green plan proves the config resolves all
+  # six triples (and surfaces a missing prebuilt `ort` artifact early).
+  plan:
+    name: plan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: install cargo-dist
+        run: cargo install cargo-dist --version 0.31.0 --locked || cargo install cargo-dist --locked
+      - name: dist plan
+        run: dist plan --output-format=json
+
+  build:
+    name: build (${{ matrix.target }})
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            lib: onnxruntime.dll
+          - target: aarch64-pc-windows-msvc
+            os: windows-latest
+            lib: onnxruntime.dll
+          - target: x86_64-apple-darwin
+            os: macos-13
+            lib: libonnxruntime.dylib
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            lib: libonnxruntime.dylib
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            lib: libonnxruntime.so
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            lib: libonnxruntime.so
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      # Build the `axil` binary with default features (includes `embed`, so the
+      # `download-binaries` feature drops the onnxruntime lib into the target
+      # dir next to the binary).
+      - name: build axil
+        run: cargo build --release -p axildb --target ${{ matrix.target }}
+      # Stage the binary + its sibling onnxruntime lib into the archive root so
+      # the loader finds the bundled lib first. This is the load-bearing step
+      # that fixes the Windows ORT-init failure on a fresh install.
+      - name: stage archive (bundle onnxruntime next to axil)
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="target/${{ matrix.target }}/release"
+          stage="axildb-${{ matrix.target }}"
+          mkdir -p "$stage"
+          if [ -f "$out/axil.exe" ]; then cp "$out/axil.exe" "$stage/"; else cp "$out/axil" "$stage/"; fi
+          # The onnxruntime lib `download-binaries` produces lands in the target
+          # dir; copy whichever variant exists for this OS next to the binary.
+          if [ -f "$out/${{ matrix.lib }}" ]; then
+            cp "$out/${{ matrix.lib }}" "$stage/"
+          else
+            # Fall back to a recursive search under the target dir (path can
+            # vary by ort release); fail loudly if absent so the bug can't ship.
+            found=$(find "target/${{ matrix.target }}" -name "${{ matrix.lib }}" -print -quit || true)
+            if [ -n "$found" ]; then cp "$found" "$stage/"; else
+              echo "::error::onnxruntime lib ${{ matrix.lib }} not found for ${{ matrix.target }} — archive would ship a broken embedder"; exit 1
+            fi
+          fi
+      - name: archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          stage="axildb-${{ matrix.target }}"
+          case "${{ matrix.target }}" in
+            *windows*) 7z a "$stage.zip" "$stage" ;;
+            *)         tar czf "$stage.tar.gz" "$stage" ;;
+          esac
+      - name: attest provenance
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: "axildb-${{ matrix.target }}.*"
+      - name: upload to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: gh release upload "${GITHUB_REF_NAME}" axildb-${{ matrix.target }}.* --clobber

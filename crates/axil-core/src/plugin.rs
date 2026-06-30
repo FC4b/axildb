@@ -55,6 +55,19 @@ pub trait Engine: Send + Sync {
 
     /// Called after a record is deleted.
     fn on_record_delete(&self, id: &RecordId) -> Result<()>;
+
+    /// Durably persist any buffered state so the engine's on-disk files reflect
+    /// every write accepted so far.
+    ///
+    /// Default is a no-op, which is correct for engines that commit each write
+    /// to their backing store synchronously (e.g. the redb-backed vector and
+    /// graph engines). Engines that buffer writes before committing — notably
+    /// the Tantivy FTS engine — override this to flush the buffer. Used when a
+    /// caller needs the companion files to be self-consistent for an external
+    /// copy (e.g. `Axil::branch_create`).
+    fn flush(&self) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// Direction for graph traversal.
@@ -85,6 +98,20 @@ pub struct TraversalStep {
 pub trait VectorIndex: Engine {
     /// Add a vector for a record.
     fn add(&self, id: RecordId, vector: &[f32]) -> Result<()>;
+
+    /// Add many vectors in one call.
+    ///
+    /// The default implementation simply loops over [`add`](Self::add), so
+    /// existing implementors keep working unchanged. Backends with an
+    /// independent durable store (e.g. a companion `.vec` file) should override
+    /// this to persist the whole batch under a single write transaction,
+    /// amortizing the per-record fsync over the entire batch.
+    fn add_batch(&self, items: &[(RecordId, &[f32])]) -> Result<()> {
+        for (id, vector) in items {
+            self.add(id.clone(), vector)?;
+        }
+        Ok(())
+    }
 
     /// Search for the top-k most similar vectors.
     fn search(&self, query: &[f32], top_k: usize) -> Result<Vec<(RecordId, f32)>>;
@@ -508,6 +535,18 @@ pub trait SearchIndex: Engine {
     /// Used by orphan cleanup during compaction. Default returns empty.
     fn all_indexed_ids(&self) -> Result<Vec<RecordId>> {
         Ok(Vec::new())
+    }
+
+    /// Whether [`Engine::on_record_insert`] would actually create a document
+    /// for this record (i.e. it has extractable text). Default `true`.
+    ///
+    /// Reverse-orphan reconciliation uses this so it never flags a record the
+    /// engine would skip anyway — a record with no string fields produces no
+    /// document, so counting it as "missing" would warn forever and a re-index
+    /// would be a phantom no-op.
+    fn would_index(&self, record: &Record) -> bool {
+        let _ = record;
+        true
     }
 
     /// Commit pending writes and optimize the index.

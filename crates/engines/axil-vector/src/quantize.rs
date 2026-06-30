@@ -186,6 +186,95 @@ mod tests {
         assert!(sim_ab > sim_ac, "sim_ab={sim_ab}, sim_ac={sim_ac}");
     }
 
+    /// Minimal xorshift64* PRNG — keeps the oracle seeded without a `rand` dep.
+    struct Rng(u64);
+
+    impl Rng {
+        fn new(seed: u64) -> Self {
+            Rng(seed | 1)
+        }
+
+        fn next_u64(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x >> 12;
+            x ^= x << 25;
+            x ^= x >> 27;
+            self.0 = x;
+            x.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        }
+
+        fn next_f32(&mut self) -> f32 {
+            let bits = (self.next_u64() >> 40) as f32 / (1u32 << 24) as f32;
+            bits * 2.0 - 1.0
+        }
+    }
+
+    fn brute_force_topk(corpus: &[Vec<f32>], query: &[f32], top_k: usize) -> Vec<usize> {
+        let mut scored: Vec<(usize, f32)> = corpus
+            .iter()
+            .enumerate()
+            .map(|(i, v)| (i, cosine_similarity(query, v)))
+            .collect();
+        scored.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0.cmp(&b.0))
+        });
+        scored.into_iter().take(top_k).map(|(i, _)| i).collect()
+    }
+
+    fn recall_overlap(approx: &[usize], exact: &[usize]) -> f32 {
+        if exact.is_empty() {
+            return 1.0;
+        }
+        let approx_set: std::collections::HashSet<usize> = approx.iter().copied().collect();
+        let hits = exact.iter().filter(|i| approx_set.contains(i)).count();
+        hits as f32 / exact.len() as f32
+    }
+
+    // int8 `two_phase_search` is a standalone helper — it is NOT wired into
+    // `VectorEngine::search` (the live path is f32 HNSW). This oracle guards
+    // the helper's own correctness, not the production recall path.
+    #[test]
+    fn two_phase_int8_recall_matches_brute_force() {
+        let n = 800;
+        let dims = 64;
+        let top_k = 10;
+        let queries = 40;
+
+        let mut rng = Rng::new(0x1117);
+        let corpus: Vec<Vec<f32>> = (0..n)
+            .map(|_| (0..dims).map(|_| rng.next_f32()).collect())
+            .collect();
+
+        let refs: Vec<&[f32]> = corpus.iter().map(|v| v.as_slice()).collect();
+        let params = QuantizationParams::fit(&refs, dims);
+        let quantized: Vec<(usize, QuantizedVector)> =
+            corpus.iter().enumerate().map(|(i, v)| (i, params.encode(v))).collect();
+        let full: Vec<(usize, &[f32])> =
+            corpus.iter().enumerate().map(|(i, v)| (i, v.as_slice())).collect();
+
+        let mut query_rng = Rng::new(0x2228);
+        let mut total = 0.0f32;
+        for _ in 0..queries {
+            let q: Vec<f32> = (0..dims).map(|_| query_rng.next_f32()).collect();
+            let qq = params.encode(&q);
+            let approx: Vec<usize> = two_phase_search(&qq, &quantized, &full, &q, top_k)
+                .into_iter()
+                .map(|(i, _)| i)
+                .collect();
+            let exact = brute_force_topk(&corpus, &q, top_k);
+            total += recall_overlap(&approx, &exact);
+        }
+        let mean = total / queries as f32;
+        // int8 4x compression loses some recall; floor pinned below measured.
+        const INT8_RECALL_FLOOR: f32 = 0.80;
+        assert!(
+            mean >= INT8_RECALL_FLOOR,
+            "int8 two-phase mean recall@{top_k} {mean:.4} below floor {INT8_RECALL_FLOOR}"
+        );
+    }
+
     #[test]
     fn params_serialization() {
         let params = QuantizationParams {

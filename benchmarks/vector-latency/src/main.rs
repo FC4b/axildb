@@ -16,7 +16,7 @@ use tempfile::TempDir;
 
 use axil_core::plugin::VectorIndex;
 use axil_core::record::RecordId;
-use axil_vector::VectorPlugin;
+use axil_vector::VectorEngine;
 
 #[derive(Parser, Debug)]
 #[command(name = "vector-latency", about = "Vector latency benchmark for Axil")]
@@ -41,6 +41,10 @@ struct Args {
     #[arg(long, default_value = "50")]
     warmup: usize,
 
+    /// top_k for the cold-recall-after-single-store phase.
+    #[arg(long, default_value = "10")]
+    top_k_cold: usize,
+
     /// Output format: "markdown" (default) or "json".
     #[arg(long, default_value = "markdown")]
     format: String,
@@ -60,6 +64,19 @@ struct TopKReport {
 }
 
 #[derive(Debug, Serialize)]
+struct ColdRecallReport {
+    /// How many store-then-search iterations were timed.
+    iterations: usize,
+    /// top_k used for the cold-recall search.
+    top_k: usize,
+    mean_us: f64,
+    p50_us: f64,
+    p95_us: f64,
+    p99_us: f64,
+    max_us: f64,
+}
+
+#[derive(Debug, Serialize)]
 struct BenchReport {
     benchmark: String,
     dataset_size: usize,
@@ -68,6 +85,11 @@ struct BenchReport {
     insert_throughput_per_sec: f64,
     rebuild_ms: u128,
     search: Vec<TopKReport>,
+    /// Cost of the agent's mandated store-then-recall loop: each iteration
+    /// adds exactly one vector and times the immediately following search.
+    /// With a full-rebuild backend this pays O(n); with an incremental graph
+    /// it pays O(log n).
+    cold_recall_after_single_store: ColdRecallReport,
 }
 
 fn make_vector(dims: usize, seed: usize) -> Vec<f32> {
@@ -94,7 +116,7 @@ fn percentile(sorted: &[Duration], p: f64) -> f64 {
     sorted[idx.min(sorted.len() - 1)].as_secs_f64() * 1_000_000.0
 }
 
-fn run_topk(plugin: &VectorPlugin, queries: &[Vec<f32>], warmup: usize, top_k: usize) -> TopKReport {
+fn run_topk(plugin: &VectorEngine, queries: &[Vec<f32>], warmup: usize, top_k: usize) -> TopKReport {
     for q in queries.iter().take(warmup) {
         let _ = plugin.search(q, top_k).unwrap();
     }
@@ -124,6 +146,45 @@ fn run_topk(plugin: &VectorPlugin, queries: &[Vec<f32>], warmup: usize, top_k: u
     }
 }
 
+/// Time the store-then-recall loop: add one new vector, then immediately
+/// search, repeated `iterations` times. Seeds are disjoint from the populated
+/// corpus and the timed queries so every iteration adds a genuinely new vector.
+fn run_cold_recall(
+    plugin: &VectorEngine,
+    dims: usize,
+    populated: usize,
+    iterations: usize,
+    top_k: usize,
+) -> ColdRecallReport {
+    let mut latencies: Vec<Duration> = Vec::with_capacity(iterations);
+    for i in 0..iterations {
+        let seed = 2_000_000 + populated + i;
+        let v = make_vector(dims, seed);
+        let id = RecordId::new();
+        plugin.add(id, &v).expect("add");
+        let q = make_vector(dims, seed);
+        let start = Instant::now();
+        let _ = plugin.search(&q, top_k).expect("search");
+        latencies.push(start.elapsed());
+    }
+    latencies.sort();
+    let sum_us: f64 = latencies.iter().map(|d| d.as_secs_f64() * 1_000_000.0).sum();
+    let mean_us = if latencies.is_empty() {
+        0.0
+    } else {
+        sum_us / latencies.len() as f64
+    };
+    ColdRecallReport {
+        iterations: latencies.len(),
+        top_k,
+        mean_us,
+        p50_us: percentile(&latencies, 0.50),
+        p95_us: percentile(&latencies, 0.95),
+        p99_us: percentile(&latencies, 0.99),
+        max_us: latencies.last().map(|d| d.as_secs_f64() * 1_000_000.0).unwrap_or(0.0),
+    }
+}
+
 fn main() {
     let args = Args::parse();
 
@@ -138,7 +199,7 @@ fn main() {
 
     let dir = TempDir::new().expect("tmpdir");
     let db_path = dir.path().join("bench.axil");
-    let plugin = VectorPlugin::open(&db_path, args.dims).expect("open vector plugin");
+    let plugin = VectorEngine::open(&db_path, args.dims).expect("open vector plugin");
 
     // 1. Insert phase.
     eprintln!("[1/3] inserting {} vectors...", args.n);
@@ -182,6 +243,17 @@ fn main() {
         })
         .collect();
 
+    // 4. Cold-recall after single store — the agent's mandated store-then-recall
+    //    loop. Each iteration adds one fresh vector and times the immediately
+    //    following search, so a full-rebuild backend pays O(n) per loop while an
+    //    incremental graph pays O(log n).
+    eprintln!("[4/4] cold-recall after single store ({} iterations)...", args.queries);
+    let cold = run_cold_recall(&plugin, args.dims, args.n, args.queries, args.top_k_cold);
+    eprintln!(
+        "       cold-recall top_k={:>3}  p50={:>8.1}us  p95={:>8.1}us  p99={:>8.1}us",
+        cold.top_k, cold.p50_us, cold.p95_us, cold.p99_us
+    );
+
     let report = BenchReport {
         benchmark: "vector-latency".to_string(),
         dataset_size: args.n,
@@ -190,6 +262,7 @@ fn main() {
         insert_throughput_per_sec,
         rebuild_ms,
         search: search_reports,
+        cold_recall_after_single_store: cold,
     };
 
     match args.format.as_str() {
@@ -210,4 +283,9 @@ fn print_markdown(r: &BenchReport) {
         println!("| {:>5} | {:>7} | {:>9.1} | {:>8.1} | {:>8.1} | {:>8.1} | {:>8.1} | {:>4.0} |",
             s.top_k, s.queries, s.mean_us, s.p50_us, s.p95_us, s.p99_us, s.max_us, s.qps);
     }
+    let c = &r.cold_recall_after_single_store;
+    println!("\n**Cold recall after single store** (add 1 vector, then search; top_k={}, {} iters)  ",
+        c.top_k, c.iterations);
+    println!("mean={:.1}us  p50={:.1}us  p95={:.1}us  p99={:.1}us  max={:.1}us",
+        c.mean_us, c.p50_us, c.p95_us, c.p99_us, c.max_us);
 }

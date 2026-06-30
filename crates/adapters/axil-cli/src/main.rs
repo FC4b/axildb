@@ -989,6 +989,20 @@ enum Command {
 
     // ── Agent-friendly CRUD (4b.2) ──────────────────────────────────
     /// Store a record. Use "-" as json_data to read from stdin.
+    ///
+    /// Categorize by FUNCTION, not TOPIC. The table is the record's kind —
+    /// the question it answers / when you reach for it: `decisions`
+    /// (a choice + rationale), `errors` (a failure + fix), `rules`
+    /// (constraints to obey), `context` (durable how-it-works knowledge).
+    /// TOPIC ("the auth feature", a module name) is already handled by
+    /// embeddings + entities + `--scope` — do NOT encode it as a category.
+    ///
+    /// `context` records may carry a `type` facet to scope retrieval
+    /// (filterable via `axil recall --type <t>`). Recommended values:
+    /// architecture, gotcha, howto, reference. The vocabulary is a
+    /// recommendation, not enforced — any string is accepted. `decisions`
+    /// and `errors` don't need a `type`; their field shape already encodes
+    /// their function.
     #[command(visible_alias = "insert")]
     Store {
         /// Table name.
@@ -1097,6 +1111,12 @@ enum Command {
         /// Filter by table name.
         #[arg(long)]
         table: Option<String>,
+        /// Filter by the record's `type` facet (matches `data.type`,
+        /// case-insensitive exact). Records without a `type` field are
+        /// excluded when this is set. See `axil store --help` for the
+        /// recommended `context` vocabulary.
+        #[arg(long = "type")]
+        r#type: Option<String>,
         /// Token budget: truncate results to fit within this many tokens (1 token ≈ 4 bytes).
         #[arg(long)]
         budget: Option<usize>,
@@ -1189,8 +1209,9 @@ enum Command {
         /// indexed repo size (tiny→1500, large monorepo→4000, capped).
         #[arg(long)]
         budget: Option<usize>,
-        /// Output: `compact` (lean pointer lines, default — ~10× smaller)
-        /// or `json` (full bundle with scores/ids/sections).
+        /// Output: `compact` (lean pointer lines, default — much smaller; drops
+        /// the JSON bundle's scores/ids/section bookkeeping) or `json` (full
+        /// bundle with scores/ids/sections).
         #[arg(long = "context-format", default_value = "compact")]
         context_format: String,
     },
@@ -2761,6 +2782,23 @@ enum ScipCommand {
 enum ExtCommand {
     /// List installed WASM plugins and whether each loads.
     List,
+    /// Scaffold a new WASM plugin crate ready to `cargo component build`.
+    /// Emits a detached (own `[workspace]`) cdylib crate with the bundled
+    /// `axil:plugin` WIT, the `sdk::Plugin` authoring layer, and a `lib.rs`
+    /// stub overriding one high-value hook. Needs no database.
+    New {
+        /// Plugin name (kebab-case, e.g. `my-plugin`). Becomes the crate name,
+        /// the plugin id, and the table prefix `_<name>_`.
+        name: String,
+        /// Directory to create the crate in. Defaults to `./<name>`.
+        #[arg(long)]
+        path: Option<PathBuf>,
+        /// Comma-separated host capabilities the plugin will request
+        /// (e.g. `recall,records.write`). Recorded in the generated README so
+        /// the operator knows what to `axil ext grant` after install.
+        #[arg(long)]
+        caps: Option<String>,
+    },
     /// Install a `.wasm` component plugin: validate it loads, then copy it into
     /// the plugins dir. No rebuild.
     Install {
@@ -4588,6 +4626,43 @@ fn resolve_embedding_model(db_path: &Path) -> axil_vector::models::EmbeddingMode
 // differs because the two crates resolve the embedder differently, but the
 // graph/fts/timeseries/extension blocks are identical). A divergence here is the
 // "MCP and CLI expose different engines for the same DB" bug.
+/// Install the process-wide encryption cipher from the environment, once, before
+/// any database is opened.
+///
+/// Key sources, in priority order (see [`axil_core::crypto`]):
+/// 1. `AXIL_ENC_KEY` — 32 raw key bytes as hex (64 chars) or standard base64.
+/// 2. `AXIL_ENC_KEY_FILE` — path to a key file (parsed hex/base64, else raw).
+///
+/// With no key set this is a no-op — the `encryption` feature is compiled in but
+/// databases open with cleartext bodies. A *malformed* key (wrong length/encoding,
+/// unreadable file) is a hard error rather than a silent cleartext fallback:
+/// encryption was asked for and could not be honored.
+///
+/// Installing it as a process default (rather than attaching at each open site)
+/// is what lets opens this code can't reach — core-internal `branch_merge`, the
+/// workspace federation fan-out, the in-process MCP server — seal/unseal with the
+/// same key. [`AxilBuilder::build`](axil_core::AxilBuilder::build) consults the
+/// default when no explicit cipher is set. No-op without the `encryption` feature.
+#[cfg(feature = "encryption")]
+fn init_default_cipher() -> Result<()> {
+    use axil_core::crypto::{Cipher, CryptoError};
+    // Treat an empty AXIL_ENC_KEY_FILE as unset (mirrors Cipher::from_env's
+    // empty-string guard for AXIL_ENC_KEY) — otherwise an empty value would
+    // resolve to `from_key_file("")` and fail every command on a bogus read.
+    let key_file = std::env::var_os("AXIL_ENC_KEY_FILE")
+        .filter(|s| !s.is_empty())
+        .map(std::path::PathBuf::from);
+    match Cipher::resolve(key_file.as_deref()) {
+        Ok(cipher) => {
+            axil_core::crypto::set_default_cipher(cipher);
+            Ok(())
+        }
+        Err(CryptoError::MissingKey) => Ok(()),
+        Err(e) => Err(anyhow::Error::new(e)
+            .context("failed to load encryption key (AXIL_ENC_KEY / AXIL_ENC_KEY_FILE)")),
+    }
+}
+
 fn attach_detected_engines(mut builder: axil_core::AxilBuilder) -> Result<axil_core::AxilBuilder> {
     let path = builder.path().to_path_buf();
     // Config (from the db dir) governs both which Engines attach
@@ -4661,7 +4736,116 @@ fn attach_detected_engines(mut builder: axil_core::AxilBuilder) -> Result<axil_c
 /// Open a database with all detected plugins.
 fn open_with_all_detected(path: &Path) -> Result<Axil> {
     let builder = attach_detected_engines(Axil::open(path))?;
-    builder.build().context("failed to open database")
+    let db = builder.build().context("failed to open database")?;
+    // Honor the `[healing] event_log` config flag (no-op unless the `event-log`
+    // feature is compiled in). Off by default — opt-in write-amplifier.
+    #[cfg(feature = "event-log")]
+    {
+        let cfg = path
+            .parent()
+            .and_then(|d| axil_core::config::load_config_from(d).ok())
+            .unwrap_or_default();
+        if cfg.healing.event_log {
+            db.set_event_log_enabled(true);
+        }
+    }
+    Ok(db)
+}
+
+/// Number of times a hot read command retries the writable open when the
+/// single-writer lock is contended before falling back to a read-only open.
+const BUSY_RETRY_ATTEMPTS: u32 = 3;
+
+/// Base backoff between busy-retry attempts. Grows linearly per attempt
+/// (~50ms, ~100ms, ~150ms), so a short-lived writer's lock is usually clear
+/// before the read-only fallback is needed.
+const BUSY_RETRY_BASE: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// True if an `anyhow` error chain bottoms out in
+/// [`axil_core::AxilError::Busy`] — the single-writer lock is contended.
+///
+/// Open helpers wrap the core error with `.context(...)`, so the `Busy` is
+/// nested in the chain rather than the outermost error; this walks the chain
+/// to find it.
+fn is_busy_chain(err: &anyhow::Error) -> bool {
+    err.chain()
+        .any(|c| matches!(c.downcast_ref::<axil_core::AxilError>(), Some(e) if e.is_busy()))
+}
+
+/// Retry a database open that may hit the single-writer lock.
+///
+/// Runs `open` up to [`BUSY_RETRY_ATTEMPTS`] times, sleeping a short linear
+/// backoff between attempts but only when the failure chain bottoms out in
+/// [`axil_core::AxilError::Busy`] (another process holds the writable handle).
+/// Any other error returns immediately. A still-contended result returns the
+/// last `Busy` error so the caller can fall back to a read-only open.
+fn retry_busy_open(mut open: impl FnMut() -> Result<Axil>) -> Result<Axil> {
+    let mut last = None;
+    for attempt in 0..BUSY_RETRY_ATTEMPTS {
+        match open() {
+            Ok(db) => return Ok(db),
+            Err(e) if is_busy_chain(&e) => {
+                if attempt + 1 < BUSY_RETRY_ATTEMPTS {
+                    std::thread::sleep(BUSY_RETRY_BASE * (attempt + 1));
+                }
+                last = Some(e);
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Err(last.unwrap_or_else(|| anyhow::Error::from(axil_core::AxilError::Busy)))
+}
+
+/// Open for a hot read command, tolerating a concurrent writer.
+///
+/// Axil is single-writer: while another process holds the writable handle, a
+/// normal open fails with [`axil_core::AxilError::Busy`]. This helper first
+/// retries the full writable open (with detected engines) a few times with a
+/// short linear backoff — most writers commit in well under that window. Only
+/// if the writer is *still* active after the retry budget does it fall back to
+/// a **core-only read-only** open, which succeeds only in the gap between
+/// writer sessions (redb's shared lock can't coexist with a live writer's
+/// exclusive lock). The fallback serves committed records (boot/get/list) but
+/// attaches no companion engines, so vector/FTS-backed features degrade to what
+/// the core store alone can answer.
+fn open_read_command(path: &Path) -> Result<Axil> {
+    match retry_busy_open(|| open_with_all_detected(path)) {
+        Ok(db) => Ok(db),
+        Err(e) if is_busy_chain(&e) => {
+            // Writer still holds the lock after the retry budget — serve
+            // committed records read-only without contending for the lock. No
+            // companion engines are attached in this mode, so flag the
+            // degradation rather than silently returning core-only results.
+            eprintln!(
+                "axil: another process holds the writer lock — opening read-only \
+                 (engine-backed features like vector recall are unavailable until \
+                 the writer is idle)."
+            );
+            Axil::open(path)
+                .read_only(true)
+                .build()
+                .context("failed to open database read-only")
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Open with FTS for a hot read command, tolerating a concurrent writer.
+///
+/// Same bounded busy-retry as [`open_read_command`], but with no read-only
+/// fallback: full-text search is engine-backed, and a core-only read-only
+/// handle can't serve it. If the writer is still active after the retry budget
+/// this surfaces a clear "busy" message rather than silently degrading to an
+/// empty result.
+#[cfg(feature = "fts")]
+fn open_read_command_fts(path: &Path) -> Result<Axil> {
+    match retry_busy_open(|| open_with_fts(path)) {
+        Ok(db) => Ok(db),
+        Err(e) if is_busy_chain(&e) => Err(anyhow::anyhow!(
+            "database busy: another process holds the writer lock — retry shortly"
+        )),
+        Err(e) => Err(e),
+    }
 }
 
 /// Like `open_with_all_detected`, but force-attaches the graph plugin
@@ -4972,6 +5156,13 @@ impl axil_core::Adapter for CliAdapter {
 /// Run the CLI command. Returns the exit code.
 fn run(cli: Cli, out: &Output) -> Result<i32> {
     let db_opt = cli.db;
+
+    // Install the process-wide encryption cipher before any command opens a
+    // database, so every open — including core-internal multi-DB ops and the
+    // in-process MCP server — seals/unseals with the same key. No-op when no key
+    // is configured or the `encryption` feature is off.
+    #[cfg(feature = "encryption")]
+    init_default_cipher()?;
 
     match cli.command {
         // ── Init ────────────────────────────────────────────────────
@@ -6701,7 +6892,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
         // ── Get ─────────────────────────────────────────────────────
         Command::Get { id } => {
             let db_path = require_db(&db_opt)?;
-            let db = open_with_all_detected(&db_path)?;
+            let db = open_read_command(&db_path)?;
             let rid = RecordId::from_string(&id).context("invalid record ID")?;
 
             match db.get(&rid).context("get failed")? {
@@ -6753,7 +6944,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             include_archived,
         } => {
             let db_path = require_db(&db_opt)?;
-            let db = open_with_all_detected(&db_path)?;
+            let db = open_read_command(&db_path)?;
 
             let filter_archived = |records: Vec<axil_core::Record>| -> Vec<axil_core::Record> {
                 if include_archived {
@@ -6810,6 +7001,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             explain,
             feedback: _feedback_flag,
             table: table_filter,
+            r#type: type_filter,
             budget,
             recall_format,
             no_dedup,
@@ -6838,7 +7030,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             };
 
             #[allow(unused_mut)]
-            let mut db = open_with_all_detected(&db_path)?;
+            let mut db = open_read_command(&db_path)?;
 
             // Expand BEFORE the similarity fetch so every downstream stage sees the same query.
             let query = if expand {
@@ -6987,10 +7179,27 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                 db.recall(&query, top_k, Some(cfg))?
             };
 
-            // Apply table, time, and freshness filters.
+            // Normalize the --type facet filter once (case-insensitive,
+            // trimmed). Matched against `data.type` as a plain where-clause —
+            // no index, no scoring change. Records without a `type` field are
+            // excluded when --type is set.
+            let type_filter = type_filter.map(|t| t.trim().to_lowercase());
+
+            // Apply table, type, time, and freshness filters.
             recall_results.retain(|rr| {
                 if let Some(ref tf) = table_filter {
                     if rr.record.table != *tf {
+                        return false;
+                    }
+                }
+                if let Some(ref tf) = type_filter {
+                    let record_type = rr
+                        .record
+                        .data
+                        .get("type")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.trim().to_lowercase());
+                    if record_type.as_deref() != Some(tf.as_str()) {
                         return false;
                     }
                 }
@@ -7061,6 +7270,17 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                     rs.retain(|rr| {
                         if let Some(ref tf) = table_filter {
                             if rr.record.table != *tf {
+                                return false;
+                            }
+                        }
+                        if let Some(ref tf) = type_filter {
+                            let record_type = rr
+                                .record
+                                .data
+                                .get("type")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.trim().to_lowercase());
+                            if record_type.as_deref() != Some(tf.as_str()) {
                                 return false;
                             }
                         }
@@ -7376,7 +7596,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             trace_graph,
         } => {
             let db_path = require_db(&db_opt)?;
-            let db = open_with_all_detected(&db_path)?;
+            let db = open_read_command(&db_path)?;
             // Fetch a larger pool so non-proxy hits (project/file index)
             // don't crowd proxies out before we filter.
             let pool = top_k.saturating_mul(5).max(15);
@@ -7646,7 +7866,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
         #[cfg(feature = "fts")]
         Command::Fts { query, limit } => {
             let db_path = require_db(&db_opt)?;
-            let db = open_with_fts(&db_path)?;
+            let db = open_read_command_fts(&db_path)?;
 
             let start = std::time::Instant::now();
             let results = db
@@ -8032,7 +8252,8 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                                 "expired_records" | "superseded_records" | "storage_bloat" => {
                                     compact
                                 }
-                                "vector_deletion_ratio" | "index_size_mismatch" => reindex,
+                                "vector_deletion_ratio" | "index_size_mismatch"
+                                | "missing_embeddings" | "missing_fts" => reindex,
                                 "orphaned_edges" => orphans,
                                 _ => compact || orphans,
                             };
@@ -8087,6 +8308,25 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                                 rebuild_report.deleted_removed,
                             ),
                         }));
+                    }
+
+                    if reindex {
+                        // Re-embed / re-index records lost by a torn insert
+                        // (committed to storage but missing their vector
+                        // embedding and/or FTS document). vector_rebuild above
+                        // only compacts tombstones — it cannot regenerate a
+                        // missing embedding.
+                        let (reembedded, refts) =
+                            db.reembed_missing().context("reembed missing failed")?;
+                        if reembedded > 0 || refts > 0 {
+                            actions.push(json!({
+                                "action": "reembed_missing",
+                                "result": format!(
+                                    "restored {} missing embeddings, {} missing FTS docs",
+                                    reembedded, refts
+                                ),
+                            }));
+                        }
                     }
                 }
 
@@ -10599,7 +10839,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             schema,
         } => {
             let db_path = require_db(&db_opt)?;
-            let db = std::sync::Arc::new(open_with_all_detected(&db_path)?);
+            let db = std::sync::Arc::new(open_read_command(&db_path)?);
             // Register installed WASM plugins so their boot_block contributions
             // render in `axil boot`, like a native Extension's.
             register_installed_plugins(&db, &db_path);
@@ -11078,6 +11318,32 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                 if !context_hits.is_empty() {
                     context_hits.truncate(10);
                     sections.insert("context_push".into(), json!(context_hits));
+                }
+            }
+
+            // Recent cross-agent changes from the durable semantic event log.
+            // Off by default (feature-gated, write-amplifier); when enabled this
+            // surfaces what other agents committed — belief revisions, decision
+            // supersessions, error fixes, checkpoint writes — so boot replays
+            // the delta, not just this agent's own history.
+            #[cfg(feature = "event-log")]
+            if db.event_log_enabled() {
+                if let Ok(events) = db.recall_delta(None, None, 10) {
+                    if !events.is_empty() {
+                        let change_vals: Vec<Value> = events
+                            .iter()
+                            .map(|e| {
+                                json!({
+                                    "cursor": e.cursor,
+                                    "kind": e.kind,
+                                    "table": e.table,
+                                    "record_id": e.record_id,
+                                    "agent_id": e.agent_id,
+                                })
+                            })
+                            .collect();
+                        sections.insert("recent_changes".into(), json!(change_vals));
+                    }
                 }
             }
 
@@ -12202,7 +12468,6 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                         "candidate_procedures": report.candidate_procedures,
                         "candidate_preferences": report.candidate_preferences,
                         "duplicate_clusters": report.duplicate_clusters,
-                        "decayed_records": report.decayed_records,
                         "duration_ms": report.duration_ms,
                     }));
                     Ok(EXIT_OK)
@@ -12576,7 +12841,13 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
 
             match command {
                 BranchCommand::Create { name } => {
-                    let branch_path = axil_core::branch_create(&db_path, &name)
+                    // Open the live handle so the branch is point-in-time
+                    // consistent: holding it takes redb's exclusive write lock
+                    // (no other process can mutate), and `branch_create`
+                    // flushes the engines and closes the handles before copying.
+                    let db = open_with_all_detected(&db_path)?;
+                    let branch_path = db
+                        .branch_create(&name)
                         .context("failed to create branch")?;
                     out.print(&json!({
                         "branch": name,
@@ -14040,6 +14311,12 @@ fn atomic_replace_with_rollback(
 fn run_ext(cmd: ExtCommand, db_opt: &Option<PathBuf>, out: &Output) -> Result<i32> {
     use std::sync::Arc;
 
+    // `ext new` only writes files — it must work in a fresh checkout with no
+    // database, so handle it before `require_db` opens anything.
+    if let ExtCommand::New { name, path, caps } = &cmd {
+        return scaffold_plugin(name, path.as_deref(), caps.as_deref(), out);
+    }
+
     let db_path = require_db(db_opt)?;
     // Grants + disabled lists live in the db's own dir, not the process cwd.
     let config = plugin_config_for_db(&db_path);
@@ -14241,7 +14518,242 @@ fn run_ext(cmd: ExtCommand, db_opt: &Option<PathBuf>, out: &Output) -> Result<i3
         ExtCommand::Revoke { key, capability } => {
             set_plugin_cap(&key, &capability, false, &db_path, out)
         }
+        // Handled above `require_db` (needs no DB); unreachable here.
+        ExtCommand::New { .. } => unreachable!("`ext new` is handled before require_db"),
     }
+}
+
+/// The canonical `axil:plugin` WIT contract, bundled into the binary so a
+/// scaffolded plugin carries its own copy and builds detached from this repo.
+#[cfg(feature = "wasm-host")]
+const PLUGIN_WIT: &str = include_str!("../../../../wit/axil-plugin.wit");
+
+/// The single canonical `sdk::Plugin` + `export_plugin!` source. The reference
+/// guest, the conformance guest, and every `ext new` scaffold all consume this
+/// one physical file — there is no second copy of the trait or the macro.
+#[cfg(feature = "wasm-host")]
+const PLUGIN_SDK_RS: &str = include_str!("../../axil-runtime/test-guest/src/sdk.rs");
+
+/// Scaffold a buildable, detached WASM-plugin crate at `dest` (default
+/// `./<name>`). Emits `Cargo.toml` (own `[workspace]`, cdylib, component target
+/// pinned at the bundled WIT), `src/lib.rs` (a `sdk::Plugin` stub overriding
+/// `handle_cli`), `src/sdk.rs` (the canonical authoring layer), `wit/`, a
+/// `build.sh`, a `.gitignore`, and a `README.md` listing requested caps. Needs
+/// no database. The result builds with `cargo component build --release`.
+#[cfg(feature = "wasm-host")]
+fn scaffold_plugin(
+    name: &str,
+    path: Option<&Path>,
+    caps: Option<&str>,
+    out: &Output,
+) -> Result<i32> {
+    // The plugin id is the kebab-case name; the crate name and prefix derive
+    // from it deterministically so install + grant key are predictable.
+    let id = name.trim();
+    if id.is_empty()
+        || !id
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        || id.starts_with('-')
+        || id.ends_with('-')
+    {
+        anyhow::bail!(
+            "invalid plugin name `{name}` — use kebab-case (lowercase letters, \
+             digits, single hyphens), e.g. `my-plugin`"
+        );
+    }
+    // `_<name>_` with hyphens as underscores keeps the prefix a valid, reserved
+    // table namespace the host's prefix jail accepts.
+    let prefix = format!("_{}_", id.replace('-', "_"));
+    let crate_name = id; // cargo accepts hyphens in package names
+
+    let dest = match path {
+        Some(p) => p.to_path_buf(),
+        None => PathBuf::from(id),
+    };
+    if dest.exists() {
+        anyhow::bail!(
+            "`{}` already exists — choose a fresh directory or pass `--path`",
+            dest.display()
+        );
+    }
+
+    let caps_list: Vec<&str> = caps
+        .map(|c| {
+            c.split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // Files.
+    std::fs::create_dir_all(dest.join("src"))
+        .with_context(|| format!("failed to create `{}`", dest.join("src").display()))?;
+    std::fs::create_dir_all(dest.join("wit"))
+        .with_context(|| format!("failed to create `{}`", dest.join("wit").display()))?;
+
+    let cargo_toml = format!(
+        r#"# {id} — an Axil WASM plugin (Tier-2 Extension).
+#
+# Detached from any parent workspace (own `[workspace]`) because it builds for
+# wasm32-wasip1 via `cargo component`, not as a native member.
+[package]
+name = "{crate_name}"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+wit-bindgen-rt = {{ version = "0.41", features = ["bitflags"] }}
+
+[lib]
+crate-type = ["cdylib"]
+
+[package.metadata.component]
+package = "axil:{id}"
+
+[package.metadata.component.target]
+# The bundled copy of Axil's `axil:plugin` WIT — keeps the build self-contained.
+path = "wit"
+world = "plugin"
+
+[package.metadata.component.dependencies]
+
+[profile.release]
+codegen-units = 1
+opt-level = "s"
+strip = true
+"#
+    );
+    std::fs::write(dest.join("Cargo.toml"), cargo_toml)
+        .with_context(|| format!("failed to write `{}`", dest.join("Cargo.toml").display()))?;
+
+    let lib_rs = format!(
+        r#"//! {id} — an Axil WASM plugin.
+//!
+//! Implement [`sdk::Plugin`] and override only the hooks you need; every other
+//! method falls back to a "decline / empty / no-op" default. `export_plugin!`
+//! then generates the real `axil:plugin` `Guest` impl and the component export.
+
+#[allow(warnings)]
+mod bindings;
+mod sdk;
+
+use bindings::axil::plugin::types::{{CliInvocation, CliOutput, CliSurface, DispatchCli, PluginError}};
+use sdk::Plugin;
+
+struct Component;
+
+impl Plugin for Component {{
+    fn id() -> String {{
+        "{id}".to_string()
+    }}
+
+    fn table_prefixes() -> Vec<String> {{
+        // This plugin owns tables under `{prefix}` (the host's prefix jail
+        // rejects writes outside it).
+        vec!["{prefix}".to_string()]
+    }}
+
+    fn cli_commands() -> Option<CliSurface> {{
+        Some(CliSurface {{
+            command: "{id}".to_string(),
+            about: "an Axil WASM plugin".to_string(),
+            subcommands: vec![],
+        }})
+    }}
+
+    fn handle_cli(inv: CliInvocation) -> Result<DispatchCli, PluginError> {{
+        Ok(DispatchCli::Handled(CliOutput {{
+            exit_code: 0,
+            stdout: format!("hello from {id}; args={{:?}}", inv.args),
+            stderr: String::new(),
+        }}))
+    }}
+}}
+
+export_plugin!(Component);
+"#
+    );
+    std::fs::write(dest.join("src").join("lib.rs"), lib_rs)
+        .with_context(|| format!("failed to write `{}`", dest.join("src/lib.rs").display()))?;
+
+    // The canonical SDK + WIT, copied verbatim from the bundled sources.
+    std::fs::write(dest.join("src").join("sdk.rs"), PLUGIN_SDK_RS)
+        .with_context(|| format!("failed to write `{}`", dest.join("src/sdk.rs").display()))?;
+    std::fs::write(dest.join("wit").join("axil-plugin.wit"), PLUGIN_WIT)
+        .with_context(|| format!("failed to write `{}`", dest.join("wit/axil-plugin.wit").display()))?;
+
+    let build_sh = format!(
+        "#!/usr/bin/env bash\n\
+         # Build the {id} plugin into a `.wasm` component.\n\
+         # Requires: cargo-component (it provisions the wasm32-wasip1 target itself).\n\
+         set -euo pipefail\n\
+         cd \"$(dirname \"$0\")\"\n\
+         cargo component build --release\n\
+         echo \"built: target/wasm32-wasip1/release/{wasm}.wasm\"\n\
+         echo \"install with: axil ext install target/wasm32-wasip1/release/{wasm}.wasm\"\n",
+        id = id,
+        wasm = crate_name.replace('-', "_"),
+    );
+    std::fs::write(dest.join("build.sh"), build_sh)
+        .with_context(|| format!("failed to write `{}`", dest.join("build.sh").display()))?;
+
+    std::fs::write(dest.join(".gitignore"), "/target\n/src/bindings.rs\nCargo.lock\n")
+        .with_context(|| format!("failed to write `{}`", dest.join(".gitignore").display()))?;
+
+    let caps_section = if caps_list.is_empty() {
+        "This plugin requests no host capabilities — it runs fully sandboxed.\n".to_string()
+    } else {
+        let mut s = String::from(
+            "After install, grant the host capabilities this plugin needs \
+             (deny-by-default):\n\n```sh\n",
+        );
+        for cap in &caps_list {
+            s.push_str(&format!("axil ext grant {id} {cap}\n"));
+        }
+        s.push_str("```\n");
+        s
+    };
+    let readme = format!(
+        "# {id}\n\n\
+         An Axil WASM plugin (Tier-2 Extension). Edit `src/lib.rs`, then:\n\n\
+         ```sh\n\
+         cargo component build --release\n\
+         axil ext install target/wasm32-wasip1/release/{wasm}.wasm\n\
+         axil {id} <args>\n\
+         ```\n\n\
+         ## Capabilities\n\n\
+         {caps_section}\n\
+         ## Authoring\n\n\
+         Implement `sdk::Plugin` in `src/lib.rs` and override only the hooks you \
+         need (`handle_cli`, `handle_mcp`, `boot_block`, `refresh`, \
+         `recall_for_file`, `mcp_tools`). `src/sdk.rs` and `wit/` are the bundled \
+         Axil contract — leave them as-is.\n",
+        id = id,
+        wasm = crate_name.replace('-', "_"),
+        caps_section = caps_section,
+    );
+    std::fs::write(dest.join("README.md"), readme)
+        .with_context(|| format!("failed to write `{}`", dest.join("README.md").display()))?;
+
+    out.print(&json!({
+        "created": id,
+        "path": dest.display().to_string(),
+        "prefix": prefix,
+        "caps": caps_list,
+        "build": "cargo component build --release",
+    }));
+    if !out.quiet {
+        out.status(&format!(
+            "scaffolded plugin `{id}` at `{}` — `cd` in and run `cargo component build --release`",
+            dest.display()
+        ));
+    }
+    Ok(EXIT_OK)
 }
 
 /// Grant or revoke a capability for a plugin by editing `[plugins.<key>]
@@ -16209,6 +16721,27 @@ fn boot_to_narrative(data: &Value) -> String {
         }
     }
 
+    // Cross-agent delta from the semantic event log (present only when the
+    // `event-log` feature is enabled and the log is on; absent otherwise, so
+    // this renders nothing by default).
+    if let Some(changes) = data.get("recent_changes").and_then(|v| v.as_array()) {
+        if !changes.is_empty() {
+            out.push_str("## Recent Changes (since last session)\n");
+            for c in changes {
+                let kind = c.get("kind").and_then(|v| v.as_str()).unwrap_or("?");
+                let table = c.get("table").and_then(|v| v.as_str()).unwrap_or("");
+                let rec = c.get("record_id").and_then(|v| v.as_str()).unwrap_or("");
+                match c.get("agent_id").and_then(|v| v.as_str()) {
+                    Some(agent) => {
+                        out.push_str(&format!("- {kind} [{table}] {rec} (by {agent})\n"))
+                    }
+                    None => out.push_str(&format!("- {kind} [{table}] {rec}\n")),
+                }
+            }
+            out.push('\n');
+        }
+    }
+
     if let Some(rules) = data.get("rules").and_then(|v| v.as_array()) {
         if !rules.is_empty() {
             out.push_str("## Rules (pinned — always apply)\n");
@@ -16856,5 +17389,101 @@ mod upgrade_helper_tests {
             .contains("new version refused to load"));
         // The original plugin is restored byte-for-byte; the broken upgrade is gone.
         assert_eq!(std::fs::read(&target).unwrap(), b"OLD");
+    }
+}
+
+#[cfg(all(test, feature = "wasm-host"))]
+mod scaffold_plugin_tests {
+    use super::*;
+
+    fn out() -> Output {
+        Output {
+            format: OutputFormat::Json,
+            quiet: true,
+            jsonl: false,
+        }
+    }
+
+    #[test]
+    fn emits_a_complete_buildable_crate() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("myplug");
+        let code = scaffold_plugin("myplug", Some(&dest), Some("recall,records.write"), &out())
+            .expect("scaffold should succeed");
+        assert_eq!(code, EXIT_OK);
+
+        // Every file cargo-component needs to build a detached guest is present.
+        for rel in [
+            "Cargo.toml",
+            "src/lib.rs",
+            "src/sdk.rs",
+            "wit/axil-plugin.wit",
+            "build.sh",
+            ".gitignore",
+            "README.md",
+        ] {
+            assert!(dest.join(rel).exists(), "missing scaffolded file: {rel}");
+        }
+
+        // The bundled SDK + WIT are the canonical copies, byte-for-byte.
+        assert_eq!(
+            std::fs::read_to_string(dest.join("src/sdk.rs")).unwrap(),
+            PLUGIN_SDK_RS
+        );
+        assert_eq!(
+            std::fs::read_to_string(dest.join("wit/axil-plugin.wit")).unwrap(),
+            PLUGIN_WIT
+        );
+
+        let cargo = std::fs::read_to_string(dest.join("Cargo.toml")).unwrap();
+        assert!(cargo.contains("name = \"myplug\""));
+        assert!(cargo.contains("[workspace]"), "must be a detached workspace");
+        assert!(cargo.contains("crate-type = [\"cdylib\"]"));
+        assert!(cargo.contains("package = \"axil:myplug\""));
+        // Component target points at the bundled WIT, not a repo-relative path.
+        assert!(cargo.contains("path = \"wit\""));
+        assert!(!cargo.contains("wasip2"), "no wasip2 lie");
+
+        let lib = std::fs::read_to_string(dest.join("src/lib.rs")).unwrap();
+        assert!(lib.contains("use sdk::Plugin;"));
+        assert!(lib.contains("export_plugin!(Component);"));
+        assert!(lib.contains("\"_myplug_\""), "prefix derived from name");
+
+        // Requested caps land in the README as grant hints.
+        let readme = std::fs::read_to_string(dest.join("README.md")).unwrap();
+        assert!(readme.contains("axil ext grant myplug recall"));
+        assert!(readme.contains("axil ext grant myplug records.write"));
+    }
+
+    #[test]
+    fn hyphenated_name_underscores_the_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("my-plug");
+        scaffold_plugin("my-plug", Some(&dest), None, &out()).unwrap();
+        let lib = std::fs::read_to_string(dest.join("src/lib.rs")).unwrap();
+        assert!(lib.contains("\"_my_plug_\""), "hyphens become underscores in the prefix");
+        let cargo = std::fs::read_to_string(dest.join("Cargo.toml")).unwrap();
+        assert!(cargo.contains("name = \"my-plug\""), "crate name keeps hyphens");
+    }
+
+    #[test]
+    fn rejects_invalid_names() {
+        let dir = tempfile::tempdir().unwrap();
+        for bad in ["", "My-Plug", "-leading", "trailing-", "has space", "under_score"] {
+            let dest = dir.path().join("x");
+            let _ = std::fs::remove_dir_all(&dest);
+            assert!(
+                scaffold_plugin(bad, Some(&dest), None, &out()).is_err(),
+                "name `{bad}` should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn refuses_to_overwrite_an_existing_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("exists");
+        std::fs::create_dir_all(&dest).unwrap();
+        assert!(scaffold_plugin("exists", Some(&dest), None, &out()).is_err());
     }
 }

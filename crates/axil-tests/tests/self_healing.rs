@@ -564,3 +564,281 @@ fn healing_config_set_via_api() {
     let cfg: axil_core::AxilConfig = toml::from_str(&contents).unwrap();
     assert!((cfg.healing.compact_live_ratio_threshold - 0.5).abs() < f64::EPSILON);
 }
+
+// ── reverse-orphan (torn insert) detection + heal ──────────────────────
+
+/// Deterministic 4-dim mock embedder (no ONNX model needed). Mirrors the
+/// `FrontWindowEmbedder` used in `intelligent_db.rs` so missing-embedding
+/// reconciliation can be exercised without downloading a model.
+struct FrontWindowEmbedder;
+
+impl axil_core::TextEmbedder for FrontWindowEmbedder {
+    fn embed(&self, text: &str) -> axil_core::Result<Vec<f32>> {
+        let window = text.chars().take(100).collect::<String>().to_lowercase();
+        Ok(vec![
+            if window.contains("auth") { 1.0 } else { 0.0 },
+            if window.contains("timeout") { 1.0 } else { 0.0 },
+            if window.contains("pool") { 1.0 } else { 0.0 },
+            1.0,
+        ])
+    }
+}
+
+fn temp_db_with_mock_vector() -> (Axil, tempfile::TempDir) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("test.axil");
+    let vector = axil_vector::VectorEngine::open(&path, 4).unwrap();
+    let db = Axil::open(&path)
+        .with_vector_index(Box::new(vector))
+        .with_embedder(Box::new(FrontWindowEmbedder))
+        .build()
+        .unwrap();
+    (db, dir)
+}
+
+fn temp_db_with_mock_vector_and_fts() -> (Axil, tempfile::TempDir) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("test.axil");
+    let vector = axil_vector::VectorEngine::open(&path, 4).unwrap();
+    use axil_fts::AxilBuilderFtsExt;
+    let db = Axil::open(&path)
+        .with_vector_index(Box::new(vector))
+        .with_embedder(Box::new(FrontWindowEmbedder))
+        .with_fts_engine()
+        .unwrap()
+        .build()
+        .unwrap();
+    (db, dir)
+}
+
+#[test]
+fn text_less_record_not_flagged_missing_fts() {
+    // A non-internal record with no string fields produces no FTS document
+    // (the engine skips an empty extract_text_fields), so it must NOT be
+    // counted as a missing FTS doc — otherwise doctor warns forever and
+    // reembed_missing reports a phantom restoration that never converges.
+    let (db, _dir) = temp_db_with_mock_vector_and_fts();
+    db.insert("counters", json!({"n": 5, "active": true})).unwrap();
+
+    let problems = db.detect_problems();
+    assert!(
+        !problems.iter().any(|p| p.detector == "missing_fts"),
+        "text-less record must not be flagged missing_fts"
+    );
+
+    let (_embeddings, fts_restored) = db.reembed_missing().unwrap();
+    assert_eq!(
+        fts_restored, 0,
+        "no FTS doc should be restored for a text-less record"
+    );
+}
+
+#[test]
+fn compact_vector_index_respects_threshold() {
+    let (db, _dir) = temp_db_with_mock_vector();
+
+    // Insert several auto-embedded records, then delete most of them so they
+    // become vector tombstones (incremental deletes never compact on their own).
+    let mut ids = Vec::new();
+    for i in 0..10 {
+        let rec = db
+            .insert("sessions", json!({"summary": format!("auth timeout {i}")}))
+            .unwrap();
+        // insert auto-embeds; a redundant embed_field here would re-add the
+        // vector and create an extra tombstone (now correctly counted toward
+        // compaction since review fix #1), skewing the ratio under test.
+        ids.push(rec.id);
+    }
+
+    // Delete 3/10 → ratio 0.3 > default threshold 0.2. Incremental deletes
+    // only tombstone, so nothing is reclaimed until a compaction runs.
+    for id in ids.iter().take(3) {
+        db.delete(id).unwrap();
+    }
+
+    // Below the (higher) custom threshold: no compaction, no tombstone reclaim.
+    assert_eq!(
+        db.compact_vector_index_if_needed(0.5).unwrap(),
+        0,
+        "below-threshold call must not compact"
+    );
+
+    // Above-threshold (default 0.2): compaction reclaims the 3 tombstones.
+    let reclaimed = db.compact_vector_index_if_needed(0.2).unwrap();
+    assert_eq!(reclaimed, 3);
+
+    // A second call is a no-op — the ratio is now zero.
+    assert_eq!(db.compact_vector_index_if_needed(0.2).unwrap(), 0);
+
+    // Live vectors survive: a forced rebuild reports 7 remaining, 0 removed.
+    let report = db.vector_rebuild().unwrap();
+    assert_eq!(report.new_size, 7);
+    assert_eq!(report.deleted_removed, 0);
+}
+
+/// Simulate a torn insert: commit the core record directly via storage (which
+/// bypasses the auto-embed / FTS fan-out the normal `insert` path runs), so the
+/// record exists but has no vector embedding and no FTS document — exactly the
+/// state a failed/interrupted fan-out leaves behind.
+fn torn_insert(db: &Axil, table: &str, data: serde_json::Value) -> axil_core::RecordId {
+    let record = axil_core::Record::new(table, data);
+    let id = record.id.clone();
+    db.storage().insert(&record).unwrap();
+    id
+}
+
+#[test]
+fn detect_problems_finds_missing_embedding() {
+    let (db, _dir) = temp_db_with_mock_vector();
+    torn_insert(
+        &db,
+        "sessions",
+        json!({"summary": "auth timeout in the connection pool"}),
+    );
+
+    let problems = db.detect_problems();
+    let missing = problems
+        .iter()
+        .find(|p| p.detector == "missing_embeddings")
+        .expect("missing_embeddings problem should be detected");
+    assert_eq!(missing.severity, Severity::Warning);
+    // An embedder is configured, so the problem is auto-fixable.
+    assert!(missing.auto_fixable);
+}
+
+#[test]
+fn detect_problems_finds_missing_fts() {
+    let (db, _dir) = temp_db_with_mock_vector_and_fts();
+    torn_insert(
+        &db,
+        "sessions",
+        json!({"summary": "auth timeout in the connection pool"}),
+    );
+
+    let problems = db.detect_problems();
+    assert!(
+        problems.iter().any(|p| p.detector == "missing_fts"),
+        "missing_fts problem should be detected"
+    );
+}
+
+#[test]
+fn reembed_missing_restores_recall() {
+    let (db, _dir) = temp_db_with_mock_vector();
+    let id = torn_insert(
+        &db,
+        "sessions",
+        json!({"summary": "auth timeout in the connection pool"}),
+    );
+
+    // Before heal: the torn record is invisible to vector recall.
+    let before = db.similar_to("auth timeout", 5).unwrap();
+    assert!(
+        !before.iter().any(|(r, _)| r.id == id),
+        "torn record must not be recallable before reembed"
+    );
+
+    let (embeddings, _fts) = db.reembed_missing().unwrap();
+    assert_eq!(embeddings, 1);
+
+    // After heal: recall surfaces it, and no missing embeddings remain.
+    let after = db.similar_to("auth timeout", 5).unwrap();
+    assert!(
+        after.iter().any(|(r, _)| r.id == id),
+        "torn record must be recallable after reembed"
+    );
+    assert!(db
+        .detect_problems()
+        .iter()
+        .all(|p| p.detector != "missing_embeddings"));
+}
+
+#[test]
+fn heal_all_reembeds_missing() {
+    let (db, _dir) = temp_db_with_mock_vector();
+    let id = torn_insert(
+        &db,
+        "sessions",
+        json!({"summary": "auth timeout in the connection pool"}),
+    );
+
+    let report = db.heal_all(&default_healing_config(), false).unwrap();
+    assert!(
+        report
+            .actions
+            .iter()
+            .any(|a| a.action == "reembed_missing"),
+        "heal_all should emit a reembed_missing action"
+    );
+
+    let after = db.similar_to("auth timeout", 5).unwrap();
+    assert!(after.iter().any(|(r, _)| r.id == id));
+}
+
+#[test]
+fn doctor_flags_missing_embedding() {
+    let (db, _dir) = temp_db_with_mock_vector();
+    torn_insert(
+        &db,
+        "sessions",
+        json!({"summary": "auth timeout in the connection pool"}),
+    );
+
+    let report = db.doctor().unwrap();
+    let check = report
+        .checks
+        .iter()
+        .find(|c| c.name == "vector_index")
+        .expect("vector_index check present");
+    assert_eq!(check.status, Severity::Warning);
+    assert_eq!(check.fix.as_deref(), Some("axil heal --reindex"));
+}
+
+#[test]
+fn reindex_code_path_drives_missing_to_zero() {
+    // Mirror the `axil heal --reindex` CLI path: vector_rebuild (compacts
+    // tombstones, cannot regenerate) THEN reembed_missing (regenerates). The
+    // combination must leave zero missing embeddings.
+    let (db, _dir) = temp_db_with_mock_vector();
+    torn_insert(
+        &db,
+        "sessions",
+        json!({"summary": "auth timeout in the connection pool"}),
+    );
+
+    let _ = db.vector_rebuild().unwrap();
+    // vector_rebuild alone does not fix a missing embedding.
+    assert!(db
+        .detect_problems()
+        .iter()
+        .any(|p| p.detector == "missing_embeddings"));
+
+    let (embeddings, _fts) = db.reembed_missing().unwrap();
+    assert_eq!(embeddings, 1);
+    assert!(db
+        .detect_problems()
+        .iter()
+        .all(|p| p.detector != "missing_embeddings"));
+}
+
+#[test]
+fn no_embedder_means_no_missing_embedding_flag() {
+    // A user who only ever calls `add_vector` manually (no embedder) must not be
+    // flagged for missing embeddings — the index is theirs to populate.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("test.axil");
+    let vector = axil_vector::VectorEngine::open(&path, 4).unwrap();
+    let db = Axil::open(&path)
+        .with_vector_index(Box::new(vector))
+        .build()
+        .unwrap();
+
+    torn_insert(&db, "sessions", json!({"summary": "no embedder configured"}));
+
+    assert!(db
+        .detect_problems()
+        .iter()
+        .all(|p| p.detector != "missing_embeddings"));
+    let (embeddings, _fts) = db.reembed_missing().unwrap();
+    assert_eq!(embeddings, 0);
+}

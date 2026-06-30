@@ -43,7 +43,10 @@ jobs:
       # Embedding / rerank integration tests download ONNX models at runtime;
       # they run locally and nightly. PR CI covers the model-free storage
       # engines, extensions, and adapters for fast, deterministic signal.
-      - name: cargo test (storage + graph + fts + timeseries + ql + scip)
+      # axil-vector default features pull in no ONNX/model deps (the HNSW
+      # correctness oracle is model-free and deterministic), so it runs here on
+      # the per-PR gate alongside the other model-free crates.
+      - name: cargo test (storage + graph + fts + timeseries + ql + scip + vector)
         run: >
           cargo test
           -p axil-core
@@ -52,6 +55,7 @@ jobs:
           -p axil-timeseries
           -p axil-ql
           -p axil-scip
+          -p axil-vector
 
   recall-gate:
     name: recall-quality gate (needle retention)
@@ -70,3 +74,58 @@ jobs:
         run: cargo build -p axildb
       - name: needle-retention recall gate
         run: AXIL_BIN="$PWD/target/debug/axil" scripts/needle-recall-gate.sh
+
+  sqlite-compare-gate:
+    name: vector-search speedup gate (sqlite-compare)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Keeps the README "~Nx faster vector search" claim honest: runs the
+      # in-tree sqlite-compare harness (Axil HNSW vs SQLite + sqlite-vec, all
+      # synthetic — no dataset, no model) at a reduced n and fails if Axil's
+      # p50 isn't at least 3x faster than sqlite-vec's. The full 100k/173x run
+      # stays a labeled local figure; this gate guards the direction.
+      - name: vector-search speedup floor
+        run: scripts/sqlite-compare-gate.sh
+
+  embed-smoke:
+    name: embed smoke (${{ matrix.os }})
+    # The ONLY Windows + macOS coverage in CI. Regression gate for the
+    # ONNX-on-Windows break: a from-source `axil` whose `download-binaries`
+    # onnxruntime lib is missing/stale fails ORT init at first embed. This
+    # builds default features (incl. `embed`), then forces a real
+    # `Embedder::new` -> `build_session` via store-with-embed + recall, and
+    # fails if the ORT-init error string appears. The prebuilt-archive path
+    # (release.yml) bundles the lib so end users never hit this; this job
+    # proves the embedder initializes at all on those platforms.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: build axil (default features, incl. embed)
+        run: cargo build -p axildb
+      - name: real embed + recall smoke (fail on ORT init failure)
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN="target/debug/axil"
+          if [ -f "$BIN.exe" ]; then BIN="$BIN.exe"; fi
+          DB="$RUNNER_TEMP/smoke.axil"
+          "$BIN" init "$DB"
+          # Store with auto-embed (a >5-char, non-internal table triggers the
+          # embedder); capture combined output so we can scan for the failure.
+          out=$("$BIN" --db "$DB" store notes '{"summary":"auth timeout bug fixed in the login handler"}' 2>&1)
+          echo "$out"
+          out2=$("$BIN" --db "$DB" recall "auth timeout" --top-k 5 2>&1)
+          echo "$out2"
+          if printf '%s\n%s\n' "$out" "$out2" | grep -qi "Failed to initialize ORT API"; then
+            echo "::error::ONNX Runtime failed to initialize — the embedder is broken on ${{ matrix.os }}"
+            exit 1
+          fi

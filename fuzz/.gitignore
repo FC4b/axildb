@@ -1,0 +1,8 @@
+target/
+artifacts/
+coverage/
+# corpus/ is intentionally NOT ignored: the seed corpus under
+# corpus/ql_parse/ is committed (it mirrors the adversarial inputs in
+# axil-ql/tests/comprehensive.rs). libFuzzer appends its own discovered inputs
+# there at runtime; those extra files are harmless to leave uncommitted but are
+# not auto-ignored so a contributor can choose to commit a reduced corpus.

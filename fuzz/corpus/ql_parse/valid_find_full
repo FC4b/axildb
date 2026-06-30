@@ -1,0 +1,1 @@
+FIND "error" FROM logs ORDER BY created_at DESC LIMIT 25 OFFSET 50

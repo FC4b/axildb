@@ -124,6 +124,96 @@ mod tests {
         assert_eq!(384 * 4 / bv.byte_size(), 32);
     }
 
+    /// Minimal xorshift64* PRNG — keeps the oracle seeded without a `rand` dep.
+    struct Rng(u64);
+
+    impl Rng {
+        fn new(seed: u64) -> Self {
+            Rng(seed | 1)
+        }
+
+        fn next_u64(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x >> 12;
+            x ^= x << 25;
+            x ^= x >> 27;
+            self.0 = x;
+            x.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        }
+
+        fn next_f32(&mut self) -> f32 {
+            let bits = (self.next_u64() >> 40) as f32 / (1u32 << 24) as f32;
+            bits * 2.0 - 1.0
+        }
+    }
+
+    fn brute_force_topk(corpus: &[Vec<f32>], query: &[f32], top_k: usize) -> Vec<usize> {
+        let mut scored: Vec<(usize, f32)> = corpus
+            .iter()
+            .enumerate()
+            .map(|(i, v)| (i, cosine_sim_f32(query, v)))
+            .collect();
+        scored.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0.cmp(&b.0))
+        });
+        scored.into_iter().take(top_k).map(|(i, _)| i).collect()
+    }
+
+    fn recall_overlap(approx: &[usize], exact: &[usize]) -> f32 {
+        if exact.is_empty() {
+            return 1.0;
+        }
+        let approx_set: std::collections::HashSet<usize> = approx.iter().copied().collect();
+        let hits = exact.iter().filter(|i| approx_set.contains(i)).count();
+        hits as f32 / exact.len() as f32
+    }
+
+    // Binary embedding is the lossiest variant (1 bit/dim, 32x compression),
+    // so its recall floor is the lowest of the three. `binary_two_phase_search`
+    // is a standalone helper — NOT wired into `VectorEngine::search`.
+    #[test]
+    fn binary_two_phase_recall_matches_brute_force() {
+        let n = 800;
+        let dims = 64;
+        let top_k = 10;
+        let queries = 40;
+
+        let mut rng = Rng::new(0x9A1);
+        let corpus: Vec<Vec<f32>> = (0..n)
+            .map(|_| (0..dims).map(|_| rng.next_f32()).collect())
+            .collect();
+
+        let binary: Vec<(usize, BinaryVector)> = corpus
+            .iter()
+            .enumerate()
+            .map(|(i, v)| (i, BinaryVector::from_f32(v)))
+            .collect();
+        let full: Vec<(usize, &[f32])> =
+            corpus.iter().enumerate().map(|(i, v)| (i, v.as_slice())).collect();
+
+        let mut query_rng = Rng::new(0x5C5);
+        let mut total = 0.0f32;
+        for _ in 0..queries {
+            let q: Vec<f32> = (0..dims).map(|_| query_rng.next_f32()).collect();
+            let qb = BinaryVector::from_f32(&q);
+            let approx: Vec<usize> = binary_two_phase_search(&qb, &binary, &q, &full, top_k)
+                .into_iter()
+                .map(|(i, _)| i)
+                .collect();
+            let exact = brute_force_topk(&corpus, &q, top_k);
+            total += recall_overlap(&approx, &exact);
+        }
+        let mean = total / queries as f32;
+        // Floor tuned below measured; binary is the lossiest of the variants.
+        const BINARY_RECALL_FLOOR: f32 = 0.65;
+        assert!(
+            mean >= BINARY_RECALL_FLOOR,
+            "binary two-phase mean recall@{top_k} {mean:.4} below floor {BINARY_RECALL_FLOOR}"
+        );
+    }
+
     #[test]
     fn similar_vectors_have_high_hamming_sim() {
         let a = vec![0.5, 0.3, -0.1, 0.8, 0.2, -0.5, 0.1, 0.9];

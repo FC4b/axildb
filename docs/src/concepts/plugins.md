@@ -62,7 +62,7 @@ Each Engine is enabled by a Cargo feature on `axil-cli` (or by depending on the 
 
 | Engine | Crate | Feature flag | Companion file | Backed by |
 |--------|-------|-------------|----------------|-----------|
-| Vector | `axil-vector` | `vector` / `embed` | `*.axil.vec` | `instant-distance` (HNSW) + `ort` (ONNX) |
+| Vector | `axil-vector` | `vector` / `embed` | `*.axil.vec` | `hnsw_rs` (incremental HNSW) + `ort` (ONNX) |
 | Graph | `axil-graph` | `graph` | `*.axil.graph` | redb (built-in) |
 | FTS | `axil-fts` | `fts` | `*.axil.fts/` | `tantivy` |
 | Time-series | `axil-timeseries` | built-in | `*.axil.ts` | redb |

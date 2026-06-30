@@ -2,7 +2,7 @@
 # the hello reference plugin + the host's round-trip test fixture.
 #
 # Detached from the parent workspace (own `[workspace]`) because it builds for
-# wasm32-wasip2 via `cargo component`, not as a native member.
+# wasm32-wasip1 via `cargo component`, not as a native member.
 [package]
 name = "axil-hello-guest"
 version = "0.1.0"

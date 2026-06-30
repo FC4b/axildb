@@ -397,6 +397,11 @@ mod host {
             SEQ.fetch_add(1, Ordering::Relaxed)
         ));
         std::fs::write(&tmp, data)?;
+        // POSIX rename atomically replaces an existing dest; Windows rename
+        // errors if the dest already exists, so remove it first there. A failed
+        // cache write is non-fatal — the loader falls back to recompiling.
+        #[cfg(windows)]
+        let _ = std::fs::remove_file(path);
         std::fs::rename(&tmp, path)
     }
 }

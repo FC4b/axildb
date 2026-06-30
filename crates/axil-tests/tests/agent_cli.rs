@@ -171,6 +171,114 @@ fn test_update_record() {
     assert_eq!(got["data"]["v"], 2);
 }
 
+// ─── Recall --type facet filter ──────────────────────────────────────────────
+
+#[test]
+fn test_recall_type_filter() {
+    let (_dir, db) = temp_db();
+    let db_str = db.to_str().unwrap();
+    run_axil(&["init", db_str]);
+
+    // Two context records with distinct `type` facets + one decision with no type.
+    run_axil(&[
+        "--db",
+        db_str,
+        "store",
+        "context",
+        r#"{"type":"architecture","summary":"zzqquux taxonomy design note"}"#,
+    ]);
+    run_axil(&[
+        "--db",
+        db_str,
+        "store",
+        "context",
+        r#"{"type":"gotcha","summary":"zzqquux taxonomy pitfall note"}"#,
+    ]);
+    run_axil(&[
+        "--db",
+        db_str,
+        "store",
+        "decisions",
+        r#"{"summary":"zzqquux taxonomy choice note"}"#,
+    ]);
+
+    // Baseline: all three are retrievable (--no-dedup keeps the count deterministic).
+    let (stdout, _, code) = run_axil(&[
+        "--db",
+        db_str,
+        "recall",
+        "zzqquux taxonomy",
+        "--top-k",
+        "10",
+        "--no-dedup",
+        "--recall-format",
+        "full",
+    ]);
+    assert_eq!(code, 0, "recall should succeed");
+    assert_eq!(
+        parse_json(&stdout).as_array().unwrap().len(),
+        3,
+        "baseline recall returns all three records"
+    );
+
+    // --type architecture → only the architecture context record; the gotcha
+    // context and the type-less decision are excluded.
+    let (stdout, _, code) = run_axil(&[
+        "--db",
+        db_str,
+        "recall",
+        "zzqquux taxonomy",
+        "--top-k",
+        "10",
+        "--no-dedup",
+        "--type",
+        "architecture",
+        "--recall-format",
+        "full",
+    ]);
+    assert_eq!(code, 0);
+    let arch = parse_json(&stdout);
+    let arch = arch.as_array().unwrap();
+    assert_eq!(arch.len(), 1, "only the architecture record matches");
+    assert_eq!(arch[0]["data"]["type"], "architecture");
+    assert_eq!(arch[0]["table"], "context");
+
+    // Case-insensitive: ARCHITECTURE matches the same single record.
+    let (stdout, _, _) = run_axil(&[
+        "--db",
+        db_str,
+        "recall",
+        "zzqquux taxonomy",
+        "--top-k",
+        "10",
+        "--no-dedup",
+        "--type",
+        "ARCHITECTURE",
+    ]);
+    assert_eq!(
+        parse_json(&stdout).as_array().unwrap().len(),
+        1,
+        "match is case-insensitive"
+    );
+
+    // Unknown type → empty (no record carries it, and type-less records are excluded).
+    let (stdout, _, _) = run_axil(&[
+        "--db",
+        db_str,
+        "recall",
+        "zzqquux taxonomy",
+        "--top-k",
+        "10",
+        "--no-dedup",
+        "--type",
+        "nope",
+    ]);
+    assert!(
+        parse_json(&stdout).as_array().unwrap().is_empty(),
+        "unknown type returns no hits"
+    );
+}
+
 // ─── List ──────────────────────────────────────────────────────────────────
 
 #[test]

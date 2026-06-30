@@ -13,6 +13,20 @@ Plugins implement the `axil:plugin@1.0.0` **WIT world** ([`wit/axil-plugin.wit`]
 
 `serde_json::Value` crosses the boundary as a canonical JSON string.
 
+## Scaffold one
+
+The fastest start is `axil ext new` (needs an `axil` built with `--features wasm-host`; needs no database):
+
+```sh
+axil ext new my-plugin --caps recall,records.write
+cd my-plugin
+cargo component build --release
+axil ext install target/wasm32-wasip1/release/my_plugin.wasm
+axil my-plugin hello
+```
+
+It emits a **detached, buildable** crate: a cdylib `Cargo.toml` with its own `[workspace]`, the bundled `axil:plugin` WIT under `wit/`, the canonical `sdk.rs` authoring layer, and a `src/lib.rs` stub that overrides `handle_cli`. `--caps` is recorded in the generated `README.md` as the `axil ext grant` lines the operator runs after install — plugins stay deny-by-default. Edit `src/lib.rs`; leave `src/sdk.rs` and `wit/` as the bundled contract.
+
 ## Write one (Rust)
 
 The reference plugin lives at [`crates/adapters/axil-runtime/test-guest`](https://github.com/FC4b/axildb/tree/main/crates/adapters/axil-runtime/test-guest). The essentials:
@@ -66,11 +80,10 @@ export_plugin!(Component);
 
 > Prefer the raw bindings? Implement `bindings::exports::axil::plugin::extension::Guest` directly (all ten methods) and call `bindings::export!(Component with_types_in bindings)` — the `sdk` layer is optional sugar over exactly that.
 
-Build (needs `cargo-component` + the `wasm32-wasip2` target):
+Build (needs `cargo-component`; it provisions the `wasm32-wasip1` target itself):
 
 ```sh
 cargo install cargo-component
-rustup target add wasm32-wasip2
 cargo component build --release
 # -> target/wasm32-wasip1/release/my_plugin.wasm  (a component)
 ```
@@ -112,4 +125,4 @@ Capabilities: `records.read`, `records.write` (own-prefix only), `recall`, `embe
 
 ## Status
 
-Shipped: the ABI, runtime, host imports, the `WasmExtension` shim, discovery, the `axil ext` commands, the capability model, **load-time ABI-version negotiation** (a clear error when a plugin's `axil:plugin@X.Y.Z` isn't one this host implements — its version shows in `ext list`/`info`), a **compiled-module cache** (`.axil/plugins/.cache/` — repeat invocations deserialize a precompiled artifact instead of recompiling, ~16× faster), a **host-ABI conformance suite** (a real guest exercises every host import across the boundary, asserting capability gating, prefix enforcement, marshalling, and fault isolation — `crates/adapters/axil-runtime/conformance-guest/`), and an **ergonomic authoring layer** (the `sdk::Plugin` trait + `export_plugin!` macro — implement only the methods you need). Still polish (Phase 22): packaging that layer as a standalone published crate, and a fuzz harness.
+Shipped: the ABI, runtime, host imports, the `WasmExtension` shim, discovery, the `axil ext` commands, the capability model, **load-time ABI-version negotiation** (a clear error when a plugin's `axil:plugin@X.Y.Z` isn't one this host implements — its version shows in `ext list`/`info`), a **compiled-module cache** (`.axil/plugins/.cache/` — repeat invocations deserialize a precompiled artifact instead of recompiling, ~16× faster), a **host-ABI conformance suite** (a real guest exercises every host import across the boundary, asserting capability gating, prefix enforcement, marshalling, and fault isolation — `crates/adapters/axil-runtime/conformance-guest/`), an **ergonomic authoring layer** (the `sdk::Plugin` trait + `export_plugin!` macro — implement only the methods you need), and a **project scaffold** (`axil ext new <name> [--caps …]` emits a detached, buildable guest crate bundling that layer + the WIT). Still polish: packaging the authoring layer as a standalone *published* crate, and a fuzz harness.

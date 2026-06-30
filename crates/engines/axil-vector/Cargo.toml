@@ -12,7 +12,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 redb = { workspace = true }
-instant-distance = "0.6"
+hnsw_rs = "0.3"
 parking_lot = { workspace = true }
 sha2 = { workspace = true }
 

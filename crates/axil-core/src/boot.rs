@@ -135,6 +135,18 @@ impl Axil {
     pub fn boot(&self, opts: BootOptions) -> Result<BootContext> {
         let budget = opts.token_budget.unwrap_or(DEFAULT_TOKEN_BUDGET);
 
+        // Resolve the decay config once for the whole boot. `boot_records`
+        // runs for several tables and each used to re-read + re-parse
+        // `axil.toml` from disk; a single load here yields identical per-table
+        // half-lives (a missing/unreadable config maps to an empty
+        // `DecayConfig`, whose `half_life_for` returns the default for every
+        // table — the same fallback the old per-call path took).
+        let decay = std::env::current_dir()
+            .ok()
+            .and_then(|cwd| crate::config::load_config_from(&cwd).ok())
+            .map(|c| c.decay)
+            .unwrap_or_default();
+
         // ── Assemble sections in fixed priority order. ───────────
         let mut sections: Vec<BootSection> = Vec::new();
 
@@ -151,15 +163,15 @@ impl Axil {
         });
 
         // 2. recent decisions: focused recall when --topic given, otherwise top-N by importance.
-        let decisions = self.boot_records("decisions", MAX_DECISIONS, &opts);
+        let decisions = self.boot_records("decisions", MAX_DECISIONS, &opts, &decay);
         sections.push(BootSection::RecentDecisions { content: decisions });
 
         // 3. active failures: unresolved errors.
-        let failures = self.boot_records("errors", MAX_FAILURES, &opts);
+        let failures = self.boot_records("errors", MAX_FAILURES, &opts, &decay);
         sections.push(BootSection::ActiveFailures { content: failures });
 
         // 4. open threads: in-flight context items.
-        let threads = self.boot_records("context", MAX_THREADS, &opts);
+        let threads = self.boot_records("context", MAX_THREADS, &opts, &decay);
         sections.push(BootSection::OpenThreads { content: threads });
 
         // 5. preferences: user-set key/value pairs.
@@ -266,7 +278,13 @@ impl Axil {
     /// recall scoped to `table`) and `scope` (filter by `_scope` field).
     /// Falls back to importance ranking when no topic is set or recall
     /// returns nothing usable.
-    fn boot_records(&self, table: &str, n: usize, opts: &BootOptions) -> Vec<Value> {
+    fn boot_records(
+        &self,
+        table: &str,
+        n: usize,
+        opts: &BootOptions,
+        decay: &crate::config::DecayConfig,
+    ) -> Vec<Value> {
         if let Some(topic) = opts.topic.as_deref() {
             let cfg = crate::scoring::RecallConfig {
                 scope_filter: opts.scope.clone().unwrap_or_default(),
@@ -296,7 +314,7 @@ impl Axil {
         }
         // No topic or recall miss: fall back to importance ranking, still
         // honoring scope.
-        self.top_n_by_importance_scoped(table, n, opts.scope.as_deref())
+        self.top_n_by_importance_scoped(table, n, opts.scope.as_deref(), decay)
     }
 
     fn top_n_by_importance_scoped(
@@ -304,6 +322,7 @@ impl Axil {
         table: &str,
         n: usize,
         scope: Option<&[String]>,
+        decay: &crate::config::DecayConfig,
     ) -> Vec<Value> {
         let mut records: Vec<_> = self
             .list(table)
@@ -311,19 +330,20 @@ impl Axil {
             .into_iter()
             .filter(|r| record_in_scope(r, scope))
             .collect();
+        // Effective importance is computed lazily from age + half-life (a pure
+        // function), so boot ordering reflects current decay without relying on
+        // a background write-sweep having stamped `_effective_importance`. The
+        // decay config is resolved once per boot and threaded in, so this hot
+        // per-table loop doesn't re-read `axil.toml` from disk.
+        let now = chrono::Utc::now();
+        let half_life = decay.half_life_for(table);
         records.sort_by(|a, b| {
-            let ia = a
-                .data
-                .get("_effective_importance")
-                .or_else(|| a.data.get("_importance"))
-                .and_then(|v| v.as_f64())
-                .unwrap_or(0.5);
-            let ib = b
-                .data
-                .get("_effective_importance")
-                .or_else(|| b.data.get("_importance"))
-                .and_then(|v| v.as_f64())
-                .unwrap_or(0.5);
+            // Clamp age at 0 so a future-dated (clock-skewed) record can't get a
+            // >1 decay factor and jump to the top of the ranking.
+            let age_a = ((now - a.created_at).num_seconds() as f64 / 86400.0).max(0.0);
+            let age_b = ((now - b.created_at).num_seconds() as f64 / 86400.0).max(0.0);
+            let ia = crate::importance::effective_importance(&a.data, age_a, half_life);
+            let ib = crate::importance::effective_importance(&b.data, age_b, half_life);
             ib.partial_cmp(&ia).unwrap_or(std::cmp::Ordering::Equal)
         });
         records.truncate(n);

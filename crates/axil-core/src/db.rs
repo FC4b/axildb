@@ -154,6 +154,15 @@ pub struct AxilBuilder {
     extensions: Vec<Arc<dyn Extension>>,
     /// Set by FTS plugin when schema migration required a rebuild.
     pub needs_fts_reindex: bool,
+    /// Open the core store read-only (no single-writer lock), serving committed
+    /// records while another process holds the writable handle.
+    read_only: bool,
+    /// Optional encryption-at-rest cipher for core record bodies, applied to the
+    /// `Storage` handle at [`AxilBuilder::build`] time. `None` means cleartext
+    /// bodies — the default. Available only under the off-by-default
+    /// `encryption` feature; see [`crate::crypto`] for the honest scope.
+    #[cfg(feature = "encryption")]
+    cipher: Option<crate::crypto::Cipher>,
 }
 
 /// Best-effort sink for canonical IDs published to a workspace control
@@ -304,10 +313,70 @@ impl AxilBuilder {
         self
     }
 
+    /// Open the core store read-only, without taking the exclusive
+    /// single-writer lock.
+    ///
+    /// The resulting handle serves committed records (get/list/recall) and
+    /// every mutation fails with [`AxilError::Busy`](crate::AxilError::Busy).
+    /// redb's read-only open requests a shared lock that cannot coexist with a
+    /// live writer's exclusive lock, so this also fails with `Busy` while a
+    /// writer is active — it is a fallback for the gap between short-lived
+    /// writer sessions, not a way to read through a live writer. The file must
+    /// already exist — a read-only open never creates it.
+    pub fn read_only(mut self, read_only: bool) -> Self {
+        self.read_only = read_only;
+        self
+    }
+
+    /// Attach an encryption-at-rest cipher to the core record store.
+    ///
+    /// When set, every core record body is sealed with XChaCha20-Poly1305 before
+    /// it is written and unsealed on read; `.vec` embeddings and `.fts` tokens
+    /// stay cleartext (see [`crate::crypto`] for the honest scope). Available
+    /// only under the off-by-default `encryption` feature. Construct the cipher
+    /// from a key source via [`Cipher::from_env`](crate::crypto::Cipher::from_env),
+    /// [`Cipher::from_key_file`](crate::crypto::Cipher::from_key_file), or
+    /// [`Cipher::resolve`](crate::crypto::Cipher::resolve) — keys never touch the
+    /// `.axil` file.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "encryption")]
+    /// # fn demo() -> axil_core::error::Result<()> {
+    /// use axil_core::{Axil, crypto::Cipher};
+    /// let db = Axil::open("./memory.axil")
+    ///     .with_cipher(Cipher::from_env()?) // reads AXIL_ENC_KEY
+    ///     .build()?;
+    /// # let _ = db;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[cfg(feature = "encryption")]
+    pub fn with_cipher(mut self, cipher: crate::crypto::Cipher) -> Self {
+        self.cipher = Some(cipher);
+        self
+    }
+
     /// Open the database and return the handle.
     pub fn build(self) -> Result<Axil> {
         let needs_fts_reindex = self.needs_fts_reindex;
-        let storage = Storage::open(&self.path)?;
+        let storage = if self.read_only {
+            Storage::open_read_only(&self.path)?
+        } else {
+            Storage::open(&self.path)?
+        };
+        // Attach the encryption cipher (if configured) to the freshly opened
+        // core store before any read/write goes through it, so bodies seal and
+        // unseal transparently. An explicit `with_cipher` wins; otherwise fall
+        // back to the process-wide default installed by the adapter — that
+        // fallback is what covers raw `Axil::open(path).build()` opens this code
+        // can't reach (core-internal `branch_merge`, the workspace fan-out).
+        // No-op without the `encryption` feature — the rebinding is cfg'd out
+        // and the default build stays byte-identical.
+        #[cfg(feature = "encryption")]
+        let storage = match self.cipher.or_else(crate::crypto::default_cipher) {
+            Some(cipher) => storage.with_cipher(cipher),
+            None => storage,
+        };
         let llm_usage = Arc::new(crate::llm::LlmUsageTracker::new(
             self.llm_config.cost_per_1m_input,
             self.llm_config.cost_per_1m_output,
@@ -334,6 +403,10 @@ impl AxilBuilder {
             feedback_store: crate::feedback::FeedbackStore::new(),
             canonical_publisher: self.canonical_publisher,
             extensions: std::sync::RwLock::new(self.extensions),
+            #[cfg(feature = "event-log")]
+            event_log_enabled: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(feature = "event-log")]
+            event_cursor: crate::event_log::EventCursor::new(),
         };
 
         // Backfill `_entities.canonical_id` for rows written before the
@@ -341,15 +414,19 @@ impl AxilBuilder {
         // via a marker row in `_axil_migrations` — without the marker this
         // would full-scan `_entities` on every open. Fresh DBs (no
         // `_entities` table) skip both the scan and the marker write so
-        // we don't materialize system tables for nothing.
-        if db.entities_table_nonempty() && !db.entity_migration_done() {
+        // we don't materialize system tables for nothing. A read-only handle
+        // can't write the marker, so skip the migration entirely — the writer
+        // process owns it.
+        if !db.storage.is_read_only() && db.entities_table_nonempty() && !db.entity_migration_done()
+        {
             let _ = db
                 .migrate_entity_canonical_id()
                 .and_then(|_| db.mark_entity_migration_done());
         }
 
-        // Auto-reindex FTS if schema migration rebuilt the index.
-        if needs_fts_reindex {
+        // Auto-reindex FTS if schema migration rebuilt the index. Never on a
+        // read-only handle (it can't write the index, and the writer owns it).
+        if needs_fts_reindex && !db.storage.is_read_only() {
             if let Some(ref fi) = db.fts_index {
                 let mut reindex_count = 0usize;
                 let mut reindex_errors = 0usize;
@@ -418,6 +495,15 @@ pub struct Axil {
     /// `Axil` handle (WASM plugins) can register *after* the database is open,
     /// not only at builder time.
     extensions: std::sync::RwLock<Vec<Arc<dyn Extension>>>,
+    /// Runtime gate for the durable semantic event log. Off by default even when
+    /// the `event-log` feature is compiled in — it is a write-amplifier, so the
+    /// caller opts in explicitly via [`Axil::set_event_log_enabled`].
+    #[cfg(feature = "event-log")]
+    event_log_enabled: std::sync::atomic::AtomicBool,
+    /// Monotonic ULID cursor source for the event tape. Same-millisecond events
+    /// still sort in commit order.
+    #[cfg(feature = "event-log")]
+    event_cursor: crate::event_log::EventCursor,
 }
 
 impl Axil {
@@ -436,6 +522,9 @@ impl Axil {
             canonical_publisher: None,
             extensions: Vec::new(),
             needs_fts_reindex: false,
+            read_only: false,
+            #[cfg(feature = "encryption")]
+            cipher: None,
         }
     }
 
@@ -546,6 +635,8 @@ impl Axil {
         }
         self.storage.insert(&record)?;
         self.audit("insert", &record.id, &table);
+        #[cfg(feature = "event-log")]
+        self.capture_semantic_event("insert", &record);
         self.run_insert_hooks(&record)?;
 
         self.publish_canonical_for_record(&record);
@@ -598,6 +689,133 @@ impl Axil {
         Ok(record)
     }
 
+    /// Whether a record would be auto-embedded into the vector index on insert.
+    ///
+    /// Mirrors the auto-embed gate in [`Axil::insert_record`] **exactly**
+    /// (non-internal table, `searchable_text` non-empty, length > 5). The
+    /// reverse-orphan reconciliation in [`Axil::count_missing_embeddings`] /
+    /// [`Axil::reembed_missing`] depends on this matching the insert gate, or it
+    /// false-positives on records that were never meant to be embedded. Kept next
+    /// to the insert path so any drift is immediately visible.
+    fn is_embeddable(record: &Record) -> bool {
+        if record.table.starts_with('_') {
+            return false;
+        }
+        let text = crate::util::searchable_text(&record.data);
+        !text.is_empty() && text.len() > 5
+    }
+
+    /// The table-prefix half of the FTS insert gate: non-internal tables only.
+    ///
+    /// The FTS engine ALSO skips records with no extractable text (see
+    /// [`SearchIndex::would_index`]), so reverse-orphan reconciliation must
+    /// combine this with `would_index` — otherwise a text-less record (e.g.
+    /// `{"n": 5}`) is flagged "missing an FTS document" forever and a re-index
+    /// is a phantom no-op.
+    fn is_fts_indexable(record: &Record) -> bool {
+        !record.table.starts_with('_')
+    }
+
+    /// Count records that should have a vector embedding but don't.
+    ///
+    /// Takes an already-scanned record slice so the caller can share one full
+    /// scan across reconciliation checks. Returns 0 unless both a vector index
+    /// and an embedder are configured — a user who only ever calls `add_vector`
+    /// manually (no embedder) must not be flagged as missing embeddings.
+    fn count_missing_embeddings(&self, records: &[Record]) -> usize {
+        if !self.has_vector_index() || self.embedder.is_none() {
+            return 0;
+        }
+        let Some(ref vi) = self.vector_index else {
+            return 0;
+        };
+        let indexed: std::collections::HashSet<RecordId> =
+            vi.all_ids().unwrap_or_default().into_iter().collect();
+        records
+            .iter()
+            .filter(|r| Self::is_embeddable(r) && !indexed.contains(&r.id))
+            .count()
+    }
+
+    /// Count records that should have an FTS document but don't.
+    ///
+    /// Takes an already-scanned record slice so the caller can share one full
+    /// scan across reconciliation checks. Returns 0 unless an FTS index is
+    /// configured.
+    fn count_missing_fts(&self, records: &[Record]) -> usize {
+        let Some(ref fi) = self.fts_index else {
+            return 0;
+        };
+        let indexed: std::collections::HashSet<RecordId> =
+            fi.all_indexed_ids().unwrap_or_default().into_iter().collect();
+        records
+            .iter()
+            .filter(|r| Self::is_fts_indexable(r) && fi.would_index(r) && !indexed.contains(&r.id))
+            .count()
+    }
+
+    /// Re-embed and re-index records that committed to storage but are missing
+    /// their vector embedding and/or FTS document.
+    ///
+    /// This closes the reverse-orphan gap: [`Axil::insert_record`] commits the
+    /// core record first and then fans out to the secondary indexes, swallowing
+    /// embed/index failures. A torn insert can therefore leave a stored memory
+    /// permanently invisible to recall. `reembed_missing` reconciles the live
+    /// records against the vector and FTS indexes and regenerates the missing
+    /// entries.
+    ///
+    /// Returns `(embeddings_restored, fts_docs_restored)`. Best-effort per
+    /// record — a single failure does not abort the sweep. A no-op (returns
+    /// `(0, 0)`) when no embedder/vector index/FTS index is configured.
+    pub fn reembed_missing(&self) -> Result<(usize, usize)> {
+        let records = self.storage.scan_all_records()?;
+
+        let mut embeddings_restored = 0usize;
+        if self.has_vector_index() && self.embedder.is_some() {
+            if let Some(ref vi) = self.vector_index {
+                let indexed: std::collections::HashSet<RecordId> =
+                    vi.all_ids().unwrap_or_default().into_iter().collect();
+                for record in &records {
+                    if !Self::is_embeddable(record) || indexed.contains(&record.id) {
+                        continue;
+                    }
+                    let text = crate::util::searchable_text(&record.data);
+                    if self.embed_text(&record.id, &text).is_ok() {
+                        embeddings_restored += 1;
+                    }
+                }
+            }
+        }
+
+        let mut fts_restored = 0usize;
+        if let Some(ref fi) = self.fts_index {
+            let indexed: std::collections::HashSet<RecordId> =
+                fi.all_indexed_ids().unwrap_or_default().into_iter().collect();
+            for record in &records {
+                if !Self::is_fts_indexable(record)
+                    || !fi.would_index(record)
+                    || indexed.contains(&record.id)
+                {
+                    continue;
+                }
+                if fi.on_record_insert(record).is_ok() {
+                    fts_restored += 1;
+                }
+            }
+        }
+
+        if embeddings_restored > 0 || fts_restored > 0 {
+            self.audit_heal_action(
+                "reembed_missing",
+                &format!(
+                    "restored {embeddings_restored} missing embeddings, {fts_restored} missing FTS docs"
+                ),
+            );
+        }
+
+        Ok((embeddings_restored, fts_restored))
+    }
+
     /// Insert a new record into the given table.
     ///
     /// The record is always committed to storage first. Engine hooks run
@@ -630,9 +848,11 @@ impl Axil {
 
     /// Insert multiple records in a single transaction.
     ///
-    /// Much faster than calling `insert()` in a loop because all records
-    /// share one storage transaction. Engine hooks (vector, FTS, timeseries)
-    /// still run per-record after the batch commit.
+    /// Much faster than calling `insert()` in a loop because all records share
+    /// one storage transaction. Vector embedding is micro-batched and indexed
+    /// through a single `add_batch` per micro-batch (one `.vec` commit), and
+    /// FTS indexing is batched too — so the whole batch costs a handful of
+    /// fsyncs rather than one per record.
     pub fn insert_batch(&self, table: &str, data_items: Vec<Value>) -> Result<Vec<Record>> {
         let timer = self.metrics.start_timer(OpType::Insert);
         let skip_internal = !table.starts_with('_');
@@ -743,11 +963,15 @@ impl Axil {
                                 .collect::<Result<Vec<_>>>()
                         });
                         if let Ok(vecs) = vectors {
-                            for (vec_idx, &(rec_idx, _)) in chunk.iter().enumerate() {
-                                if vec_idx < vecs.len() {
-                                    let _ = vi.add(records[rec_idx].id.clone(), &vecs[vec_idx]);
-                                }
-                            }
+                            let batch: Vec<(RecordId, &[f32])> = chunk
+                                .iter()
+                                .enumerate()
+                                .filter(|(vec_idx, _)| *vec_idx < vecs.len())
+                                .map(|(vec_idx, &(rec_idx, _))| {
+                                    (records[rec_idx].id.clone(), vecs[vec_idx].as_slice())
+                                })
+                                .collect();
+                            let _ = vi.add_batch(&batch);
                         }
                     }
                 }
@@ -825,11 +1049,15 @@ impl Axil {
                                 .collect::<Result<Vec<_>>>()
                         });
                         if let Ok(vecs) = vectors {
-                            for (vec_idx, &(rec_idx, _)) in chunk.iter().enumerate() {
-                                if vec_idx < vecs.len() {
-                                    let _ = vi.add(records[rec_idx].id.clone(), &vecs[vec_idx]);
-                                }
-                            }
+                            let batch: Vec<(RecordId, &[f32])> = chunk
+                                .iter()
+                                .enumerate()
+                                .filter(|(vec_idx, _)| *vec_idx < vecs.len())
+                                .map(|(vec_idx, &(rec_idx, _))| {
+                                    (records[rec_idx].id.clone(), vecs[vec_idx].as_slice())
+                                })
+                                .collect();
+                            let _ = vi.add_batch(&batch);
                         }
                     }
                 }
@@ -1102,6 +1330,8 @@ impl Axil {
         }
 
         self.audit("update", id, &record.table);
+        #[cfg(feature = "event-log")]
+        self.capture_semantic_event("update", &record);
         timer.finish();
         Ok(record)
     }
@@ -1196,6 +1426,60 @@ impl Axil {
         let vector = embedder.embed(text)?;
         vi.add(id.clone(), &vector)?;
         Ok(())
+    }
+
+    /// Embed many `(record, text)` pairs and store the vectors in one pass.
+    ///
+    /// Micro-batches the ONNX inference and indexes every vector through a
+    /// single `add_batch` per micro-batch (one `.vec` commit), so ingesting N
+    /// chunks costs a handful of fsyncs instead of one per chunk. Callers that
+    /// already hold the text (e.g. dep-docs chunk ingest) should prefer this
+    /// over a loop of [`Axil::embed_text`]. Records are assumed to exist —
+    /// pass ids from records you just inserted. A no-op when no vector index or
+    /// embedder is configured.
+    pub fn embed_fields_batch(&self, entries: &[(&RecordId, &str)]) -> Result<()> {
+        if entries.is_empty() || !self.has_vector_index() || self.embedder.is_none() {
+            return Ok(());
+        }
+        let embedder = self.require_embedder()?;
+        let vi = self.require_vector_index()?;
+
+        const MICRO_BATCH: usize = 32;
+        for chunk in entries.chunks(MICRO_BATCH) {
+            let texts: Vec<&str> = chunk.iter().map(|(_, t)| *t).collect();
+            let vectors = embedder.embed_batch(&texts).or_else(|_| {
+                texts
+                    .iter()
+                    .map(|t| embedder.embed(t))
+                    .collect::<Result<Vec<_>>>()
+            })?;
+            if vectors.len() != chunk.len() {
+                return Err(AxilError::plugin(format!(
+                    "embedder returned {} vectors for {} texts — refusing to \
+                     silently drop the remainder",
+                    vectors.len(),
+                    chunk.len()
+                )));
+            }
+            let batch: Vec<(RecordId, &[f32])> = chunk
+                .iter()
+                .zip(&vectors)
+                .map(|((id, _), v)| ((*id).clone(), v.as_slice()))
+                .collect();
+            vi.add_batch(&batch)?;
+        }
+        Ok(())
+    }
+
+    /// FTS-index the same named field across many records in one commit.
+    ///
+    /// Thin wrapper over the buffered `index_field_batch` plugin hook — turns N
+    /// per-chunk commits into one. A no-op when no FTS index is configured.
+    pub fn index_text_batch(&self, field: &str, entries: &[(&RecordId, &str)]) -> Result<()> {
+        if entries.is_empty() || !self.has_fts_index() {
+            return Ok(());
+        }
+        self.require_fts_index()?.index_field_batch(field, entries)
     }
 
     /// Embed arbitrary text and associate the vector with a record.
@@ -2254,6 +2538,32 @@ impl Axil {
         (expired, superseded)
     }
 
+    /// Compact the vector index only when the tombstone ratio exceeds
+    /// `threshold` (e.g. `HealingConfig::vector_rebuild_threshold`).
+    ///
+    /// Incremental inserts keep the live graph searchable, so deletes only
+    /// accumulate tombstoned nodes; this reclaims them in one rebuild once they
+    /// outweigh the live set enough to matter. Returns the number of tombstones
+    /// reclaimed (`0` when the ratio was below threshold or there is no vector
+    /// index). Intended for the background worker — off the write path.
+    pub fn compact_vector_index_if_needed(&self, threshold: f64) -> Result<usize> {
+        let Some(ref vi) = self.vector_index else {
+            return Ok(0);
+        };
+        let deleted = vi.deleted_count();
+        let live = vi.count();
+        let total = live + deleted;
+        if total == 0 {
+            return Ok(0);
+        }
+        let ratio = deleted as f64 / total as f64;
+        if ratio <= threshold {
+            return Ok(0);
+        }
+        self.vector_rebuild()?;
+        Ok(deleted)
+    }
+
     /// Rebuild the vector index to compact tombstones.
     pub fn vector_rebuild(&self) -> Result<crate::diagnostics::VectorRebuildReport> {
         let start = std::time::Instant::now();
@@ -2366,6 +2676,46 @@ impl Axil {
                             total_vec
                         ),
                         recommendation: "Rebuild vector index: axil heal --reindex".to_string(),
+                        auto_fixable: true,
+                    });
+                }
+            }
+        }
+
+        // Reverse-orphan reconciliation: records that committed to core storage
+        // but never got their vector embedding and/or FTS document. A torn
+        // insert fan-out (insert commits first, then swallows embed/index
+        // failures) can otherwise leave a stored memory invisible to recall.
+        // One scan feeds both the embedding and FTS reconciliation.
+        if self.vector_index.is_some() || self.fts_index.is_some() {
+            if let Ok(records) = self.storage.scan_all_records() {
+                let missing_embeddings = self.count_missing_embeddings(&records);
+                if missing_embeddings > 0 {
+                    // Only auto-fixable when an embedder can regenerate them; a
+                    // manual `add_vector` user with no embedder is already gated
+                    // out by `count_missing_embeddings`, but guard the flag too.
+                    problems.push(crate::diagnostics::ProblemDetection {
+                        detector: "missing_embeddings".to_string(),
+                        severity: Severity::Warning,
+                        message: format!(
+                            "{} record(s) committed without a vector embedding",
+                            missing_embeddings
+                        ),
+                        recommendation: "Re-embed missing records: axil heal --reindex".to_string(),
+                        auto_fixable: self.embedder.is_some(),
+                    });
+                }
+
+                let missing_fts = self.count_missing_fts(&records);
+                if missing_fts > 0 {
+                    problems.push(crate::diagnostics::ProblemDetection {
+                        detector: "missing_fts".to_string(),
+                        severity: Severity::Warning,
+                        message: format!(
+                            "{} record(s) committed without an FTS document",
+                            missing_fts
+                        ),
+                        recommendation: "Re-index missing records: axil heal --reindex".to_string(),
                         auto_fixable: true,
                     });
                 }
@@ -2651,6 +3001,19 @@ impl Axil {
             }
         }
 
+        // 3. Re-embed / re-index records lost by a torn insert fan-out (records
+        // that committed to core storage but never got their vector embedding
+        // and/or FTS document).
+        let (reembedded, refts) = self.reembed_missing()?;
+        if reembedded > 0 || refts > 0 {
+            actions.push(crate::diagnostics::HealAction {
+                action: "reembed_missing".to_string(),
+                result: format!(
+                    "restored {reembedded} missing embeddings, {refts} missing FTS docs"
+                ),
+            });
+        }
+
         Ok(crate::diagnostics::SelfHealReport {
             healed: !actions.is_empty(),
             actions,
@@ -2814,6 +3177,64 @@ impl Axil {
     /// Get the base database path.
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Flush every engine's buffered state to its backing file.
+    ///
+    /// Most engines commit each write synchronously, so this is a no-op for
+    /// them; the Tantivy FTS engine buffers documents and overrides
+    /// [`Engine::flush`] to commit. Called before [`Axil::branch_create`] copies
+    /// the companion files so each one reflects every committed record.
+    fn flush_engines(&self) -> Result<()> {
+        for plugin in &self.plugins {
+            plugin.flush()?;
+        }
+        if let Some(ref v) = self.vector_index {
+            v.flush()?;
+        }
+        if let Some(ref g) = self.graph_index {
+            g.flush()?;
+        }
+        if let Some(ref ts) = self.timeseries_index {
+            ts.flush()?;
+        }
+        if let Some(ref f) = self.fts_index {
+            f.flush()?;
+        }
+        Ok(())
+    }
+
+    /// Create a point-in-time-consistent branch from this live handle.
+    ///
+    /// A branch is a file-level copy of the core `.axil` plus every companion
+    /// file ([`branch_create`](crate::branch::branch_create) documents the
+    /// layout). Driving it from the live handle makes the copy internally
+    /// consistent under Axil's single-writer model:
+    ///
+    /// 1. While this handle is open it holds redb's **exclusive** OS write lock,
+    ///    so no other process can mutate the database.
+    /// 2. [`flush_engines`](Self::flush_engines) commits any buffered engine
+    ///    state (notably the FTS index) so every companion file is current.
+    /// 3. The handle is then **dropped**, releasing the OS lock, and only then
+    ///    are the files copied. On Windows, redb holds a byte-range lock on the
+    ///    core file for the lifetime of the [`Database`], so an open file cannot
+    ///    be copied (`fs::copy` fails with a sharing-violation); the
+    ///    flush-then-close-then-copy sequence is what makes this work
+    ///    cross-platform. Single-writer means a brief in-process quiesce is
+    ///    sufficient — there is no need to hold the OS lock during the byte copy.
+    ///
+    /// Taking `self` by value enforces at the type level that no mutation method
+    /// can run on this handle once the branch operation has begun.
+    pub fn branch_create(self, name: &str) -> Result<PathBuf> {
+        // Validate before flushing/closing so a bad name is a cheap rejection.
+        crate::branch::validate_branch_name(name)?;
+        self.flush_engines()?;
+        let db_path = self.path.clone();
+        // Drop every redb handle (core + companions) so the files are unlocked
+        // for copying. This is the quiesce point: no writer is active and all
+        // committed state is on disk.
+        drop(self);
+        crate::branch::copy_branch_files(&db_path, name)
     }
 
     /// List all files belonging to this database (core + companions).
@@ -3095,18 +3516,44 @@ impl Axil {
             });
         }
 
+        // Reconcile the vector and FTS indexes against live records once: a
+        // torn insert can commit a record but skip its embedding/FTS document,
+        // leaving the memory invisible to recall. Scan a single time and share
+        // the slice between both index checks below.
+        let index_scan = if self.vector_index.is_some() || self.fts_index.is_some() {
+            self.storage.scan_all_records().ok()
+        } else {
+            None
+        };
+
         // 3. Vector index sync
         if let Some(ref vi) = self.vector_index {
             let vec_count = vi.count();
-            checks.push(CheckResult {
-                name: "vector_index".to_string(),
-                status: Severity::Ok,
-                detail: format!(
-                    "{vec_count} vectors indexed, dimensions={}",
-                    vi.dimensions()
-                ),
-                fix: None,
-            });
+            let missing = index_scan
+                .as_ref()
+                .map(|recs| self.count_missing_embeddings(recs))
+                .unwrap_or(0);
+            if missing == 0 {
+                checks.push(CheckResult {
+                    name: "vector_index".to_string(),
+                    status: Severity::Ok,
+                    detail: format!(
+                        "{vec_count} vectors indexed, dimensions={}",
+                        vi.dimensions()
+                    ),
+                    fix: None,
+                });
+            } else {
+                checks.push(CheckResult {
+                    name: "vector_index".to_string(),
+                    status: Severity::Warning,
+                    detail: format!(
+                        "{vec_count} vectors indexed, dimensions={}; {missing} record(s) missing an embedding",
+                        vi.dimensions()
+                    ),
+                    fix: Some("axil heal --reindex".to_string()),
+                });
+            }
         }
 
         // 4. Graph: orphaned edges
@@ -3152,12 +3599,25 @@ impl Axil {
 
         // 6. FTS index
         if self.fts_index.is_some() {
-            checks.push(CheckResult {
-                name: "fts_index".to_string(),
-                status: Severity::Ok,
-                detail: "FTS index present".to_string(),
-                fix: None,
-            });
+            let missing = index_scan
+                .as_ref()
+                .map(|recs| self.count_missing_fts(recs))
+                .unwrap_or(0);
+            if missing == 0 {
+                checks.push(CheckResult {
+                    name: "fts_index".to_string(),
+                    status: Severity::Ok,
+                    detail: "FTS index present".to_string(),
+                    fix: None,
+                });
+            } else {
+                checks.push(CheckResult {
+                    name: "fts_index".to_string(),
+                    status: Severity::Warning,
+                    detail: format!("FTS index present; {missing} record(s) missing an FTS document"),
+                    fix: Some("axil heal --reindex".to_string()),
+                });
+            }
         }
 
         // 7. Storage fragmentation estimate
@@ -4443,6 +4903,137 @@ impl Axil {
         &self.storage
     }
 
+    /// Read change-data-capture events from the durable `_changelog` tape, in
+    /// commit order, for changes strictly after `cursor` (a ULID `change_id`).
+    ///
+    /// Pass `None` to read from the oldest retained entry. The `change_id` of
+    /// the last returned entry is the cursor for the next pull. Only available
+    /// with the off-by-default `cdc` feature; without it there is no tape.
+    #[cfg(feature = "cdc")]
+    pub fn changes_since(
+        &self,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<crate::storage::ChangeEntry>> {
+        self.storage.changes_since(cursor, limit)
+    }
+
+    /// Enable or disable full-body (`before`/`after`) capture on the CDC tape.
+    /// Id-only capture is the default; value capture roughly doubles write cost.
+    #[cfg(feature = "cdc")]
+    pub fn set_cdc_capture_values(&self, enabled: bool) {
+        self.storage.set_cdc_capture_values(enabled);
+    }
+
+    /// Enable or disable the durable semantic event log.
+    ///
+    /// Off by default even with the `event-log` feature compiled in: the tape is
+    /// a write-amplifier (an extra committed write per allowlisted event), so the
+    /// caller opts in. When off, the capture hook is a single relaxed atomic load
+    /// and never touches storage.
+    #[cfg(feature = "event-log")]
+    pub fn set_event_log_enabled(&self, enabled: bool) {
+        self.event_log_enabled
+            .store(enabled, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Whether the semantic event log is currently capturing.
+    #[cfg(feature = "event-log")]
+    pub fn event_log_enabled(&self) -> bool {
+        self.event_log_enabled
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Capture a committed write as a semantic event when it matches the curated
+    /// allowlist. No-op unless the event log is enabled.
+    ///
+    /// Called from `insert` / `update` / `delete` *after* the storage write
+    /// commits, so it only ever records facts that are already durable. Captures
+    /// allowlisted `_`-prefixed events (belief revisions, checkpoint writes) that
+    /// the per-record audit log deliberately skips. Best-effort: a failed append
+    /// never fails the originating write.
+    #[cfg(feature = "event-log")]
+    fn capture_semantic_event(&self, op: &str, record: &Record) {
+        if !self.event_log_enabled() {
+            return;
+        }
+        let Some(kind) = crate::event_log::classify(op, record) else {
+            return;
+        };
+        let cursor = self.event_cursor.next();
+        let event = crate::event_log::SemanticEvent {
+            cursor: cursor.clone(),
+            kind: kind.to_string(),
+            op: op.to_string(),
+            table: record.table.clone(),
+            record_id: record.id.to_string(),
+            agent_id: crate::event_log::agent_id_of(record),
+        };
+        if let Ok(bytes) = serde_json::to_vec(&event) {
+            let _ = self.storage.append_event(&cursor, &bytes);
+        }
+    }
+
+    /// Pull committed semantic events strictly after `cursor`, oldest first.
+    ///
+    /// This is the engine behind the `recall_delta` MCP tool: a second agent
+    /// passes the last cursor it saw and gets back what changed since — belief
+    /// revisions, decision supersessions, error fixes, checkpoint writes — under
+    /// a monotonic ULID order it can resume from. Pass `None` to read from the
+    /// oldest retained event.
+    ///
+    /// `exclude_agent` drops events whose `agent_id` matches (e.g. "skip my own
+    /// writes"). This is an ergonomic filter over **committed facts only** — it
+    /// does not read record bodies and does not relax cross-agent session
+    /// isolation; an agent still resolves a returned `record_id` through the
+    /// normal access path. Only available with the `event-log` feature.
+    #[cfg(feature = "event-log")]
+    pub fn recall_delta(
+        &self,
+        cursor: Option<&str>,
+        exclude_agent: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<crate::event_log::SemanticEvent>> {
+        // Over-read when filtering so an excluded run can't starve the page; the
+        // tape is a high-signal feed so the slop is small.
+        let scan_limit = if exclude_agent.is_some() {
+            limit.saturating_mul(4).max(limit)
+        } else {
+            limit
+        };
+        let raw = self.storage.events_since(cursor, scan_limit)?;
+        let mut out = Vec::with_capacity(raw.len().min(limit));
+        for bytes in raw {
+            let Ok(event) = serde_json::from_slice::<crate::event_log::SemanticEvent>(&bytes) else {
+                continue;
+            };
+            if let Some(excl) = exclude_agent {
+                if event.agent_id.as_deref() == Some(excl) {
+                    continue;
+                }
+            }
+            out.push(event);
+            if out.len() >= limit {
+                break;
+            }
+        }
+        Ok(out)
+    }
+
+    /// Trim the semantic event log to at most `max` retained entries (oldest
+    /// evicted). Driven off the write path by the maintenance thread so an
+    /// always-on event log can't grow the core file unboundedly.
+    #[cfg(feature = "event-log")]
+    pub fn trim_event_log(&self, max: usize) -> Result<()> {
+        self.storage.trim_event_log(max)
+    }
+
+    /// Number of retained entries on the semantic event log tape.
+    #[cfg(feature = "event-log")]
+    pub fn event_log_len(&self) -> Result<usize> {
+        self.storage.event_log_len()
+    }
+
     /// Append one `insert` audit-log entry per record. Mirrors what
     /// `Axil::insert` does inside the per-record path so bulk-import
     /// flows (e.g. SCIP ingest) keep the audit trail complete without
@@ -5195,12 +5786,16 @@ impl Axil {
                             .collect::<Result<Vec<_>>>()
                     });
                     if let Ok(vecs) = vectors {
-                        for (i, vec) in vecs.into_iter().enumerate() {
-                            let global = cursor + i;
-                            if let Some(id) = flat_ids.get(global) {
-                                let _ = vi.add(id.clone(), &vec);
-                            }
-                        }
+                        let batch: Vec<(RecordId, &[f32])> = vecs
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(i, vec)| {
+                                flat_ids
+                                    .get(cursor + i)
+                                    .map(|id| (id.clone(), vec.as_slice()))
+                            })
+                            .collect();
+                        let _ = vi.add_batch(&batch);
                     }
                     cursor = end;
                 }
@@ -5293,11 +5888,13 @@ impl Axil {
                         .collect::<Result<Vec<_>>>()
                 });
                 if let Ok(vecs) = vectors {
-                    for (i, vec) in vecs.into_iter().enumerate() {
-                        if i < chunk_records.len() {
-                            let _ = vi.add(chunk_records[i].id.clone(), &vec);
-                        }
-                    }
+                    let batch: Vec<(RecordId, &[f32])> = vecs
+                        .iter()
+                        .enumerate()
+                        .filter(|(i, _)| *i < chunk_records.len())
+                        .map(|(i, vec)| (chunk_records[i].id.clone(), vec.as_slice()))
+                        .collect();
+                    let _ = vi.add_batch(&batch);
                 }
             }
         }
@@ -6247,5 +6844,221 @@ mod tests {
             );
         }
         let _ = id_exact;
+    }
+
+    #[cfg(feature = "event-log")]
+    mod event_log {
+        use super::*;
+
+        #[test]
+        fn off_by_default_captures_nothing() {
+            let (db, _dir) = temp_db();
+            // Even an allowlisted write is a no-op while the log is disabled.
+            db.insert("_checkpoint_records", json!({"goal": "x"}))
+                .unwrap();
+            assert_eq!(db.event_log_len().unwrap(), 0);
+            assert!(db.recall_delta(None, None, 50).unwrap().is_empty());
+        }
+
+        #[test]
+        fn captures_allowlisted_underscore_table_events() {
+            let (db, _dir) = temp_db();
+            db.set_event_log_enabled(true);
+
+            // Checkpoint write — an allowlisted `_`-prefixed table the plain
+            // audit log would skip.
+            db.insert("_checkpoint_records", json!({"goal": "ship T14"}))
+                .unwrap();
+            // Belief revision — also `_`-prefixed.
+            db.insert("_beliefs", json!({"statement": "x", "doubted": true}))
+                .unwrap();
+            // An ordinary write is NOT captured.
+            db.insert("notes", json!({"text": "noise"})).unwrap();
+
+            let events = db.recall_delta(None, None, 50).unwrap();
+            let kinds: Vec<&str> = events.iter().map(|e| e.kind.as_str()).collect();
+            assert!(kinds.contains(&crate::event_log::kind::CHECKPOINT_WRITTEN));
+            assert!(kinds.contains(&crate::event_log::kind::BELIEF_REVISED));
+            assert_eq!(events.len(), 2, "ordinary `notes` write must not be captured");
+        }
+
+        #[test]
+        fn captures_decision_superseded_and_error_fixed() {
+            let (db, _dir) = temp_db();
+            db.set_event_log_enabled(true);
+
+            let dec = db
+                .insert("decisions", json!({"summary": "old"}))
+                .unwrap();
+            // Mark it superseded via update → decision-superseded.
+            db.update(&dec.id, json!({"summary": "old", "_superseded": true}))
+                .unwrap();
+            // An error with a fix → error-fixed.
+            db.insert("errors", json!({"error": "boom", "fix": "patch"}))
+                .unwrap();
+
+            let events = db.recall_delta(None, None, 50).unwrap();
+            let kinds: Vec<&str> = events.iter().map(|e| e.kind.as_str()).collect();
+            assert!(kinds.contains(&crate::event_log::kind::DECISION_SUPERSEDED));
+            assert!(kinds.contains(&crate::event_log::kind::ERROR_FIXED));
+        }
+
+        #[test]
+        fn recall_delta_returns_only_post_cursor_events() {
+            let (db, _dir) = temp_db();
+            db.set_event_log_enabled(true);
+
+            for i in 0..5 {
+                db.insert("errors", json!({"error": format!("e{i}"), "fix": "f"}))
+                    .unwrap();
+            }
+            let all = db.recall_delta(None, None, 50).unwrap();
+            assert_eq!(all.len(), 5);
+
+            // Resume strictly after the 2nd event → events 3,4,5.
+            let cursor = all[1].cursor.clone();
+            let rest = db.recall_delta(Some(&cursor), None, 50).unwrap();
+            assert_eq!(rest.len(), 3);
+            assert_eq!(rest[0].cursor, all[2].cursor);
+            // Every returned cursor is strictly greater than the resume cursor.
+            for e in &rest {
+                assert!(e.cursor > cursor);
+            }
+        }
+
+        #[test]
+        fn recall_delta_respects_exclude_agent() {
+            let (db, _dir) = temp_db();
+            db.set_event_log_enabled(true);
+
+            db.insert("errors", json!({"error": "a", "fix": "f", "_agent_id": "agent-a"}))
+                .unwrap();
+            db.insert("errors", json!({"error": "b", "fix": "f", "_agent_id": "agent-b"}))
+                .unwrap();
+            db.insert("errors", json!({"error": "c", "fix": "f", "_agent_id": "agent-a"}))
+                .unwrap();
+
+            // Excluding agent-a leaves only agent-b's single event.
+            let filtered = db.recall_delta(None, Some("agent-a"), 50).unwrap();
+            assert_eq!(filtered.len(), 1);
+            assert_eq!(filtered[0].agent_id.as_deref(), Some("agent-b"));
+
+            // No exclusion → all three.
+            assert_eq!(db.recall_delta(None, None, 50).unwrap().len(), 3);
+        }
+
+        #[test]
+        fn cursor_is_monotonic_across_same_millisecond_writes() {
+            let (db, _dir) = temp_db();
+            db.set_event_log_enabled(true);
+
+            // A tight insert loop forces many same-millisecond commits; the
+            // cursors must still be strictly increasing in commit order.
+            for i in 0..200 {
+                db.insert("errors", json!({"error": format!("e{i}"), "fix": "f"}))
+                    .unwrap();
+            }
+            let events = db.recall_delta(None, None, 1000).unwrap();
+            assert_eq!(events.len(), 200);
+            for w in events.windows(2) {
+                assert!(
+                    w[0].cursor < w[1].cursor,
+                    "cursor not monotonic: {} should be < {}",
+                    w[0].cursor,
+                    w[1].cursor
+                );
+            }
+        }
+
+        #[test]
+        fn trim_keeps_newest_within_bound() {
+            let (db, _dir) = temp_db();
+            db.set_event_log_enabled(true);
+            for i in 0..10 {
+                db.insert("errors", json!({"error": format!("e{i}"), "fix": "f"}))
+                    .unwrap();
+            }
+            assert_eq!(db.event_log_len().unwrap(), 10);
+            db.trim_event_log(4).unwrap();
+            assert_eq!(db.event_log_len().unwrap(), 4);
+            // Trimming evicts the oldest, so the surviving events are the newest 4.
+            let remaining = db.recall_delta(None, None, 50).unwrap();
+            assert_eq!(remaining.len(), 4);
+        }
+    }
+
+    /// Builder-level encryption wiring (`encryption` feature). Storage-level
+    /// sealing is covered in `storage.rs`; these prove `AxilBuilder::with_cipher`
+    /// actually threads the cipher into the core store, so a full `Axil` opened
+    /// through the builder round-trips — the integration the CLI/MCP rely on.
+    #[cfg(feature = "encryption")]
+    mod encryption {
+        use super::*;
+        use crate::crypto::Cipher;
+
+        fn key_a() -> Cipher {
+            Cipher::from_key_bytes(&[7u8; 32]).unwrap()
+        }
+        fn key_b() -> Cipher {
+            Cipher::from_key_bytes(&[9u8; 32]).unwrap()
+        }
+
+        /// insert through a cipher-attached builder → reopen with the same key →
+        /// the record reads back as plaintext.
+        #[test]
+        fn builder_round_trips_through_cipher() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("enc.axil");
+
+            // Scoped so the writer handle drops (releasing the single-writer
+            // lock) before we reopen the same file below.
+            let id = {
+                let db = Axil::open(&path).with_cipher(key_a()).build().unwrap();
+                db.insert("secrets", json!({"summary": "classified"}))
+                    .unwrap()
+                    .id
+            };
+
+            let db = Axil::open(&path).with_cipher(key_a()).build().unwrap();
+            let fetched = db.get(&id).unwrap().unwrap();
+            assert_eq!(fetched.data["summary"], "classified");
+            assert_eq!(fetched.table, "secrets");
+        }
+
+        /// A builder with no cipher cannot read a body that a cipher-attached
+        /// builder wrote — proves the builder genuinely encrypted on disk
+        /// (the wiring is not a silent no-op).
+        #[test]
+        fn cleartext_builder_cannot_read_encrypted_db() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("enc.axil");
+            let id = {
+                let db = Axil::open(&path).with_cipher(key_a()).build().unwrap();
+                db.insert("secrets", json!({"summary": "needle-xyz"}))
+                    .unwrap()
+                    .id
+            };
+
+            // Reopen with NO cipher: the sealed body fails to deserialize as a
+            // cleartext record, so `get` surfaces an error rather than plaintext.
+            let db = Axil::open(&path).build().unwrap();
+            assert!(db.get(&id).is_err());
+        }
+
+        /// Wrong key fails loud rather than returning corrupt or partial data.
+        #[test]
+        fn wrong_key_builder_fails_to_read() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("enc.axil");
+            let id = {
+                let db = Axil::open(&path).with_cipher(key_a()).build().unwrap();
+                db.insert("secrets", json!({"summary": "classified"}))
+                    .unwrap()
+                    .id
+            };
+
+            let db = Axil::open(&path).with_cipher(key_b()).build().unwrap();
+            assert!(db.get(&id).is_err());
+        }
     }
 }

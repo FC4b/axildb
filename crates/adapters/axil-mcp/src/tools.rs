@@ -28,6 +28,10 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
                         "type": "string",
                         "description": "Filter by table name"
                     },
+                    "type": {
+                        "type": "string",
+                        "description": "Filter by the record's `type` facet (matches data.type, case-insensitive exact). Records without a `type` field are excluded when set."
+                    },
                     "across": {
                         "type": "array",
                         "items": { "type": "string" },
@@ -288,6 +292,29 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
                 }
             }),
         },
+        // ─── Read-only census + light health ────────────────────────
+        ToolDefinition {
+            name: "inspect".into(),
+            description: "Read-only overview of what kinds of memory this brain holds and whether it is healthy. Returns a per-record-type census (e.g. decisions, errors, sessions; all internal bookkeeping tables collapse into one `_internal` bucket) plus a light health verdict (`ok`/`warning`/`error`) drawn from the same checks as `axil doctor`. Performs zero writes — use it when you only have MCP access and can't shell out to `axil tables`/`axil doctor`.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {}
+            }),
+        },
+        // ─── Pull-based cross-agent delta (event-log feature only) ───
+        #[cfg(feature = "event-log")]
+        ToolDefinition {
+            name: "recall_delta".into(),
+            description: "Pull committed semantic events that happened after a cursor, oldest first. Surfaces high-signal cross-agent changes — a belief was revised, a decision superseded, an error fixed, a checkpoint written — so a second agent can ask 'what changed since I last looked' without re-scanning. Each event carries a monotonic `cursor`; pass the last one back in as `since_cursor` to resume. `exclude_agent` drops events written by that agent (e.g. skip your own). Returns committed facts only — it does not read record bodies and does not relax cross-agent session isolation; resolve a returned `record_id` through the normal access path.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "since_cursor": {"type": "string", "description": "Return only events strictly after this cursor. Omit to read from the oldest retained event."},
+                    "exclude_agent": {"type": "string", "description": "Drop events tagged with this agent_id (e.g. your own)."},
+                    "limit": {"type": "integer", "description": "Max events to return (default 50)."}
+                }
+            }),
+        },
     ]
 }
 
@@ -327,6 +354,9 @@ pub fn dispatch(db: &Axil, tool_name: &str, args: &Value) -> ToolCallResult {
         "set_preference" => handle_set_preference(db, args),
         "close_session" => handle_close_session(db, args),
         "boot" => handle_boot(db, args),
+        "inspect" => handle_inspect(db, args),
+        #[cfg(feature = "event-log")]
+        "recall_delta" => handle_recall_delta(db, args),
         "code_search" => handle_code_search(db, args),
         "code_context" => handle_code_context(db, args),
         // `dep_docs` / `deps_status` are handled by DocsExtension via
@@ -394,6 +424,11 @@ fn handle_recall(db: &Axil, args: &Value) -> ToolCallResult {
     };
     let top_k = args.get("top_k").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
     let table = args.get("table").and_then(|v| v.as_str());
+    // --type facet filter, normalized case-insensitive (matches the CLI).
+    let type_filter = args
+        .get("type")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_lowercase());
     let across: Vec<String> = args
         .get("across")
         .and_then(|v| v.as_array())
@@ -413,7 +448,7 @@ fn handle_recall(db: &Axil, args: &Value) -> ToolCallResult {
     }
 
     const TABLE_FILTER_INFLATION: usize = 5;
-    let fetch_k = if table.is_some() {
+    let fetch_k = if table.is_some() || type_filter.is_some() {
         top_k * TABLE_FILTER_INFLATION
     } else {
         top_k
@@ -441,6 +476,17 @@ fn handle_recall(db: &Axil, args: &Value) -> ToolCallResult {
                 }
                 if let Some(t) = table {
                     if result.record.table != t {
+                        continue;
+                    }
+                }
+                if let Some(ref tf) = type_filter {
+                    let record_type = result
+                        .record
+                        .data
+                        .get("type")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.trim().to_lowercase());
+                    if record_type.as_deref() != Some(tf.as_str()) {
                         continue;
                     }
                 }
@@ -1025,6 +1071,93 @@ fn handle_boot(db: &Axil, args: &Value) -> ToolCallResult {
     }
 }
 
+/// Read-only census of record types plus a light health verdict.
+///
+/// Answers "what kinds of memory does this brain hold, and is it healthy?"
+/// without any shell access: per-table counts framed as the memory model
+/// (not SQL columns), with every `_`-prefixed bookkeeping table rolled into a
+/// single `_internal` bucket, and the overall `axil doctor` verdict reduced to
+/// its read-only checks. Issues zero writes.
+fn handle_inspect(db: &Axil, _args: &Value) -> ToolCallResult {
+    let tables = match db.tables_with_counts() {
+        Ok(t) => t,
+        Err(e) => return ToolCallResult::error(format!("inspect failed: {e}")),
+    };
+
+    // Roll the user-facing tables out individually, collapsing every
+    // `_`-prefixed bookkeeping table (entities, indexes, dep-docs, …) into one
+    // opaque `_internal` bucket so the census reads as the memory model, not the
+    // physical schema.
+    let mut record_types = serde_json::Map::new();
+    let mut internal_total: usize = 0;
+    let mut total: usize = 0;
+    for (name, count) in &tables {
+        total += count;
+        if name.starts_with('_') {
+            internal_total += count;
+        } else {
+            record_types.insert(name.clone(), json!(count));
+        }
+    }
+    if internal_total > 0 {
+        record_types.insert("_internal".to_string(), json!(internal_total));
+    }
+
+    // `doctor()` is read-only (it only scans and counts); reuse its verdict and
+    // per-check details for the light health summary.
+    let health = match db.doctor() {
+        Ok(report) => {
+            let checks: Vec<Value> = report
+                .checks
+                .iter()
+                .map(|c| {
+                    json!({
+                        "name": c.name,
+                        "status": c.status,
+                        "detail": c.detail,
+                    })
+                })
+                .collect();
+            json!({ "status": report.status, "checks": checks })
+        }
+        Err(e) => json!({ "status": "error", "detail": format!("doctor failed: {e}") }),
+    };
+
+    ToolCallResult::json(&json!({
+        "record_types": record_types,
+        "total_records": total,
+        "health": health,
+    }))
+}
+
+/// Pull-based "what changed since I last looked" over the durable semantic
+/// event log. Returns committed facts only — never another agent's private
+/// record body — so it surfaces cross-agent signals without relaxing session
+/// isolation. The trailing `cursor` is the resume point for the next pull.
+#[cfg(feature = "event-log")]
+fn handle_recall_delta(db: &Axil, args: &Value) -> ToolCallResult {
+    let since = args.get("since_cursor").and_then(|v| v.as_str());
+    let exclude_agent = args.get("exclude_agent").and_then(|v| v.as_str());
+    let limit = args
+        .get("limit")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(50)
+        .clamp(1, 1000) as usize;
+
+    match db.recall_delta(since, exclude_agent, limit) {
+        Ok(events) => {
+            let next_cursor = events.last().map(|e| e.cursor.clone());
+            let v = serde_json::to_value(&events).unwrap_or(json!([]));
+            ToolCallResult::json(&json!({
+                "events": v,
+                "next_cursor": next_cursor,
+                "count": events.len(),
+            }))
+        }
+        Err(e) => ToolCallResult::error(format!("recall_delta failed: {e}")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1150,5 +1283,91 @@ mod tests {
         let names: Vec<String> = tool_definitions().into_iter().map(|d| d.name).collect();
         assert!(names.iter().any(|n| n == "code_search"));
         assert!(names.iter().any(|n| n == "code_context"));
+    }
+
+    #[test]
+    fn inspect_tool_reports_census_and_health() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Axil::open(dir.path().join("inspect.axil")).build().unwrap();
+        // Two user-facing tables plus whatever internal bookkeeping a bare
+        // insert produces (`_`-prefixed rows must collapse, not leak).
+        db.insert("decisions", json!({"summary": "chose redb"})).unwrap();
+        db.insert("decisions", json!({"summary": "chose tantivy"})).unwrap();
+        db.insert("errors", json!({"error": "lock contention"})).unwrap();
+
+        let result = dispatch(&db, "inspect", &json!({}));
+        assert!(result.is_error.is_none(), "inspect returned error: {result:?}");
+        let body = parse_json_payload(&result);
+
+        let record_types = body["record_types"]
+            .as_object()
+            .expect("record_types must be an object");
+        assert_eq!(record_types["decisions"].as_u64(), Some(2));
+        assert_eq!(record_types["errors"].as_u64(), Some(1));
+        // No raw `_`-prefixed table name leaks; internal rows are bucketed.
+        assert!(
+            record_types.keys().all(|k| k == "_internal" || !k.starts_with('_')),
+            "raw internal table leaked into census: {record_types:?}"
+        );
+
+        assert!(body["total_records"].as_u64().unwrap() >= 3);
+        let status = body["health"]["status"]
+            .as_str()
+            .expect("health.status must be a string");
+        assert!(
+            matches!(status, "ok" | "warning" | "error"),
+            "unexpected health status: {status}"
+        );
+        assert!(
+            body["health"]["checks"].is_array(),
+            "health.checks must be an array"
+        );
+    }
+
+    #[test]
+    fn inspect_tool_is_advertised() {
+        let names: Vec<String> = tool_definitions().into_iter().map(|d| d.name).collect();
+        assert!(names.iter().any(|n| n == "inspect"));
+    }
+
+    #[cfg(feature = "event-log")]
+    #[test]
+    fn recall_delta_tool_is_advertised_and_filters() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Axil::open(dir.path().join("delta.axil")).build().unwrap();
+        db.set_event_log_enabled(true);
+
+        // The tool is in the advertised surface when the feature is on.
+        let names: Vec<String> = tool_definitions().into_iter().map(|d| d.name).collect();
+        assert!(names.iter().any(|n| n == "recall_delta"));
+
+        // Two allowlisted events by different agents.
+        db.insert(
+            "errors",
+            json!({"error": "a", "fix": "f", "_agent_id": "agent-a"}),
+        )
+        .unwrap();
+        db.insert(
+            "errors",
+            json!({"error": "b", "fix": "f", "_agent_id": "agent-b"}),
+        )
+        .unwrap();
+
+        // Full pull returns both events plus a resumable cursor.
+        let all = dispatch(&db, "recall_delta", &json!({}));
+        assert!(all.is_error.is_none(), "recall_delta errored: {all:?}");
+        let body = parse_json_payload(&all);
+        assert_eq!(body["count"].as_u64(), Some(2));
+        assert!(body["next_cursor"].is_string());
+
+        // exclude_agent drops that agent's event.
+        let filtered = dispatch(&db, "recall_delta", &json!({"exclude_agent": "agent-a"}));
+        let body = parse_json_payload(&filtered);
+        assert_eq!(body["count"].as_u64(), Some(1));
+        assert_eq!(
+            body["events"][0]["agent_id"].as_str(),
+            Some("agent-b"),
+            "exclude_agent must drop agent-a's event"
+        );
     }
 }

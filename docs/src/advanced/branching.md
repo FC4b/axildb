@@ -10,6 +10,13 @@ axil branch create <DB> <NAME>
 
 Creates a full copy of the database and all companion files at `<DB>.branch.<NAME>`.
 
+> **Consistency:** a branch is a sequential file copy of the core database and its
+> companion files (`.vec`/`.graph`/`.fts`), not a coordinated snapshot. It is
+> point-in-time consistent only when the database is **quiescent** — Axil's
+> single-writer model means a copy taken while another process is mid-write can
+> capture the core and companion files at slightly different logical points. For a
+> reliable backup, branch when no writer is active.
+
 ## List branches
 
 ```bash

@@ -280,6 +280,29 @@ impl McpServer {
         Ok(())
     }
 
+    /// Drive a single raw JSON-RPC frame the way the stdio `run` loop does and
+    /// return the serialized response line, or `None` for a notification (a
+    /// request with no `id`) that takes no reply.
+    ///
+    /// This is the in-process equivalent of piping one newline-delimited frame
+    /// into `axil --db <DB> mcp`: it parses the line, routes it through
+    /// [`McpServer::handle_request`], and serializes the response back to a
+    /// JSON string — without touching stdin/stdout. It lets a host (or a test)
+    /// exercise the exact `initialize` / `tools/list` / `tools/call` frames the
+    /// docs document. A malformed frame yields a JSON-RPC parse-error response
+    /// rather than an `Err`, matching the serve loop's behavior.
+    pub fn handle_frame(&self, frame: &str) -> Option<String> {
+        let request: JsonRpcRequest = match serde_json::from_str(frame.trim()) {
+            Ok(req) => req,
+            Err(_) => {
+                let resp = JsonRpcResponse::error(None, PARSE_ERROR, "Parse error");
+                return Some(serde_json::to_string(&resp).unwrap_or_default());
+            }
+        };
+        let resp = self.handle_request(&request)?;
+        Some(serde_json::to_string(&resp).unwrap_or_default())
+    }
+
     /// Handle a single JSON-RPC request and return an optional response.
     fn handle_request(&self, req: &JsonRpcRequest) -> Option<JsonRpcResponse> {
         match req.method.as_str() {
@@ -508,6 +531,85 @@ mod adapter_tests {
                 "test's `referenced` list names `{name}` but the instructions no longer mention it"
             );
         }
+    }
+
+    /// The MCP surface guide, embedded at compile time so the drift test can
+    /// diff it against the runtime tool set without a working-dir-relative read.
+    const MCP_DOC: &str = include_str!("../../../../docs/src/agents/mcp.md");
+
+    /// Every tool the assembled server actually exposes: the built-in
+    /// `tool_definitions()` **plus** each enabled Extension's `mcp_tools()`
+    /// surface. `tool_definitions()` alone omits the Extension tools
+    /// (`dep_docs`/`deps_status`, `checkpoint`/`checkpoint_show`), which only
+    /// reach `tools/list` via `register_builtin_extensions`.
+    fn assembled_tool_names() -> std::collections::BTreeSet<String> {
+        let mut names: std::collections::BTreeSet<String> = crate::tools::tool_definitions()
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+        let config = axil_core::AxilConfig::default();
+        for surface in axil_bundle::builtin_mcp_surfaces(&config) {
+            for tool in surface.tools {
+                names.insert(tool.name);
+            }
+        }
+        // `recall_delta` only exists under the off-by-default `event-log` feature,
+        // so it is documented in a prose subsection of mcp.md (not the tool
+        // table) to keep the doc portable across feature sets. Exclude it from
+        // the strict table-equality drift check; its presence is asserted
+        // separately by the feature-gated `recall_delta_tool_*` tests.
+        names.remove("recall_delta");
+        names
+    }
+
+    /// Extract the documented tool names from `docs/src/agents/mcp.md`: the
+    /// first cell of every tool-table row, recognised as a line of the form
+    /// `| `name` | …`. Prose back-ticks (e.g. "prefer `recall`") are ignored
+    /// because they aren't in leading-cell position.
+    fn documented_tool_names() -> std::collections::BTreeSet<String> {
+        MCP_DOC
+            .lines()
+            .filter_map(|line| {
+                let cell = line.strip_prefix("| `")?;
+                let name = cell.split('`').next()?;
+                // A tool name is a bare identifier; the header separator row
+                // (`|------|`) and multi-word cells never qualify.
+                if !name.is_empty()
+                    && name
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '_')
+                {
+                    Some(name.to_string())
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// Drift guard: `docs/src/agents/mcp.md` must document exactly the tools the
+    /// assembled server exposes — built-ins **and** the enabled Extensions'
+    /// tools. Adding or removing a tool without updating the doc table (or vice
+    /// versa) fails here. The doc is the agent-facing contract; stale tool docs
+    /// mislead every MCP client.
+    #[test]
+    fn mcp_doc_matches_assembled_tool_surface() {
+        let runtime = assembled_tool_names();
+        let documented = documented_tool_names();
+
+        let undocumented: Vec<&String> = runtime.difference(&documented).collect();
+        assert!(
+            undocumented.is_empty(),
+            "these assembled MCP tools are missing from docs/src/agents/mcp.md: {undocumented:?} \
+             — add a table row (name, params, when-to-use)"
+        );
+
+        let phantom: Vec<&String> = documented.difference(&runtime).collect();
+        assert!(
+            phantom.is_empty(),
+            "docs/src/agents/mcp.md documents tools the assembled server does not expose: \
+             {phantom:?} — remove the row or restore the tool"
+        );
     }
 
     #[test]

@@ -1,0 +1,82 @@
+name: nightly-bench
+
+# Criterion latency regression watch (Phase 25 P0.5). Runs the 4 in-tree
+# hot-path suites (core/vector/graph/fts) via scripts/bench-check.sh and
+# surfaces >5% regressions vs the previous night's baseline as WARNINGS —
+# informational, never blocking. Criterion variance on shared CI runners is
+# real (eval-log.md classifies +6–10% single-run swings as noise), so this is
+# deliberately NOT a per-PR blocking gate.
+on:
+  schedule:
+    - cron: "0 7 * * *" # 07:00 UTC daily
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  criterion:
+    name: criterion latency watch (informational)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Persist the Criterion "main" baseline across nightly runs so --compare
+      # has something to diff against. restore-keys picks up the most recent
+      # prior baseline; the run-id-suffixed key writes a fresh one each night.
+      - name: restore criterion baseline
+        uses: actions/cache@v4
+        with:
+          path: target/criterion
+          key: criterion-baseline-${{ github.run_id }}
+          restore-keys: criterion-baseline-
+      # Compare against the restored baseline (if any). Non-blocking: a
+      # regression here is a heads-up, not a build failure.
+      - name: compare vs previous baseline (warn-only)
+        continue-on-error: true
+        run: scripts/bench-check.sh --compare
+      # Refresh the baseline so tomorrow compares against today.
+      - name: save fresh baseline
+        run: scripts/bench-check.sh --save
+
+  vector-oracle:
+    name: HNSW recall oracle (large N)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # The per-PR `test` job runs the recall oracle at the default N=2000 for
+      # fast signal; nightly re-runs the same env-scalable tests at N=20000 in
+      # release so a recall floor that only droops at scale still trips. Tests
+      # are seeded/deterministic and model-free — no dataset, no network.
+      - name: HNSW-vs-brute-force recall at N=20000
+        env:
+          AXIL_ORACLE_N: "20000"
+        run: cargo test -p axil-vector --release recall
+
+  ql-fuzz:
+    name: AxilQL parser fuzz smoke (informational)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      # `axil_ql::parse` is the one genuinely untrusted byte surface (a query
+      # string from a console / MCP / argv). cargo-fuzz needs nightly +
+      # libFuzzer, so this is nightly-only and warn-only: a short bounded run
+      # over the committed seed corpus that flags a crash/hang as a WARNING, not
+      # a build failure (variance and false floors don't belong on the per-PR
+      # gate). The fuzz crate is detached from the workspace — build it via its
+      # own manifest. A real finding lands as a reproducible artifact under
+      # fuzz/artifacts/.
+      - name: install cargo-fuzz
+        continue-on-error: true
+        run: cargo install cargo-fuzz --locked
+      - name: ql_parse fuzz smoke (60s, warn-only)
+        continue-on-error: true
+        run: |
+          cd fuzz
+          cargo +nightly fuzz run ql_parse -- -max_total_time=60 -rss_limit_mb=2048 \
+            || echo "::warning::ql_parse fuzz smoke reported a finding or failed to run — inspect fuzz/artifacts/"

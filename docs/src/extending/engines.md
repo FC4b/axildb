@@ -152,7 +152,7 @@ The benchmark must run as part of `scripts/bench-check.sh` so regressions >5% br
 
 The four built-in Engines are the canonical examples:
 
-- **Vector**: [crates/axil-vector/](../../../crates/axil-vector/) — `instant-distance` HNSW + ONNX embedding.
+- **Vector**: [crates/axil-vector/](../../../crates/axil-vector/) — `hnsw_rs` incremental HNSW + ONNX embedding.
 - **Graph**: [crates/axil-graph/](../../../crates/axil-graph/) — pure-Rust edge storage in redb.
 - **FTS**: [crates/axil-fts/](../../../crates/axil-fts/) — tantivy wrapper with code tokenizer, fuzzy matching, field boosting.
 - **Time-series**: [crates/axil-timeseries/](../../../crates/axil-timeseries/) — redb-backed bucketed ranges.

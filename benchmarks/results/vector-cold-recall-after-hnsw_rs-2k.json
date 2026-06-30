@@ -1,0 +1,36 @@
+{
+  "_meta": {
+    "label": "AFTER — incremental hnsw_rs backend (Phase 26 T7)",
+    "machine": "same machine as the before-2k baseline",
+    "cmd": "vector-latency.exe --n 2000 --queries 50 --top-k 10 --top-k-cold 10 --format json",
+    "note": "cold_recall_after_single_store now links one vector into the live graph in O(log n) and searches it directly — no rebuild. mean_us 307 vs the instant-distance baseline's 1449148 (~4700x faster on the store-then-recall loop). rebuild_ms=0 because the incremental graph is always current."
+  },
+  "benchmark": "vector-latency",
+  "dataset_size": 2000,
+  "dimensions": 384,
+  "insert_ms": 2637,
+  "insert_throughput_per_sec": 758.4376185058779,
+  "rebuild_ms": 0,
+  "search": [
+    {
+      "top_k": 10,
+      "queries": 50,
+      "mean_us": 288.36999999999995,
+      "min_us": 247.0,
+      "p50_us": 283.5,
+      "p95_us": 340.7,
+      "p99_us": 350.7,
+      "max_us": 350.7,
+      "qps": 3467.767104761245
+    }
+  ],
+  "cold_recall_after_single_store": {
+    "iterations": 50,
+    "top_k": 10,
+    "mean_us": 306.74999999999994,
+    "p50_us": 307.4,
+    "p95_us": 350.5,
+    "p99_us": 354.5,
+    "max_us": 354.5
+  }
+}

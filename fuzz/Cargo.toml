@@ -1,0 +1,36 @@
+[package]
+name = "axil-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+license = "PolyForm-Noncommercial-1.0.0"
+
+# Detached from the main workspace on purpose: cargo-fuzz needs nightly +
+# libFuzzer and pulls in `libfuzzer-sys`, so keeping it out of the default
+# workspace keeps `cargo check --workspace` fast and toolchain-clean. Build it
+# explicitly with `cargo +nightly fuzz run ql_parse` (or
+# `--manifest-path fuzz/Cargo.toml`), never via the root workspace.
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+# Path-only: the fuzz target exercises the in-tree parser, never a published
+# version.
+axil-ql = { path = "../crates/adapters/axil-ql" }
+
+[[bin]]
+name = "ql_parse"
+path = "fuzz_targets/ql_parse.rs"
+test = false
+doc = false
+bench = false
+
+# Fuzz binaries are built with sanitizer-friendly settings; release-grade
+# optimization with debug assertions on so a panic-on-overflow still trips.
+[profile.release]
+debug = 1
+debug-assertions = true
+overflow-checks = true

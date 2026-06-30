@@ -129,11 +129,25 @@ impl Engine for FtsEngine {
     fn on_record_delete(&self, id: &RecordId) -> Result<()> {
         self.index.remove_document(id)
     }
+
+    /// Flush the Tantivy write buffer so the on-disk index reflects every
+    /// document indexed so far. The per-record `index_text`/`on_record_*` paths
+    /// already commit, but a caller copying the `.fts` directory needs a hard
+    /// guarantee the segments on disk are current.
+    fn flush(&self) -> Result<()> {
+        self.index.commit()
+    }
 }
 
 impl SearchIndex for FtsEngine {
     fn index_text(&self, id: &RecordId, field: &str, text: &str) -> Result<()> {
         self.index.index_field(id, field, text)
+    }
+
+    fn would_index(&self, record: &Record) -> bool {
+        // Mirror on_record_insert: a record with no extractable text fields
+        // produces no document, so it must not be flagged as a missing doc.
+        !Self::extract_text_fields(&record.data).is_empty()
     }
 
     /// Buffers every document with `add_document_deferred`, then commits once.
