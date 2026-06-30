@@ -108,11 +108,20 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+      # Skip the build cache on macOS. A restored cache replays stale, absolute
+      # link-search paths that ort_sys/rustc baked under a different Xcode (e.g.
+      # `-L /Applications/Xcode_26.5.app/.../clang/21/lib/darwin` and a one-shot
+      # ort download dir) — both vanish on a fresh runner, so the link dies with
+      # "library 'clang_rt.osx' not found". A clean build re-runs the build
+      # scripts under the Xcode selected below. (Release builds are infrequent;
+      # a clean macOS build is the safer choice for shipped artifacts anyway.)
       - uses: Swatinem/rust-cache@v2
+        if: runner.os != 'macOS'
       # GitHub bumped the *default* Xcode on the macOS images to 26.x, whose
       # clang-21 resource-dir layout lacks libclang_rt.osx.a where rustc looks,
-      # so the `-lclang_rt.osx` rustc emits dies at link ("ld: library
-      # 'clang_rt.osx' not found"). Force the newest installed pre-26 Xcode.
+      # so the `-lclang_rt.osx` rustc emits dies at link. Force the newest
+      # installed pre-26 Xcode via DEVELOPER_DIR (authoritative — overrides any
+      # inherited value) for every later step.
       - name: Select a pre-26 Xcode (clang_rt.osx link fix)
         if: runner.os == 'macOS'
         shell: bash
@@ -127,6 +136,7 @@ jobs:
           if [ -n "$sel" ]; then
             echo "Selecting $sel"
             sudo xcode-select -s "$sel/Contents/Developer"
+            echo "DEVELOPER_DIR=$sel/Contents/Developer" >> "$GITHUB_ENV"
           else
             echo "::warning::No pre-26 Xcode found; using default $(xcode-select -p)"
           fi
