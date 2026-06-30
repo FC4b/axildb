@@ -1,7 +1,13 @@
 use thiserror::Error;
 
 /// Core error type for all Axil operations.
+///
+/// `#[non_exhaustive]`: new variants may be added in minor releases without a
+/// breaking change, so downstream `match` on an `AxilError` must include a
+/// wildcard arm. (The `Busy` variant added in 2.0 is exactly the kind of
+/// additive growth this guards against repeating.)
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum AxilError {
     /// Storage-layer error (redb).
     #[error("storage error: {0}")]

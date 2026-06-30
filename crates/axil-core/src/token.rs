@@ -100,6 +100,7 @@ pub use real::TokenizersEstimator;
 /// Errors raised while building a token estimator.
 #[cfg(feature = "real-tokenizer")]
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum TokenError {
     /// A tokenizer model could not be loaded from disk.
     #[error("failed to load tokenizer: {0}")]
