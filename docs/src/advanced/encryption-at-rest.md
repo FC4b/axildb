@@ -16,14 +16,13 @@ that each record stores. It deliberately does **not** encrypt:
   clear.
 - **Table names and record IDs.** These remain visible in the core file's key
   space and table index.
-- **The CDC `_changelog` tape, when value-capture is on.** With the `cdc`
-  feature *and* `set_cdc_capture_values(true)`, the change tape records the
-  before/after record bodies into the core `.axil` via plain serialization —
-  it does **not** go through the cipher. Encryption covers the live `records`
-  table, not the change log. Keep CDC value-capture off (the default) when every
-  on-disk copy of a body must be encrypted, or treat the changelog as outside
-  the encrypted boundary. (The semantic `_event_log` tape is unaffected — its
-  events carry IDs and metadata, not record bodies.)
+
+It **does** encrypt the CDC `_changelog` tape when value-capture is on (the
+`cdc` feature *and* `set_cdc_capture_values(true)`): each change entry — metadata
+plus the captured before/after record bodies — is sealed under its `change_id`,
+so the change tape never holds cleartext copies of the bodies the `records` table
+seals. (The semantic `_event_log` tape carries only IDs and metadata, no record
+bodies, so it needs no encryption.)
 
 The honest pitch is therefore *"encrypted record bodies"*, not *"encrypted
 memory"*. An operator who needs the embeddings and FTS index encrypted as well

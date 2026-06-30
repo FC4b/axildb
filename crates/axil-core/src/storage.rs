@@ -250,6 +250,48 @@ impl Storage {
         Record::from_bytes(bytes)
     }
 
+    /// Serialize a [`ChangeEntry`] for the `_changelog` table, sealing it with
+    /// the cipher (AAD-bound to its `change_id`) when encryption is on. CDC
+    /// value-capture stores full before/after record bodies, so without this the
+    /// change tape would hold cleartext copies of bodies the `records` table
+    /// seals — defeating encryption-at-rest. With a cipher attached the whole
+    /// entry (metadata + bodies) is sealed; without one it is plain serde,
+    /// byte-identical to the no-`encryption` build.
+    #[cfg(all(feature = "cdc", feature = "encryption"))]
+    fn encode_changelog(&self, change_id: &str, entry: &ChangeEntry) -> Result<Vec<u8>> {
+        let plaintext = serde_json::to_vec(entry)?;
+        match &self.cipher {
+            Some(cipher) => Ok(cipher.encrypt(&plaintext, change_id)?),
+            None => Ok(plaintext),
+        }
+    }
+
+    /// Decode a `_changelog` entry for `change_id` (its redb key, the AAD).
+    #[cfg(all(feature = "cdc", feature = "encryption"))]
+    fn decode_changelog(&self, change_id: &str, bytes: &[u8]) -> Result<ChangeEntry> {
+        match &self.cipher {
+            Some(cipher) => {
+                let plaintext = cipher.decrypt(bytes, change_id)?;
+                Ok(serde_json::from_slice(&plaintext)?)
+            }
+            None => Ok(serde_json::from_slice(bytes)?),
+        }
+    }
+
+    /// Plain changelog encode/decode for the default (no-`encryption`) build —
+    /// byte-identical to calling serde directly.
+    #[cfg(all(feature = "cdc", not(feature = "encryption")))]
+    #[inline]
+    fn encode_changelog(&self, _change_id: &str, entry: &ChangeEntry) -> Result<Vec<u8>> {
+        Ok(serde_json::to_vec(entry)?)
+    }
+
+    #[cfg(all(feature = "cdc", not(feature = "encryption")))]
+    #[inline]
+    fn decode_changelog(&self, _change_id: &str, bytes: &[u8]) -> Result<ChangeEntry> {
+        Ok(serde_json::from_slice(bytes)?)
+    }
+
     /// True if this handle is read-only (cannot accept write transactions).
     pub fn is_read_only(&self) -> bool {
         matches!(self.db, StorageDb::ReadOnly(_))
@@ -900,7 +942,7 @@ impl Storage {
             before,
             after,
         };
-        let bytes = serde_json::to_vec(&entry)?;
+        let bytes = self.encode_changelog(change_id.as_str(), &entry)?;
         let mut log = txn.open_table(CHANGELOG)?;
         log.insert(change_id.as_str(), bytes.as_slice())?;
 
@@ -945,9 +987,9 @@ impl Storage {
                     (std::ops::Bound::Excluded(c), std::ops::Bound::Unbounded);
                 let range = log.range::<&str>(bounds)?;
                 for entry in range {
-                    let (_, val): (redb::AccessGuard<'_, &str>, redb::AccessGuard<'_, &[u8]>) =
+                    let (key, val): (redb::AccessGuard<'_, &str>, redb::AccessGuard<'_, &[u8]>) =
                         entry?;
-                    out.push(serde_json::from_slice(val.value())?);
+                    out.push(self.decode_changelog(key.value(), val.value())?);
                     if out.len() >= limit {
                         break;
                     }
@@ -955,9 +997,9 @@ impl Storage {
             }
             None => {
                 for entry in log.iter()? {
-                    let (_, val): (redb::AccessGuard<'_, &str>, redb::AccessGuard<'_, &[u8]>) =
+                    let (key, val): (redb::AccessGuard<'_, &str>, redb::AccessGuard<'_, &[u8]>) =
                         entry?;
-                    out.push(serde_json::from_slice(val.value())?);
+                    out.push(self.decode_changelog(key.value(), val.value())?);
                     if out.len() >= limit {
                         break;
                     }
@@ -1397,6 +1439,43 @@ mod tests {
 
         fn key_b() -> Cipher {
             Cipher::from_key_bytes(&[9u8; 32]).unwrap()
+        }
+
+        /// CDC value-capture bodies are sealed in the `_changelog` tape (not
+        /// stored in cleartext), and `changes_since` round-trips them.
+        #[cfg(feature = "cdc")]
+        #[test]
+        fn changelog_value_capture_is_encrypted_at_rest() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("enc.axil");
+            let storage = Storage::open(&path).unwrap().with_cipher(key_a());
+            storage.set_cdc_capture_values(true);
+
+            let r = Record::new("secrets", json!({"summary": "changelog-needle-zzz"}));
+            storage.insert(&r).unwrap();
+
+            // changes_since decrypts and round-trips the captured after-image.
+            let changes = storage.changes_since(None, 10).unwrap();
+            assert!(
+                changes.iter().any(|c| c
+                    .after
+                    .as_ref()
+                    .and_then(|v| v.get("summary"))
+                    .and_then(|s| s.as_str())
+                    == Some("changelog-needle-zzz")),
+                "changes_since should round-trip the captured body"
+            );
+
+            // The raw `_changelog` bytes on disk must NOT contain the plaintext.
+            let txn = storage.begin_read().unwrap();
+            let log = txn.open_table(CHANGELOG).unwrap();
+            for e in log.iter().unwrap() {
+                let (_, val) = e.unwrap();
+                assert!(
+                    !String::from_utf8_lossy(val.value()).contains("changelog-needle-zzz"),
+                    "changelog body leaked in cleartext"
+                );
+            }
         }
 
         /// insert-with-key → reopen-with-key → get returns plaintext.

@@ -175,7 +175,10 @@ pub use write_buffer::{WriteBuffer, WriteBufferConfig};
 // Re-exports — tiered memory
 pub use tiering::{classify_tier, tier_distribution, MemoryTier, TierConfig, TierStats};
 
-// Re-exports — snapshots
+// Re-exports — snapshots. The three functions are deprecated (unwired, redundant
+// with the branch API); the re-export stays for backward compat until removal, so
+// silence the deprecation lint at this intentional re-export site.
+#[allow(deprecated)]
 pub use snapshot::{create_snapshot, list_snapshots, restore_snapshot, SnapshotMeta};
 
 // Re-exports — brain (full agent brain)
