@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.1](https://github.com/FC4b/axildb/compare/axil-vector-v2.0.0...axil-vector-v2.0.1) - 2026-06-30
+
+### Fixed
+
+- *(vector)* adaptive HNSW search ef to hold recall@10 at scale
+
+### Other
+
+- Merge pull request #14 from FC4b/dev
+
 ## [2.0.0](https://github.com/FC4b/axildb/compare/axil-vector-v1.2.0...axil-vector-v2.0.0) - 2026-06-30
 
 ### Fixed
