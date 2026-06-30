@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0](https://github.com/FC4b/axildb/compare/axil-runtime-v1.2.0...axil-runtime-v2.0.0) - 2026-06-30
+
+### Added
+
+- *(cli)* axil ext new scaffold + single-source guest SDK (Phase 26 T10)
+
+### Fixed
+
+- *(wasm)* cross-platform atomic_write cache replace
+
 ## [1.1.1](https://github.com/FC4b/axildb/compare/axil-runtime-v1.1.0...axil-runtime-v1.1.1) - 2026-06-23
 
 ### Other

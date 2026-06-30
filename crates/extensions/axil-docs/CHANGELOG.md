@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0](https://github.com/FC4b/axildb/compare/axil-docs-v1.2.0...axil-docs-v2.0.0) - 2026-06-30
+
+### Other
+
+- *(ingest)* batch vector + dep-docs ingest to cut per-chunk fsync (Phase 26 T12)
+
 ## [1.1.1](https://github.com/FC4b/axildb/compare/axil-docs-v1.1.0...axil-docs-v1.1.1) - 2026-06-23
 
 ### Other
