@@ -21,6 +21,17 @@
 # the Release release-plz already created — the two coexist (release-plz owns
 # crate publishing + the Release object; this workflow owns the prebuilt
 # archives).
+#
+# GITHUB_TOKEN gotcha: a tag pushed by release-plz using the default
+# GITHUB_TOKEN does NOT trigger this `on: push: tags` workflow — GitHub blocks
+# workflow-token pushes from triggering other workflows (loop prevention). So a
+# release can land on crates.io with the Release present but ZERO archives.
+# Two remedies:
+#   1) Recover an affected tag with `workflow_dispatch` below — e.g.
+#      `gh workflow run release.yml -f tag=axildb-v2.0.0` — to build + upload its
+#      archives without touching the published tag.
+#   2) Permanent fix: give release-plz a PAT (repo secret, e.g. RELEASE_PLZ_TOKEN)
+#      so its tag push is a *user* push that DOES trigger this workflow.
 name: release
 
 on:
@@ -30,6 +41,14 @@ on:
       # `tag-namespace = "axildb"` in dist-workspace.toml — a bare `v*` would
       # never recur under release-plz and the job would never fire.
       - "axildb-v*"
+  # Manual (re)build of an existing tag's archives — see the GITHUB_TOKEN gotcha
+  # above. Builds the tagged code and uploads to that tag's existing Release.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to (re)build archives for, e.g. axildb-v2.0.0"
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -38,6 +57,8 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # Tag to build/upload: the dispatched input when present, else the pushed tag.
+  REL_TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
   # Enumerate the planned artifacts; a green plan proves the config resolves all
@@ -47,6 +68,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.REL_TAG }}
       - uses: dtolnay/rust-toolchain@stable
       - name: install cargo-dist
         run: cargo install cargo-dist --version 0.31.0 --locked || cargo install cargo-dist --locked
@@ -81,6 +104,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.REL_TAG }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -130,4 +155,4 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
-        run: gh release upload "${GITHUB_REF_NAME}" axildb-${{ matrix.target }}.* --clobber
+        run: gh release upload "$REL_TAG" axildb-${{ matrix.target }}.* --clobber
