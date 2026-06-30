@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0](https://github.com/FC4b/axildb/compare/axil-fts-v1.2.0...axil-fts-v2.0.0) - 2026-06-30
+
+### Fixed
+
+- *(branch)* point-in-time-consistent branch create from live handle (Phase 26 T15)
+- *(core)* FTS reverse-orphan detector must mirror the text-presence gate (Phase 26 review #2)
+
 ## [1.1.1](https://github.com/FC4b/axildb/compare/axil-fts-v1.1.0...axil-fts-v1.1.1) - 2026-06-23
 
 ### Other
