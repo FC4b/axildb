@@ -133,22 +133,25 @@ jobs:
           # `ort`'s `download-binaries` does NOT drop the onnxruntime lib in
           # target/ — it caches it under the OS cache dir (~/.cache/ort.pyke.io on
           # Linux, ~/Library/Caches/ort.pyke.io on macOS, %LOCALAPPDATA%\ort.pyke.io
-          # on Windows). Search the build output first, then the home tree (which
-          # contains every cache root on CI), and bundle the first match next to
-          # the binary so the loader resolves the sibling at runtime.
-          lib="${{ matrix.lib }}"
-          found=""
-          for root in "$out" "target/${{ matrix.target }}" "$HOME"; do
-            [ -e "$root" ] || continue
-            f=$(find "$root" -name "$lib" -type f -print 2>/dev/null | head -n1)
-            if [ -n "$f" ]; then found="$f"; break; fi
-          done
-          if [ -n "$found" ]; then
-            cp "$found" "$stage/"
-            echo "bundled onnxruntime: $found"
-          else
-            echo "::error::onnxruntime lib $lib not found in target/ or the ort cache for ${{ matrix.target }} — archive would ship a broken embedder"; exit 1
+          # on Windows), and the filename is often VERSIONED (e.g.
+          # libonnxruntime.so.1.22.0). Match a version-tolerant glob across the
+          # build output, the home tree (every cache root on CI), and the runner
+          # temp, then bundle it under the canonical unversioned name the loader
+          # resolves as a sibling at runtime.
+          case "${{ matrix.target }}" in
+            *windows*) pat="onnxruntime*.dll" ;;
+            *apple*)   pat="libonnxruntime*.dylib" ;;
+            *)         pat="libonnxruntime.so*" ;;
+          esac
+          found=$(find "$out" "target/${{ matrix.target }}" "$HOME" "${RUNNER_TEMP:-/tmp}" \
+                    -name "$pat" -type f -print 2>/dev/null | head -n1 || true)
+          if [ -z "$found" ]; then
+            echo "::error::onnxruntime lib ($pat) not found for ${{ matrix.target }} — candidate paths:"
+            find "$HOME" "${RUNNER_TEMP:-/tmp}" /opt 2>/dev/null | grep -i onnxruntime | head -40 || true
+            exit 1
           fi
+          cp "$found" "$stage/${{ matrix.lib }}"
+          echo "bundled onnxruntime: $found -> ${{ matrix.lib }}"
       - name: archive
         shell: bash
         run: |
