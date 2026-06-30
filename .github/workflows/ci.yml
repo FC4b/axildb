@@ -103,7 +103,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, macos-latest]
+        # macos-15 (stable Xcode 16, still ARM), NOT macos-latest. The
+        # macos-latest label migrated to macOS 26 / Xcode 26.5, whose clang-21
+        # resource-dir layout breaks the `-lclang_rt.osx` that rustc emits
+        # ("ld: library 'clang_rt.osx' not found"). Pin until the toolchain and
+        # Xcode 26 agree on the compiler-rt path.
+        os: [windows-latest, macos-15]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
