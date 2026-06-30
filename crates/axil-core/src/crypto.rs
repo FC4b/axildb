@@ -65,7 +65,11 @@ const KEY_LEN: usize = 32;
 const NONCE_LEN: usize = 24;
 
 /// Errors raised while loading a key or encrypting/decrypting a record body.
+///
+/// `#[non_exhaustive]`: additive variants stay non-breaking, so downstream
+/// `match` must carry a wildcard arm.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum CryptoError {
     /// The supplied key material was not exactly 32 bytes after decoding.
     #[error("encryption key must be 32 bytes (got {0} after decoding)")]
