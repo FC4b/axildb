@@ -103,17 +103,36 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # macos-15 (stable Xcode 16, still ARM), NOT macos-latest. The
-        # macos-latest label migrated to macOS 26 / Xcode 26.5, whose clang-21
-        # resource-dir layout breaks the `-lclang_rt.osx` that rustc emits
-        # ("ld: library 'clang_rt.osx' not found"). Pin until the toolchain and
-        # Xcode 26 agree on the compiler-rt path.
+        # macos-15, NOT macos-latest: the latter migrated to macOS 26, and we
+        # need an image that still ships an Xcode 16.x to select below.
         os: [windows-latest, macos-15]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # GitHub bumped the *default* Xcode on the macOS images to 26.x, whose
+      # clang-21 resource-dir layout lacks libclang_rt.osx.a where rustc looks,
+      # so the `-lclang_rt.osx` rustc emits dies at link ("ld: library
+      # 'clang_rt.osx' not found"). Force the newest installed pre-26 Xcode.
+      - name: Select a pre-26 Xcode (clang_rt.osx link fix)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Installed Xcodes:"; ls -d /Applications/Xcode*.app || true
+          sel=""
+          for app in $(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V); do
+            ver=$(basename "$app" | sed -E 's/Xcode_([0-9]+).*/\1/')
+            if [ "$ver" -lt 26 ] 2>/dev/null; then sel="$app"; fi
+          done
+          if [ -n "$sel" ]; then
+            echo "Selecting $sel"
+            sudo xcode-select -s "$sel/Contents/Developer"
+          else
+            echo "::warning::No pre-26 Xcode found; using default $(xcode-select -p)"
+          fi
+          cc --version || true
       - name: build axil (default features, incl. embed)
         run: cargo build -p axildb
       - name: real embed + recall smoke (fail on ORT init failure)
