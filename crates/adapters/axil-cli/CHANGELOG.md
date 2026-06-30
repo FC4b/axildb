@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.1](https://github.com/FC4b/axildb/compare/axildb-v2.0.0...axildb-v2.0.1) - 2026-06-30
+
+### Fixed
+
+- *(vector)* adaptive HNSW search `ef` so recall@10 holds at scale — the nightly
+  large-N oracle (N=20000) caught recall dropping to ~0.78 under a fixed `ef`;
+  `ef` now widens with the graph population, restoring recall@10 ≥ 0.90 at 20k
+- *(release)* prebuilt archives now ship the self-contained binary (onnxruntime
+  is statically linked — there is no sidecar lib to bundle); aarch64-linux builds
+  on a native ARM runner; a `workflow_dispatch` tag input can (re)build a tag's
+  archives when a release-plz tag push doesn't trigger the workflow
+
 ## [2.0.0](https://github.com/FC4b/axildb/compare/axildb-v1.2.0...axildb-v2.0.0) - 2026-06-30
 
 ### Added
