@@ -12,6 +12,7 @@ use axil_core::{Axil, Direction, Op, RecordId, SortDirection};
 mod http_server;
 
 mod features;
+mod hook_brain;
 mod install_wizard;
 #[cfg(feature = "scip")]
 mod scip_detect;
@@ -519,9 +520,15 @@ enum Command {
         /// Configure Aider integration (.aider.conf.yml).
         #[arg(long)]
         aider: bool,
-        /// Configure Codex integration (AGENTS.md).
+        /// Deprecated alias — the AGENTS.md managed block is written by
+        /// default on every install (see --no-agents-md to opt out).
         #[arg(long)]
         codex: bool,
+        /// Skip the AGENTS.md managed block. It is written by default because
+        /// AGENTS.md is the cross-tool contract read by Codex, OpenCode,
+        /// Qwen Code, Copilot, Droid, and most other agents.
+        #[arg(long)]
+        no_agents_md: bool,
         /// Install for all detected AI agents in the project.
         #[arg(long)]
         all: bool,
@@ -1567,6 +1574,17 @@ enum Command {
     Skill {
         #[command(subcommand)]
         command: SkillCommand,
+    },
+
+    // ── Hook runtime ─────────────────────────────────────────────────
+    /// Agent lifecycle hook runtime (the Axil brain).
+    ///
+    /// Wired into the agent's hook config by `axil install`; the harness
+    /// pipes each event's JSON to stdin and reads the response from stdout.
+    /// Replaces the former bash hook scripts — no bash/jq needed.
+    Hook {
+        #[command(subcommand)]
+        command: HookCommand,
     },
 
     // ── Model management ────────────────────────────────────────────
@@ -3048,6 +3066,25 @@ enum SkillCommand {
     Uninstall,
 }
 
+/// Agent lifecycle hook runtime.
+#[derive(Subcommand)]
+enum HookCommand {
+    /// Execute one hook event: reads the event JSON on stdin, emits the
+    /// dialect's response (JSON or injected context text) on stdout.
+    /// Always exits 0 once the input parses — a memory hook must never
+    /// break the agent loop.
+    Run {
+        /// Hook dialect — which agent's JSON contract to speak.
+        /// `claude` today; codex/copilot/droid/gemini land with their waves.
+        #[arg(long, default_value = "claude")]
+        dialect: String,
+        /// Override the event name (defaults to the input's own event field,
+        /// e.g. `hook_event_name` in the claude dialect).
+        #[arg(long)]
+        event: Option<String>,
+    },
+}
+
 /// Scheduled task operations (12.3).
 #[derive(Subcommand)]
 enum ScheduleOp {
@@ -3800,11 +3837,41 @@ fn add_to_gitignore(path: &Path, pattern: &str) -> bool {
 
 /// Claude Code hook events Axil owns. New events must land here so install / uninstall / dry-run stay in sync.
 const AXIL_HOOK_EVENTS: &[&str] = &["UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"];
-/// Hook scripts Axil writes to `.claude/hooks/`. Any new script must land here too.
+/// Legacy hook scripts earlier installs wrote to `.claude/hooks/`. The brain
+/// now lives in the binary (`axil hook run`); these names remain only so
+/// install/sync/uninstall can clean old copies up.
 const AXIL_HOOK_SCRIPTS: &[&str] = &["axil-brain.sh", "store-on-task-complete.sh"];
-/// True when a hook-entry `command` field refers to an Axil-owned script.
+/// True when a hook-entry `command` field is Axil-owned — either the current
+/// `axil hook run` form or one of the legacy shell scripts.
 fn is_axil_hook_command(cmd: &str) -> bool {
     AXIL_HOOK_SCRIPTS.iter().any(|s| cmd.contains(s))
+        || (cmd.contains("axil") && cmd.contains(" hook run"))
+}
+
+/// The command string wired into agent hook configs. Prefers bare `axil`
+/// when it resolves on PATH (portable across machines sharing the repo);
+/// otherwise pins this binary's absolute path so hooks work without any
+/// PATH setup.
+fn hook_run_command() -> String {
+    let axil_on_path = std::env::var_os("PATH")
+        .map(|p| {
+            std::env::split_paths(&p)
+                .any(|d| d.join(format!("axil{}", std::env::consts::EXE_SUFFIX)).is_file())
+        })
+        .unwrap_or(false);
+    let exe = if axil_on_path {
+        "axil".to_string()
+    } else {
+        std::env::current_exe()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| "axil".to_string())
+    };
+    let exe = if exe.contains(' ') {
+        format!("\"{exe}\"")
+    } else {
+        exe
+    };
+    format!("{exe} hook run --dialect claude")
 }
 
 /// Install Axil brain hooks into .claude/settings.json, merging with existing config.
@@ -3831,16 +3898,19 @@ fn install_hooks_to_settings(path: &Path) -> Result<bool> {
         .as_object_mut()
         .ok_or_else(|| anyhow::anyhow!("settings.json 'hooks' is not an object"))?;
 
-    // Define our hook entries
+    // Define our hook entries. One command serves every event — the brain
+    // dispatches on the event name in the input JSON.
+    let cmd_owned = hook_run_command();
+    let cmd = cmd_owned.as_str();
     let axil_hooks = [
         // 12.1: inject <context> block on every user prompt. Tight 3s cap —
-        // the hook script enforces its own 1.8s deadline inside `axil recall`.
+        // the brain enforces its own 1.8s deadline inside `axil recall`.
         (
             "UserPromptSubmit",
             json!([{
                 "hooks": [{
                     "type": "command",
-                    "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/axil-brain.sh",
+                    "command": cmd,
                     "timeout": 3
                 }]
             }]),
@@ -3850,7 +3920,7 @@ fn install_hooks_to_settings(path: &Path) -> Result<bool> {
             json!([{
                 "hooks": [{
                     "type": "command",
-                    "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/axil-brain.sh",
+                    "command": cmd,
                     "timeout": 10
                 }]
             }]),
@@ -3862,7 +3932,7 @@ fn install_hooks_to_settings(path: &Path) -> Result<bool> {
                     "matcher": "Edit|Write",
                     "hooks": [{
                         "type": "command",
-                        "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/axil-brain.sh",
+                        "command": cmd,
                         "async": true,
                         "timeout": 10
                     }]
@@ -3871,7 +3941,7 @@ fn install_hooks_to_settings(path: &Path) -> Result<bool> {
                     "matcher": "Bash",
                     "hooks": [{
                         "type": "command",
-                        "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/axil-brain.sh",
+                        "command": cmd,
                         "async": true,
                         "timeout": 10
                     }]
@@ -3884,16 +3954,20 @@ fn install_hooks_to_settings(path: &Path) -> Result<bool> {
                     "matcher": "Read",
                     "hooks": [{
                         "type": "command",
-                        "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/axil-brain.sh",
+                        "command": cmd,
                         "async": true,
                         "timeout": 5
                     }]
                 },
                 {
-                    "matcher": "TaskUpdate",
+                    // Store reminder when a todo flips to completed. Matches
+                    // TodoWrite — the tool stock Claude Code actually emits
+                    // (the old TaskUpdate matcher never fired). Synchronous:
+                    // the reminder must land before the agent moves on.
+                    "matcher": "TodoWrite",
                     "hooks": [{
                         "type": "command",
-                        "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/store-on-task-complete.sh",
+                        "command": cmd,
                         "timeout": 5
                     }]
                 }
@@ -3908,7 +3982,7 @@ fn install_hooks_to_settings(path: &Path) -> Result<bool> {
             json!([{
                 "hooks": [{
                     "type": "command",
-                    "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/axil-brain.sh",
+                    "command": cmd,
                     "timeout": 15
                 }]
             }]),
@@ -4035,22 +4109,12 @@ fn dry_run_install_plan(
     }
     if claude_code {
         let cc_dir = cwd.join(".claude");
-        files.push(
-            cc_dir
-                .join("hooks")
-                .join("axil-brain.sh")
-                .display()
-                .to_string(),
-        );
-        files.push(
-            cc_dir
-                .join("hooks")
-                .join("store-on-task-complete.sh")
-                .display()
-                .to_string(),
-        );
         files.push(cc_dir.join("CLAUDE.md").display().to_string());
-        files.push(cc_dir.join("settings.json").display().to_string() + " (merged)");
+        files.push(format!(
+            "{} (merged: hooks → `{}`)",
+            cc_dir.join("settings.json").display(),
+            hook_run_command()
+        ));
         let skills_target = if local {
             cc_dir.join("skills")
         } else {
@@ -4350,18 +4414,18 @@ fn install_claude_code_files(
     force_claude_md: bool,
     local_skills: bool,
 ) -> Result<Value> {
-    // Hook script
-    let hooks_dir = cwd.join(".claude").join("hooks");
-    std::fs::create_dir_all(&hooks_dir)?;
-    let hook_path = hooks_dir.join("axil-brain.sh");
-    std::fs::write(&hook_path, HOOK_BRAIN)?;
-    let task_hook_path = hooks_dir.join("store-on-task-complete.sh");
-    std::fs::write(&task_hook_path, HOOK_STORE_ON_TASK)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&hook_path, std::fs::Permissions::from_mode(0o755))?;
-        std::fs::set_permissions(&task_hook_path, std::fs::Permissions::from_mode(0o755))?;
+    let claude_dir = cwd.join(".claude");
+    std::fs::create_dir_all(&claude_dir)?;
+
+    // The brain hook lives in the binary (`axil hook run`) — no scripts to
+    // write. Clean up scripts from older installs so nothing stale lingers
+    // next to the settings.json entries that no longer reference them.
+    let hooks_dir = claude_dir.join("hooks");
+    for legacy in AXIL_HOOK_SCRIPTS {
+        let p = hooks_dir.join(legacy);
+        if p.exists() {
+            let _ = std::fs::remove_file(&p);
+        }
     }
 
     // CLAUDE.md
@@ -4405,7 +4469,7 @@ fn install_claude_code_files(
         "skills_dir": skills_dir_path.display().to_string(),
         "project_claude_md": project_claude_md.display().to_string(),
         "instructions_written": instructions_written,
-        "hook_script": hook_path.display().to_string(),
+        "hook_command": hook_run_command(),
         "hooks_configured": hooks_configured,
         "auto_memory": auto_memory,
     }))
@@ -5441,6 +5505,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             cody,
             aider,
             codex,
+            no_agents_md,
             all,
             agent,
             #[cfg(feature = "vector")]
@@ -5465,7 +5530,8 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                     windsurf,
                     cody,
                     aider,
-                    codex,
+                    // AGENTS.md is on by default (cross-tool contract).
+                    codex || !no_agents_md,
                     all,
                     local,
                 )?;
@@ -5482,10 +5548,12 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                 && !cody
                 && !aider
                 && !codex
+                && !no_agents_md
                 && !all
                 && agent.is_none()
                 && !bootstrap
                 && !local;
+            let mut wizard_ran = false;
             let (claude_code, cursor, windsurf, cody, aider, codex, bootstrap, local) =
                 if no_selection {
                     match install_wizard::maybe_run(&cwd_early, out.quiet)? {
@@ -5493,16 +5561,19 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                             out.status("install aborted — nothing written");
                             return Ok(EXIT_OK);
                         }
-                        install_wizard::WizardOutcome::Choices(c) => (
-                            c.claude_code,
-                            c.cursor,
-                            c.windsurf,
-                            c.cody,
-                            c.aider,
-                            c.codex,
-                            c.bootstrap,
-                            c.local,
-                        ),
+                        install_wizard::WizardOutcome::Choices(c) => {
+                            wizard_ran = true;
+                            (
+                                c.claude_code,
+                                c.cursor,
+                                c.windsurf,
+                                c.cody,
+                                c.aider,
+                                c.codex,
+                                c.bootstrap,
+                                c.local,
+                            )
+                        }
                         install_wizard::WizardOutcome::NotInteractive => (
                             claude_code,
                             cursor,
@@ -5526,6 +5597,15 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                         local,
                     )
                 };
+            // AGENTS.md managed block: on by default — it is the cross-tool
+            // contract (Codex, OpenCode, Qwen Code, Copilot, Droid, …). The
+            // wizard's toggle is an explicit user choice and wins; flag/CI
+            // installs opt out only via --no-agents-md.
+            let codex = if wizard_ran {
+                codex
+            } else {
+                codex || all || !no_agents_md
+            };
 
             let axil_dir = cwd_early.join(".axil");
             let db_path = axil_dir.join("memory.axil");
@@ -5571,8 +5651,8 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                     out.status(&format!("  Skills: {}", names.join(", ")));
                 }
                 out.status(&format!(
-                    "  Hook: {}",
-                    cc_result["hook_script"].as_str().unwrap_or("?")
+                    "  Hook: {} (wired in .claude/settings.json)",
+                    cc_result["hook_command"].as_str().unwrap_or("?")
                 ));
                 out.status(&format!(
                     "  Instructions: {}",
@@ -5766,7 +5846,15 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             // Auto-detect whether the original install used --local by checking
             // for the canonical project-scoped memory skill; otherwise refresh
             // the global skills dir at ~/.claude/skills/.
-            if update_claude || (auto_detect && cwd.join(".claude/hooks/axil-brain.sh").exists()) {
+            // Detect an existing Claude Code install either by the current
+            // settings.json wiring or by a legacy hook script still on disk.
+            let claude_installed = || {
+                std::fs::read_to_string(cwd.join(".claude/settings.json"))
+                    .map(|s| s.contains(" hook run") || s.contains("axil-brain.sh"))
+                    .unwrap_or(false)
+                    || cwd.join(".claude/hooks/axil-brain.sh").exists()
+            };
+            if update_claude || (auto_detect && claude_installed()) {
                 let local_skills = cwd.join(".claude/skills/axil.md").exists();
                 install_claude_code_files(&cwd, true, local_skills)?;
 
@@ -8604,6 +8692,9 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
 
         // ── Skill ───────────────────────────────────────────────────
         Command::Skill { command: sk_cmd } => run_skill(sk_cmd, out),
+        Command::Hook {
+            command: HookCommand::Run { dialect, event },
+        } => hook_brain::run(&dialect, event.as_deref()),
 
         // ── Model management ────────────────────────────────────────
         #[cfg(feature = "vector")]
@@ -16959,8 +17050,6 @@ const SKILL_AUTOAGENT: &str = include_str!("skills/axil-autoagent.md");
 const SKILL_LEARN: &str = include_str!("skills/axil-learn.md");
 const SKILL_RETRO: &str = include_str!("skills/axil-retro.md");
 const SKILL_BRIEF: &str = include_str!("skills/axil-brief.md");
-const HOOK_BRAIN: &str = include_str!("hooks/axil-brain.sh");
-const HOOK_STORE_ON_TASK: &str = include_str!("hooks/store-on-task-complete.sh");
 const CLAUDE_MD_TEMPLATE: &str = include_str!("templates/CLAUDE.md");
 
 struct SkillInfo {

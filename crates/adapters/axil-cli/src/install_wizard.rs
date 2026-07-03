@@ -92,8 +92,8 @@ fn items_from(choices: &InstallChoices, detected: &InstallChoices) -> Vec<Item> 
             checked: choices.aider,
         },
         Item {
-            label: "codex",
-            detail: "Codex (AGENTS.md)",
+            label: "agents-md",
+            detail: "AGENTS.md contract (Codex, OpenCode, Qwen Code, Droid, …)",
             detected: detected.codex,
             checked: choices.codex,
         },
@@ -120,7 +120,7 @@ fn choices_from(items: &[Item]) -> InstallChoices {
         windsurf: on("windsurf"),
         cody: on("cody"),
         aider: on("aider"),
-        codex: on("codex"),
+        codex: on("agents-md"),
         bootstrap: on("bootstrap"),
         local: on("local"),
     }
@@ -165,7 +165,11 @@ pub fn maybe_run(cwd: &Path, quiet: bool) -> Result<WizardOutcome> {
     }
 
     let detected = detect_agents(cwd);
-    let mut items = items_from(&detected, &detected);
+    // AGENTS.md is the cross-tool contract — pre-check its toggle even when
+    // no AGENTS.md exists yet, matching the flag path's default-on behavior.
+    let mut initial = detected;
+    initial.codex = true;
+    let mut items = items_from(&initial, &detected);
 
     println!("Axil project install — set up agent memory in {}", cwd.display());
     if cwd.join(".axil").join("version").exists() {
