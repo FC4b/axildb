@@ -20,7 +20,6 @@ pub struct InstallChoices {
     pub claude_code: bool,
     pub cursor: bool,
     pub windsurf: bool,
-    pub cody: bool,
     pub aider: bool,
     pub codex: bool,
     pub bootstrap: bool,
@@ -42,7 +41,6 @@ pub fn detect_agents(cwd: &Path) -> InstallChoices {
         claude_code: cwd.join(".claude").is_dir() || cwd.join("CLAUDE.md").is_file(),
         cursor: cwd.join(".cursor").is_dir(),
         windsurf: cwd.join(".windsurfrules").is_file() || cwd.join(".windsurf").is_dir(),
-        cody: cwd.join(".cody").is_dir(),
         aider: cwd.join(".aider.conf.yml").is_file(),
         codex: cwd.join("AGENTS.md").is_file(),
         // Defaults for the non-agent toggles: bootstrap is almost always
@@ -51,6 +49,11 @@ pub fn detect_agents(cwd: &Path) -> InstallChoices {
         local: false,
     }
 }
+
+/// Number of agent-integration items at the head of the wizard list —
+/// everything after them renders under the "Options" header and is
+/// excluded from the "all agents" toggle.
+const AGENT_ITEM_COUNT: usize = 5;
 
 struct Item {
     label: &'static str,
@@ -78,12 +81,6 @@ fn items_from(choices: &InstallChoices, detected: &InstallChoices) -> Vec<Item> 
             detail: "Windsurf (.windsurfrules)",
             detected: detected.windsurf,
             checked: choices.windsurf,
-        },
-        Item {
-            label: "cody",
-            detail: "Cody (.cody/instructions)",
-            detected: detected.cody,
-            checked: choices.cody,
         },
         Item {
             label: "aider",
@@ -118,7 +115,6 @@ fn choices_from(items: &[Item]) -> InstallChoices {
         claude_code: on("claude-code"),
         cursor: on("cursor"),
         windsurf: on("windsurf"),
-        cody: on("cody"),
         aider: on("aider"),
         codex: on("agents-md"),
         bootstrap: on("bootstrap"),
@@ -130,7 +126,7 @@ fn render(items: &[Item]) {
     println!();
     println!("  Agent integrations");
     for (n, item) in items.iter().enumerate() {
-        if n == 6 {
+        if n == AGENT_ITEM_COUNT {
             println!("  Options");
         }
         let mark = if item.checked { "x" } else { " " };
@@ -184,7 +180,7 @@ pub fn maybe_run(cwd: &Path, quiet: bool) -> Result<WizardOutcome> {
             "" | "install" => break,
             "q" | "quit" => return Ok(WizardOutcome::Aborted),
             "a" | "all" => {
-                for item in items.iter_mut().take(6) {
+                for item in items.iter_mut().take(AGENT_ITEM_COUNT) {
                     item.checked = true;
                 }
             }
@@ -238,7 +234,7 @@ mod tests {
     fn detects_nothing_in_empty_project() {
         let dir = scratch("empty");
         let d = detect_agents(&dir);
-        assert!(!d.claude_code && !d.cursor && !d.windsurf && !d.cody && !d.aider && !d.codex);
+        assert!(!d.claude_code && !d.cursor && !d.windsurf && !d.aider && !d.codex);
         assert!(d.bootstrap, "bootstrap defaults on");
         assert!(!d.local, "local defaults off");
         let _ = fs::remove_dir_all(&dir);
@@ -253,7 +249,7 @@ mod tests {
         fs::write(dir.join("AGENTS.md"), "").unwrap();
         let d = detect_agents(&dir);
         assert!(d.claude_code && d.cursor && d.windsurf && d.codex);
-        assert!(!d.cody && !d.aider);
+        assert!(!d.aider);
         let _ = fs::remove_dir_all(&dir);
     }
 

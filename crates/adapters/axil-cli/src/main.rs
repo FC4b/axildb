@@ -514,10 +514,11 @@ enum Command {
         /// Configure Windsurf integration (.windsurfrules).
         #[arg(long)]
         windsurf: bool,
-        /// Configure Cody integration (.cody/instructions).
-        #[arg(long)]
+        /// Deprecated no-op — Sourcegraph discontinued Cody in 2025; its
+        /// successor Amp reads the AGENTS.md contract written by default.
+        #[arg(long, hide = true)]
         cody: bool,
-        /// Configure Aider integration (.aider.conf.yml).
+        /// Configure Aider integration (CONVENTIONS.md + .aider.conf.yml read list).
         #[arg(long)]
         aider: bool,
         /// Deprecated alias — the AGENTS.md managed block is written by
@@ -802,13 +803,13 @@ enum Command {
         /// Update Windsurf integration.
         #[arg(long)]
         windsurf: bool,
-        /// Update Cody integration.
-        #[arg(long)]
+        /// Deprecated no-op — Cody was discontinued; see `axil install --help`.
+        #[arg(long, hide = true)]
         cody: bool,
         /// Update Aider integration.
         #[arg(long)]
         aider: bool,
-        /// Update Codex integration.
+        /// Update the AGENTS.md managed block.
         #[arg(long)]
         codex: bool,
         /// Update all detected agent integrations.
@@ -2367,9 +2368,12 @@ enum Command {
     },
 
     // ── MCP server ─────────────────────────────────────────
-    /// Start the MCP (Model Context Protocol) server over stdio.
+    /// Start the MCP (Model Context Protocol) server over stdio,
+    /// or register it in an agent's config (`axil mcp install <target>`).
     #[cfg(feature = "mcp")]
     Mcp {
+        #[command(subcommand)]
+        command: Option<McpCommand>,
         /// OpenTelemetry OTLP endpoint for tracing/metrics export.
         /// Example: http://localhost:4317
         #[arg(long)]
@@ -3064,6 +3068,22 @@ enum SkillCommand {
     List,
     /// Remove all installed skills.
     Uninstall,
+}
+
+/// MCP server management.
+#[cfg(feature = "mcp")]
+#[derive(Subcommand)]
+enum McpCommand {
+    /// Register the Axil MCP server in an agent's config file (idempotent
+    /// merge — only the `axil` server entry is touched).
+    Install {
+        /// Target agent: claude-code | cursor | windsurf | codex | copilot |
+        /// qwen | antigravity | opencode.
+        target: String,
+        /// Print the config path and entry without writing.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 /// Agent lifecycle hook runtime.
@@ -3848,24 +3868,29 @@ fn is_axil_hook_command(cmd: &str) -> bool {
         || (cmd.contains("axil") && cmd.contains(" hook run"))
 }
 
-/// The command string wired into agent hook configs. Prefers bare `axil`
+/// The executable to reference from agent configs. Prefers bare `axil`
 /// when it resolves on PATH (portable across machines sharing the repo);
-/// otherwise pins this binary's absolute path so hooks work without any
-/// PATH setup.
-fn hook_run_command() -> String {
+/// otherwise pins this binary's absolute path so the wiring works without
+/// any PATH setup.
+fn resolved_axil_exe() -> String {
     let axil_on_path = std::env::var_os("PATH")
         .map(|p| {
             std::env::split_paths(&p)
                 .any(|d| d.join(format!("axil{}", std::env::consts::EXE_SUFFIX)).is_file())
         })
         .unwrap_or(false);
-    let exe = if axil_on_path {
+    if axil_on_path {
         "axil".to_string()
     } else {
         std::env::current_exe()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|_| "axil".to_string())
-    };
+    }
+}
+
+/// The command string wired into agent hook configs.
+fn hook_run_command() -> String {
+    let exe = resolved_axil_exe();
     let exe = if exe.contains(' ') {
         format!("\"{exe}\"")
     } else {
@@ -4078,7 +4103,6 @@ fn dry_run_install_plan(
     claude_code: bool,
     cursor: bool,
     windsurf: bool,
-    cody: bool,
     aider: bool,
     codex: bool,
     all: bool,
@@ -4121,7 +4145,13 @@ fn dry_run_install_plan(
             skills_dir()?
         };
         for skill in ALL_SKILLS {
-            files.push(skills_target.join(skill.filename).display().to_string());
+            files.push(
+                skills_target
+                    .join(skill.dir_name())
+                    .join("SKILL.md")
+                    .display()
+                    .to_string(),
+            );
         }
         if let Some(mem_dir) = claude_auto_memory_dir(cwd) {
             files.push(
@@ -4134,16 +4164,20 @@ fn dry_run_install_plan(
         }
     }
     if cursor || all {
-        files.push(cwd.join(".cursor").join("rules").display().to_string());
+        files.push(
+            cwd.join(".cursor")
+                .join("rules")
+                .join("axil.mdc")
+                .display()
+                .to_string(),
+        );
     }
     if windsurf || all {
         files.push(cwd.join(".windsurfrules").display().to_string());
     }
-    if cody || all {
-        files.push(cwd.join(".cody").join("instructions").display().to_string());
-    }
     if aider || all {
-        files.push(cwd.join(".aider.conf.yml").display().to_string());
+        files.push(cwd.join("CONVENTIONS.md").display().to_string() + " (merged)");
+        files.push(cwd.join(".aider.conf.yml").display().to_string() + " (read: key)");
     }
     if codex || all {
         files.push(cwd.join("AGENTS.md").display().to_string() + " (merged)");
@@ -4186,8 +4220,21 @@ fn uninstall_claude_code_files(cwd: &Path, dry_run: bool) -> Result<Value> {
     }
     for skills_dir_path in &skills_dirs {
         for skill in ALL_SKILLS {
+            // Current skills/<name>/SKILL.md layout plus the legacy flat file.
+            let skill_dir = skills_dir_path.join(skill.dir_name());
+            if skill_dir.is_dir() {
+                if !dry_run {
+                    if let Err(e) = std::fs::remove_dir_all(&skill_dir) {
+                        eprintln!(
+                            "[uninstall] warn: failed to remove {}: {e}",
+                            skill_dir.display()
+                        );
+                    }
+                }
+                removed.push(skill_dir.display().to_string());
+            }
             let p = skills_dir_path.join(skill.filename);
-            if p.exists() {
+            if p.is_file() {
                 if !dry_run {
                     if let Err(e) = std::fs::remove_file(&p) {
                         eprintln!("[uninstall] warn: failed to remove {}: {e}", p.display());
@@ -4451,7 +4498,7 @@ fn install_claude_code_files(
     std::fs::create_dir_all(&skills_dir_path)?;
     let mut installed_skills = Vec::new();
     for skill in ALL_SKILLS {
-        std::fs::write(skills_dir_path.join(skill.filename), skill.content)?;
+        write_skill(&skills_dir_path, skill)?;
         installed_skills.push(skill.name);
     }
 
@@ -4475,37 +4522,47 @@ fn install_claude_code_files(
     }))
 }
 
-/// Install/update agent framework integration files (Cursor, Windsurf, Cody, Aider).
-/// For Aider, merges with existing config instead of overwriting.
+/// Install/update agent framework integration files (Cursor, Windsurf,
+/// Aider, AGENTS.md). Merges with existing user config instead of
+/// overwriting. (Cody was removed: Sourcegraph discontinued it in 2025 —
+/// its successor Amp reads the AGENTS.md contract.)
 fn install_agent_integrations(
     cwd: &Path,
     db_path: &Path,
     cursor: bool,
     windsurf: bool,
-    cody: bool,
     aider: bool,
     codex: bool,
 ) -> Result<Vec<&'static str>> {
     let mut installed = Vec::new();
 
     if cursor {
-        let cursor_dir = cwd.join(".cursor");
-        std::fs::create_dir_all(&cursor_dir)?;
-        let rules_path = cursor_dir.join("rules");
-        if rules_path.is_dir() {
-            // Modern Cursor: `.cursor/rules/` is a directory of `*.mdc` files.
-            // Drop our rule into it as `axil.mdc` with frontmatter so Cursor
-            // always applies it.
-            let axil_mdc = rules_path.join("axil.mdc");
+        // Cursor's rules live in a `.cursor/rules/` DIRECTORY of `*.mdc`
+        // files — a plain file at that path is not a Cursor convention and
+        // blocks Cursor from ever creating the directory. Earlier installs
+        // wrote exactly that file; migrate ours away, but never delete a
+        // file we didn't write.
+        let rules_dir = cwd.join(".cursor").join("rules");
+        if rules_dir.is_file() {
+            let content = std::fs::read_to_string(&rules_dir).unwrap_or_default();
+            if content.contains("Axil Agent Memory") {
+                std::fs::remove_file(&rules_dir)?;
+            } else {
+                eprintln!(
+                    "[install] warn: {} is a file (not the directory Cursor expects) and wasn't written by Axil — leaving it; skipping the Cursor rule",
+                    rules_dir.display()
+                );
+            }
+        }
+        if !rules_dir.is_file() {
+            std::fs::create_dir_all(&rules_dir)?;
             let body = format!(
                 "---\ndescription: Axil agent memory rules\nalwaysApply: true\n---\n\n{}",
                 agent_instructions_cursor(db_path)
             );
-            std::fs::write(&axil_mdc, body)?;
-        } else {
-            std::fs::write(&rules_path, agent_instructions_cursor(db_path))?;
+            std::fs::write(rules_dir.join("axil.mdc"), body)?;
+            installed.push("cursor");
         }
-        installed.push("cursor");
     }
 
     if windsurf {
@@ -4516,33 +4573,8 @@ fn install_agent_integrations(
         installed.push("windsurf");
     }
 
-    if cody {
-        let cody_dir = cwd.join(".cody");
-        std::fs::create_dir_all(&cody_dir)?;
-        let instructions_path = cody_dir.join("instructions");
-        if instructions_path.is_dir() {
-            // Some Cody setups use `.cody/instructions/` as a directory.
-            let axil_md = instructions_path.join("axil.md");
-            std::fs::write(&axil_md, agent_instructions_cody(db_path))?;
-        } else {
-            std::fs::write(&instructions_path, agent_instructions_cody(db_path))?;
-        }
-        installed.push("cody");
-    }
-
     if aider {
-        let conf_path = cwd.join(".aider.conf.yml");
-        let content = if conf_path.exists() {
-            let existing = std::fs::read_to_string(&conf_path)?;
-            if existing.contains("axil") {
-                existing
-            } else {
-                format!("{}\n{}", existing.trim(), agent_instructions_aider(db_path))
-            }
-        } else {
-            agent_instructions_aider(db_path)
-        };
-        std::fs::write(&conf_path, content)?;
+        install_aider_files(cwd, db_path)?;
         installed.push("aider");
     }
 
@@ -5522,13 +5554,17 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                 out.print(&result);
                 return Ok(EXIT_OK);
             }
+            if cody {
+                out.status(
+                    "note: --cody is a deprecated no-op — Sourcegraph discontinued Cody; its successor Amp reads the AGENTS.md contract (written by default).",
+                );
+            }
             if dry_run {
                 let plan = dry_run_install_plan(
                     &cwd_early,
                     claude_code,
                     cursor,
                     windsurf,
-                    cody,
                     aider,
                     // AGENTS.md is on by default (cross-tool contract).
                     codex || !no_agents_md,
@@ -5545,7 +5581,6 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             let no_selection = !claude_code
                 && !cursor
                 && !windsurf
-                && !cody
                 && !aider
                 && !codex
                 && !no_agents_md
@@ -5554,49 +5589,31 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                 && !bootstrap
                 && !local;
             let mut wizard_ran = false;
-            let (claude_code, cursor, windsurf, cody, aider, codex, bootstrap, local) =
-                if no_selection {
-                    match install_wizard::maybe_run(&cwd_early, out.quiet)? {
-                        install_wizard::WizardOutcome::Aborted => {
-                            out.status("install aborted — nothing written");
-                            return Ok(EXIT_OK);
-                        }
-                        install_wizard::WizardOutcome::Choices(c) => {
-                            wizard_ran = true;
-                            (
-                                c.claude_code,
-                                c.cursor,
-                                c.windsurf,
-                                c.cody,
-                                c.aider,
-                                c.codex,
-                                c.bootstrap,
-                                c.local,
-                            )
-                        }
-                        install_wizard::WizardOutcome::NotInteractive => (
-                            claude_code,
-                            cursor,
-                            windsurf,
-                            cody,
-                            aider,
-                            codex,
-                            bootstrap,
-                            local,
-                        ),
+            let (claude_code, cursor, windsurf, aider, codex, bootstrap, local) = if no_selection {
+                match install_wizard::maybe_run(&cwd_early, out.quiet)? {
+                    install_wizard::WizardOutcome::Aborted => {
+                        out.status("install aborted — nothing written");
+                        return Ok(EXIT_OK);
                     }
-                } else {
-                    (
-                        claude_code,
-                        cursor,
-                        windsurf,
-                        cody,
-                        aider,
-                        codex,
-                        bootstrap,
-                        local,
-                    )
-                };
+                    install_wizard::WizardOutcome::Choices(c) => {
+                        wizard_ran = true;
+                        (
+                            c.claude_code,
+                            c.cursor,
+                            c.windsurf,
+                            c.aider,
+                            c.codex,
+                            c.bootstrap,
+                            c.local,
+                        )
+                    }
+                    install_wizard::WizardOutcome::NotInteractive => {
+                        (claude_code, cursor, windsurf, aider, codex, bootstrap, local)
+                    }
+                }
+            } else {
+                (claude_code, cursor, windsurf, aider, codex, bootstrap, local)
+            };
             // AGENTS.md managed block: on by default — it is the cross-tool
             // contract (Codex, OpenCode, Qwen Code, Copilot, Droid, …). The
             // wizard's toggle is an explicit user choice and wins; flag/CI
@@ -5689,7 +5706,6 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                 &db_path,
                 cursor || all,
                 windsurf || all,
-                cody || all,
                 aider || all,
                 codex || all,
             )?;
@@ -5817,7 +5833,18 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                 "current_version": current_version,
             });
 
-            if !installed_version.is_empty() && installed_version == current_version {
+            if cody {
+                out.status(
+                    "note: --cody is a deprecated no-op — Sourcegraph discontinued Cody; its successor Amp reads the AGENTS.md contract.",
+                );
+            }
+
+            // Same-version fast path applies only to the bare auto-detect
+            // refresh. An explicit flag means "add/refresh this integration
+            // now" — that must work without a version bump.
+            let any_flag = claude_code || cursor || windsurf || aider || codex || all;
+            if !any_flag && !installed_version.is_empty() && installed_version == current_version
+            {
                 out.status(&format!("Already up to date (v{})", current_version));
                 let mut result = result_version;
                 result["updated"] = json!([]);
@@ -5828,7 +5855,6 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             let update_claude = claude_code || all;
             let update_cursor = cursor || all;
             let update_windsurf = windsurf || all;
-            let update_cody = cody || all;
             let update_aider = aider || all;
             let update_codex = codex || all;
 
@@ -5836,7 +5862,6 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             let auto_detect = !update_claude
                 && !update_cursor
                 && !update_windsurf
-                && !update_cody
                 && !update_aider
                 && !update_codex;
 
@@ -5855,7 +5880,8 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                     || cwd.join(".claude/hooks/axil-brain.sh").exists()
             };
             if update_claude || (auto_detect && claude_installed()) {
-                let local_skills = cwd.join(".claude/skills/axil.md").exists();
+                let local_skills = cwd.join(".claude/skills/axil/SKILL.md").exists()
+                    || cwd.join(".claude/skills/axil.md").exists();
                 install_claude_code_files(&cwd, true, local_skills)?;
 
                 // Backfill the Axil-first pinned rule into older DBs that were
@@ -5877,7 +5903,8 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             let do_cursor = update_cursor || (auto_detect && cwd.join(".cursor/rules").exists());
             let do_windsurf =
                 update_windsurf || (auto_detect && cwd.join(".windsurfrules").exists());
-            let do_cody = update_cody || (auto_detect && cwd.join(".cody/instructions").exists());
+            // `.aider.conf.yml` is the aider marker; a bare CONVENTIONS.md is
+            // not — plenty of repos keep one with no aider involved.
             let do_aider = update_aider || (auto_detect && cwd.join(".aider.conf.yml").exists());
             let do_codex = update_codex || (auto_detect && cwd.join("AGENTS.md").exists());
 
@@ -5886,7 +5913,6 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                 &db_path,
                 do_cursor,
                 do_windsurf,
-                do_cody,
                 do_aider,
                 do_codex,
             )?;
@@ -12827,7 +12853,15 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
 
         // ── MCP server ─────────────────────────────────────────────
         #[cfg(feature = "mcp")]
-        Command::Mcp { otel_endpoint } => {
+        Command::Mcp {
+            command: Some(McpCommand::Install { target, dry_run }),
+            ..
+        } => mcp_install(&std::env::current_dir()?, &target, dry_run, out),
+        #[cfg(feature = "mcp")]
+        Command::Mcp {
+            command: None,
+            otel_endpoint,
+        } => {
             // Fail loudly if --otel-endpoint is used without the otel feature.
             #[cfg(not(feature = "otel"))]
             if otel_endpoint.is_some() {
@@ -16966,16 +17000,6 @@ fn agent_instructions_windsurf(db_path: &Path) -> String {
     agent_instructions_cursor(db_path) // same markdown format
 }
 
-fn agent_instructions_cody(db_path: &Path) -> String {
-    format!("This project uses Axil for persistent agent memory at `{db}`.\n\n{cmds}\n\nSearch/query gate: before rg, grep, git grep, find, fd, ls, tree, or any broad project query, run axil recall/code-search/fts first, then verify current code.\n\nWorkflow: boot at start, store decisions/errors during work, write a checkpoint at end.\n",
-        db = db_path.display(), cmds = AXIL_COMMANDS)
-}
-
-fn agent_instructions_aider(db_path: &Path) -> String {
-    format!("\n# Axil agent memory\nconventions:\n  - At session start run `axil boot` to load context\n  - Use `axil recall \"<query>\"` to find relevant memories\n  - Before rg/grep/git grep/find/fd/ls/tree, run `axil recall`, `axil code-search`, or `axil fts` first\n  - After decisions run `axil store decisions '{{\"summary\":\"...\",\"reason\":\"...\"}}'`\n  - After bugs run `axil store errors '{{\"error\":\"...\",\"fix\":\"...\"}}'`\n  - At session end run `axil checkpoint '{{\"state\":\"...\",\"next_steps\":[\"...\"]}}'`\n  - Database path: {db}\n",
-        db = db_path.display())
-}
-
 fn agent_instructions_codex(db_path: &Path) -> String {
     format!(
         r#"# Axil Agent Memory
@@ -17006,16 +17030,15 @@ Bypass Axil only for a user-named exact file/line, a command/test output you jus
     )
 }
 
-fn install_codex_agents_md(cwd: &Path, db_path: &Path) -> Result<bool> {
+/// Idempotently merge the Axil-managed `<!-- AXIL:BEGIN/END -->` block into
+/// a markdown file: replace an existing block in place, otherwise append —
+/// user content around the markers is never touched.
+fn merge_axil_block(path: &Path, inner: &str) -> Result<bool> {
     const BEGIN: &str = "<!-- AXIL:BEGIN -->";
     const END: &str = "<!-- AXIL:END -->";
 
-    let path = cwd.join("AGENTS.md");
-    let block = format!(
-        "{BEGIN}\n{}\n{END}\n",
-        agent_instructions_codex(db_path).trim()
-    );
-    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    let block = format!("{BEGIN}\n{}\n{END}\n", inner.trim());
+    let existing = std::fs::read_to_string(path).unwrap_or_default();
 
     let next = if let Some(start) = existing.find(BEGIN) {
         if let Some(end_rel) = existing[start..].find(END) {
@@ -17034,9 +17057,251 @@ fn install_codex_agents_md(cwd: &Path, db_path: &Path) -> Result<bool> {
 
     let changed = existing != next;
     if changed {
-        std::fs::write(&path, next)?;
+        std::fs::write(path, next)?;
     }
     Ok(changed)
+}
+
+fn install_codex_agents_md(cwd: &Path, db_path: &Path) -> Result<bool> {
+    merge_axil_block(&cwd.join("AGENTS.md"), &agent_instructions_codex(db_path))
+}
+
+/// Aider integration: the memory contract goes in `CONVENTIONS.md` (the
+/// community-standard conventions file), loaded read-only via the `read:`
+/// key in `.aider.conf.yml` — aider has no `conventions:` config option,
+/// and earlier installs that wrote one could make aider reject its config.
+fn install_aider_files(cwd: &Path, db_path: &Path) -> Result<()> {
+    merge_axil_block(&cwd.join("CONVENTIONS.md"), &agent_instructions_cursor(db_path))?;
+
+    let conf_path = cwd.join(".aider.conf.yml");
+    if !conf_path.exists() {
+        std::fs::write(
+            &conf_path,
+            "# Axil agent memory: load the memory contract read-only.\nread: [CONVENTIONS.md]\n",
+        )?;
+        return Ok(());
+    }
+
+    let existing = std::fs::read_to_string(&conf_path)?;
+    // Self-heal: strip the invalid `conventions:` block earlier installs
+    // appended (from the "# Axil agent memory" comment through its last
+    // "  - Database path:" item).
+    let mut lines: Vec<&str> = existing.lines().collect();
+    if let Some(start) = lines
+        .iter()
+        .position(|l| l.trim() == "# Axil agent memory")
+    {
+        let end = lines
+            .iter()
+            .skip(start)
+            .position(|l| l.trim_start().starts_with("- Database path:"))
+            .map(|rel| start + rel);
+        if let Some(end) = end {
+            lines.drain(start..=end);
+        }
+    }
+    let mut cleaned = lines.join("\n");
+
+    if !cleaned.contains("CONVENTIONS.md") {
+        if cleaned
+            .lines()
+            .any(|l| l.starts_with("read:") || l.starts_with("read :"))
+        {
+            // A read: key we didn't write — don't textually edit unknown
+            // YAML; tell the user what to add instead.
+            eprintln!(
+                "[install] note: add CONVENTIONS.md to the `read:` list in {} so aider loads the Axil memory contract",
+                conf_path.display()
+            );
+        } else {
+            if !cleaned.is_empty() && !cleaned.ends_with('\n') {
+                cleaned.push('\n');
+            }
+            cleaned.push_str(
+                "# Axil agent memory: load the memory contract read-only.\nread: [CONVENTIONS.md]\n",
+            );
+        }
+    }
+
+    if cleaned != existing {
+        std::fs::write(&conf_path, cleaned)?;
+    }
+    Ok(())
+}
+
+// ─── MCP registration ────────────────────────────────────────────────
+
+/// Where one agent keeps its MCP config and how the entry is shaped.
+#[cfg(feature = "mcp")]
+struct McpTarget {
+    /// Config file (project-relative or absolute in the home dir).
+    config: PathBuf,
+    /// True when the config lives in the user's home dir — the server
+    /// entry then needs an absolute DB path instead of a project-relative
+    /// one, and it points at *this* project's database.
+    global: bool,
+}
+
+/// Register the Axil MCP server in an agent's config. Only the `axil`
+/// entry is written; everything else in the file is preserved.
+#[cfg(feature = "mcp")]
+fn mcp_install(cwd: &Path, target: &str, dry_run: bool, out: &Output) -> Result<i32> {
+    let db_rel = "./.axil/memory.axil";
+    let db_abs = cwd.join(".axil").join("memory.axil");
+    if !db_abs.is_file() {
+        anyhow::bail!(
+            "no database at {} — run `axil install` first",
+            db_abs.display()
+        );
+    }
+    let home = || -> Result<PathBuf> {
+        axil_core::home_dir().ok_or_else(|| anyhow::anyhow!("cannot determine home directory"))
+    };
+
+    let t = match target {
+        "claude-code" => McpTarget {
+            config: cwd.join(".mcp.json"),
+            global: false,
+        },
+        "cursor" => McpTarget {
+            config: cwd.join(".cursor").join("mcp.json"),
+            global: false,
+        },
+        "windsurf" => McpTarget {
+            config: home()?
+                .join(".codeium")
+                .join("windsurf")
+                .join("mcp_config.json"),
+            global: true,
+        },
+        "codex" => McpTarget {
+            config: home()?.join(".codex").join("config.toml"),
+            global: true,
+        },
+        "copilot" => McpTarget {
+            config: home()?.join(".copilot").join("mcp-config.json"),
+            global: true,
+        },
+        "qwen" => McpTarget {
+            config: cwd.join(".qwen").join("settings.json"),
+            global: false,
+        },
+        "antigravity" => McpTarget {
+            config: cwd.join(".agents").join("mcp_config.json"),
+            global: false,
+        },
+        "opencode" => McpTarget {
+            config: cwd.join("opencode.json"),
+            global: false,
+        },
+        other => anyhow::bail!(
+            "unknown MCP target '{other}'. Supported: claude-code, cursor, windsurf, codex, copilot, qwen, antigravity, opencode"
+        ),
+    };
+
+    let exe = resolved_axil_exe();
+    let db_arg = if t.global {
+        db_abs.display().to_string()
+    } else {
+        db_rel.to_string()
+    };
+    let args = vec![
+        "--db".to_string(),
+        db_arg.clone(),
+        "mcp".to_string(),
+    ];
+
+    // Per-target entry shape.
+    let entry_desc: Value;
+    if target == "codex" {
+        // Codex config is TOML: [mcp_servers.axil] command/args.
+        entry_desc = json!({"table": "mcp_servers.axil", "command": exe, "args": args});
+        if !dry_run {
+            let existing = std::fs::read_to_string(&t.config).unwrap_or_default();
+            let mut root: toml::Table = if existing.trim().is_empty() {
+                toml::Table::new()
+            } else {
+                existing.parse().with_context(|| {
+                    format!("{} is not valid TOML — fix it and rerun", t.config.display())
+                })?
+            };
+            let servers = root
+                .entry("mcp_servers".to_string())
+                .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+            let servers = servers.as_table_mut().ok_or_else(|| {
+                anyhow::anyhow!("mcp_servers in {} is not a table", t.config.display())
+            })?;
+            let mut axil = toml::Table::new();
+            axil.insert("command".into(), toml::Value::String(exe.clone()));
+            axil.insert(
+                "args".into(),
+                toml::Value::Array(args.iter().cloned().map(toml::Value::String).collect()),
+            );
+            servers.insert("axil".into(), toml::Value::Table(axil));
+            if let Some(parent) = t.config.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&t.config, toml::to_string_pretty(&root)?)?;
+        }
+    } else {
+        // JSON targets. OpenCode uses `mcp.<name>` with a command array;
+        // everything else uses the standard `mcpServers.<name>` shape.
+        let (top_key, entry) = if target == "opencode" {
+            let mut command = vec![exe.clone()];
+            command.extend(args.iter().cloned());
+            (
+                "mcp",
+                json!({"type": "local", "command": command, "enabled": true}),
+            )
+        } else if target == "copilot" {
+            // Copilot CLI requires a type and a tool allowlist per server.
+            (
+                "mcpServers",
+                json!({"type": "local", "command": exe, "args": args, "tools": ["*"]}),
+            )
+        } else {
+            ("mcpServers", json!({"command": exe, "args": args}))
+        };
+        entry_desc = json!({ "key": format!("{top_key}.axil"), "entry": entry });
+        if !dry_run {
+            let existing = std::fs::read_to_string(&t.config).unwrap_or_default();
+            let mut root: serde_json::Map<String, Value> = if existing.trim().is_empty() {
+                serde_json::Map::new()
+            } else {
+                serde_json::from_str(&existing).with_context(|| {
+                    format!("{} is not valid JSON — fix it and rerun", t.config.display())
+                })?
+            };
+            let servers = root.entry(top_key.to_string()).or_insert_with(|| json!({}));
+            let servers = servers.as_object_mut().ok_or_else(|| {
+                anyhow::anyhow!("{top_key} in {} is not an object", t.config.display())
+            })?;
+            servers.insert("axil".to_string(), entry);
+            if let Some(parent) = t.config.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(
+                &t.config,
+                serde_json::to_string_pretty(&Value::Object(root))? + "\n",
+            )?;
+        }
+    }
+
+    let mut result = json!({
+        "target": target,
+        "config": t.config.display().to_string(),
+        "written": !dry_run,
+        "server": entry_desc,
+    });
+    if t.global {
+        result["note"] = json!(format!(
+            "{} is a per-user config — the axil entry points at this project's database ({})",
+            t.config.display(),
+            db_arg
+        ));
+    }
+    out.print(&result);
+    Ok(EXIT_OK)
 }
 
 // ─── Skill commands ─────────────────────────────────────────────────────────
@@ -17050,12 +17315,38 @@ const SKILL_AUTOAGENT: &str = include_str!("skills/axil-autoagent.md");
 const SKILL_LEARN: &str = include_str!("skills/axil-learn.md");
 const SKILL_RETRO: &str = include_str!("skills/axil-retro.md");
 const SKILL_BRIEF: &str = include_str!("skills/axil-brief.md");
+const SKILL_CHECKPOINT: &str = include_str!("skills/axil-checkpoint.md");
 const CLAUDE_MD_TEMPLATE: &str = include_str!("templates/CLAUDE.md");
 
 struct SkillInfo {
     name: &'static str,
     filename: &'static str,
     content: &'static str,
+}
+
+impl SkillInfo {
+    /// Directory name under the skills root — the slash-command name.
+    fn dir_name(&self) -> &'static str {
+        self.filename.trim_end_matches(".md")
+    }
+}
+
+/// Write one skill in the `skills/<name>/SKILL.md` directory layout (the
+/// agentskills.io convention Claude Code, Codex, Antigravity, Qwen, Amp,
+/// and Zed all load). Removes the legacy flat `<name>.md` file older
+/// installs wrote, which current Claude Code no longer discovers.
+fn write_skill(skills_root: &Path, skill: &SkillInfo) -> Result<PathBuf> {
+    let dir = skills_root.join(skill.dir_name());
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("failed to create {}", dir.display()))?;
+    let path = dir.join("SKILL.md");
+    std::fs::write(&path, skill.content)
+        .with_context(|| format!("failed to write {}", path.display()))?;
+    let legacy = skills_root.join(skill.filename);
+    if legacy.is_file() {
+        let _ = std::fs::remove_file(legacy);
+    }
+    Ok(path)
 }
 
 const ALL_SKILLS: &[SkillInfo] = &[
@@ -17099,6 +17390,11 @@ const ALL_SKILLS: &[SkillInfo] = &[
         filename: "axil-brief.md",
         content: SKILL_BRIEF,
     },
+    SkillInfo {
+        name: "checkpoint",
+        filename: "axil-checkpoint.md",
+        content: SKILL_CHECKPOINT,
+    },
 ];
 
 fn skills_dir() -> Result<PathBuf> {
@@ -17132,9 +17428,7 @@ fn run_skill(cmd: SkillCommand, out: &Output) -> Result<i32> {
 
             let mut installed = Vec::new();
             for skill in &to_install {
-                let path = dir.join(skill.filename);
-                std::fs::write(&path, skill.content)
-                    .with_context(|| format!("failed to write {}", path.display()))?;
+                let path = write_skill(&dir, skill)?;
                 installed.push(json!({
                     "name": skill.name,
                     "path": path.display().to_string(),
@@ -17154,14 +17448,23 @@ fn run_skill(cmd: SkillCommand, out: &Output) -> Result<i32> {
             let mut results = Vec::new();
 
             for skill in skills {
-                let path = dir.join(skill.filename);
-                let installed = path.exists();
+                // Current layout first; fall back to the legacy flat file so
+                // pre-migration installs still report as installed.
+                let dir_path = dir.join(skill.dir_name()).join("SKILL.md");
+                let legacy_path = dir.join(skill.filename);
+                let path = if dir_path.exists() {
+                    Some(dir_path)
+                } else if legacy_path.exists() {
+                    Some(legacy_path)
+                } else {
+                    None
+                };
                 let mut entry = json!({
                     "name": skill.name,
                     "filename": skill.filename,
-                    "installed": installed,
+                    "installed": path.is_some(),
                 });
-                if installed {
+                if let Some(path) = path {
                     if let Ok(meta) = std::fs::metadata(&path) {
                         entry["size_bytes"] = json!(meta.len());
                     }
@@ -17180,10 +17483,20 @@ fn run_skill(cmd: SkillCommand, out: &Output) -> Result<i32> {
             let mut removed = Vec::new();
 
             for skill in skills {
-                let path = dir.join(skill.filename);
-                if path.exists() {
-                    std::fs::remove_file(&path)
-                        .with_context(|| format!("failed to remove {}", path.display()))?;
+                let mut hit = false;
+                let skill_dir = dir.join(skill.dir_name());
+                if skill_dir.is_dir() {
+                    std::fs::remove_dir_all(&skill_dir)
+                        .with_context(|| format!("failed to remove {}", skill_dir.display()))?;
+                    hit = true;
+                }
+                let legacy = dir.join(skill.filename);
+                if legacy.is_file() {
+                    std::fs::remove_file(&legacy)
+                        .with_context(|| format!("failed to remove {}", legacy.display()))?;
+                    hit = true;
+                }
+                if hit {
                     removed.push(skill.name);
                 }
             }

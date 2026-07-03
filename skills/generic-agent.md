@@ -5,7 +5,7 @@ description: "Portable agent memory instructions — works with any AI agent tha
 
 # Axil Agent Memory — Portable Instructions
 
-These instructions work with any AI agent that can execute shell commands (Claude Code, Cursor, Windsurf, Cody, Aider, Continue, etc.).
+These instructions work with any AI agent that can execute shell commands (Claude Code, Codex, Copilot CLI, Cursor, OpenCode, Qwen Code, Droid, Aider, etc.).
 
 ## Setup
 
