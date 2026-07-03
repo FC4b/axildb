@@ -18,10 +18,13 @@ use anyhow::{Context, Result};
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct InstallChoices {
     pub claude_code: bool,
+    pub codex: bool,
+    pub copilot: bool,
+    pub droid: bool,
     pub cursor: bool,
     pub windsurf: bool,
     pub aider: bool,
-    pub codex: bool,
+    pub agents_md: bool,
     pub bootstrap: bool,
     pub local: bool,
 }
@@ -39,10 +42,14 @@ pub enum WizardOutcome {
 pub fn detect_agents(cwd: &Path) -> InstallChoices {
     InstallChoices {
         claude_code: cwd.join(".claude").is_dir() || cwd.join("CLAUDE.md").is_file(),
+        codex: cwd.join(".codex").is_dir(),
+        copilot: cwd.join(".github").join("copilot-instructions.md").is_file()
+            || cwd.join(".github").join("hooks").is_dir(),
+        droid: cwd.join(".factory").is_dir(),
         cursor: cwd.join(".cursor").is_dir(),
         windsurf: cwd.join(".windsurfrules").is_file() || cwd.join(".windsurf").is_dir(),
         aider: cwd.join(".aider.conf.yml").is_file(),
-        codex: cwd.join("AGENTS.md").is_file(),
+        agents_md: cwd.join("AGENTS.md").is_file(),
         // Defaults for the non-agent toggles: bootstrap is almost always
         // what you want on a code repo; repo-local skills stay opt-in.
         bootstrap: true,
@@ -53,7 +60,7 @@ pub fn detect_agents(cwd: &Path) -> InstallChoices {
 /// Number of agent-integration items at the head of the wizard list —
 /// everything after them renders under the "Options" header and is
 /// excluded from the "all agents" toggle.
-const AGENT_ITEM_COUNT: usize = 5;
+const AGENT_ITEM_COUNT: usize = 8;
 
 struct Item {
     label: &'static str,
@@ -71,6 +78,24 @@ fn items_from(choices: &InstallChoices, detected: &InstallChoices) -> Vec<Item> 
             checked: choices.claude_code,
         },
         Item {
+            label: "codex",
+            detail: "OpenAI Codex (hooks + MCP + skills)",
+            detected: detected.codex,
+            checked: choices.codex,
+        },
+        Item {
+            label: "copilot",
+            detail: "GitHub Copilot CLI (hooks + MCP)",
+            detected: detected.copilot,
+            checked: choices.copilot,
+        },
+        Item {
+            label: "droid",
+            detail: "Factory Droid (hooks + MCP)",
+            detected: detected.droid,
+            checked: choices.droid,
+        },
+        Item {
             label: "cursor",
             detail: "Cursor (.cursor/rules)",
             detected: detected.cursor,
@@ -84,15 +109,15 @@ fn items_from(choices: &InstallChoices, detected: &InstallChoices) -> Vec<Item> 
         },
         Item {
             label: "aider",
-            detail: "Aider (.aider.conf.yml)",
+            detail: "Aider (CONVENTIONS.md + read list)",
             detected: detected.aider,
             checked: choices.aider,
         },
         Item {
             label: "agents-md",
-            detail: "AGENTS.md contract (Codex, OpenCode, Qwen Code, Droid, …)",
-            detected: detected.codex,
-            checked: choices.codex,
+            detail: "AGENTS.md contract (read by most agents)",
+            detected: detected.agents_md,
+            checked: choices.agents_md,
         },
         Item {
             label: "bootstrap",
@@ -113,10 +138,13 @@ fn choices_from(items: &[Item]) -> InstallChoices {
     let on = |label: &str| items.iter().any(|i| i.label == label && i.checked);
     InstallChoices {
         claude_code: on("claude-code"),
+        codex: on("codex"),
+        copilot: on("copilot"),
+        droid: on("droid"),
         cursor: on("cursor"),
         windsurf: on("windsurf"),
         aider: on("aider"),
-        codex: on("agents-md"),
+        agents_md: on("agents-md"),
         bootstrap: on("bootstrap"),
         local: on("local"),
     }
@@ -164,7 +192,7 @@ pub fn maybe_run(cwd: &Path, quiet: bool) -> Result<WizardOutcome> {
     // AGENTS.md is the cross-tool contract — pre-check its toggle even when
     // no AGENTS.md exists yet, matching the flag path's default-on behavior.
     let mut initial = detected;
-    initial.codex = true;
+    initial.agents_md = true;
     let mut items = items_from(&initial, &detected);
 
     println!("Axil project install — set up agent memory in {}", cwd.display());
@@ -234,7 +262,16 @@ mod tests {
     fn detects_nothing_in_empty_project() {
         let dir = scratch("empty");
         let d = detect_agents(&dir);
-        assert!(!d.claude_code && !d.cursor && !d.windsurf && !d.aider && !d.codex);
+        assert!(
+            !d.claude_code
+                && !d.codex
+                && !d.copilot
+                && !d.droid
+                && !d.cursor
+                && !d.windsurf
+                && !d.aider
+                && !d.agents_md
+        );
         assert!(d.bootstrap, "bootstrap defaults on");
         assert!(!d.local, "local defaults off");
         let _ = fs::remove_dir_all(&dir);
@@ -245,10 +282,14 @@ mod tests {
         let dir = scratch("detect");
         fs::create_dir_all(dir.join(".claude")).unwrap();
         fs::create_dir_all(dir.join(".cursor")).unwrap();
+        fs::create_dir_all(dir.join(".codex")).unwrap();
+        fs::create_dir_all(dir.join(".factory")).unwrap();
+        fs::create_dir_all(dir.join(".github").join("hooks")).unwrap();
         fs::write(dir.join(".windsurfrules"), "").unwrap();
         fs::write(dir.join("AGENTS.md"), "").unwrap();
         let d = detect_agents(&dir);
-        assert!(d.claude_code && d.cursor && d.windsurf && d.codex);
+        assert!(d.claude_code && d.codex && d.copilot && d.droid);
+        assert!(d.cursor && d.windsurf && d.agents_md);
         assert!(!d.aider);
         let _ = fs::remove_dir_all(&dir);
     }

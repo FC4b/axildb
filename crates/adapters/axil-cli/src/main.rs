@@ -521,10 +521,18 @@ enum Command {
         /// Configure Aider integration (CONVENTIONS.md + .aider.conf.yml read list).
         #[arg(long)]
         aider: bool,
-        /// Deprecated alias — the AGENTS.md managed block is written by
-        /// default on every install (see --no-agents-md to opt out).
+        /// Configure OpenAI Codex integration (.codex/hooks.json + project
+        /// MCP + .agents/skills). AGENTS.md is written by default anyway.
         #[arg(long)]
         codex: bool,
+        /// Configure GitHub Copilot CLI integration (.github/hooks/axil.json
+        /// + ~/.copilot/mcp-config.json).
+        #[arg(long)]
+        copilot: bool,
+        /// Configure Factory Droid integration (.factory/hooks.json +
+        /// .factory/mcp.json).
+        #[arg(long)]
+        droid: bool,
         /// Skip the AGENTS.md managed block. It is written by default because
         /// AGENTS.md is the cross-tool contract read by Codex, OpenCode,
         /// Qwen Code, Copilot, Droid, and most other agents.
@@ -809,9 +817,15 @@ enum Command {
         /// Update Aider integration.
         #[arg(long)]
         aider: bool,
-        /// Update the AGENTS.md managed block.
+        /// Update Codex integration (hooks + MCP + skills).
         #[arg(long)]
         codex: bool,
+        /// Update Copilot CLI integration (hooks + MCP).
+        #[arg(long)]
+        copilot: bool,
+        /// Update Factory Droid integration (hooks + MCP).
+        #[arg(long)]
+        droid: bool,
         /// Update all detected agent integrations.
         #[arg(long)]
         all: bool,
@@ -3889,14 +3903,219 @@ fn resolved_axil_exe() -> String {
 }
 
 /// The command string wired into agent hook configs.
-fn hook_run_command() -> String {
+fn hook_run_command_for(dialect: &str) -> String {
     let exe = resolved_axil_exe();
     let exe = if exe.contains(' ') {
         format!("\"{exe}\"")
     } else {
         exe
     };
-    format!("{exe} hook run --dialect claude")
+    format!("{exe} hook run --dialect {dialect}")
+}
+
+fn hook_run_command() -> String {
+    hook_run_command_for("claude")
+}
+
+/// Merge Axil's hook entries into a standalone hooks file (Codex/Droid/
+/// Copilot), preserving every non-Axil entry. `flat` selects Copilot's
+/// shape (event → array of hook definitions) vs the Claude-style shape
+/// (event → array of matcher groups each holding a "hooks" array).
+/// `version` adds Copilot's required top-level `"version": 1`.
+fn merge_hooks_file(
+    path: &Path,
+    events: &[(&str, Value)],
+    flat: bool,
+    version: Option<i64>,
+) -> Result<bool> {
+    let existing = std::fs::read_to_string(path).unwrap_or_default();
+    let mut root: serde_json::Map<String, Value> = if existing.trim().is_empty() {
+        serde_json::Map::new()
+    } else {
+        serde_json::from_str(&existing)
+            .with_context(|| format!("{} is not valid JSON — fix it and rerun", path.display()))?
+    };
+    if let Some(v) = version {
+        root.insert("version".to_string(), json!(v));
+    }
+    let hooks = root.entry("hooks".to_string()).or_insert_with(|| json!({}));
+    let hooks_obj = hooks
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("'hooks' in {} is not an object", path.display()))?;
+
+    for (event, ours) in events {
+        let preserved: Vec<Value> = hooks_obj
+            .get(*event)
+            .and_then(Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter(|entry| {
+                        if flat {
+                            // Copilot: each entry IS a hook definition with
+                            // command/bash/powershell fields.
+                            !["command", "bash", "powershell"].iter().any(|k| {
+                                entry
+                                    .get(*k)
+                                    .and_then(Value::as_str)
+                                    .map(is_axil_hook_command)
+                                    .unwrap_or(false)
+                            })
+                        } else {
+                            // Claude shape: matcher groups with inner hooks.
+                            match entry.get("hooks").and_then(Value::as_array) {
+                                None => true, // unrecognised — preserve
+                                Some(inner) => !inner.iter().any(|h| {
+                                    h.get("command")
+                                        .and_then(Value::as_str)
+                                        .map(is_axil_hook_command)
+                                        .unwrap_or(false)
+                                }),
+                            }
+                        }
+                    })
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut merged = preserved;
+        merged.extend(ours.as_array().cloned().unwrap_or_default());
+        hooks_obj.insert((*event).to_string(), Value::Array(merged));
+    }
+
+    let next = serde_json::to_string_pretty(&Value::Object(root))? + "\n";
+    let changed = existing != next;
+    if changed {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(path, next)?;
+    }
+    Ok(changed)
+}
+
+/// Claude-shaped matcher-group entry holding one Axil command hook.
+fn hook_group(cmd: &str, timeout: i64) -> Value {
+    json!([{ "hooks": [{ "type": "command", "command": cmd, "timeout": timeout }] }])
+}
+
+/// Codex hooks: `.codex/hooks.json`, Claude-compatible event names and
+/// shape. NOTE: Codex trust-hashes each hook definition — a changed
+/// definition is silently skipped until the user re-trusts it via /hooks,
+/// so this file must stay byte-stable across reinstalls (idempotent merge
+/// guarantees that as long as the command string doesn't change).
+fn install_codex_hooks(cwd: &Path) -> Result<bool> {
+    let cmd = hook_run_command_for("codex");
+    merge_hooks_file(
+        &cwd.join(".codex").join("hooks.json"),
+        &[
+            ("SessionStart", hook_group(&cmd, 10)),
+            ("UserPromptSubmit", hook_group(&cmd, 3)),
+            ("PreToolUse", hook_group(&cmd, 10)),
+            ("PostToolUse", hook_group(&cmd, 10)),
+            ("Stop", hook_group(&cmd, 15)),
+        ],
+        false,
+        None,
+    )
+}
+
+/// Copilot CLI hooks: `.github/hooks/axil.json`. Events are registered in
+/// PascalCase (the "VS Code compatible" format) so payloads arrive
+/// snake_case WITH `hook_event_name` — self-describing input, same as the
+/// other dialects. userPromptSubmitted is not registered: its output is
+/// documented as ignored. `command` is the cross-platform field.
+fn install_copilot_hooks(cwd: &Path) -> Result<bool> {
+    let cmd = hook_run_command_for("copilot");
+    let def =
+        |timeout: i64| json!([{ "type": "command", "command": cmd.as_str(), "timeoutSec": timeout }]);
+    merge_hooks_file(
+        &cwd.join(".github").join("hooks").join("axil.json"),
+        &[
+            ("SessionStart", def(10)),
+            ("PreToolUse", def(10)),
+            ("PostToolUse", def(10)),
+            ("Stop", def(15)),
+            ("SessionEnd", def(15)),
+        ],
+        true,
+        Some(1),
+    )
+}
+
+/// Factory Droid hooks: `.factory/hooks.json`, byte-for-byte the Claude
+/// Code contract (snake_case stdin, exit-2 blocks) with Droid tool names.
+fn install_droid_hooks(cwd: &Path) -> Result<bool> {
+    let cmd = hook_run_command_for("droid");
+    merge_hooks_file(
+        &cwd.join(".factory").join("hooks.json"),
+        &[
+            ("SessionStart", hook_group(&cmd, 10)),
+            ("UserPromptSubmit", hook_group(&cmd, 3)),
+            ("PreToolUse", hook_group(&cmd, 10)),
+            ("PostToolUse", hook_group(&cmd, 10)),
+            ("Stop", hook_group(&cmd, 15)),
+            ("SessionEnd", hook_group(&cmd, 15)),
+        ],
+        false,
+        None,
+    )
+}
+
+/// Best-effort MCP registration for the full installers — the loop works
+/// without it (the CLI is the write path), so failures are reported, not
+/// fatal.
+fn mcp_register_soft(cwd: &Path, target: &str) -> Value {
+    #[cfg(feature = "mcp")]
+    {
+        mcp_register(cwd, target, false).unwrap_or_else(|e| json!({"error": e.to_string()}))
+    }
+    #[cfg(not(feature = "mcp"))]
+    {
+        let _ = (cwd, target);
+        json!({"skipped": "binary built without the mcp feature"})
+    }
+}
+
+/// Full Codex integration: hooks + project-scoped MCP + skills in the
+/// cross-tool `.agents/skills/` layout (read by Codex, Antigravity, Zed,
+/// and Amp). The AGENTS.md contract is written by the default install.
+fn install_codex_full(cwd: &Path) -> Result<Value> {
+    let hooks_written = install_codex_hooks(cwd)?;
+    let skills_root = cwd.join(".agents").join("skills");
+    let mut skills = Vec::new();
+    for skill in ALL_SKILLS {
+        write_skill(&skills_root, skill)?;
+        skills.push(skill.name);
+    }
+    Ok(json!({
+        "hooks": cwd.join(".codex").join("hooks.json").display().to_string(),
+        "hooks_written": hooks_written,
+        "skills_dir": skills_root.display().to_string(),
+        "skills": skills,
+        "mcp": mcp_register_soft(cwd, "codex"),
+        "note": "Codex runs project hooks only after you trust the project AND the hook definitions (run /hooks inside Codex once)",
+    }))
+}
+
+/// Full Copilot CLI integration: repo hooks + user-level MCP registration.
+fn install_copilot_full(cwd: &Path) -> Result<Value> {
+    let hooks_written = install_copilot_hooks(cwd)?;
+    Ok(json!({
+        "hooks": cwd.join(".github").join("hooks").join("axil.json").display().to_string(),
+        "hooks_written": hooks_written,
+        "mcp": mcp_register_soft(cwd, "copilot"),
+        "note": "the same .github/hooks file is also loaded by the Copilot cloud agent from the cloned repo",
+    }))
+}
+
+/// Full Factory Droid integration: project hooks + project MCP.
+fn install_droid_full(cwd: &Path) -> Result<Value> {
+    let hooks_written = install_droid_hooks(cwd)?;
+    Ok(json!({
+        "hooks": cwd.join(".factory").join("hooks.json").display().to_string(),
+        "hooks_written": hooks_written,
+        "mcp": mcp_register_soft(cwd, "droid"),
+    }))
 }
 
 /// Install Axil brain hooks into .claude/settings.json, merging with existing config.
@@ -4098,13 +4317,17 @@ fn install_hooks_to_settings(path: &Path) -> Result<bool> {
 }
 
 /// 12.1: preview every file/entry that an `axil install` run would touch, without writing.
+#[allow(clippy::too_many_arguments)]
 fn dry_run_install_plan(
     cwd: &Path,
     claude_code: bool,
+    codex: bool,
+    copilot: bool,
+    droid: bool,
     cursor: bool,
     windsurf: bool,
     aider: bool,
-    codex: bool,
+    agents_md: bool,
     all: bool,
     local: bool,
 ) -> Result<Value> {
@@ -4163,6 +4386,35 @@ fn dry_run_install_plan(
             files.push(mem_dir.join("MEMORY.md").display().to_string() + " (appended)");
         }
     }
+    if codex || all {
+        files.push(cwd.join(".codex").join("hooks.json").display().to_string() + " (merged)");
+        files.push(cwd.join(".codex").join("config.toml").display().to_string() + " (MCP entry)");
+        for skill in ALL_SKILLS {
+            files.push(
+                cwd.join(".agents")
+                    .join("skills")
+                    .join(skill.dir_name())
+                    .join("SKILL.md")
+                    .display()
+                    .to_string(),
+            );
+        }
+    }
+    if copilot || all {
+        files.push(
+            cwd.join(".github")
+                .join("hooks")
+                .join("axil.json")
+                .display()
+                .to_string()
+                + " (merged)",
+        );
+        files.push("~/.copilot/mcp-config.json (MCP entry)".to_string());
+    }
+    if droid || all {
+        files.push(cwd.join(".factory").join("hooks.json").display().to_string() + " (merged)");
+        files.push(cwd.join(".factory").join("mcp.json").display().to_string() + " (MCP entry)");
+    }
     if cursor || all {
         files.push(
             cwd.join(".cursor")
@@ -4179,7 +4431,7 @@ fn dry_run_install_plan(
         files.push(cwd.join("CONVENTIONS.md").display().to_string() + " (merged)");
         files.push(cwd.join(".aider.conf.yml").display().to_string() + " (read: key)");
     }
-    if codex || all {
+    if agents_md || all {
         files.push(cwd.join("AGENTS.md").display().to_string() + " (merged)");
     }
     Ok(json!({
@@ -4532,7 +4784,7 @@ fn install_agent_integrations(
     cursor: bool,
     windsurf: bool,
     aider: bool,
-    codex: bool,
+    agents_md: bool,
 ) -> Result<Vec<&'static str>> {
     let mut installed = Vec::new();
 
@@ -4578,9 +4830,9 @@ fn install_agent_integrations(
         installed.push("aider");
     }
 
-    if codex {
+    if agents_md {
         install_codex_agents_md(cwd, db_path)?;
-        installed.push("codex");
+        installed.push("agents-md");
     }
 
     Ok(installed)
@@ -5537,6 +5789,8 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             cody,
             aider,
             codex,
+            copilot,
+            droid,
             no_agents_md,
             all,
             agent,
@@ -5563,11 +5817,14 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                 let plan = dry_run_install_plan(
                     &cwd_early,
                     claude_code,
+                    codex,
+                    copilot,
+                    droid,
                     cursor,
                     windsurf,
                     aider,
                     // AGENTS.md is on by default (cross-tool contract).
-                    codex || !no_agents_md,
+                    !no_agents_md,
                     all,
                     local,
                 )?;
@@ -5583,13 +5840,26 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                 && !windsurf
                 && !aider
                 && !codex
+                && !copilot
+                && !droid
                 && !no_agents_md
                 && !all
                 && agent.is_none()
                 && !bootstrap
                 && !local;
             let mut wizard_ran = false;
-            let (claude_code, cursor, windsurf, aider, codex, bootstrap, local) = if no_selection {
+            let (
+                claude_code,
+                codex,
+                copilot,
+                droid,
+                cursor,
+                windsurf,
+                aider,
+                agents_md,
+                bootstrap,
+                local,
+            ) = if no_selection {
                 match install_wizard::maybe_run(&cwd_early, out.quiet)? {
                     install_wizard::WizardOutcome::Aborted => {
                         out.status("install aborted — nothing written");
@@ -5599,30 +5869,49 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                         wizard_ran = true;
                         (
                             c.claude_code,
+                            c.codex,
+                            c.copilot,
+                            c.droid,
                             c.cursor,
                             c.windsurf,
                             c.aider,
-                            c.codex,
+                            c.agents_md,
                             c.bootstrap,
                             c.local,
                         )
                     }
-                    install_wizard::WizardOutcome::NotInteractive => {
-                        (claude_code, cursor, windsurf, aider, codex, bootstrap, local)
-                    }
+                    install_wizard::WizardOutcome::NotInteractive => (
+                        claude_code,
+                        codex,
+                        copilot,
+                        droid,
+                        cursor,
+                        windsurf,
+                        aider,
+                        false,
+                        bootstrap,
+                        local,
+                    ),
                 }
             } else {
-                (claude_code, cursor, windsurf, aider, codex, bootstrap, local)
+                (
+                    claude_code,
+                    codex,
+                    copilot,
+                    droid,
+                    cursor,
+                    windsurf,
+                    aider,
+                    false,
+                    bootstrap,
+                    local,
+                )
             };
             // AGENTS.md managed block: on by default — it is the cross-tool
             // contract (Codex, OpenCode, Qwen Code, Copilot, Droid, …). The
             // wizard's toggle is an explicit user choice and wins; flag/CI
             // installs opt out only via --no-agents-md.
-            let codex = if wizard_ran {
-                codex
-            } else {
-                codex || all || !no_agents_md
-            };
+            let agents_md = if wizard_ran { agents_md } else { !no_agents_md };
 
             let axil_dir = cwd_early.join(".axil");
             let db_path = axil_dir.join("memory.axil");
@@ -5701,14 +5990,37 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             }
 
             // Multi-agent framework support
-            let agents_installed = install_agent_integrations(
+            let mut agents_installed = install_agent_integrations(
                 &cwd,
                 &db_path,
                 cursor || all,
                 windsurf || all,
                 aider || all,
-                codex || all,
+                agents_md || all,
             )?;
+
+            // Full terminal-agent loops (hooks + MCP; Codex also gets the
+            // cross-tool skills). AGENTS.md above is their shared contract.
+            if codex || all {
+                result["codex"] = install_codex_full(&cwd)?;
+                agents_installed.push("codex");
+                out.status(
+                    "Codex: .codex/hooks.json + .codex/config.toml (MCP) + .agents/skills/ — trust the project, then run /hooks in Codex once",
+                );
+            }
+            if copilot || all {
+                result["copilot"] = install_copilot_full(&cwd)?;
+                agents_installed.push("copilot");
+                out.status(
+                    "Copilot CLI: .github/hooks/axil.json + ~/.copilot/mcp-config.json (also picked up by the Copilot cloud agent)",
+                );
+            }
+            if droid || all {
+                result["droid"] = install_droid_full(&cwd)?;
+                agents_installed.push("droid");
+                out.status("Droid: .factory/hooks.json + .factory/mcp.json");
+            }
+
             if !agents_installed.is_empty() {
                 result["agents_installed"] = json!(agents_installed);
                 out.status(&format!(
@@ -5813,6 +6125,8 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             cody,
             aider,
             codex,
+            copilot,
+            droid,
             all,
         } => {
             let cwd = std::env::current_dir()?;
@@ -5842,7 +6156,8 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             // Same-version fast path applies only to the bare auto-detect
             // refresh. An explicit flag means "add/refresh this integration
             // now" — that must work without a version bump.
-            let any_flag = claude_code || cursor || windsurf || aider || codex || all;
+            let any_flag =
+                claude_code || cursor || windsurf || aider || codex || copilot || droid || all;
             if !any_flag && !installed_version.is_empty() && installed_version == current_version
             {
                 out.status(&format!("Already up to date (v{})", current_version));
@@ -5857,13 +6172,17 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             let update_windsurf = windsurf || all;
             let update_aider = aider || all;
             let update_codex = codex || all;
+            let update_copilot = copilot || all;
+            let update_droid = droid || all;
 
             // Auto-detect if no flags given: update whatever is already installed
             let auto_detect = !update_claude
                 && !update_cursor
                 && !update_windsurf
                 && !update_aider
-                && !update_codex;
+                && !update_codex
+                && !update_copilot
+                && !update_droid;
 
             let mut updated: Vec<&str> = Vec::new();
 
@@ -5906,7 +6225,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             // `.aider.conf.yml` is the aider marker; a bare CONVENTIONS.md is
             // not — plenty of repos keep one with no aider involved.
             let do_aider = update_aider || (auto_detect && cwd.join(".aider.conf.yml").exists());
-            let do_codex = update_codex || (auto_detect && cwd.join("AGENTS.md").exists());
+            let do_agents_md = auto_detect && cwd.join("AGENTS.md").exists();
 
             let agents = install_agent_integrations(
                 &cwd,
@@ -5914,12 +6233,29 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                 do_cursor,
                 do_windsurf,
                 do_aider,
-                do_codex,
+                do_agents_md,
             )?;
             for agent in &agents {
                 out.status(&format!("Updated: {}", agent));
             }
             updated.extend(agents);
+
+            // Full terminal-agent loops: refresh where installed or flagged.
+            if update_codex || (auto_detect && cwd.join(".codex/hooks.json").exists()) {
+                install_codex_full(&cwd)?;
+                updated.push("codex");
+                out.status("Updated: codex (.codex/hooks.json + MCP + .agents/skills)");
+            }
+            if update_copilot || (auto_detect && cwd.join(".github/hooks/axil.json").exists()) {
+                install_copilot_full(&cwd)?;
+                updated.push("copilot");
+                out.status("Updated: copilot (.github/hooks/axil.json + MCP)");
+            }
+            if update_droid || (auto_detect && cwd.join(".factory/hooks.json").exists()) {
+                install_droid_full(&cwd)?;
+                updated.push("droid");
+                out.status("Updated: droid (.factory/hooks.json + MCP)");
+            }
 
             if updated.is_empty() {
                 out.status("Nothing to update. No agent integrations detected.");
@@ -17142,10 +17478,18 @@ struct McpTarget {
     global: bool,
 }
 
+/// CLI wrapper around [`mcp_register`].
+#[cfg(feature = "mcp")]
+fn mcp_install(cwd: &Path, target: &str, dry_run: bool, out: &Output) -> Result<i32> {
+    let result = mcp_register(cwd, target, dry_run)?;
+    out.print(&result);
+    Ok(EXIT_OK)
+}
+
 /// Register the Axil MCP server in an agent's config. Only the `axil`
 /// entry is written; everything else in the file is preserved.
 #[cfg(feature = "mcp")]
-fn mcp_install(cwd: &Path, target: &str, dry_run: bool, out: &Output) -> Result<i32> {
+fn mcp_register(cwd: &Path, target: &str, dry_run: bool) -> Result<Value> {
     let db_rel = "./.axil/memory.axil";
     let db_abs = cwd.join(".axil").join("memory.axil");
     if !db_abs.is_file() {
@@ -17174,13 +17518,20 @@ fn mcp_install(cwd: &Path, target: &str, dry_run: bool, out: &Output) -> Result<
                 .join("mcp_config.json"),
             global: true,
         },
+        // Project-scoped: Codex reads [mcp_servers.*] from a trusted
+        // project's .codex/config.toml — the right scope for a per-project
+        // memory DB.
         "codex" => McpTarget {
-            config: home()?.join(".codex").join("config.toml"),
-            global: true,
+            config: cwd.join(".codex").join("config.toml"),
+            global: false,
         },
         "copilot" => McpTarget {
             config: home()?.join(".copilot").join("mcp-config.json"),
             global: true,
+        },
+        "droid" => McpTarget {
+            config: cwd.join(".factory").join("mcp.json"),
+            global: false,
         },
         "qwen" => McpTarget {
             config: cwd.join(".qwen").join("settings.json"),
@@ -17195,7 +17546,7 @@ fn mcp_install(cwd: &Path, target: &str, dry_run: bool, out: &Output) -> Result<
             global: false,
         },
         other => anyhow::bail!(
-            "unknown MCP target '{other}'. Supported: claude-code, cursor, windsurf, codex, copilot, qwen, antigravity, opencode"
+            "unknown MCP target '{other}'. Supported: claude-code, cursor, windsurf, codex, copilot, droid, qwen, antigravity, opencode"
         ),
     };
 
@@ -17300,8 +17651,11 @@ fn mcp_install(cwd: &Path, target: &str, dry_run: bool, out: &Output) -> Result<
             db_arg
         ));
     }
-    out.print(&result);
-    Ok(EXIT_OK)
+    if target == "codex" {
+        result["note"] =
+            json!("Codex loads project-scoped .codex/config.toml only in trusted projects");
+    }
+    Ok(result)
 }
 
 // ─── Skill commands ─────────────────────────────────────────────────────────
