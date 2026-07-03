@@ -23,6 +23,7 @@ pub struct InstallChoices {
     pub droid: bool,
     pub antigravity: bool,
     pub qwen: bool,
+    pub opencode: bool,
     pub cursor: bool,
     pub windsurf: bool,
     pub aider: bool,
@@ -50,6 +51,9 @@ pub fn detect_agents(cwd: &Path) -> InstallChoices {
         droid: cwd.join(".factory").is_dir(),
         antigravity: cwd.join(".agents").is_dir() || cwd.join(".antigravity.md").is_file(),
         qwen: cwd.join(".qwen").is_dir(),
+        opencode: cwd.join("opencode.json").is_file()
+            || cwd.join("opencode.jsonc").is_file()
+            || cwd.join(".opencode").is_dir(),
         cursor: cwd.join(".cursor").is_dir(),
         windsurf: cwd.join(".windsurfrules").is_file() || cwd.join(".windsurf").is_dir(),
         aider: cwd.join(".aider.conf.yml").is_file(),
@@ -64,7 +68,7 @@ pub fn detect_agents(cwd: &Path) -> InstallChoices {
 /// Number of agent-integration items at the head of the wizard list —
 /// everything after them renders under the "Options" header and is
 /// excluded from the "all agents" toggle.
-const AGENT_ITEM_COUNT: usize = 10;
+const AGENT_ITEM_COUNT: usize = 11;
 
 struct Item {
     label: &'static str,
@@ -110,6 +114,12 @@ fn items_from(choices: &InstallChoices, detected: &InstallChoices) -> Vec<Item> 
             detail: "Qwen Code (hooks + MCP)",
             detected: detected.qwen,
             checked: choices.qwen,
+        },
+        Item {
+            label: "opencode",
+            detail: "OpenCode (.opencode/plugins/axil.ts + MCP)",
+            detected: detected.opencode,
+            checked: choices.opencode,
         },
         Item {
             label: "cursor",
@@ -159,6 +169,7 @@ fn choices_from(items: &[Item]) -> InstallChoices {
         droid: on("droid"),
         antigravity: on("antigravity"),
         qwen: on("qwen"),
+        opencode: on("opencode"),
         cursor: on("cursor"),
         windsurf: on("windsurf"),
         aider: on("aider"),

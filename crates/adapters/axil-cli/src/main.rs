@@ -540,6 +540,9 @@ enum Command {
         /// Configure Qwen Code integration (.qwen/settings.json hooks + MCP).
         #[arg(long)]
         qwen: bool,
+        /// Configure OpenCode integration (.opencode/plugins/axil.ts + MCP).
+        #[arg(long)]
+        opencode: bool,
         /// Skip the AGENTS.md managed block. It is written by default because
         /// AGENTS.md is the cross-tool contract read by Codex, OpenCode,
         /// Qwen Code, Copilot, Droid, and most other agents.
@@ -839,6 +842,9 @@ enum Command {
         /// Update Qwen Code integration (hooks + MCP).
         #[arg(long)]
         qwen: bool,
+        /// Update OpenCode integration (plugin + MCP).
+        #[arg(long)]
+        opencode: bool,
         /// Update all detected agent integrations.
         #[arg(long)]
         all: bool,
@@ -4243,6 +4249,22 @@ fn install_qwen_full(cwd: &Path) -> Result<Value> {
     }))
 }
 
+/// Full OpenCode integration: a self-contained local plugin (no npm
+/// dependency — OpenCode auto-loads `.opencode/plugins/*.ts`) plus the
+/// MCP entry in opencode.json. The plugin is a thin event adapter that
+/// shells out to this binary; all cognitive logic stays in the brain.
+fn install_opencode_full(cwd: &Path) -> Result<Value> {
+    let plugins_dir = cwd.join(".opencode").join("plugins");
+    std::fs::create_dir_all(&plugins_dir)?;
+    let plugin_path = plugins_dir.join("axil.ts");
+    std::fs::write(&plugin_path, OPENCODE_PLUGIN_TEMPLATE)?;
+    Ok(json!({
+        "plugin": plugin_path.display().to_string(),
+        "mcp": mcp_register_soft(cwd, "opencode"),
+        "note": "the plugin shells out to the axil binary; OpenCode also reads the AGENTS.md contract (or CLAUDE.md via its Claude Code compatibility)",
+    }))
+}
+
 /// Ensure `.qwen/settings.json` lists AGENTS.md in `context.fileName` so
 /// Qwen loads the cross-tool contract alongside its native QWEN.md.
 fn qwen_add_agents_md_context(cwd: &Path) -> Result<bool> {
@@ -5955,6 +5977,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             droid,
             antigravity,
             qwen,
+            opencode,
             no_agents_md,
             all,
             agent,
@@ -6008,6 +6031,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                 && !droid
                 && !antigravity
                 && !qwen
+                && !opencode
                 && !no_agents_md
                 && !all
                 && agent.is_none()
@@ -6020,6 +6044,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                 droid,
                 antigravity,
                 qwen,
+                opencode,
                 cursor,
                 windsurf,
                 aider,
@@ -6057,6 +6082,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                 droid,
                 antigravity,
                 qwen,
+                opencode,
                 cursor,
                 windsurf,
                 aider,
@@ -6186,6 +6212,11 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                     "Qwen Code: .qwen/settings.json (hooks + MCP + AGENTS.md context) — consider disabling memory.enableManagedAutoMemory to avoid double-capture",
                 );
             }
+            if opencode || all {
+                result["opencode"] = install_opencode_full(&cwd)?;
+                agents_installed.push("opencode");
+                out.status("OpenCode: .opencode/plugins/axil.ts + opencode.json MCP entry");
+            }
 
             if !agents_installed.is_empty() {
                 result["agents_installed"] = json!(agents_installed);
@@ -6295,6 +6326,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             droid,
             antigravity,
             qwen,
+            opencode,
             all,
         } => {
             let cwd = std::env::current_dir()?;
@@ -6333,6 +6365,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                 || droid
                 || antigravity
                 || qwen
+                || opencode
                 || all;
             if !any_flag && !installed_version.is_empty() && installed_version == current_version
             {
@@ -6352,6 +6385,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             let update_droid = droid || all;
             let update_antigravity = antigravity || all;
             let update_qwen = qwen || all;
+            let update_opencode = opencode || all;
 
             // Auto-detect if no flags given: update whatever is already installed
             let auto_detect = !update_claude
@@ -6362,7 +6396,8 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                 && !update_copilot
                 && !update_droid
                 && !update_antigravity
-                && !update_qwen;
+                && !update_qwen
+                && !update_opencode;
 
             let mut updated: Vec<&str> = Vec::new();
 
@@ -6450,6 +6485,12 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                 install_qwen_full(&cwd)?;
                 updated.push("qwen");
                 out.status("Updated: qwen (.qwen/settings.json hooks + MCP)");
+            }
+            if update_opencode || (auto_detect && cwd.join(".opencode/plugins/axil.ts").exists())
+            {
+                install_opencode_full(&cwd)?;
+                updated.push("opencode");
+                out.status("Updated: opencode (.opencode/plugins/axil.ts + MCP)");
             }
 
             if updated.is_empty() {
@@ -17866,6 +17907,7 @@ const SKILL_RETRO: &str = include_str!("skills/axil-retro.md");
 const SKILL_BRIEF: &str = include_str!("skills/axil-brief.md");
 const SKILL_CHECKPOINT: &str = include_str!("skills/axil-checkpoint.md");
 const CLAUDE_MD_TEMPLATE: &str = include_str!("templates/CLAUDE.md");
+const OPENCODE_PLUGIN_TEMPLATE: &str = include_str!("templates/opencode-plugin.ts");
 
 struct SkillInfo {
     name: &'static str,
