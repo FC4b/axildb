@@ -21,6 +21,8 @@ pub struct InstallChoices {
     pub codex: bool,
     pub copilot: bool,
     pub droid: bool,
+    pub antigravity: bool,
+    pub qwen: bool,
     pub cursor: bool,
     pub windsurf: bool,
     pub aider: bool,
@@ -46,6 +48,8 @@ pub fn detect_agents(cwd: &Path) -> InstallChoices {
         copilot: cwd.join(".github").join("copilot-instructions.md").is_file()
             || cwd.join(".github").join("hooks").is_dir(),
         droid: cwd.join(".factory").is_dir(),
+        antigravity: cwd.join(".agents").is_dir() || cwd.join(".antigravity.md").is_file(),
+        qwen: cwd.join(".qwen").is_dir(),
         cursor: cwd.join(".cursor").is_dir(),
         windsurf: cwd.join(".windsurfrules").is_file() || cwd.join(".windsurf").is_dir(),
         aider: cwd.join(".aider.conf.yml").is_file(),
@@ -60,7 +64,7 @@ pub fn detect_agents(cwd: &Path) -> InstallChoices {
 /// Number of agent-integration items at the head of the wizard list —
 /// everything after them renders under the "Options" header and is
 /// excluded from the "all agents" toggle.
-const AGENT_ITEM_COUNT: usize = 8;
+const AGENT_ITEM_COUNT: usize = 10;
 
 struct Item {
     label: &'static str,
@@ -94,6 +98,18 @@ fn items_from(choices: &InstallChoices, detected: &InstallChoices) -> Vec<Item> 
             detail: "Factory Droid (hooks + MCP)",
             detected: detected.droid,
             checked: choices.droid,
+        },
+        Item {
+            label: "antigravity",
+            detail: "Google Antigravity (hooks + MCP + rules + skills)",
+            detected: detected.antigravity,
+            checked: choices.antigravity,
+        },
+        Item {
+            label: "qwen",
+            detail: "Qwen Code (hooks + MCP)",
+            detected: detected.qwen,
+            checked: choices.qwen,
         },
         Item {
             label: "cursor",
@@ -141,6 +157,8 @@ fn choices_from(items: &[Item]) -> InstallChoices {
         codex: on("codex"),
         copilot: on("copilot"),
         droid: on("droid"),
+        antigravity: on("antigravity"),
+        qwen: on("qwen"),
         cursor: on("cursor"),
         windsurf: on("windsurf"),
         aider: on("aider"),

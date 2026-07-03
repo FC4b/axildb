@@ -533,6 +533,13 @@ enum Command {
         /// .factory/mcp.json).
         #[arg(long)]
         droid: bool,
+        /// Configure Google Antigravity integration (.agents/ rules + skills
+        /// + hooks + mcp_config.json).
+        #[arg(long)]
+        antigravity: bool,
+        /// Configure Qwen Code integration (.qwen/settings.json hooks + MCP).
+        #[arg(long)]
+        qwen: bool,
         /// Skip the AGENTS.md managed block. It is written by default because
         /// AGENTS.md is the cross-tool contract read by Codex, OpenCode,
         /// Qwen Code, Copilot, Droid, and most other agents.
@@ -826,6 +833,12 @@ enum Command {
         /// Update Factory Droid integration (hooks + MCP).
         #[arg(long)]
         droid: bool,
+        /// Update Google Antigravity integration (rules + skills + hooks + MCP).
+        #[arg(long)]
+        antigravity: bool,
+        /// Update Qwen Code integration (hooks + MCP).
+        #[arg(long)]
+        qwen: bool,
         /// Update all detected agent integrations.
         #[arg(long)]
         all: bool,
@@ -4118,6 +4131,155 @@ fn install_droid_full(cwd: &Path) -> Result<Value> {
     }))
 }
 
+/// Antigravity CLI hooks: `.agents/hooks.json`. The top level maps
+/// user-chosen hook NAMES to event configs — Axil owns the `axil-brain`
+/// key and replaces it wholesale, preserving every other named hook.
+/// Payloads carry no event name, so each registration passes `--event`.
+/// Timeouts are SECONDS (unlike Qwen's milliseconds). There is no
+/// session-start event: the brain boots on the first PreInvocation and
+/// flushes queued context there (`injectSteps`).
+fn install_antigravity_hooks(cwd: &Path) -> Result<bool> {
+    let path = cwd.join(".agents").join("hooks.json");
+    let cmd = |event: &str| format!("{} --event {event}", hook_run_command_for("antigravity"));
+
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut root: serde_json::Map<String, Value> = if existing.trim().is_empty() {
+        serde_json::Map::new()
+    } else {
+        serde_json::from_str(&existing)
+            .with_context(|| format!("{} is not valid JSON — fix it and rerun", path.display()))?
+    };
+
+    // Tool events use the matcher-group shape, agent-loop events the flat
+    // shape — mirroring the official docs' own examples.
+    root.insert(
+        "axil-brain".to_string(),
+        json!({
+            "PreInvocation": [
+                { "type": "command", "command": cmd("PreInvocation"), "timeout": 10 }
+            ],
+            "PreToolUse": [
+                { "hooks": [ { "type": "command", "command": cmd("PreToolUse"), "timeout": 10 } ] }
+            ],
+            "PostToolUse": [
+                { "hooks": [ { "type": "command", "command": cmd("PostToolUse"), "timeout": 5 } ] }
+            ],
+            "Stop": [
+                { "type": "command", "command": cmd("Stop"), "timeout": 15 }
+            ],
+        }),
+    );
+
+    let next = serde_json::to_string_pretty(&Value::Object(root))? + "\n";
+    let changed = existing != next;
+    if changed {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&path, next)?;
+    }
+    Ok(changed)
+}
+
+/// Qwen Code hooks: the top-level `hooks` key in `.qwen/settings.json`,
+/// Claude-style event names and matcher-group shape — but timeouts in
+/// MILLISECONDS. Project-level hooks require the folder to be trusted.
+fn install_qwen_hooks(cwd: &Path) -> Result<bool> {
+    let cmd = hook_run_command_for("qwen");
+    merge_hooks_file(
+        &cwd.join(".qwen").join("settings.json"),
+        &[
+            ("SessionStart", hook_group(&cmd, 10_000)),
+            ("UserPromptSubmit", hook_group(&cmd, 3_000)),
+            ("PreToolUse", hook_group(&cmd, 10_000)),
+            ("PostToolUse", hook_group(&cmd, 10_000)),
+            ("Stop", hook_group(&cmd, 15_000)),
+            ("SessionEnd", hook_group(&cmd, 15_000)),
+        ],
+        false,
+        None,
+    )
+}
+
+/// Full Google Antigravity integration: always-on rule + cross-tool skills
+/// + Gemini-lineage hooks + workspace MCP. AGENTS.md (default install) is
+/// read natively as the context file.
+fn install_antigravity_full(cwd: &Path, db_path: &Path) -> Result<Value> {
+    // Rules are plain markdown files in .agents/rules/, loaded as
+    // persistent prompt-level guidance.
+    let rules_dir = cwd.join(".agents").join("rules");
+    std::fs::create_dir_all(&rules_dir)?;
+    std::fs::write(rules_dir.join("axil.md"), agent_instructions_cursor(db_path))?;
+
+    // Same skills layout Codex reads (.agents/skills/<name>/SKILL.md).
+    let skills_root = cwd.join(".agents").join("skills");
+    let mut skills = Vec::new();
+    for skill in ALL_SKILLS {
+        write_skill(&skills_root, skill)?;
+        skills.push(skill.name);
+    }
+
+    let hooks_written = install_antigravity_hooks(cwd)?;
+    Ok(json!({
+        "rules": rules_dir.join("axil.md").display().to_string(),
+        "skills_dir": skills_root.display().to_string(),
+        "skills": skills,
+        "hooks_written": hooks_written,
+        "mcp": mcp_register_soft(cwd, "antigravity"),
+    }))
+}
+
+/// Full Qwen Code integration: hooks + MCP in .qwen/settings.json, plus
+/// AGENTS.md added to the context-file list so the shared contract loads.
+fn install_qwen_full(cwd: &Path) -> Result<Value> {
+    let hooks_written = install_qwen_hooks(cwd)?;
+    let context_updated = qwen_add_agents_md_context(cwd)?;
+    Ok(json!({
+        "settings": cwd.join(".qwen").join("settings.json").display().to_string(),
+        "hooks_written": hooks_written,
+        "context_file_added": context_updated,
+        "mcp": mcp_register_soft(cwd, "qwen"),
+        "note": "Qwen ships its own LLM-driven auto-memory — set memory.enableManagedAutoMemory=false in ~/.qwen/settings.json to avoid double-capture alongside Axil",
+    }))
+}
+
+/// Ensure `.qwen/settings.json` lists AGENTS.md in `context.fileName` so
+/// Qwen loads the cross-tool contract alongside its native QWEN.md.
+fn qwen_add_agents_md_context(cwd: &Path) -> Result<bool> {
+    let path = cwd.join(".qwen").join("settings.json");
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut root: serde_json::Map<String, Value> = if existing.trim().is_empty() {
+        serde_json::Map::new()
+    } else {
+        serde_json::from_str(&existing)
+            .with_context(|| format!("{} is not valid JSON — fix it and rerun", path.display()))?
+    };
+    let context = root.entry("context".to_string()).or_insert_with(|| json!({}));
+    let context = context
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("'context' in {} is not an object", path.display()))?;
+    let names = match context.get("fileName") {
+        // Preserve an existing list; normalize a bare string to a list.
+        Some(Value::Array(a)) => a.clone(),
+        Some(Value::String(s)) => vec![json!(s)],
+        _ => vec![json!("QWEN.md")],
+    };
+    if names.iter().any(|v| v.as_str() == Some("AGENTS.md")) {
+        return Ok(false);
+    }
+    let mut names = names;
+    names.push(json!("AGENTS.md"));
+    context.insert("fileName".to_string(), Value::Array(names));
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(
+        &path,
+        serde_json::to_string_pretty(&Value::Object(root))? + "\n",
+    )?;
+    Ok(true)
+}
+
 /// Install Axil brain hooks into .claude/settings.json, merging with existing config.
 ///
 /// Preserves all existing settings (permissions, other hooks). Only adds
@@ -5791,6 +5953,8 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             codex,
             copilot,
             droid,
+            antigravity,
+            qwen,
             no_agents_md,
             all,
             agent,
@@ -5842,24 +6006,29 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                 && !codex
                 && !copilot
                 && !droid
+                && !antigravity
+                && !qwen
                 && !no_agents_md
                 && !all
                 && agent.is_none()
                 && !bootstrap
                 && !local;
-            let mut wizard_ran = false;
-            let (
+            let mut choices = install_wizard::InstallChoices {
                 claude_code,
                 codex,
                 copilot,
                 droid,
+                antigravity,
+                qwen,
                 cursor,
                 windsurf,
                 aider,
-                agents_md,
+                agents_md: false, // resolved below
                 bootstrap,
                 local,
-            ) = if no_selection {
+            };
+            let mut wizard_ran = false;
+            if no_selection {
                 match install_wizard::maybe_run(&cwd_early, out.quiet)? {
                     install_wizard::WizardOutcome::Aborted => {
                         out.status("install aborted — nothing written");
@@ -5867,51 +6036,34 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                     }
                     install_wizard::WizardOutcome::Choices(c) => {
                         wizard_ran = true;
-                        (
-                            c.claude_code,
-                            c.codex,
-                            c.copilot,
-                            c.droid,
-                            c.cursor,
-                            c.windsurf,
-                            c.aider,
-                            c.agents_md,
-                            c.bootstrap,
-                            c.local,
-                        )
+                        choices = c;
                     }
-                    install_wizard::WizardOutcome::NotInteractive => (
-                        claude_code,
-                        codex,
-                        copilot,
-                        droid,
-                        cursor,
-                        windsurf,
-                        aider,
-                        false,
-                        bootstrap,
-                        local,
-                    ),
+                    install_wizard::WizardOutcome::NotInteractive => {}
                 }
-            } else {
-                (
-                    claude_code,
-                    codex,
-                    copilot,
-                    droid,
-                    cursor,
-                    windsurf,
-                    aider,
-                    false,
-                    bootstrap,
-                    local,
-                )
-            };
+            }
             // AGENTS.md managed block: on by default — it is the cross-tool
             // contract (Codex, OpenCode, Qwen Code, Copilot, Droid, …). The
             // wizard's toggle is an explicit user choice and wins; flag/CI
             // installs opt out only via --no-agents-md.
-            let agents_md = if wizard_ran { agents_md } else { !no_agents_md };
+            let agents_md = if wizard_ran {
+                choices.agents_md
+            } else {
+                !no_agents_md
+            };
+            let install_wizard::InstallChoices {
+                claude_code,
+                codex,
+                copilot,
+                droid,
+                antigravity,
+                qwen,
+                cursor,
+                windsurf,
+                aider,
+                bootstrap,
+                local,
+                ..
+            } = choices;
 
             let axil_dir = cwd_early.join(".axil");
             let db_path = axil_dir.join("memory.axil");
@@ -6020,6 +6172,20 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                 agents_installed.push("droid");
                 out.status("Droid: .factory/hooks.json + .factory/mcp.json");
             }
+            if antigravity || all {
+                result["antigravity"] = install_antigravity_full(&cwd, &db_path)?;
+                agents_installed.push("antigravity");
+                out.status(
+                    "Antigravity: .agents/rules/axil.md + .agents/skills/ + hooks + mcp_config.json",
+                );
+            }
+            if qwen || all {
+                result["qwen"] = install_qwen_full(&cwd)?;
+                agents_installed.push("qwen");
+                out.status(
+                    "Qwen Code: .qwen/settings.json (hooks + MCP + AGENTS.md context) — consider disabling memory.enableManagedAutoMemory to avoid double-capture",
+                );
+            }
 
             if !agents_installed.is_empty() {
                 result["agents_installed"] = json!(agents_installed);
@@ -6127,6 +6293,8 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             codex,
             copilot,
             droid,
+            antigravity,
+            qwen,
             all,
         } => {
             let cwd = std::env::current_dir()?;
@@ -6156,8 +6324,16 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             // Same-version fast path applies only to the bare auto-detect
             // refresh. An explicit flag means "add/refresh this integration
             // now" — that must work without a version bump.
-            let any_flag =
-                claude_code || cursor || windsurf || aider || codex || copilot || droid || all;
+            let any_flag = claude_code
+                || cursor
+                || windsurf
+                || aider
+                || codex
+                || copilot
+                || droid
+                || antigravity
+                || qwen
+                || all;
             if !any_flag && !installed_version.is_empty() && installed_version == current_version
             {
                 out.status(&format!("Already up to date (v{})", current_version));
@@ -6174,6 +6350,8 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             let update_codex = codex || all;
             let update_copilot = copilot || all;
             let update_droid = droid || all;
+            let update_antigravity = antigravity || all;
+            let update_qwen = qwen || all;
 
             // Auto-detect if no flags given: update whatever is already installed
             let auto_detect = !update_claude
@@ -6182,7 +6360,9 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                 && !update_aider
                 && !update_codex
                 && !update_copilot
-                && !update_droid;
+                && !update_droid
+                && !update_antigravity
+                && !update_qwen;
 
             let mut updated: Vec<&str> = Vec::new();
 
@@ -6255,6 +6435,21 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                 install_droid_full(&cwd)?;
                 updated.push("droid");
                 out.status("Updated: droid (.factory/hooks.json + MCP)");
+            }
+            if update_antigravity || (auto_detect && cwd.join(".agents/rules/axil.md").exists()) {
+                install_antigravity_full(&cwd, &db_path)?;
+                updated.push("antigravity");
+                out.status("Updated: antigravity (.agents/ rules + skills + hooks + MCP)");
+            }
+            if update_qwen
+                || (auto_detect
+                    && std::fs::read_to_string(cwd.join(".qwen/settings.json"))
+                        .map(|s| s.contains("hook run"))
+                        .unwrap_or(false))
+            {
+                install_qwen_full(&cwd)?;
+                updated.push("qwen");
+                out.status("Updated: qwen (.qwen/settings.json hooks + MCP)");
             }
 
             if updated.is_empty() {

@@ -62,6 +62,14 @@ enum Dialect {
     Codex,
     Copilot,
     Droid,
+    /// The legacy Gemini CLI contract (settings.json hooks, snake_case
+    /// stdin, hookSpecificOutput.additionalContext) — spoken by Qwen Code,
+    /// which forked Gemini CLI before Google's Antigravity rewrite.
+    Gemini,
+    /// Antigravity CLI (`agy`) rewrote the contract: 5 events, camelCase
+    /// stdin (`toolCall.args`), context via PreInvocation `injectSteps`,
+    /// no session-start event, Stop blocks with `decision: "continue"`.
+    Antigravity,
 }
 
 impl Dialect {
@@ -71,6 +79,8 @@ impl Dialect {
             "codex" => Some(Self::Codex),
             "copilot" => Some(Self::Copilot),
             "droid" => Some(Self::Droid),
+            "gemini" | "qwen" => Some(Self::Gemini),
+            "antigravity" => Some(Self::Antigravity),
             _ => None,
         }
     }
@@ -85,6 +95,10 @@ enum EventKind {
     PostTool,
     Stop,
     SessionEnd,
+    /// Fires before every model call (Antigravity's PreInvocation) — the
+    /// only context-injection channel that dialect has. Carries the boot
+    /// on first fire and flushes queued context after that.
+    PreModel,
 }
 
 /// Canonical tool actions, extracted from each dialect's tool payloads.
@@ -148,6 +162,8 @@ pub(crate) fn run(dialect: &str, event_override: Option<&str>) -> Result<i32> {
         Dialect::Codex => parse_codex(&input, event_override),
         Dialect::Copilot => parse_copilot(&input, event_override),
         Dialect::Droid => parse_droid(&input, event_override),
+        Dialect::Gemini => parse_gemini(&input, event_override),
+        Dialect::Antigravity => parse_antigravity(&input, event_override),
     };
     let Some(event) = event else {
         return Ok(0);
@@ -445,6 +461,171 @@ fn droid_tool_action(input: &Value, tool_name: &str) -> ToolAction {
     }
 }
 
+/// Qwen Code (and the legacy Gemini CLI it forked): settings.json hooks,
+/// snake_case stdin with `hook_event_name`, hookSpecificOutput responses,
+/// exit 2 blocks. Qwen kept the Claude-style event spellings; the legacy
+/// Gemini names (BeforeTool/AfterTool/BeforeAgent/AfterAgent) are accepted
+/// as aliases. Tool names are Gemini-lineage snake_case canonicals.
+fn parse_gemini(input: &Value, event_override: Option<&str>) -> Option<HookEvent> {
+    let raw_event = event_override
+        .map(str::to_string)
+        .or_else(|| str_field(input, "hook_event_name"))?;
+    let kind = match raw_event.as_str() {
+        "SessionStart" => EventKind::SessionStart,
+        "SessionEnd" => EventKind::SessionEnd,
+        "UserPromptSubmit" | "BeforeAgent" => EventKind::UserPrompt,
+        "PreToolUse" | "BeforeTool" => EventKind::PreTool,
+        "PostToolUse" | "PostToolUseFailure" | "AfterTool" => EventKind::PostTool,
+        "Stop" | "AfterAgent" => EventKind::Stop,
+        _ => return None,
+    };
+    let tool_name = str_field(input, "tool_name").unwrap_or_default();
+    let tool = match kind {
+        EventKind::PreTool | EventKind::PostTool => Some(gemini_tool_action(input, &tool_name)),
+        _ => None,
+    };
+    Some(HookEvent {
+        kind,
+        session_id: str_field(input, "session_id")?,
+        cwd: str_field(input, "cwd"),
+        prompt: str_field(input, "prompt"),
+        stop_hook_active: input
+            .get("stop_hook_active")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        tool,
+    })
+}
+
+fn gemini_tool_action(input: &Value, tool_name: &str) -> ToolAction {
+    match tool_name {
+        "run_shell_command" => ToolAction::Shell {
+            command: nested_str(input, &["tool_input", "command"]).unwrap_or_default(),
+            exit_code: response_exit_code(input),
+            stdout: response_str(input, &["stdout", "output", "result"]),
+            stderr: response_str(input, &["stderr"]),
+        },
+        // `replace` is the legacy alias Qwen canonicalizes to `edit`.
+        "write_file" | "edit" | "replace" => {
+            match nested_str(input, &["tool_input", "file_path"])
+                .or_else(|| nested_str(input, &["tool_input", "path"]))
+            {
+                Some(path) => ToolAction::FileEdit {
+                    path,
+                    snippet: nested_str(input, &["tool_input", "content"])
+                        .or_else(|| nested_str(input, &["tool_input", "new_string"])),
+                },
+                None => ToolAction::Other,
+            }
+        }
+        "read_file" => match nested_str(input, &["tool_input", "file_path"])
+            .or_else(|| nested_str(input, &["tool_input", "path"]))
+        {
+            Some(path) => ToolAction::FileRead {
+                path,
+                offset: nested_i64(input, &["tool_input", "offset"]).unwrap_or(1),
+                limit: nested_i64(input, &["tool_input", "limit"]).unwrap_or(2000),
+            },
+            None => ToolAction::Other,
+        },
+        // Qwen's todo tool (Gemini legacy: write_todos).
+        "todo_write" | "write_todos" => ToolAction::Todo {
+            completed_count: input
+                .get("tool_input")
+                .and_then(|t| t.get("todos"))
+                .and_then(Value::as_array)
+                .map(|todos| {
+                    todos
+                        .iter()
+                        .filter(|t| t.get("status").and_then(Value::as_str) == Some("completed"))
+                        .count() as i64
+                })
+                .unwrap_or(0),
+        },
+        _ => ToolAction::Other,
+    }
+}
+
+/// Antigravity CLI (`agy`): the payload carries NO event name — the config
+/// writer passes `--event <name>` per registration. camelCase fields;
+/// session identity is `conversationId`, the workspace root is
+/// `workspacePaths[0]`; tool args use PascalCase keys (Windsurf lineage).
+fn parse_antigravity(input: &Value, event_override: Option<&str>) -> Option<HookEvent> {
+    let kind = match event_override? {
+        "PreInvocation" => EventKind::PreModel,
+        "PreToolUse" => EventKind::PreTool,
+        "PostToolUse" => EventKind::PostTool,
+        "Stop" => EventKind::Stop,
+        _ => return None,
+    };
+    let tool = match kind {
+        EventKind::PreTool => Some(antigravity_tool_action(input)),
+        // PostToolUse carries only stepIdx + an optional error string — no
+        // toolCall or output. Surface a failure so error capture still runs.
+        EventKind::PostTool => Some(match str_field(input, "error") {
+            Some(err) => ToolAction::Shell {
+                command: String::new(),
+                exit_code: 1,
+                stdout: err,
+                stderr: String::new(),
+            },
+            None => ToolAction::Other,
+        }),
+        _ => None,
+    };
+    Some(HookEvent {
+        kind,
+        session_id: str_field(input, "conversationId")?,
+        cwd: input
+            .get("workspacePaths")
+            .and_then(Value::as_array)
+            .and_then(|a| a.first())
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        prompt: None,
+        stop_hook_active: false,
+        tool,
+    })
+}
+
+fn antigravity_tool_action(input: &Value) -> ToolAction {
+    let name = nested_str(input, &["toolCall", "name"]).unwrap_or_default();
+    let arg = |keys: &[&str]| -> Option<String> {
+        let args = input.get("toolCall")?.get("args")?;
+        keys.iter()
+            .find_map(|k| args.get(*k).and_then(Value::as_str))
+            .map(str::to_string)
+    };
+    match name.as_str() {
+        "run_command" => ToolAction::Shell {
+            command: arg(&["CommandLine", "Command"]).unwrap_or_default(),
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        },
+        // File-write arg keys are not documented; try the plausible
+        // PascalCase spellings and degrade to Other.
+        "write_to_file" | "replace_file_content" | "multi_replace_file_content" => {
+            match arg(&["TargetFile", "AbsolutePath", "FilePath", "Path", "File"]) {
+                Some(path) => ToolAction::FileEdit {
+                    path,
+                    snippet: arg(&["CodeContent", "Content", "ReplacementContent", "TargetContent"]),
+                },
+                None => ToolAction::Other,
+            }
+        }
+        "view_file" => match arg(&["TargetFile", "AbsolutePath", "FilePath", "Path", "File"]) {
+            Some(path) => ToolAction::FileRead {
+                path,
+                offset: 1,
+                limit: 2000,
+            },
+            None => ToolAction::Other,
+        },
+        _ => ToolAction::Other,
+    }
+}
+
 /// Extract a flat command string from a shell tool's input, tolerating
 /// both a plain string and an argv array (Codex uses `command: [..]`).
 fn shell_command_from(input: &Value) -> String {
@@ -526,6 +707,7 @@ impl HookCtx {
                 self.boot_push();
                 Ok(())
             }
+            EventKind::PreModel => self.on_pre_model(),
             EventKind::PreTool => self.on_pre_tool(),
             EventKind::PostTool => self.on_post_tool(),
             // SessionEnd can't block, so it skips the narrative guard but
@@ -539,14 +721,36 @@ impl HookCtx {
 
     /// Inject context the model will see.
     ///
-    /// Claude/Codex/Droid share `hookSpecificOutput.additionalContext`,
-    /// with `hookEventName` required to equal the event (Codex validates
-    /// it against a const in its schemas). Copilot instead takes a
-    /// root-level `additionalContext`, emitted on a single line.
+    /// Claude/Codex/Droid/Qwen share `hookSpecificOutput.additionalContext`
+    /// with `hookEventName` required to equal the event (Codex validates it
+    /// against a const). Copilot takes a root-level `additionalContext` on
+    /// a single line. Antigravity has NO context channel on tool events —
+    /// text is queued and flushed as an `injectSteps` ephemeral message on
+    /// the next PreInvocation.
     fn emit_context(&self, ctx: &str) {
         match self.dialect {
             Dialect::Copilot => {
                 println!("{}", json!({ "additionalContext": ctx }));
+            }
+            Dialect::Antigravity => {
+                append_line(&self.sfile("pending"), ctx);
+                append_line(&self.sfile("pending"), "");
+            }
+            // Qwen's documented PreToolUse output interface pairs
+            // additionalContext with a permission decision — send an
+            // explicit allow so the context-only injection stays valid.
+            Dialect::Gemini if self.event.kind == EventKind::PreTool => {
+                println!(
+                    "{}",
+                    json!({
+                        "hookSpecificOutput": {
+                            "hookEventName": "PreToolUse",
+                            "permissionDecision": "allow",
+                            "permissionDecisionReason": "context attached",
+                            "additionalContext": ctx,
+                        }
+                    })
+                );
             }
             _ => {
                 println!(
@@ -562,12 +766,17 @@ impl HookCtx {
         }
     }
 
-    /// Block a stop, demanding a narrative store first. The same
-    /// `{"decision":"block","reason"}` shape is documented for Claude,
-    /// Codex, Droid, and Copilot (agentStop: block forces another turn
-    /// with `reason` as the next prompt).
+    /// Block a stop, demanding a narrative store first.
+    /// `{"decision":"block","reason"}` is documented for Claude, Codex,
+    /// Droid, Copilot, and Qwen; Antigravity spells it
+    /// `{"decision":"continue"}` — "continue working", not "stop".
     fn emit_stop_block(&self, reason: &str) {
-        println!("{}", json!({"decision": "block", "reason": reason}));
+        let decision = if self.dialect == Dialect::Antigravity {
+            "continue"
+        } else {
+            "block"
+        };
+        println!("{}", json!({"decision": decision, "reason": reason}));
     }
 
     // ── Session temp files ────────────────────────────────────────────
@@ -785,10 +994,11 @@ impl HookCtx {
         }
     }
 
-    fn boot_push(&self) {
-        if self.db.is_none() {
-            return;
-        }
+    /// Produce the boot context text (and fire the opportunistic background
+    /// refreshes). The banner goes straight to stderr; how the boot text
+    /// reaches the model is the caller's dialect-specific concern.
+    fn boot_context_text(&self) -> Option<String> {
+        self.db.as_ref()?;
         // Context-aware boot flags from the previous session's manifest.
         let mut args: Vec<String> = vec![
             "boot".into(),
@@ -811,32 +1021,67 @@ impl HookCtx {
             }
         }
 
-        // Banner + boot text both go to stderr: pre-tool stdout is parsed
-        // as hook JSON, and mixing prose into it corrupts the parse (the old
-        // bash hook printed the banner to stdout — a latent bug).
+        // Banner to stderr: hook stdout is parsed as JSON, and mixing prose
+        // into it corrupts the parse (the old bash hook printed the banner
+        // to stdout — a latent bug).
         if let Some(banner) = self.axil_db_out(&["brain-banner"]) {
             if !banner.trim().is_empty() {
                 eprint!("{banner}");
             }
         }
         let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-        if let Some(boot) = self.axil_db_out(&arg_refs) {
-            if !boot.trim().is_empty() {
-                // A real session-start event supports context injection —
-                // use it so the model (not just the terminal) sees the boot.
-                if self.event.kind == EventKind::SessionStart {
-                    self.emit_context(&boot);
-                } else {
-                    eprintln!("{boot}");
-                }
-            }
-        }
+        let boot = self.axil_db_out(&arg_refs);
 
         // Opportunistic background refreshes. Both subcommands self-detach
         // (`--in-background`) and gate on staleness, so these return fast;
         // errors are silent — the brain hook must never block the agent.
         let _ = self.axil_db_out(&["scip", "refresh", "--if-stale", "--in-background", "--quiet"]);
         let _ = self.axil_db_out(&["maintain", "--if-stale", "--in-background", "--quiet"]);
+
+        boot.filter(|b| !b.trim().is_empty())
+    }
+
+    fn boot_push(&self) {
+        if let Some(boot) = self.boot_context_text() {
+            // A real session-start event supports context injection — use
+            // it so the model (not just the terminal) sees the boot.
+            if self.event.kind == EventKind::SessionStart {
+                self.emit_context(&boot);
+            } else {
+                eprintln!("{boot}");
+            }
+        }
+    }
+
+    /// Antigravity's PreInvocation: fires before every model call and is
+    /// that dialect's only context-injection channel. First fire carries
+    /// the boot; every fire flushes context queued by the tool handlers.
+    fn on_pre_model(&self) -> Result<()> {
+        let mut chunks: Vec<String> = Vec::new();
+
+        let booted = self.sfile("booted");
+        if !booted.exists() {
+            let _ = std::fs::write(&booted, "");
+            if let Some(boot) = self.boot_context_text() {
+                chunks.push(boot);
+            }
+        }
+
+        let pending = self.sfile("pending");
+        if let Ok(queued) = std::fs::read_to_string(&pending) {
+            if !queued.trim().is_empty() {
+                chunks.push(queued.trim_end().to_string());
+            }
+            let _ = std::fs::remove_file(&pending);
+        }
+
+        if !chunks.is_empty() {
+            println!(
+                "{}",
+                json!({ "injectSteps": [{ "ephemeralMessage": chunks.join("\n\n") }] })
+            );
+        }
+        Ok(())
     }
 
     /// Surface past memories about a file BEFORE the agent edits it, plus
@@ -1390,6 +1635,8 @@ fn claude_event_name(kind: EventKind) -> &'static str {
         EventKind::PostTool => "PostToolUse",
         EventKind::Stop => "Stop",
         EventKind::SessionEnd => "SessionEnd",
+        // Antigravity-only; never appears in a Claude-style response.
+        EventKind::PreModel => "PreInvocation",
     }
 }
 
@@ -2064,6 +2311,116 @@ mod tests {
             Some("a/b.txt".into())
         );
         assert_eq!(first_patch_path("no markers here"), None);
+    }
+
+    #[test]
+    fn qwen_snake_case_payloads_and_tools_parse() {
+        // Qwen kept the Claude-style event spellings + snake_case fields.
+        let ev = parse_gemini(
+            &json!({
+                "hook_event_name": "PreToolUse",
+                "session_id": "q1",
+                "cwd": "/repo",
+                "tool_name": "run_shell_command",
+                "tool_input": {"command": "rg adaptive_ef src/"}
+            }),
+            None,
+        )
+        .unwrap();
+        assert_eq!(ev.kind, EventKind::PreTool);
+        match ev.tool {
+            Some(ToolAction::Shell { ref command, .. }) => {
+                assert_eq!(command, "rg adaptive_ef src/")
+            }
+            other => panic!("expected Shell, got {other:?}"),
+        }
+
+        // Legacy Gemini CLI aliases still map.
+        let ev = parse_gemini(
+            &json!({
+                "hook_event_name": "AfterTool",
+                "session_id": "q1",
+                "tool_name": "write_file",
+                "tool_input": {"file_path": "src/a.rs", "content": "x"}
+            }),
+            None,
+        )
+        .unwrap();
+        assert_eq!(ev.kind, EventKind::PostTool);
+        match ev.tool {
+            Some(ToolAction::FileEdit { ref path, .. }) => assert_eq!(path, "src/a.rs"),
+            other => panic!("expected FileEdit, got {other:?}"),
+        }
+
+        // Qwen's todo tool.
+        let ev = parse_gemini(
+            &json!({
+                "hook_event_name": "PostToolUse",
+                "session_id": "q1",
+                "tool_name": "todo_write",
+                "tool_input": {"todos": [
+                    {"content": "a", "status": "completed"},
+                    {"content": "b", "status": "pending"}
+                ]}
+            }),
+            None,
+        )
+        .unwrap();
+        assert_eq!(ev.tool, Some(ToolAction::Todo { completed_count: 1 }));
+
+        // Stop carries stop_hook_active.
+        let ev = parse_gemini(
+            &json!({"hook_event_name": "Stop", "session_id": "q1", "stop_hook_active": true}),
+            None,
+        )
+        .unwrap();
+        assert!(ev.stop_hook_active);
+    }
+
+    #[test]
+    fn antigravity_events_need_override_and_use_conversation_id() {
+        // No event name in the payload → --event is mandatory.
+        let payload = json!({
+            "toolCall": {"name": "run_command",
+                "args": {"CommandLine": "npm test", "Cwd": "/workspace/p"}},
+            "stepIdx": 19,
+            "conversationId": "ec33ebf9",
+            "workspacePaths": ["/workspace/p"]
+        });
+        assert!(parse_antigravity(&payload, None).is_none());
+
+        let ev = parse_antigravity(&payload, Some("PreToolUse")).unwrap();
+        assert_eq!(ev.kind, EventKind::PreTool);
+        assert_eq!(ev.session_id, "ec33ebf9");
+        assert_eq!(ev.cwd.as_deref(), Some("/workspace/p"));
+        match ev.tool {
+            Some(ToolAction::Shell { ref command, .. }) => assert_eq!(command, "npm test"),
+            other => panic!("expected Shell, got {other:?}"),
+        }
+
+        // PreInvocation maps to the PreModel channel.
+        let ev = parse_antigravity(
+            &json!({"conversationId": "c1", "workspacePaths": ["/w"], "invocationNum": 1}),
+            Some("PreInvocation"),
+        )
+        .unwrap();
+        assert_eq!(ev.kind, EventKind::PreModel);
+
+        // PostToolUse carries only an optional error — surfaced as a
+        // failed shell action so error capture runs.
+        let ev = parse_antigravity(
+            &json!({"conversationId": "c1", "workspacePaths": ["/w"], "stepIdx": 3,
+                    "error": "command exited 1"}),
+            Some("PostToolUse"),
+        )
+        .unwrap();
+        match ev.tool {
+            Some(ToolAction::Shell { exit_code, ref stdout, .. }) => {
+                assert_eq!(exit_code, 1);
+                assert_eq!(stdout, "command exited 1");
+            }
+            other => panic!("expected Shell failure, got {other:?}"),
+        }
     }
 
     #[test]
