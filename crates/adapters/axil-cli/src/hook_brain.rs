@@ -370,10 +370,15 @@ fn copilot_tool_action(input: &Value, tool_name: &str) -> ToolAction {
             .find_map(|k| obj.get(*k).and_then(Value::as_str))
             .map(str::to_string)
     };
+    // postToolUseFailure carries no exit code — only a top-level `error`
+    // string. Without this, response_exit_code returns 0 and a failed
+    // command takes the success path (skipping error capture, and letting
+    // a failed `git commit` capture the *previous* HEAD as a success).
+    let failed = input.get("error").is_some();
     match tool_name {
         "bash" | "powershell" => ToolAction::Shell {
             command: arg(&["command", "cmd"]).unwrap_or_default(),
-            exit_code: response_exit_code(input),
+            exit_code: if failed { 1 } else { response_exit_code(input) },
             stdout: copilot_tool_result_text(input),
             stderr: String::new(),
         },
@@ -736,22 +741,12 @@ impl HookCtx {
                 append_line(&self.sfile("pending"), ctx);
                 append_line(&self.sfile("pending"), "");
             }
-            // Qwen's documented PreToolUse output interface pairs
-            // additionalContext with a permission decision — send an
-            // explicit allow so the context-only injection stays valid.
-            Dialect::Gemini if self.event.kind == EventKind::PreTool => {
-                println!(
-                    "{}",
-                    json!({
-                        "hookSpecificOutput": {
-                            "hookEventName": "PreToolUse",
-                            "permissionDecision": "allow",
-                            "permissionDecisionReason": "context attached",
-                            "additionalContext": ctx,
-                        }
-                    })
-                );
-            }
+            // Everything else (Claude/Codex/Droid/Qwen) shares the
+            // hookSpecificOutput.additionalContext channel. Note: we do NOT
+            // attach a `permissionDecision` on Qwen's PreToolUse — emitting
+            // `allow` there would auto-approve the very tool the memory hook
+            // is annotating, bypassing the user's confirmation gate.
+            // Omitting it leaves the normal permission flow untouched.
             _ => {
                 println!(
                     "{}",
@@ -785,8 +780,13 @@ impl HookCtx {
         self.tmp.join(format!("axil-session-{}.{}", self.sid, suffix))
     }
 
+    /// Previous-session manifest, scoped per project so one repo's edited
+    /// files never seed another repo's boot `--files`. Deliberately NOT
+    /// prefixed `axil-session-<sid>.` so `cleanup_session_files` leaves it
+    /// in place for the next session.
     fn prev_manifest(&self) -> PathBuf {
-        self.tmp.join("axil-session-prev.manifest")
+        let scope = fnv1a(&self.project_dir.to_string_lossy());
+        self.tmp.join(format!("axil-prev-{scope}.manifest"))
     }
 
     /// Sweep every per-session temp file, including the one-per-file/query
@@ -985,6 +985,17 @@ impl HookCtx {
             self.boot_push();
             // Fall through: if the session's first tool is a file edit the
             // file-recall context must still be injected below.
+        }
+
+        // Antigravity surfaces file edits ONLY at PreToolUse (its
+        // PostToolUse payload carries no toolCall), so record the manifest
+        // here — otherwise on_stop sees no manifest and skips the entire
+        // session-close pipeline for this dialect. Other dialects log at
+        // PostToolUse, once the edit has actually happened.
+        if self.dialect == Dialect::Antigravity {
+            if let Some(ToolAction::FileEdit { path, snippet }) = &self.event.tool {
+                let _ = self.post_edit_log(path, snippet.as_deref());
+            }
         }
 
         match &self.event.tool {
@@ -1264,7 +1275,10 @@ impl HookCtx {
             return Ok(());
         };
 
-        let (line_start, line_end) = (offset, offset + limit - 1);
+        // A malformed limit (<= 0) would invert the range; clamp so
+        // line_end is never below line_start.
+        let line_start = offset;
+        let line_end = offset.max(offset.saturating_add(limit).saturating_sub(1));
         let rel = self.rel_path(file_path);
 
         // Dedup: one capture per (query, path, range) per session.
@@ -1498,9 +1512,17 @@ impl HookCtx {
                 "Axil brain: {file_count} files were edited this turn but no {NARRATIVE_TABLES_TEXT} row was stored in the last hour (and no git commit). Before stopping, either: (a) commit the work — the commit message is captured as narrative — or (b) run: axil checkpoint '{{\"state\":\"<where things stand>\",\"next_steps\":[\"<remaining work>\"],\"references\":[{{\"kind\":\"file\",\"ref\":\"<path>\"}}]}}' (files touched this turn: {files_json}). After storing, you may stop."
             );
             self.emit_stop_block(&reason);
-            // Fall through to session close + cleanup: if the harness honors
-            // the block a second Stop fires later and closes again; if an
-            // old async config ignores it, falling through prevents leaks.
+            // Return WITHOUT closing or cleaning up: the session is still
+            // live. Running the close here would write a premature _sessions
+            // record + worker/beliefs, and deleting the temp files (booted,
+            // counts, manifest) would make the next tool call spuriously
+            // re-boot mid-session. When the agent stores and stops again,
+            // that Stop passes the guard (narrative present or
+            // stop_hook_active) and does the real close + cleanup. If a
+            // stale async config ignores the block, the small per-session
+            // temp-file set is orphaned until the OS clears the temp dir —
+            // an acceptable trade for not corrupting a live session.
+            return Ok(());
         }
 
         // Entity extraction from accumulated edit snippets.

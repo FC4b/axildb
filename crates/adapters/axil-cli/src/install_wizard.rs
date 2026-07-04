@@ -49,7 +49,12 @@ pub fn detect_agents(cwd: &Path) -> InstallChoices {
         copilot: cwd.join(".github").join("copilot-instructions.md").is_file()
             || cwd.join(".github").join("hooks").is_dir(),
         droid: cwd.join(".factory").is_dir(),
-        antigravity: cwd.join(".agents").is_dir() || cwd.join(".antigravity.md").is_file(),
+        // NOT a bare `.agents/` dir — Codex also writes `.agents/skills/`.
+        // Key on Antigravity-specific artifacts (its hooks file, rules dir,
+        // or workspace context file).
+        antigravity: cwd.join(".antigravity.md").is_file()
+            || cwd.join(".agents").join("hooks.json").is_file()
+            || cwd.join(".agents").join("rules").is_dir(),
         qwen: cwd.join(".qwen").is_dir(),
         opencode: cwd.join("opencode.json").is_file()
             || cwd.join("opencode.jsonc").is_file()
