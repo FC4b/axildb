@@ -26,6 +26,9 @@ members = [
     "crates/extensions/axil-docs",
     "crates/extensions/axil-checkpoint",
     "crates/extensions/axil-workspace",
+    "crates/extensions/axil-sync",
+    # Shared wire protocol (public contract for the closed Atlas server)
+    "crates/proto/axil-atlas-proto",
     # Tier 3 — Adapters (interface to the outside world)
     "crates/adapters/axil-runtime",
     "crates/adapters/axil-mcp",
@@ -109,6 +112,8 @@ axil-scip = { path = "crates/extensions/axil-scip", version = "1.2.0" }
 axil-docs = { path = "crates/extensions/axil-docs", version = "1.2.0" }
 axil-checkpoint = { path = "crates/extensions/axil-checkpoint", version = "1.2.0" }
 axil-workspace = { path = "crates/extensions/axil-workspace", version = "1.2.0" }
+axil-sync = { path = "crates/extensions/axil-sync", version = "1.2.0" }
+axil-atlas-proto = { path = "crates/proto/axil-atlas-proto", version = "1.2.0" }
 axil-runtime = { path = "crates/adapters/axil-runtime", version = "1.2.0" }
 axil-mcp = { path = "crates/adapters/axil-mcp", version = "1.2.0" }
 axil-ql = { path = "crates/adapters/axil-ql", version = "1.2.0" }

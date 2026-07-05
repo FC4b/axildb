@@ -1,0 +1,25 @@
+[package]
+name = "axil-sync"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Client seam for Atlas sync: selects the distillate from a local Axil and speaks the Atlas sync protocol. Fully standalone — Atlas is something you point it at, never a hard dependency."
+
+[dependencies]
+axil-core.workspace = true
+axil-atlas-proto = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+sha2 = { workspace = true }
+# HTTP transport is default-off (offline-first posture, mirrors axil-docs).
+# Distillate SELECTION needs no network; only the SyncClient does.
+ureq = { workspace = true, optional = true }
+
+[features]
+default = []
+http = ["dep:ureq"]
+
+[dev-dependencies]
+tempfile = { workspace = true }

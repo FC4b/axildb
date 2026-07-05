@@ -27,6 +27,11 @@ jobs:
             cmd: cargo check --workspace --all-targets
           - label: full
             cmd: cargo check -p axildb --no-default-features --features full
+          # axil-sync's HTTP transport is behind a default-off `http` feature
+          # (the `--workspace` check above only exercises its default, network-
+          # free build); this guards the feature-gated SyncClient.
+          - label: axil-sync http
+            cmd: cargo check -p axil-sync --features http
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

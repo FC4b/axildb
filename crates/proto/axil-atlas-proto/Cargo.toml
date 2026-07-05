@@ -1,0 +1,11 @@
+[package]
+name = "axil-atlas-proto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Wire DTOs for the Atlas sync protocol — shared by the public axil-sync client and the (private) Atlas server so both agree on the protocol without code coupling"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
