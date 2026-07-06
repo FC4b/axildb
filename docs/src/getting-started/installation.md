@@ -156,6 +156,23 @@ axil init ./test.axil
 axil --db ./test.axil doctor
 ```
 
+## Set up agent memory
+
+Installing the binary is step one. To give a coding agent persistent memory,
+run `axil install` in your project — it detects the agent tooling present and
+wires up the auto-boot / auto-capture loop:
+
+```bash
+cd your-project
+axil install                     # interactive wizard (detects .claude/, .codex/, …)
+axil install --claude-code       # or name an agent explicitly
+axil install --all               # every detected + supported agent
+```
+
+Claude Code, OpenAI Codex, GitHub Copilot CLI, Factory Droid, Google
+Antigravity CLI, Qwen Code, and OpenCode are all supported from one shared
+database — see [Terminal Agents](../agents/terminal-agents.md).
+
 ## As a Rust library
 
 Add to your `Cargo.toml`:
