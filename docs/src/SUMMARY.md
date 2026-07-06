@@ -44,6 +44,7 @@
 # Agent Integration
 
 - [Claude Code Integration](./agents/claude-code.md)
+- [Terminal Agents](./agents/terminal-agents.md)
 - [MCP Server](./agents/mcp.md)
 - [Multi-Agent](./agents/multi-agent.md)
 

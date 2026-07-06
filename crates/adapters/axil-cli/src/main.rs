@@ -3127,12 +3127,25 @@ enum HookCommand {
     /// Always exits 0 once the input parses — a memory hook must never
     /// break the agent loop.
     Run {
-        /// Hook dialect — which agent's JSON contract to speak.
-        /// `claude` today; codex/copilot/droid/gemini land with their waves.
+        /// Hook dialect — which agent's JSON contract to speak: claude,
+        /// codex, copilot, droid, antigravity, or qwen.
         #[arg(long, default_value = "claude")]
         dialect: String,
         /// Override the event name (defaults to the input's own event field,
-        /// e.g. `hook_event_name` in the claude dialect).
+        /// e.g. `hook_event_name` in the claude dialect). Required for the
+        /// antigravity dialect, whose payload carries no event name.
+        #[arg(long)]
+        event: Option<String>,
+    },
+    /// Debug probe: record the raw hook payload plus what the dialect parser
+    /// extracted to `.axil/hook-capture.jsonl`, then run the normal loop.
+    /// Wire it as an agent's hook command temporarily to confirm a dialect's
+    /// field mappings against what the agent actually sends.
+    Capture {
+        /// Hook dialect to parse the payload as (see `run`).
+        #[arg(long, default_value = "claude")]
+        dialect: String,
+        /// Override the event name (required for antigravity).
         #[arg(long)]
         event: Option<String>,
     },
@@ -9576,6 +9589,9 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
         Command::Hook {
             command: HookCommand::Run { dialect, event },
         } => hook_brain::run(&dialect, event.as_deref()),
+        Command::Hook {
+            command: HookCommand::Capture { dialect, event },
+        } => hook_brain::capture(&dialect, event.as_deref()),
 
         // ── Model management ────────────────────────────────────────
         #[cfg(feature = "vector")]

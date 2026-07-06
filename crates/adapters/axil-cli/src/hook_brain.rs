@@ -138,15 +138,30 @@ struct HookEvent {
     tool: Option<ToolAction>,
 }
 
+const SUPPORTED_DIALECTS: &str = "claude, codex, copilot, droid, antigravity, qwen";
+
+/// Parse the dialect string or fail loudly — a bad value is a wiring
+/// mistake in someone's hook config, not a runtime input to swallow.
+fn parse_dialect(dialect: &str) -> Result<Dialect> {
+    Dialect::parse(dialect).ok_or_else(|| {
+        anyhow::anyhow!("unknown hook dialect '{dialect}' (supported: {SUPPORTED_DIALECTS})")
+    })
+}
+
+/// Map one dialect's stdin JSON onto the canonical [`HookEvent`].
+fn parse_event(dialect: Dialect, input: &Value, event_override: Option<&str>) -> Option<HookEvent> {
+    match dialect {
+        Dialect::Claude => parse_claude(input, event_override),
+        Dialect::Codex => parse_codex(input, event_override),
+        Dialect::Copilot => parse_copilot(input, event_override),
+        Dialect::Droid => parse_droid(input, event_override),
+        Dialect::Gemini => parse_gemini(input, event_override),
+        Dialect::Antigravity => parse_antigravity(input, event_override),
+    }
+}
+
 pub(crate) fn run(dialect: &str, event_override: Option<&str>) -> Result<i32> {
-    // Unknown dialect is a wiring mistake by whoever edited settings —
-    // fail loudly so it's caught in development, not silently in sessions.
-    let Some(dialect) = Dialect::parse(dialect) else {
-        anyhow::bail!(
-            "unknown hook dialect '{dialect}' (supported: claude, codex, copilot, droid). \
-             Gemini-lineage dialects (antigravity, qwen) arrive with their integration wave."
-        );
-    };
+    let dialect = parse_dialect(dialect)?;
 
     let mut raw = String::new();
     if std::io::stdin().read_to_string(&mut raw).is_err() || raw.trim().is_empty() {
@@ -157,15 +172,7 @@ pub(crate) fn run(dialect: &str, event_override: Option<&str>) -> Result<i32> {
         Err(_) => return Ok(0),
     };
 
-    let event = match dialect {
-        Dialect::Claude => parse_claude(&input, event_override),
-        Dialect::Codex => parse_codex(&input, event_override),
-        Dialect::Copilot => parse_copilot(&input, event_override),
-        Dialect::Droid => parse_droid(&input, event_override),
-        Dialect::Gemini => parse_gemini(&input, event_override),
-        Dialect::Antigravity => parse_antigravity(&input, event_override),
-    };
-    let Some(event) = event else {
+    let Some(event) = parse_event(dialect, &input, event_override) else {
         return Ok(0);
     };
     let Some(ctx) = HookCtx::new(dialect, event) else {
@@ -174,6 +181,83 @@ pub(crate) fn run(dialect: &str, event_override: Option<&str>) -> Result<i32> {
     // Never propagate internal errors to the agent loop: report and exit 0.
     if let Err(e) = ctx.dispatch() {
         eprintln!("[axil hook] warn: {e}");
+    }
+    Ok(0)
+}
+
+/// A one-line summary of what the dialect parser extracted from a payload —
+/// the debug view for the `capture` probe. A tool that comes out as `other`
+/// next to a raw payload that clearly names a file edit or command is a
+/// mapping miss to fix in this module.
+fn tool_summary(tool: &ToolAction) -> Value {
+    match tool {
+        ToolAction::FileEdit { path, .. } => json!({"kind": "file_edit", "path": path}),
+        ToolAction::FileRead { path, offset, limit } => {
+            json!({"kind": "file_read", "path": path, "offset": offset, "limit": limit})
+        }
+        ToolAction::Shell {
+            command,
+            exit_code,
+            ..
+        } => json!({"kind": "shell", "command": command, "exit_code": exit_code}),
+        ToolAction::Todo { completed_count } => {
+            json!({"kind": "todo", "completed_count": completed_count})
+        }
+        ToolAction::Other => json!({"kind": "other"}),
+    }
+}
+
+/// `axil hook capture --dialect <d>` — a debugging probe. Records the raw
+/// hook payload AND what the dialect parser understood from it to
+/// `.axil/hook-capture.jsonl`, then runs the normal loop so the session
+/// still functions while you record. Wire it as an agent's hook command
+/// temporarily, drive a session, then inspect the file to confirm (or
+/// correct) a dialect's field mappings against what the agent really sends.
+pub(crate) fn capture(dialect: &str, event_override: Option<&str>) -> Result<i32> {
+    let d = parse_dialect(dialect)?;
+
+    let mut raw = String::new();
+    if std::io::stdin().read_to_string(&mut raw).is_err() || raw.trim().is_empty() {
+        return Ok(0);
+    }
+    let input: Value = serde_json::from_str(raw.trim()).unwrap_or(Value::Null);
+    let event = parse_event(d, &input, event_override);
+
+    // Resolve the project dir the same way HookCtx does, so the capture log
+    // lands in the same `.axil/` the loop uses.
+    let cwd_hint = event.as_ref().and_then(|e| e.cwd.clone());
+    let project_dir = project_dir_env_var(d)
+        .and_then(std::env::var_os)
+        .map(PathBuf::from)
+        .or_else(|| cwd_hint.map(PathBuf::from))
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| PathBuf::from("."));
+
+    let parsed = event.as_ref().map(|e| {
+        json!({
+            "event": format!("{:?}", e.kind),
+            "session_id": e.session_id,
+            "cwd": e.cwd,
+            "tool": e.tool.as_ref().map(tool_summary),
+        })
+    });
+    let record = json!({
+        "at": now_iso(),
+        "dialect": dialect,
+        "event_override": event_override,
+        "parsed": parsed,          // what the brain understood
+        "raw": input,              // what the agent actually sent
+    });
+
+    let axil_dir = project_dir.join(".axil");
+    let _ = std::fs::create_dir_all(&axil_dir);
+    append_line(&axil_dir.join("hook-capture.jsonl"), &record.to_string());
+
+    // Still run the real loop so wiring `capture` doesn't break the session.
+    if let Some(event) = event {
+        if let Some(ctx) = HookCtx::new(d, event) {
+            let _ = ctx.dispatch();
+        }
     }
     Ok(0)
 }
