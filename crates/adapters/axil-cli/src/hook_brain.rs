@@ -54,6 +54,10 @@ const NARRATIVE_TABLES_TEXT: &str = "decisions/errors/context/commits/checkpoint
 /// can't bloat the queue and the eventual session-heal load.
 const PROBLEMS_MAX_BYTES: u64 = 262_144;
 
+/// Cap the `axil hook capture` debug log — plenty for a probe session,
+/// bounded if someone leaves it wired.
+const CAPTURE_MAX_BYTES: u64 = 4_194_304;
+
 // ── Dialect layer ────────────────────────────────────────────────────
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -220,7 +224,12 @@ pub(crate) fn capture(dialect: &str, event_override: Option<&str>) -> Result<i32
     if std::io::stdin().read_to_string(&mut raw).is_err() || raw.trim().is_empty() {
         return Ok(0);
     }
-    let input: Value = serde_json::from_str(raw.trim()).unwrap_or(Value::Null);
+    let trimmed = raw.trim();
+    // Keep the parse result and the original text separately: a payload that
+    // ISN'T valid JSON is the most debug-worthy case, so it must reach the
+    // log verbatim rather than collapsing to null.
+    let parsed_json: Option<Value> = serde_json::from_str(trimmed).ok();
+    let input = parsed_json.clone().unwrap_or(Value::Null);
     let event = parse_event(d, &input, event_override);
 
     // Resolve the project dir the same way HookCtx does, so the capture log
@@ -246,12 +255,22 @@ pub(crate) fn capture(dialect: &str, event_override: Option<&str>) -> Result<i32
         "dialect": dialect,
         "event_override": event_override,
         "parsed": parsed,          // what the brain understood
-        "raw": input,              // what the agent actually sent
+        // What the agent actually sent — the parsed JSON, or the raw text
+        // when it wasn't JSON (exactly the case worth capturing).
+        "raw": parsed_json.unwrap_or_else(|| json!(trimmed)),
     });
 
+    // Cap the log like the problems file — a probe left wired on Edit/Write
+    // otherwise grows unbounded (it lives in .axil/, not the swept tmp dir).
     let axil_dir = project_dir.join(".axil");
     let _ = std::fs::create_dir_all(&axil_dir);
-    append_line(&axil_dir.join("hook-capture.jsonl"), &record.to_string());
+    let cap_path = axil_dir.join("hook-capture.jsonl");
+    let over_cap = std::fs::metadata(&cap_path)
+        .map(|m| m.len() >= CAPTURE_MAX_BYTES)
+        .unwrap_or(false);
+    if !over_cap {
+        append_line(&cap_path, &record.to_string());
+    }
 
     // Still run the real loop so wiring `capture` doesn't break the session.
     if let Some(event) = event {

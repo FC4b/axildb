@@ -3111,7 +3111,7 @@ enum McpCommand {
     /// merge — only the `axil` server entry is touched).
     Install {
         /// Target agent: claude-code | cursor | windsurf | codex | copilot |
-        /// qwen | antigravity | opencode.
+        /// droid | qwen | antigravity | opencode.
         target: String,
         /// Print the config path and entry without writing.
         #[arg(long)]

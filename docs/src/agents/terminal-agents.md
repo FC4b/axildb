@@ -129,11 +129,14 @@ exactly what that agent sends, then compare against the mapping:
 
 ```bash
 # writes each raw hook payload to .axil/hook-capture.jsonl
-axil hook capture --dialect <agent>
+axil hook capture --dialect <dialect>
 ```
 
-Wire it as the agent's hook command temporarily (or point one event at it),
-drive a normal session, then inspect `.axil/hook-capture.jsonl`. The fields you
+`<dialect>` is the hook contract, not the agent name — one of `claude`,
+`codex`, `copilot`, `droid`, `qwen`, or `antigravity` (OpenCode speaks the
+`claude` dialect, and its payloads are already first-party, so it needs no
+probe). Wire it as the agent's hook command temporarily (or point one event at
+it), drive a normal session, then inspect `.axil/hook-capture.jsonl`. The fields you
 care about are the tool name and its arguments (shell command, edited file
 path). File an issue if a mapping is off — the fix is a one-line field rename in
 `hook_brain.rs`.
