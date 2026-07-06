@@ -1,0 +1,35 @@
+{
+  "dialect": "codex",
+  "note": "OpenAI Codex: Claude wire-compatible; shell tool is literally 'Bash' (argv arrays tolerated), edits arrive as apply_patch (path parsed from the patch body).",
+  "cases": [
+    {
+      "name": "PreToolUse Bash with argv-array command -> shell",
+      "event": null,
+      "payload": {
+        "hook_event_name": "PreToolUse",
+        "session_id": "cx1",
+        "cwd": "/repo",
+        "tool_name": "Bash",
+        "tool_input": { "command": ["rg", "adaptive_ef", "src/"] }
+      },
+      "expect": { "event": "PreTool", "tool": { "kind": "shell", "command": "rg adaptive_ef src/", "exit_code": 0 } }
+    },
+    {
+      "name": "PostToolUse apply_patch -> file_edit (path from patch body)",
+      "event": null,
+      "payload": {
+        "hook_event_name": "PostToolUse",
+        "session_id": "cx1",
+        "tool_name": "apply_patch",
+        "tool_input": { "input": "*** Begin Patch\n*** Update File: src/lib.rs\n@@\n-a\n+b\n*** End Patch" }
+      },
+      "expect": { "event": "PostTool", "tool": { "kind": "file_edit", "path": "src/lib.rs" } }
+    },
+    {
+      "name": "SessionStart -> no tool",
+      "event": null,
+      "payload": { "hook_event_name": "SessionStart", "session_id": "cx1", "source": "startup" },
+      "expect": { "event": "SessionStart", "tool": null }
+    }
+  ]
+}

@@ -1,0 +1,49 @@
+{
+  "dialect": "qwen",
+  "note": "Qwen Code (legacy Gemini CLI lineage): snake_case stdin with hook_event_name, Claude event spellings, snake_case canonical tool names (run_shell_command / write_file / edit / read_file / todo_write). Legacy BeforeTool/AfterTool aliases accepted.",
+  "cases": [
+    {
+      "name": "PreToolUse run_shell_command -> shell",
+      "event": null,
+      "payload": {
+        "hook_event_name": "PreToolUse",
+        "session_id": "q1",
+        "cwd": "/repo",
+        "tool_name": "run_shell_command",
+        "tool_input": { "command": "rg adaptive_ef src/" }
+      },
+      "expect": { "event": "PreTool", "tool": { "kind": "shell", "command": "rg adaptive_ef src/", "exit_code": 0 } }
+    },
+    {
+      "name": "AfterTool write_file (legacy alias) -> file_edit",
+      "event": null,
+      "payload": {
+        "hook_event_name": "AfterTool",
+        "session_id": "q1",
+        "tool_name": "write_file",
+        "tool_input": { "file_path": "src/a.rs", "content": "x" }
+      },
+      "expect": { "event": "PostTool", "tool": { "kind": "file_edit", "path": "src/a.rs" } }
+    },
+    {
+      "name": "PostToolUse todo_write -> todo",
+      "event": null,
+      "payload": {
+        "hook_event_name": "PostToolUse",
+        "session_id": "q1",
+        "tool_name": "todo_write",
+        "tool_input": { "todos": [
+          { "content": "a", "status": "completed" },
+          { "content": "b", "status": "pending" }
+        ] }
+      },
+      "expect": { "event": "PostTool", "tool": { "kind": "todo", "completed_count": 1 } }
+    },
+    {
+      "name": "Stop -> no tool",
+      "event": null,
+      "payload": { "hook_event_name": "Stop", "session_id": "q1", "stop_hook_active": true },
+      "expect": { "event": "Stop", "tool": null }
+    }
+  ]
+}

@@ -1,0 +1,40 @@
+{
+  "dialect": "antigravity",
+  "note": "Google Antigravity CLI: camelCase stdin, no event name in the payload (event MUST come from --event), conversationId/workspacePaths instead of session_id/cwd, toolCall.args with PascalCase keys. PostToolUse carries only stepIdx + an optional error.",
+  "cases": [
+    {
+      "name": "PreInvocation -> PreModel, no tool (boot/flush channel)",
+      "event": "PreInvocation",
+      "payload": { "conversationId": "ag1", "workspacePaths": ["/workspace/p"], "invocationNum": 1 },
+      "expect": { "event": "PreModel", "tool": null }
+    },
+    {
+      "name": "PreToolUse run_command -> shell (args at toolCall.args.CommandLine)",
+      "event": "PreToolUse",
+      "payload": {
+        "conversationId": "ag1",
+        "workspacePaths": ["/workspace/p"],
+        "stepIdx": 2,
+        "toolCall": { "name": "run_command", "args": { "CommandLine": "npm test", "Cwd": "/workspace/p" } }
+      },
+      "expect": { "event": "PreTool", "tool": { "kind": "shell", "command": "npm test", "exit_code": 0 } }
+    },
+    {
+      "name": "PreToolUse write_to_file -> file_edit (inferred arg keys)",
+      "event": "PreToolUse",
+      "payload": {
+        "conversationId": "ag1",
+        "workspacePaths": ["/workspace/p"],
+        "stepIdx": 3,
+        "toolCall": { "name": "write_to_file", "args": { "TargetFile": "src/a.rs", "CodeContent": "x" } }
+      },
+      "expect": { "event": "PreTool", "tool": { "kind": "file_edit", "path": "src/a.rs" } }
+    },
+    {
+      "name": "PostToolUse with error -> shell failure (error capture path)",
+      "event": "PostToolUse",
+      "payload": { "conversationId": "ag1", "workspacePaths": ["/workspace/p"], "stepIdx": 3, "error": "command exited 1" },
+      "expect": { "event": "PostTool", "tool": { "kind": "shell", "command": "", "exit_code": 1 } }
+    }
+  ]
+}

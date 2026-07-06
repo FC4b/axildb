@@ -2557,4 +2557,58 @@ mod tests {
         .is_none());
         assert!(parse_copilot(&json!({"eventName": "notification", "sessionId": "s1"}), None).is_none());
     }
+
+    /// Golden-fixture regression gate for the dialect field mappings.
+    ///
+    /// Each `tests/fixtures/hooks/<dialect>.json` holds representative hook
+    /// payloads and the canonical parse they must produce. The `expect`
+    /// shape is exactly what `axil hook capture` writes in its `parsed`
+    /// block (same [`tool_summary`]), so a real captured payload can be
+    /// dropped straight into a fixture as `{payload, expect}` to lock it.
+    /// A tool contract that drifts (or a mapping that regresses) fails here.
+    #[test]
+    fn dialect_fixtures_parse_as_expected() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("hooks");
+        let mut files: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap_or_else(|e| panic!("read fixtures dir {}: {e}", dir.display()))
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("json"))
+            .collect();
+        files.sort();
+        assert!(!files.is_empty(), "no hook fixtures found in {}", dir.display());
+
+        let mut cases_run = 0usize;
+        for path in files {
+            let text = std::fs::read_to_string(&path).unwrap();
+            let doc: Value = serde_json::from_str(&text)
+                .unwrap_or_else(|e| panic!("{} is not valid JSON: {e}", path.display()));
+            let dialect_str = doc["dialect"].as_str().expect("fixture missing `dialect`");
+            let dialect =
+                Dialect::parse(dialect_str).unwrap_or_else(|| panic!("unknown dialect '{dialect_str}' in {}", path.display()));
+
+            for case in doc["cases"].as_array().expect("fixture missing `cases`") {
+                let name = case["name"].as_str().unwrap_or("<unnamed>");
+                let event_override = case["event"].as_str();
+                let payload = &case["payload"];
+
+                let ev = parse_event(dialect, payload, event_override);
+                let actual = json!({
+                    "event": ev.as_ref().map(|e| format!("{:?}", e.kind)),
+                    "tool": ev.as_ref().and_then(|e| e.tool.as_ref()).map(tool_summary),
+                });
+                assert_eq!(
+                    actual, case["expect"],
+                    "\n{} :: {name}\n  payload: {payload}\n  expected: {}\n  actual:   {actual}",
+                    path.display(),
+                    case["expect"],
+                );
+                cases_run += 1;
+            }
+        }
+        // Guard against an empty/renamed fixture set silently passing.
+        assert!(cases_run >= 20, "expected >=20 fixture cases, ran {cases_run}");
+    }
 }
