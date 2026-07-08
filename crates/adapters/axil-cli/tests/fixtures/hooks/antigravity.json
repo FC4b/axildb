@@ -20,15 +20,25 @@
       "expect": { "event": "PreTool", "tool": { "kind": "shell", "command": "npm test", "exit_code": 0 } }
     },
     {
-      "name": "PreToolUse write_to_file -> file_edit (inferred arg keys)",
+      "name": "PreToolUse write_to_file -> file_edit (REAL captured payload)",
+      "note": "Captured live from agy 1.1.0 (gemini-3.5-flash): file writes are write_to_file with args.TargetFile + args.CodeContent; identity is conversationId, no cwd/session_id/hook_event_name.",
       "event": "PreToolUse",
       "payload": {
-        "conversationId": "ag1",
-        "workspacePaths": ["/workspace/p"],
+        "artifactDirectoryPath": "C:/Users/x/.gemini/antigravity-cli/brain/0e549a37",
+        "conversationId": "0e549a37-431c-48e2-aac7-03736886ebb5",
+        "modelName": "gemini-3.5-flash-low",
         "stepIdx": 3,
-        "toolCall": { "name": "write_to_file", "args": { "TargetFile": "src/a.rs", "CodeContent": "x" } }
+        "toolCall": {
+          "name": "write_to_file",
+          "args": {
+            "CodeContent": "axil was here",
+            "Description": "Create note.txt",
+            "Overwrite": true,
+            "TargetFile": "/workspace/p/note.txt"
+          }
+        }
       },
-      "expect": { "event": "PreTool", "tool": { "kind": "file_edit", "path": "src/a.rs" } }
+      "expect": { "event": "PreTool", "tool": { "kind": "file_edit", "path": "/workspace/p/note.txt" } }
     },
     {
       "name": "PostToolUse with error -> shell failure (error capture path)",
