@@ -36,7 +36,7 @@ Your coding agent is brilliant and amnesiac. Every session it re-reads the same 
 - 💸 **Returns a pointer, not your whole repo** — a "where is X" lookup costs **~100 tokens**, not a stack of file reads. Fewer tokens, every turn.
 - ⚡ **A file you embed, not a server you run** — no Postgres, no cloud, no daemon. A ~5–10 MB binary, <100 ms commands, fully offline.
 - 🤖 **No LLM required** — local ONNX embeddings + rule-based cognition do the work with zero API calls; plug an LLM in only to sharpen extraction & consolidation.
-- 🔗 **One memory, every tool** — the same portable `.axil` brain is read *and* written by Claude Code, Cursor, Windsurf, Codex, any MCP client, or your own Rust. No vendor lock-in.
+- 🔗 **One memory, every tool** — the same portable `.axil` brain is read *and* written by Claude Code, OpenAI Codex, GitHub Copilot CLI, Factory Droid, Google Antigravity, Qwen Code, OpenCode, Cursor, any MCP client, or your own Rust. No vendor lock-in.
 
 ## Quick start
 
@@ -63,10 +63,11 @@ cargo install axildb                     # installs the `axil` binary · default
 
 </details>
 
-**2. Wire it into your project** (recommended — agent memory). One command wires Axil into your Claude Code / Cursor / Codex project and indexes your code. From there the agent does the work: hooks inject context before each turn, capture decisions and errors as you go, and write a checkpoint at the end.
+**2. Wire it into your project** (recommended — agent memory). One command wires Axil into your coding-agent project and indexes your code. From there the agent does the work: hooks inject context before each turn, capture decisions and errors as you go, and write a checkpoint at the end.
 
 ```bash
-axil install --claude-code --bootstrap     # wire hooks + skills AND index your code, in one shot
+axil install                               # interactive: detects the agents in your project and wires them
+axil install --claude-code --bootstrap     # or name one: wire hooks + skills AND index your code, in one shot
 ```
 
 That's the whole setup. To *see the payoff immediately*, ask "where is X" the frugal way:
@@ -88,7 +89,7 @@ The DB auto-detects at `.axil/memory.axil`, so everyday commands need no `--db`.
 
 → Full install options (feature flags, SCIP indexers, manual setup): [Installation](docs/src/getting-started/installation.md).
 
-**Using another editor?** The same one-command setup wires the matching rules file — `axil install --cursor` (`.cursor/rules`), `axil install --windsurf` (`.windsurfrules`), or `axil install --codex` (`AGENTS.md`). For any MCP client, register the stdio server in one step — see the **[MCP Server guide](docs/src/agents/mcp.md)**:
+**Using another agent?** The same one command wires the full memory loop — the same brain, spoken in each tool's hook dialect — for **seven terminal agents**: `--claude-code`, `--codex` (OpenAI Codex), `--copilot` (GitHub Copilot CLI), `--droid` (Factory Droid), `--antigravity` (Google Antigravity), `--qwen` (Qwen Code), and `--opencode`. IDE rules files are one command too: `--cursor` (`.cursor/rules/`), `--windsurf` (`.windsurfrules`), or `--aider` (`CONVENTIONS.md`). `--all` sets up every detected agent at once. See the **[Terminal Agents guide](docs/src/agents/terminal-agents.md)**. For any MCP client, register the stdio server in one step — see the **[MCP Server guide](docs/src/agents/mcp.md)**:
 
 ```bash
 claude mcp add axil -- axil --db ./.axil/memory.axil mcp   # the DB is the global --db flag, not positional
@@ -273,7 +274,7 @@ model = "gpt-4o-mini"                     # api_key via AXIL_LLM_API_KEY env var
 | **Getting started** | [Install](docs/src/getting-started/installation.md) · [Quick Start](docs/src/getting-started/quick-start.md) · [Configuration](docs/src/getting-started/configuration.md) |
 | **Concepts** | [Architecture](docs/src/concepts/architecture.md) · [Memory Types](docs/src/concepts/memory-types.md) · [Engines](docs/src/concepts/plugins.md) · [Storage Model](docs/src/concepts/storage.md) |
 | **CLI reference** | [Data](docs/src/cli/data.md) · [Memory](docs/src/cli/memory.md) · [Code Search](docs/src/cli/code-search.md) · [Diagnostics](docs/src/cli/diagnostics.md) · [AxilQL](docs/src/cli/axilql.md) · [Dependency Docs](docs/src/cli/dependency-docs.md) |
-| **Agent integration** | [Claude Code](docs/src/agents/claude-code.md) · [MCP Server](docs/src/agents/mcp.md) · [Multi-Agent](docs/src/agents/multi-agent.md) |
+| **Agent integration** | [Claude Code](docs/src/agents/claude-code.md) · [Terminal Agents](docs/src/agents/terminal-agents.md) · [MCP Server](docs/src/agents/mcp.md) · [Multi-Agent](docs/src/agents/multi-agent.md) |
 | **Deep dives** | [Benchmarks](docs/src/advanced/benchmarks.md) · [Context Economics](docs/src/advanced/context-economics.md) · [Retrieval Pipeline](docs/src/advanced/retrieval-pipeline.md) · [Cognitive Memory](docs/src/advanced/cognitive.md) |
 | **Extending Axil** | [Three Tiers](docs/src/extending/overview.md) · [Engines](docs/src/extending/engines.md) · [Extensions](docs/src/extending/extensions.md) · [Adapters](docs/src/extending/adapters.md) |
 
