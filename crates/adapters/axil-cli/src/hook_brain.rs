@@ -391,9 +391,12 @@ fn codex_tool_action(input: &Value, tool_name: &str) -> ToolAction {
             stderr: response_str(input, &["stderr"]),
         },
         // Codex edits files through apply_patch; the patch body names the
-        // touched file(s) — surface the first as the edited path.
+        // touched file(s) — surface the first as the edited path. Observed
+        // live: real Codex puts the patch body in `tool_input.command`
+        // (the docs' `input`/`patch` never appear); keep those as fallbacks.
         "apply_patch" => {
-            let patch = nested_str(input, &["tool_input", "input"])
+            let patch = nested_str(input, &["tool_input", "command"])
+                .or_else(|| nested_str(input, &["tool_input", "input"]))
                 .or_else(|| nested_str(input, &["tool_input", "patch"]))
                 .unwrap_or_default();
             match first_patch_path(&patch) {

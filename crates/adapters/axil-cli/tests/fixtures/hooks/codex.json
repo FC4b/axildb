@@ -15,20 +15,26 @@
       "expect": { "event": "PreTool", "tool": { "kind": "shell", "command": "rg adaptive_ef src/", "exit_code": 0 } }
     },
     {
-      "name": "PostToolUse apply_patch -> file_edit (path from patch body)",
+      "name": "PreToolUse apply_patch (REAL captured payload) -> file_edit",
+      "note": "Captured live from codex-cli 0.124.0 (gpt-5.5). The patch body is at tool_input.command — NOT the docs' input/patch. Add File marker.",
       "event": null,
       "payload": {
-        "hook_event_name": "PostToolUse",
-        "session_id": "cx1",
+        "hook_event_name": "PreToolUse",
+        "session_id": "019f404a",
+        "cwd": "C:\\Users\\sigha\\tmp",
+        "model": "gpt-5.5",
+        "permission_mode": "bypassPermissions",
         "tool_name": "apply_patch",
-        "tool_input": { "input": "*** Begin Patch\n*** Update File: src/lib.rs\n@@\n-a\n+b\n*** End Patch" }
+        "tool_use_id": "call_P2SNOnqPS4HNqrLOegpPHsAr",
+        "turn_id": "019f404a-109d",
+        "tool_input": { "command": "*** Begin Patch\n*** Add File: note.txt\n+axil was here\n*** End Patch\n" }
       },
-      "expect": { "event": "PostTool", "tool": { "kind": "file_edit", "path": "src/lib.rs" } }
+      "expect": { "event": "PreTool", "tool": { "kind": "file_edit", "path": "note.txt" } }
     },
     {
-      "name": "SessionStart -> no tool",
+      "name": "SessionStart (REAL captured payload) -> no tool",
       "event": null,
-      "payload": { "hook_event_name": "SessionStart", "session_id": "cx1", "source": "startup" },
+      "payload": { "hook_event_name": "SessionStart", "session_id": "019f404a", "cwd": "C:\\Users\\sigha\\tmp", "model": "gpt-5.5", "permission_mode": "bypassPermissions", "source": "startup" },
       "expect": { "event": "SessionStart", "tool": null }
     }
   ]
