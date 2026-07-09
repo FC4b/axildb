@@ -307,23 +307,34 @@ pub fn get(
 /// otherwise falls back to an exact question-text match (score 1.0) so the
 /// cache remains usable without embeddings.
 fn ranked_candidates(db: &Axil, question: &str) -> Result<Vec<(Record, f32)>> {
-    use std::collections::HashMap;
-
+    // Table-scoped similarity. The ANN index is not partitioned by table, so a
+    // global `similar_to` returns a fixed-size top-N in which a memory-heavy
+    // database's non-cache rows can fill every slot and crowd cached answers out
+    // of the window — the cache then reports a false miss even though a good
+    // entry is stored. `_cache_entries` is small and retention-bounded, so we
+    // score it directly: embed the question once and rank every live entry by
+    // exact cosine against its own stored question text. No non-cache row can
+    // displace a cache entry because none is ever scored, and the score stays
+    // consistent with the index (same deterministic embedder, same cosine metric
+    // the threshold is calibrated against).
     if db.has_vector_index() && db.has_embedder() {
-        // Over-fetch: search ranks across all tables, so widen before
-        // narrowing to `_cache_entries`.
-        let fetch = 40usize;
-        let mut by_id: HashMap<String, (Record, f32)> = HashMap::new();
-        if let Ok(hits) = db.similar_to(question, fetch) {
-            for (rec, score) in hits {
-                if rec.table == TABLE_CACHE_ENTRIES {
-                    by_id.entry(rec.id.to_string()).or_insert((rec, score));
+        if let Ok(query_vec) = db.embed_query(question) {
+            let mut out: Vec<(Record, f32)> = Vec::new();
+            for record in db.list(TABLE_CACHE_ENTRIES)? {
+                let Some(entry_question) = record.data.get(FIELD_QUESTION).and_then(|v| v.as_str())
+                else {
+                    continue;
+                };
+                match db.embed_query(entry_question) {
+                    Ok(entry_vec) => out.push((record, cosine(&query_vec, &entry_vec))),
+                    // Skip an entry we cannot embed rather than fail the read.
+                    Err(_) => continue,
                 }
             }
+            out.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            return Ok(out);
         }
-        let mut out: Vec<(Record, f32)> = by_id.into_values().collect();
-        out.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        return Ok(out);
+        // Embedding the query itself failed — degrade to the exact-text path.
     }
 
     // No vector index: exact-text fallback.
@@ -333,6 +344,20 @@ fn ranked_candidates(db: &Axil, question: &str) -> Result<Vec<(Record, f32)>> {
         .where_field(FIELD_QUESTION, Op::Eq, json!(question))
         .exec()?;
     Ok(rows.into_iter().map(|r| (r, 1.0)).collect())
+}
+
+/// Cosine similarity between two vectors, `0.0` when either is all-zero (no
+/// direction to compare). Shared by the scoped ranking above and its tests so
+/// the metric that gates a cache hit is defined in exactly one place.
+fn cosine(a: &[f32], b: &[f32]) -> f32 {
+    let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
+    let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if na == 0.0 || nb == 0.0 {
+        0.0
+    } else {
+        dot / (na * nb)
+    }
 }
 
 /// `true` when the entry carries a `valid_until` that has passed.
@@ -618,17 +643,6 @@ mod tests {
         }
     }
 
-    fn cosine(a: &[f32], b: &[f32]) -> f32 {
-        let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
-        let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
-        let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-        if na == 0.0 || nb == 0.0 {
-            0.0
-        } else {
-            dot / (na * nb)
-        }
-    }
-
     #[derive(Default)]
     struct NoopFts;
     impl Engine for NoopFts {
@@ -706,6 +720,44 @@ mod tests {
                 assert_eq!(hits[0].hit_count, 1);
             }
             other => panic!("expected hit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cache_entry_survives_many_higher_scoring_non_cache_rows() {
+        let (db, dir) = vector_db();
+        // A legitimately cached answer, phrased with partial overlap so it
+        // scores below a perfect match but comfortably above the get threshold.
+        put(
+            &db,
+            &put_req("how does auth token refresh", "rotate the refresh token"),
+            dir.path(),
+        )
+        .unwrap();
+
+        // Flood the database with non-cache rows that each match the query
+        // *perfectly* (cosine 1.0) — far more than the old global top-40 fetch
+        // window. Under the previous `similar_to(question, 40)` these filled
+        // every slot and crowded the cache entry out, a silent false miss.
+        for i in 0..60 {
+            let rec = db
+                .insert(
+                    "memories",
+                    json!({"text": "how does auth token refresh work", "n": i}),
+                )
+                .unwrap();
+            db.embed_field(&rec.id, "text").unwrap();
+        }
+
+        // Table-scoped ranking never scores the memory rows, so the cache entry
+        // is still found.
+        let out = get(&db, "how does auth token refresh work", 0.5, 1, dir.path()).unwrap();
+        match out {
+            GetOutcome::Hit(hits) => {
+                assert_eq!(hits.len(), 1);
+                assert_eq!(hits[0].answer, "rotate the refresh token");
+            }
+            other => panic!("cache entry crowded out by non-cache rows: {other:?}"),
         }
     }
 
