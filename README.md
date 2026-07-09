@@ -27,15 +27,16 @@
 
 ---
 
-Your coding agent is brilliant and amnesiac. Every session it re-reads the same files, re-learns the same architecture, repeats the same mistakes — and **burns tokens (your money) doing it.** Axil is the second brain that fixes this: it remembers your decisions, gotchas, and code structure across sessions, then hands the agent the *right* memory at the right moment instead of dumping the whole repo into context.
+Your coding agent is brilliant and amnesiac. Every session it re-reads the same files, re-learns the same architecture, repeats the same mistakes — and **burns tokens (your money) doing it.** Axil is the second brain that fixes this: it remembers your decisions, gotchas, and code structure across sessions, then hands the agent the *right* memory at the right moment instead of dumping the whole repo into context. When your agent outgrows a markdown notes file, the next step isn't a cloud platform — it's a smarter file.
 
 > **In a real, equal-correctness A/B test, agents answered the same coding questions with up to ~80% fewer context tokens on a large repo with semantic "where/how" queries (≈ parity on a tiny repo where `grep` already nails it).** → [the numbers & caveats](#token-savings--real-savings)
 
-- 🧠 **Remembers across sessions** — decisions, gotchas, and architecture learned once, never re-read. Vector + knowledge graph + full-text + time-series, all in a single `.axil` file.
-- 🕸️ **Knows your code, not just your text** — a SCIP **code-graph** (callers/callees, not keyword guesses) and **version-pinned dependency-doc memory** (your *exact* lib versions, zero network) — code-aware context most agent memory skips.
-- 💸 **Returns a pointer, not your whole repo** — a "where is X" lookup costs **~100 tokens**, not a stack of file reads. Fewer tokens, every turn.
-- ⚡ **A file you embed, not a server you run** — no Postgres, no cloud, no daemon. A ~5–10 MB binary, <100 ms commands, fully offline.
-- 🤖 **No LLM required** — local ONNX embeddings + rule-based cognition do the work with zero API calls; plug an LLM in only to sharpen extraction & consolidation.
+Good agent memory has to be four things — navigable, fast, fresh, and compounding. Axil is all four, locally, for the code domain:
+
+- 🕸️ **Navigable** — not a flat log but a graph you can walk: a knowledge graph of typed edges, a SCIP **code-graph** (real callers/callees, not keyword guesses), and **version-pinned dependency-doc memory** (your *exact* lib versions, zero network) — fused with vector, full-text, and time-series in one `.axil` file. Ask "where is X" and get a pointer in **~100 tokens**, not a stack of file reads.
+- ⚡ **Fast** — a file you embed, not a server you run: no Postgres, no cloud, no daemon. **<100 ms** commands from a ~5–10 MB binary, zero network hop, fully offline.
+- 🔄 **Fresh** — memory that keeps up with the code: background hooks auto-capture decisions and errors as you work, and SCIP + dep-doc **drift detection** refreshes indexes only when they've gone stale (`--if-stale`) — recall tracks the code as it moves.
+- 🧠 **Compounding** — memory that gets *better* across sessions, not just bigger: active forgetting (decay + reinforcement), a belief system, consolidation with contradiction detection, and structured checkpoints — all rule-based, **no LLM required**.
 - 🔗 **One memory, every tool** — the same portable `.axil` brain is read *and* written by Claude Code, OpenAI Codex, GitHub Copilot CLI, Factory Droid, Google Antigravity, Qwen Code, OpenCode, Cursor, any MCP client, or your own Rust. No vendor lock-in.
 
 ## Quick start
@@ -149,6 +150,7 @@ The honest version — what you'd otherwise reach for, what it costs you, and wh
 | **A markdown notes file** | No retrieval or ranking — it grows unbounded and you paste the *whole* thing into context every turn | Ranked recall + active forgetting; hands the agent the *right* memory, not all of it |
 | **A vector DB** (pgvector, Chroma) | A service to run, and vectors *only* — no graph, no full-text, no cognition; you bolt an LLM on for extraction | One embedded file fuses vector + graph + full-text + time-series; rule-based cognition, **no LLM required** |
 | **An LLM-memory framework** (Mem0, Zep, Letta) | Needs an LLM **and** external databases just to store a memory; lower recall in our tests ([below](#benchmarks)) | No LLM, no server, no daemon — a ~5–10 MB binary, 100% offline, higher recall |
+| **A managed context engine** (Redis Iris / Agent Memory) | A cloud account and four managed services — or self-hosting Python + Docker + Redis + background workers — plus an LLM key just to extract memories | One offline binary, algorithmic extraction — no account, no cloud, no LLM |
 | **A single-file doc store** (Memvid) | Local and single-file like Axil — but a smart *doc* store: no knowledge graph, no entity extraction, no memory types | Structured agent memory: code-graph, entity inference, 5 memory types, consolidation |
 
 ## Token savings = real savings

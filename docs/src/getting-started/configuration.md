@@ -29,7 +29,7 @@ auto_compact_threshold = 1000
 enabled = true
 
 [llm]
-endpoint = "https://api.openai.com/v1"
+endpoint = "https://api.openai.com/v1/chat/completions"
 model = "gpt-4o-mini"
 # api_key = "..." or set AXIL_LLM_API_KEY env var
 ```

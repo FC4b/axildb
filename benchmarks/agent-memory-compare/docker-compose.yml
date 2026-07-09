@@ -1,0 +1,112 @@
+# Head-to-head harness stack: redis/agent-memory-server ("AMS") for the
+# LongMemEval retrieval comparison. This brings up ONLY what the benchmark
+# needs: Redis Stack + the AMS REST API + the AMS background task-worker.
+#
+# Derived from the upstream compose (redis/agent-memory-server, Apache 2.0):
+#   https://github.com/redis/agent-memory-server/blob/main/docker-compose.yml
+# Image + tag verified against Docker Hub (redislabs/agent-memory-server), NOT
+# ghcr.io — see README.md "Verified sources".
+#
+#   docker compose up -d          # pull + start redis, api (:8000), task-worker
+#   docker compose logs -f api    # watch startup
+#   docker compose down -v        # stop + wipe the Redis volume
+#
+# The api indexes long-term memories via a background task (Docket queue), so
+# the task-worker MUST be running for ingested memories to become searchable.
+# See README.md "Why the task-worker is required".
+
+volumes:
+  redis_data:
+    driver: local
+
+networks:
+  ams-bench-net:
+    driver: bridge
+
+services:
+  # Redis Stack = Redis + the search/vector module (RediSearch) AMS indexes into.
+  redis:
+    image: redis/redis-stack-server:${REDIS_VERSION:-7.4.0-v8}
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    environment:
+      - REDIS_ARGS=--appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - ams-bench-net
+
+  # AMS REST API. Exposes /v1/long-term-memory/ (create), /v1/long-term-memory/search,
+  # /v1/long-term-memory (delete), /v1/health.
+  api:
+    image: redislabs/agent-memory-server:${REDIS_AGENT_MEMORY_VERSION:-0.15.2}
+    ports:
+      - "8000:8000"
+    environment:
+      # --- Always required for this benchmark ---
+      - REDIS_URL=redis://redis:6379
+      - PORT=8000
+      - LONG_TERM_MEMORY=True     # enables the /v1/long-term-memory/* endpoints
+      - DISABLE_AUTH=true         # dev-only: skip bearer-token auth on every route
+
+      # --- Embedding provider (REQUIRED in every mode) ---
+      # AMS always embeds each memory at ingest to populate its RedisVL vector
+      # index, and embeds the query for semantic/hybrid search. The default
+      # model is OpenAI text-embedding-3-small (1536-dim) => needs OPENAI_API_KEY.
+      # This is an inherent asymmetry vs Axil's in-process bge-small (no key,
+      # no network). To point at a different provider, also set the matching
+      # REDISVL_VECTOR_DIMENSIONS. See README "Fairness & asymmetries".
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-text-embedding-3-small}
+      - REDISVL_VECTOR_DIMENSIONS=${REDISVL_VECTOR_DIMENSIONS:-1536}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+
+      # --- Generative LLM extraction: OFF by default (no-LLM retrieval condition) ---
+      # These drive the head-to-head's default "extraction OFF" mode: no
+      # generative model is called on ingest, so we measure retrieval over the
+      # text we hand it (same as Axil's no-LLM condition). Flip any to True (and
+      # supply the relevant key) only for a separate, clearly-labeled
+      # extraction-ON run — that measures a DIFFERENT, LLM-assisted condition.
+      - ENABLE_DISCRETE_MEMORY_EXTRACTION=${ENABLE_DISCRETE_MEMORY_EXTRACTION:-False}
+      - ENABLE_TOPIC_EXTRACTION=${ENABLE_TOPIC_EXTRACTION:-False}
+      - ENABLE_NER=${ENABLE_NER:-False}
+      # GENERATION_MODEL is only consulted when an extraction flag above is True.
+      - GENERATION_MODEL=${GENERATION_MODEL:-gpt-4o-mini}
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/v1/health"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+    networks:
+      - ams-bench-net
+
+  # Processes the background indexing queue (Docket). AMS enqueues indexing of
+  # each created long-term memory here; without this service, memories are
+  # accepted (202/ack) but never become searchable.
+  task-worker:
+    image: redislabs/agent-memory-server:${REDIS_AGENT_MEMORY_VERSION:-0.15.2}
+    command: ["agent-memory", "task-worker"]
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - LONG_TERM_MEMORY=True
+      - DISABLE_AUTH=true
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-text-embedding-3-small}
+      - REDISVL_VECTOR_DIMENSIONS=${REDISVL_VECTOR_DIMENSIONS:-1536}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ENABLE_DISCRETE_MEMORY_EXTRACTION=${ENABLE_DISCRETE_MEMORY_EXTRACTION:-False}
+      - ENABLE_TOPIC_EXTRACTION=${ENABLE_TOPIC_EXTRACTION:-False}
+      - ENABLE_NER=${ENABLE_NER:-False}
+      - GENERATION_MODEL=${GENERATION_MODEL:-gpt-4o-mini}
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - ams-bench-net

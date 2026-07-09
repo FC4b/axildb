@@ -51,6 +51,8 @@
 # Advanced
 
 - [Cognitive Memory](./advanced/cognitive.md)
+- [Session Compaction & Token Budgets](./advanced/session-compaction.md)
+- [Optional LLM Grounding](./advanced/llm-grounding.md)
 - [Branching](./advanced/branching.md)
 - [Performance](./advanced/performance.md)
 - [Benchmarks](./advanced/benchmarks.md)
