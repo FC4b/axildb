@@ -846,6 +846,18 @@ impl Axil {
         self.insert_record(record)
     }
 
+    /// Insert a fully-formed record, preserving its id, timestamps, and metadata.
+    ///
+    /// Routes through the same internal insert path as [`Axil::insert`], so every
+    /// engine still fires (embedding, FTS, graph auto-link, `code_refs` sync).
+    /// Used by [`crate::portable`] import so record ids survive the round trip:
+    /// checkpoint `references[]` and `code_refs` point at ids, and remapping them
+    /// would break those pointers. If a record with the same id already exists it
+    /// is overwritten (upsert), matching the storage layer's id-keyed semantics.
+    pub fn insert_preserving(&self, record: Record) -> Result<Record> {
+        self.insert_record(record)
+    }
+
     /// Insert multiple records in a single transaction.
     ///
     /// Much faster than calling `insert()` in a loop because all records share

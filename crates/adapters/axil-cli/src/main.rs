@@ -1,4 +1,4 @@
-use std::io::{self, Read as IoRead};
+use std::io::{self, Read as IoRead, Write as IoWrite};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -1120,6 +1120,45 @@ enum Command {
         /// Include archived records (excluded by default).
         #[arg(long)]
         include_archived: bool,
+    },
+
+    /// Export memory to mergeable JSONL (portable across machines / teammates).
+    ///
+    /// Records and the graph edges between them are written as one JSON object
+    /// per line, prefixed by a header line. Embeddings are NOT exported — they
+    /// are machine-local and rebuilt on import. Distinct from `branch`/`snapshot`
+    /// (a binary whole-file clone you restore over a DB): an export is merged
+    /// into another DB with `import`.
+    Export {
+        /// Write to this file instead of stdout.
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Only export these tables (comma-separated). Overrides the default
+        /// user-tables filter; `_idx_*` index tables are always excluded.
+        #[arg(long, value_delimiter = ',')]
+        tables: Vec<String>,
+        /// Only export records created at or after this ISO 8601 instant.
+        #[arg(long)]
+        since: Option<String>,
+        /// Also export system tables (prefix `_`, except rebuilt `_idx_*`).
+        #[arg(long)]
+        include_system: bool,
+    },
+
+    /// Import memory from a JSONL file produced by `axil export`.
+    ///
+    /// Records are recreated through the normal insert path (so embeddings, FTS,
+    /// and code_refs are rebuilt) with their original ids preserved. Edges are
+    /// recreated between resolvable endpoints.
+    Import {
+        /// Path to the JSONL export file (or "-" to read from stdin).
+        file: String,
+        /// Skip records whose id — or whose content — already exists.
+        #[arg(long)]
+        dedup: bool,
+        /// Report what would be imported without writing anything.
+        #[arg(long)]
+        dry_run: bool,
     },
 
     // ── Agent recall & search (4b.3) ────────────────────────────────
@@ -8012,6 +8051,99 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                 let values: Vec<Value> = results.iter().map(record_to_json).collect();
                 out.print_array(&values);
             }
+            Ok(EXIT_OK)
+        }
+
+        // ── Portable export / import ─────────────────────────────────
+        Command::Export {
+            out: out_file,
+            tables,
+            since,
+            include_system,
+        } => {
+            let db_path = require_db(&db_opt)?;
+            let db = open_read_command(&db_path)?;
+
+            let since_dt = match since {
+                Some(ref s) => Some(
+                    DateTime::parse_from_rfc3339(s)
+                        .map(|dt| dt.with_timezone(&Utc))
+                        .with_context(|| format!("--since must be ISO 8601: '{s}'"))?,
+                ),
+                None => None,
+            };
+            let opts = axil_core::ExportOptions {
+                tables: if tables.is_empty() {
+                    None
+                } else {
+                    Some(tables)
+                },
+                since: since_dt,
+                include_system,
+            };
+
+            let stats = if let Some(ref path) = out_file {
+                let file = std::fs::File::create(path)
+                    .with_context(|| format!("failed to create '{}'", path.display()))?;
+                let mut w = io::BufWriter::new(file);
+                let stats = axil_core::export_to_writer(&db, &opts, &mut w)
+                    .context("export failed")?;
+                w.flush().ok();
+                stats
+            } else {
+                let stdout = io::stdout();
+                let mut w = io::BufWriter::new(stdout.lock());
+                let stats = axil_core::export_to_writer(&db, &opts, &mut w)
+                    .context("export failed")?;
+                w.flush().ok();
+                stats
+            };
+
+            // The JSONL itself is the payload; report the summary on stderr so a
+            // piped-to-file export stays a clean stream.
+            out.status(&format!(
+                "exported {} record(s), {} edge(s) across {} table(s){}",
+                stats.records,
+                stats.edges,
+                stats.tables,
+                out_file
+                    .as_ref()
+                    .map(|p| format!(" to {}", p.display()))
+                    .unwrap_or_default()
+            ));
+            Ok(EXIT_OK)
+        }
+
+        Command::Import {
+            file,
+            dedup,
+            dry_run,
+        } => {
+            let db_path = require_db(&db_opt)?;
+            let db = open_with_all_detected(&db_path)?;
+
+            let opts = axil_core::ImportOptions { dedup, dry_run };
+
+            let report = if file == "-" {
+                let stdin = io::stdin();
+                axil_core::import_from_reader(&db, &opts, stdin.lock())
+                    .context("import failed")?
+            } else {
+                let f = std::fs::File::open(&file)
+                    .with_context(|| format!("failed to open '{file}'"))?;
+                axil_core::import_from_reader(&db, &opts, io::BufReader::new(f))
+                    .context("import failed")?
+            };
+
+            out.print(&json!({
+                "dry_run": dry_run,
+                "imported": report.imported,
+                "skipped_id": report.skipped_id,
+                "skipped_dup": report.skipped_dup,
+                "edges_created": report.edges_created,
+                "edges_skipped": report.edges_skipped,
+                "id_remapped": report.id_remapped,
+            }));
             Ok(EXIT_OK)
         }
 

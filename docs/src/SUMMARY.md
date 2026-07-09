@@ -29,6 +29,7 @@
 
 - [Overview](./cli/overview.md)
 - [Data Commands](./cli/data.md)
+- [Export & Import](./cli/export-import.md)
 - [Memory Commands](./cli/memory.md)
 - [Diagnostics](./cli/diagnostics.md)
 - [Code Search](./cli/code-search.md)
