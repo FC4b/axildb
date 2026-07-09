@@ -777,6 +777,15 @@ enum Command {
         is_final: bool,
     },
 
+    /// Reuse a cached answer when a semantically similar question recurs,
+    /// with code-aware invalidation.
+    ///
+    /// `axil cache put '{"question":"…","answer":"…"}'` stores a pair;
+    /// `axil cache get "<question>"` returns a hit or an explained miss.
+    #[cfg(feature = "cache")]
+    #[command(subcommand)]
+    Cache(CacheCommand),
+
     /// Resolve a display name to a canonical id via scoped aliases.
     /// Distinct from `entity-resolve` (which does fuzzy/strategy
     /// disambiguation against natural-language aliases) — this walks
@@ -3016,6 +3025,45 @@ enum DepsCommand {
         /// Project root to scan. Defaults to the current directory.
         #[arg(long, default_value = ".")]
         path: PathBuf,
+    },
+}
+
+/// Subcommands for the semantic answer cache (`axil cache …`).
+///
+/// Each variant marshals into the same `CliInvocation` the generic
+/// external-subcommand path builds, so the typed surface here and the
+/// Extension's own `handle_cli` stay in lockstep — the Extension remains the
+/// single owner of put/get/stats/clear logic.
+#[cfg(feature = "cache")]
+#[derive(Subcommand)]
+enum CacheCommand {
+    /// Store a question/answer pair. Inline JSON positional or `-` for stdin:
+    /// `{question, answer, code_refs?[], ttl?}`.
+    Put {
+        /// Inline JSON object, or `-` to read it from stdin.
+        json: Option<String>,
+    },
+    /// Look up a cached answer for a semantically similar question.
+    Get {
+        /// The question to look up.
+        question: String,
+        /// Minimum similarity for a hit (default 0.92).
+        #[arg(long)]
+        threshold: Option<f32>,
+        /// Maximum hits to return (default 1).
+        #[arg(long)]
+        top_k: Option<usize>,
+    },
+    /// Show cumulative hit / miss / eviction counters.
+    Stats,
+    /// Remove cached entries. Defaults to expired-only; `--all` wipes them.
+    Clear {
+        /// Remove every entry.
+        #[arg(long)]
+        all: bool,
+        /// Remove only entries past their TTL (the default).
+        #[arg(long)]
+        expired: bool,
     },
 }
 
@@ -11239,6 +11287,10 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             is_final,
         } => run_checkpoint_extension(arg, session, is_final, &db_opt, out),
 
+        // Marshal clap args → CliInvocation; CacheExtension owns put/get/stats/clear.
+        #[cfg(feature = "cache")]
+        Command::Cache(action) => run_cache_extension(action, &db_opt, out),
+
         #[cfg(feature = "scip")]
         Command::Scip(action) => {
             let db_path = require_db(&db_opt)?;
@@ -14824,6 +14876,81 @@ fn run_checkpoint_extension(
         axil_core::Dispatch::NotHandled => Err(anyhow::anyhow!(
             "axil checkpoint: CheckpointExtension declined the call — \
              is the `checkpoint` feature compiled in?",
+        )),
+    }
+}
+
+/// Route `axil cache …` through the CacheExtension's CLI surface via Path C
+/// dispatch, mirroring `run_checkpoint_extension`. The typed clap subcommand
+/// exists only so `cache` shows in `axil --help`; it marshals into the same
+/// `CliInvocation` the generic external-subcommand path would build, so the
+/// Extension stays the single owner of the cache logic. `cache put` captures
+/// piped stdin when the payload is `-` or omitted.
+#[cfg(feature = "cache")]
+fn run_cache_extension(cmd: CacheCommand, db_opt: &Option<PathBuf>, out: &Output) -> Result<i32> {
+    let mut stdin: Option<String> = None;
+    let (sub, args): (&str, Vec<String>) = match cmd {
+        CacheCommand::Put { json } => {
+            // Read piped stdin for the `-` and bare-`put` shorthands, matching
+            // the Extension's `read_payload` contract.
+            if matches!(json.as_deref(), Some("-") | None) {
+                stdin = read_piped_stdin();
+            }
+            ("put", json.into_iter().collect())
+        }
+        CacheCommand::Get {
+            question,
+            threshold,
+            top_k,
+        } => {
+            let mut args = vec![question];
+            if let Some(t) = threshold {
+                args.push("--threshold".into());
+                args.push(t.to_string());
+            }
+            if let Some(k) = top_k {
+                args.push("--top-k".into());
+                args.push(k.to_string());
+            }
+            ("get", args)
+        }
+        CacheCommand::Stats => ("stats", Vec::new()),
+        CacheCommand::Clear { all, expired } => {
+            let mut args = Vec::new();
+            if all {
+                args.push("--all".into());
+            }
+            if expired {
+                args.push("--expired".into());
+            }
+            ("clear", args)
+        }
+    };
+
+    let invocation = axil_core::CliInvocation {
+        command_path: vec!["cache".into(), sub.into()],
+        args,
+        stdin,
+    };
+
+    let db_path = require_db(db_opt)?;
+    let db = open_with_all_detected(&db_path)?;
+    match axil_core::dispatch_cli(&db, &db.extensions(), &invocation)? {
+        axil_core::Dispatch::Handled(output) => {
+            if !output.stdout.is_empty() {
+                match serde_json::from_str::<Value>(&output.stdout) {
+                    Ok(v) => out.print(&v),
+                    Err(_) => println!("{}", output.stdout),
+                }
+            }
+            if !output.stderr.is_empty() {
+                eprint!("{}", output.stderr);
+            }
+            Ok(output.exit_code)
+        }
+        axil_core::Dispatch::NotHandled => Err(anyhow::anyhow!(
+            "axil cache: CacheExtension declined the call — \
+             is the `cache` feature compiled in?",
         )),
     }
 }
