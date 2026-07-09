@@ -80,6 +80,12 @@ its code references re-linked. **Original ids are preserved**, so checkpoint
 are recreated between records whose endpoints resolved; an edge with a missing
 endpoint is skipped rather than left dangling.
 
+Without `--dedup`, importing a record whose id already exists **overwrites that
+record in place** (storage is keyed by id) — the engines re-fire on the imported
+content. Use `--dedup` whenever the destination may already contain any of the
+exported records; overwrite-by-id is only the right tool when you intend the
+import to win.
+
 `import` prints a JSON report:
 
 ```json
