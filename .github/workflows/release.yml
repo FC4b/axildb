@@ -90,7 +90,9 @@ jobs:
           - target: x86_64-apple-darwin
             os: macos-13
           - target: aarch64-apple-darwin
-            os: macos-latest
+            # macos-15, NOT macos-latest: the latter migrated to macOS 26, and
+            # we need an image that still ships an Xcode 16.x to select below.
+            os: macos-15
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
           - target: aarch64-unknown-linux-gnu
@@ -106,7 +108,39 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+      # Skip the build cache on macOS. A restored cache replays stale, absolute
+      # link-search paths that ort_sys/rustc baked under a different Xcode (e.g.
+      # `-L /Applications/Xcode_26.5.app/.../clang/21/lib/darwin` and a one-shot
+      # ort download dir) — both vanish on a fresh runner, so the link dies with
+      # "library 'clang_rt.osx' not found". A clean build re-runs the build
+      # scripts under the Xcode selected below. (Release builds are infrequent;
+      # a clean macOS build is the safer choice for shipped artifacts anyway.)
       - uses: Swatinem/rust-cache@v2
+        if: runner.os != 'macOS'
+      # GitHub bumped the *default* Xcode on the macOS images to 26.x, whose
+      # clang-21 resource-dir layout lacks libclang_rt.osx.a where rustc looks,
+      # so the `-lclang_rt.osx` rustc emits dies at link. Force the newest
+      # installed pre-26 Xcode via DEVELOPER_DIR (authoritative — overrides any
+      # inherited value) for every later step.
+      - name: Select a pre-26 Xcode (clang_rt.osx link fix)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Installed Xcodes:"; ls -d /Applications/Xcode*.app || true
+          sel=""
+          for app in $(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V); do
+            ver=$(basename "$app" | sed -E 's/Xcode_([0-9]+).*/\1/')
+            if [ "$ver" -lt 26 ] 2>/dev/null; then sel="$app"; fi
+          done
+          if [ -n "$sel" ]; then
+            echo "Selecting $sel"
+            sudo xcode-select -s "$sel/Contents/Developer"
+            echo "DEVELOPER_DIR=$sel/Contents/Developer" >> "$GITHUB_ENV"
+          else
+            echo "::warning::No pre-26 Xcode found; using default $(xcode-select -p)"
+          fi
+          cc --version || true
       # Build the `axil` binary with default features (includes `embed`, which
       # STATICALLY links onnxruntime via ort's `download-binaries` — the binary
       # is self-contained, no runtime onnxruntime library needed).
