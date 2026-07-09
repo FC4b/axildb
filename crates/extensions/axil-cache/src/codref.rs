@@ -35,7 +35,7 @@ use std::path::Path;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-use axil_core::Axil;
+use axil_core::{Axil, Op};
 
 /// The structural-proxy table owned by `axil-indexer`. Duplicated here as a
 /// string constant so `axil-cache` needs no dependency on the indexer crate
@@ -211,17 +211,22 @@ pub fn current_fingerprint(db: &Axil, code_ref: &Value, base_dir: &Path) -> Code
 
     // Recompute the proxy hash only when the stored ref pointed at a proxy —
     // a path-only ref never had one and must not gain one on read.
+    //
+    // Resolve the proxy row through a scoped field query instead of pulling the
+    // whole `_idx_code_proxies` table into the extension and scanning it by
+    // hand. `proxy_id` is the precise pointer, so try it first and fall back to
+    // `canonical_id`, preserving the prior "match either id" behaviour. A
+    // removed symbol matches no row → `None` → the ref reads as stale, exactly
+    // as before.
+    //
+    // Axil's storage keeps only a table→ids index, so the query engine still
+    // resolves these `where_field` equalities with a filtered table read; this
+    // expresses the point lookup (and benefits automatically if a per-field
+    // index is ever added) rather than being asymptotically cheaper today.
     let proxy_hash = if proxy_id.is_some() || canonical_id.is_some() {
-        db.list(TABLE_CODE_PROXIES)
-            .unwrap_or_default()
-            .iter()
-            .find(|r| {
-                (proxy_id.is_some()
-                    && r.data.get("proxy_id").and_then(|v| v.as_str()) == proxy_id)
-                    || (canonical_id.is_some()
-                        && r.data.get("canonical_id").and_then(|v| v.as_str()) == canonical_id)
-            })
-            .and_then(|r| r.data.get("proxy_text").and_then(|v| v.as_str()))
+        lookup_proxy_text(db, "proxy_id", proxy_id)
+            .or_else(|| lookup_proxy_text(db, "canonical_id", canonical_id))
+            .as_deref()
             .map(hash_str)
     } else {
         None
@@ -247,6 +252,27 @@ pub fn current_fingerprint(db: &Axil, code_ref: &Value, base_dir: &Path) -> Code
         file_hash,
         file_path,
     }
+}
+
+/// Fetch the `proxy_text` of the first `_idx_code_proxies` row whose `field`
+/// equals `id`, via a scoped field query. `None` when `id` is `None` or no row
+/// matches (e.g. the symbol was removed and re-indexed).
+fn lookup_proxy_text(db: &Axil, field: &str, id: Option<&str>) -> Option<String> {
+    let id = id?;
+    db.query()
+        .table(TABLE_CODE_PROXIES)
+        .where_field(field, Op::Eq, json!(id))
+        .limit(1)
+        .exec()
+        .ok()?
+        .into_iter()
+        .next()
+        .and_then(|r| {
+            r.data
+                .get("proxy_text")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        })
 }
 
 /// Compare a stored fingerprint against a freshly computed one. Returns the
@@ -433,6 +459,33 @@ mod tests {
             staleness(&stored, &current_fingerprint(&db, &r, dir.path())),
             Some(StaleReason::ProxyChanged)
         );
+    }
+
+    #[test]
+    fn current_fingerprint_resolves_proxy_via_field_lookup() {
+        let (db, dir) = temp_db();
+        // Seed a proxy addressed by canonical_id only (no proxy_id) to exercise
+        // the canonical_id fallback branch of the scoped field lookup.
+        db.insert(
+            TABLE_CODE_PROXIES,
+            json!({
+                "canonical_id": "cargo::auth::login",
+                "kind": "symbol",
+                "path": "src/auth.rs",
+                "proxy_text": "fn login(user)"
+            }),
+        )
+        .unwrap();
+        let r = resolve_ref(&db, "cargo::auth::login", dir.path());
+        let stored: CodeFingerprint =
+            serde_json::from_value(r.get("fingerprint").unwrap().clone()).unwrap();
+        assert!(stored.proxy_hash.is_some());
+
+        // current_fingerprint must recompute the same hash through the new
+        // where_field path (proxy_id absent → canonical_id fallback).
+        let now = current_fingerprint(&db, &r, dir.path());
+        assert_eq!(now.proxy_hash, Some(hash_str("fn login(user)")));
+        assert_eq!(staleness(&stored, &now), None);
     }
 
     #[test]
