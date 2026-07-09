@@ -32,7 +32,6 @@
 //! once the input parses.
 
 use std::collections::BTreeSet;
-use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -164,13 +163,77 @@ fn parse_event(dialect: Dialect, input: &Value, event_override: Option<&str>) ->
     }
 }
 
+/// Read the hook payload from stdin, tolerant of agents that send the JSON
+/// but DON'T close stdin (observed with Antigravity's `agy`: a plain
+/// `read_to_string` there blocks forever waiting for an EOF that never
+/// comes, hanging the hook and the whole agent turn). Strategy: read in a
+/// detached thread, and return as soon as the buffer parses as complete
+/// JSON — no EOF required. Falls back to whatever arrived if EOF or a hard
+/// deadline comes first. Returns None on empty input.
+fn read_hook_stdin() -> Option<String> {
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    let (tx, rx) = mpsc::channel::<Vec<u8>>();
+    // Detached reader: pushes each chunk as it arrives. If stdin never
+    // closes, this thread blocks in read() forever — harmless, the process
+    // exits when main returns regardless of live threads.
+    std::thread::spawn(move || {
+        use std::io::Read as _;
+        let mut stdin = std::io::stdin();
+        let mut chunk = [0u8; 8192];
+        loop {
+            match stdin.read(&mut chunk) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    if tx.send(chunk[..n].to_vec()).is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut buf: Vec<u8> = Vec::new();
+    loop {
+        // As soon as what we have is valid JSON, we're done — this is the
+        // fast path when the agent sent one complete object and stalled.
+        if !buf.is_empty() {
+            if let Ok(s) = std::str::from_utf8(&buf) {
+                if serde_json::from_str::<Value>(s.trim()).is_ok() {
+                    return Some(s.to_string());
+                }
+            }
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match rx.recv_timeout(remaining.min(Duration::from_millis(250))) {
+            Ok(chunk) => buf.extend_from_slice(&chunk),
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if Instant::now() >= deadline {
+                    break;
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => break, // EOF
+        }
+    }
+    let s = String::from_utf8_lossy(&buf).into_owned();
+    if s.trim().is_empty() {
+        None
+    } else {
+        Some(s)
+    }
+}
+
 pub(crate) fn run(dialect: &str, event_override: Option<&str>) -> Result<i32> {
     let dialect = parse_dialect(dialect)?;
 
-    let mut raw = String::new();
-    if std::io::stdin().read_to_string(&mut raw).is_err() || raw.trim().is_empty() {
+    let Some(raw) = read_hook_stdin() else {
         return Ok(0);
-    }
+    };
     let input: Value = match serde_json::from_str(raw.trim()) {
         Ok(v) => v,
         Err(_) => return Ok(0),
@@ -220,10 +283,9 @@ fn tool_summary(tool: &ToolAction) -> Value {
 pub(crate) fn capture(dialect: &str, event_override: Option<&str>) -> Result<i32> {
     let d = parse_dialect(dialect)?;
 
-    let mut raw = String::new();
-    if std::io::stdin().read_to_string(&mut raw).is_err() || raw.trim().is_empty() {
+    let Some(raw) = read_hook_stdin() else {
         return Ok(0);
-    }
+    };
     let trimmed = raw.trim();
     // Keep the parse result and the original text separately: a payload that
     // ISN'T valid JSON is the most debug-worthy case, so it must reach the
@@ -391,9 +453,12 @@ fn codex_tool_action(input: &Value, tool_name: &str) -> ToolAction {
             stderr: response_str(input, &["stderr"]),
         },
         // Codex edits files through apply_patch; the patch body names the
-        // touched file(s) — surface the first as the edited path.
+        // touched file(s) — surface the first as the edited path. Observed
+        // live: real Codex puts the patch body in `tool_input.command`
+        // (the docs' `input`/`patch` never appear); keep those as fallbacks.
         "apply_patch" => {
-            let patch = nested_str(input, &["tool_input", "input"])
+            let patch = nested_str(input, &["tool_input", "command"])
+                .or_else(|| nested_str(input, &["tool_input", "input"]))
                 .or_else(|| nested_str(input, &["tool_input", "patch"]))
                 .unwrap_or_default();
             match first_patch_path(&patch) {
@@ -966,6 +1031,22 @@ impl HookCtx {
         )
     }
 
+    /// Spawn an axil subcommand with ALL stdio detached (null) and don't
+    /// wait — for opportunistic background work whose output we don't need.
+    /// Crucially, null stdout means the child never inherits the agent's
+    /// hook pipe, so the agent's turn never blocks waiting on it.
+    fn spawn_fire_and_forget(&self, args: &[&str]) {
+        let Some(db) = self.db.as_ref() else { return };
+        let _ = Command::new(&self.exe)
+            .arg("--db")
+            .arg(db)
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+    }
+
     /// Same but feeding bytes to the child's stdin (`auto-capture -` etc.).
     fn axil_db_out_stdin(&self, args: &[&str], stdin_bytes: &[u8]) -> Option<String> {
         let db = self.db.as_ref()?;
@@ -1146,11 +1227,14 @@ impl HookCtx {
         let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
         let boot = self.axil_db_out(&arg_refs);
 
-        // Opportunistic background refreshes. Both subcommands self-detach
-        // (`--in-background`) and gate on staleness, so these return fast;
-        // errors are silent — the brain hook must never block the agent.
-        let _ = self.axil_db_out(&["scip", "refresh", "--if-stale", "--in-background", "--quiet"]);
-        let _ = self.axil_db_out(&["maintain", "--if-stale", "--in-background", "--quiet"]);
+        // Opportunistic background refreshes — fire-and-forget with stdio
+        // fully detached. These spawn their own detached workers; if the
+        // hook CAPTURED their stdout (via .output()), the agent's hook
+        // pipe would stay open until those grandchildren exit, hanging the
+        // whole turn (observed with Antigravity's `agy`). Spawning with
+        // null stdio and not waiting keeps the hook instant.
+        self.spawn_fire_and_forget(&["scip", "refresh", "--if-stale", "--in-background", "--quiet"]);
+        self.spawn_fire_and_forget(&["maintain", "--if-stale", "--in-background", "--quiet"]);
 
         boot.filter(|b| !b.trim().is_empty())
     }

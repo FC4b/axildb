@@ -61,7 +61,7 @@ contract** is written by default (opt out with `--no-agents-md`).
 | **codex** | `.codex/hooks.json` | project `.codex/config.toml` `[mcp_servers.axil]` | `.agents/skills/<name>/SKILL.md` |
 | **copilot** | `.github/hooks/axil.json` | user `~/.copilot/mcp-config.json` | — |
 | **droid** | `.factory/hooks.json` | project `.factory/mcp.json` | — |
-| **antigravity** | `.agents/hooks.json` (key `axil-brain`) | project `.agents/mcp_config.json` | `.agents/rules/axil.md` + `.agents/skills/` |
+| **antigravity** | `.agents/axil-plugin/` → `agy plugin install` | project `.agents/mcp_config.json` | `.agents/rules/axil.md` + `.agents/skills/` |
 | **qwen** | `.qwen/settings.json` `hooks` | `.qwen/settings.json` `mcpServers` | `context.fileName` gains `AGENTS.md` |
 | **opencode** | `.opencode/plugins/axil.ts` (local plugin) | `opencode.json` `mcp.axil` | reads `AGENTS.md` / `CLAUDE.md` |
 
@@ -82,11 +82,16 @@ for free. The MCP entry is per-user and pins no `--db` — it auto-detects
 `.axil/memory.axil` from the launch directory, so one entry serves every
 project.
 
-**Antigravity CLI** rewrote the Gemini hook contract: it has no session-start
-event, so boot rides the first `PreInvocation` (before the first model call)
-and context queued by tool hooks is flushed there as an `injectSteps` message.
-Its file-edit argument keys are inferred from docs — if edit capture looks
-empty, see [Verifying dialects](#verifying-dialects).
+**Antigravity CLI (`agy`)** integrates as an installable **plugin**, not a
+loose hook file — `axil install --antigravity` stages `.agents/axil-plugin/`
+(a `plugin.json` + root `hooks.json`) and runs `agy plugin install` for you
+(if `agy` is on your PATH; otherwise it prints the one-line command). Its hook
+payload is the Antigravity shape (`toolCall.args`, `conversationId`), which the
+`antigravity` dialect parses — **verified live against `agy` 1.1.0**: shell
+(`run_command`) and file writes (`write_to_file` → `TargetFile`/`CodeContent`)
+map correctly and a full turn writes a session record. One gotcha: `agy -p`
+headless mode needs `--add-dir <path>` to set the workspace; interactive use
+does not.
 
 **Qwen Code** ships its own LLM-driven auto-memory. To avoid double-capture,
 set `memory.enableManagedAutoMemory = false` (and `enableManagedAutoDream`,

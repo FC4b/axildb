@@ -4150,54 +4150,72 @@ fn install_droid_full(cwd: &Path) -> Result<Value> {
     }))
 }
 
-/// Antigravity CLI hooks: `.agents/hooks.json`. The top level maps
-/// user-chosen hook NAMES to event configs — Axil owns the `axil-brain`
-/// key and replaces it wholesale, preserving every other named hook.
-/// Payloads carry no event name, so each registration passes `--event`.
-/// Timeouts are SECONDS (unlike Qwen's milliseconds). There is no
-/// session-start event: the brain boots on the first PreInvocation and
-/// flushes queued context there (`injectSteps`).
-fn install_antigravity_hooks(cwd: &Path) -> Result<bool> {
-    let path = cwd.join(".agents").join("hooks.json");
+/// Build the Antigravity (`agy`) plugin: a directory with `plugin.json`
+/// plus a root `hooks.json`, then register it via `agy plugin install`.
+///
+/// Verified on `agy` 1.1.0: agy does NOT read a loose `.agents/hooks.json`
+/// — its extension unit is a *plugin* (`agy plugin install <dir>`), whose
+/// hooks live in a `hooks.json` at the plugin root (matcher-group shape).
+/// Payloads carry no event name, so each hook passes `--event`.
+///
+/// Returns (plugin_dir, registered) — `registered` is true only if the
+/// `agy plugin install` actually ran (agy on PATH); otherwise the plugin
+/// is staged and the caller surfaces the one-line manual command.
+fn install_antigravity_plugin(cwd: &Path) -> Result<(PathBuf, bool)> {
+    let plugin_dir = cwd.join(".agents").join("axil-plugin");
+    std::fs::create_dir_all(&plugin_dir)?;
+    std::fs::write(
+        plugin_dir.join("plugin.json"),
+        "{\n  \"name\": \"axil\",\n  \"version\": \"1.0.0\",\n  \"description\": \"Axil cognitive memory hooks\"\n}\n",
+    )?;
+
     let cmd = |event: &str| format!("{} --event {event}", hook_run_command_for("antigravity"));
-
-    let existing = std::fs::read_to_string(&path).unwrap_or_default();
-    let mut root: serde_json::Map<String, Value> = if existing.trim().is_empty() {
-        serde_json::Map::new()
-    } else {
-        serde_json::from_str(&existing)
-            .with_context(|| format!("{} is not valid JSON — fix it and rerun", path.display()))?
+    let group = |event: &str, timeout: i64| {
+        json!([{ "hooks": [ { "type": "command", "command": cmd(event), "timeout": timeout } ] }])
     };
-
-    // Tool events use the matcher-group shape, agent-loop events the flat
-    // shape — mirroring the official docs' own examples.
-    root.insert(
-        "axil-brain".to_string(),
-        json!({
-            "PreInvocation": [
-                { "type": "command", "command": cmd("PreInvocation"), "timeout": 10 }
-            ],
-            "PreToolUse": [
-                { "hooks": [ { "type": "command", "command": cmd("PreToolUse"), "timeout": 10 } ] }
-            ],
-            "PostToolUse": [
-                { "hooks": [ { "type": "command", "command": cmd("PostToolUse"), "timeout": 5 } ] }
-            ],
-            "Stop": [
-                { "type": "command", "command": cmd("Stop"), "timeout": 15 }
-            ],
-        }),
-    );
-
-    let next = serde_json::to_string_pretty(&Value::Object(root))? + "\n";
-    let changed = existing != next;
-    if changed {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
+    let hooks = json!({
+        "hooks": {
+            "SessionStart": group("SessionStart", 10),
+            "PreToolUse":   group("PreToolUse", 10),
+            "PostToolUse":  group("PostToolUse", 10),
+            "Stop":         group("Stop", 15),
         }
-        std::fs::write(&path, next)?;
-    }
-    Ok(changed)
+    });
+    std::fs::write(
+        plugin_dir.join("hooks.json"),
+        serde_json::to_string_pretty(&hooks)? + "\n",
+    )?;
+
+    // Best-effort registration. `agy` may not be on PATH (it installs to a
+    // per-user dir); try the bare name and the known Windows location.
+    let registered = ["agy", "agy.exe"]
+        .iter()
+        .map(|s| s.to_string())
+        .chain(
+            axil_core::home_dir()
+                .map(|h| {
+                    h.join("AppData")
+                        .join("Local")
+                        .join("agy")
+                        .join("bin")
+                        .join("agy.exe")
+                        .display()
+                        .to_string()
+                })
+                .into_iter(),
+        )
+        .any(|exe| {
+            std::process::Command::new(&exe)
+                .args(["plugin", "install"])
+                .arg(&plugin_dir)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        });
+    Ok((plugin_dir, registered))
 }
 
 /// Qwen Code hooks: the top-level `hooks` key in `.qwen/settings.json`,
@@ -4238,13 +4256,23 @@ fn install_antigravity_full(cwd: &Path, db_path: &Path) -> Result<Value> {
         skills.push(skill.name);
     }
 
-    let hooks_written = install_antigravity_hooks(cwd)?;
+    let (plugin_dir, registered) = install_antigravity_plugin(cwd)?;
+    let note = if registered {
+        "installed the axil plugin via `agy plugin install` (hooks now active)".to_string()
+    } else {
+        format!(
+            "agy not found on PATH — register the hooks yourself: `agy plugin install {}`",
+            plugin_dir.display()
+        )
+    };
     Ok(json!({
         "rules": rules_dir.join("axil.md").display().to_string(),
         "skills_dir": skills_root.display().to_string(),
         "skills": skills,
-        "hooks_written": hooks_written,
+        "plugin_dir": plugin_dir.display().to_string(),
+        "plugin_registered": registered,
         "mcp": mcp_register_soft(cwd, "antigravity"),
+        "note": note,
     }))
 }
 
@@ -4629,7 +4657,10 @@ fn dry_run_install_plan(
         files.push(cwd.join(".factory").join("mcp.json").display().to_string() + " (MCP entry)");
     }
     if antigravity || all {
-        files.push(cwd.join(".agents").join("hooks.json").display().to_string() + " (merged)");
+        files.push(
+            cwd.join(".agents").join("axil-plugin").display().to_string()
+                + "/ (plugin.json + hooks.json → `agy plugin install`)",
+        );
         files.push(cwd.join(".agents").join("rules").join("axil.md").display().to_string());
         files.push(
             cwd.join(".agents")
@@ -4868,11 +4899,24 @@ fn uninstall_agent_integrations(cwd: &Path, dry_run: bool, removed: &mut Vec<Str
     note(cwd.join(".factory/hooks.json"), remove_claude_style_hooks(&cwd.join(".factory/hooks.json"), dry_run));
     note(cwd.join(".factory/mcp.json"), remove_json_entry(&cwd.join(".factory/mcp.json"), "mcpServers", "axil", dry_run));
 
-    // Antigravity: named hook key + rule + MCP (skills shared with Codex,
-    // removed once below).
+    // Antigravity: plugin dir + rule + MCP (skills shared with Codex,
+    // removed once below). Also strip the legacy `.agents/hooks.json`
+    // axil-brain key from pre-plugin installs, and unregister the plugin
+    // from agy if it's on PATH.
+    note(cwd.join(".agents/axil-plugin"), del_dir(cwd.join(".agents/axil-plugin")));
     note(cwd.join(".agents/hooks.json"), remove_json_entry(&cwd.join(".agents/hooks.json"), "", "axil-brain", dry_run));
     note(cwd.join(".agents/rules/axil.md"), del(cwd.join(".agents/rules/axil.md")));
     note(cwd.join(".agents/mcp_config.json"), remove_json_entry(&cwd.join(".agents/mcp_config.json"), "mcpServers", "axil", dry_run));
+    if !dry_run {
+        for exe in ["agy", "agy.exe"] {
+            let _ = std::process::Command::new(exe)
+                .args(["plugin", "uninstall", "axil"])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+        }
+    }
 
     // Shared cross-tool skills under .agents/skills (Codex + Antigravity).
     for skill in ALL_SKILLS {
