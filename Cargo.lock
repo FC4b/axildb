@@ -222,10 +222,24 @@ dependencies = [
 name = "axil-bundle"
 version = "1.2.0"
 dependencies = [
+ "axil-cache",
  "axil-checkpoint",
  "axil-core",
  "axil-docs",
  "tempfile",
+]
+
+[[package]]
+name = "axil-cache"
+version = "2.0.1"
+dependencies = [
+ "axil-core",
+ "chrono",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -335,6 +349,7 @@ version = "1.2.0"
 dependencies = [
  "anyhow",
  "axil-bundle",
+ "axil-cache",
  "axil-checkpoint",
  "axil-core",
  "axil-docs",
@@ -491,6 +506,7 @@ version = "1.2.0"
 dependencies = [
  "anyhow",
  "axil-bundle",
+ "axil-cache",
  "axil-checkpoint",
  "axil-core",
  "axil-docs",

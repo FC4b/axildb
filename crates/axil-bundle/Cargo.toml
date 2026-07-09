@@ -15,6 +15,7 @@ axil-core.workspace = true
 # own crate rather than living inside an adapter.
 axil-docs = { workspace = true, optional = true }
 axil-checkpoint = { workspace = true, optional = true }
+axil-cache = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
@@ -23,4 +24,5 @@ tempfile = { workspace = true }
 default = []
 deps = ["dep:axil-docs"]
 checkpoint = ["dep:axil-checkpoint"]
-full = ["deps", "checkpoint"]
+cache = ["dep:axil-cache"]
+full = ["deps", "checkpoint", "cache"]

@@ -83,7 +83,7 @@ server is reading real memory. If the handshake frame is missing or
 ## The tool surface
 
 The assembled surface is the built-in tools plus the tools of every enabled
-**Extension** (`deps` and `checkpoint` ship by default). The groups below describe
+**Extension** (`deps`, `checkpoint`, and `cache` ship by default). The groups below describe
 the full default surface; a trimmed build that disables an Extension drops that
 Extension's tools.
 
@@ -143,6 +143,13 @@ an error, or a preference: they auto-embed, auto-supersede, and dedupe.
 |------|--------|-------------|
 | `checkpoint` | `goal?`, `state?`, `next_steps?` string[], `open_questions?` string[], `references?` object[], `summary?`, `session?`, `final?` bool | Write a structured checkpoint so a fresh agent can resume. `references[]` are typed pointers (`{kind, ref, note?}`), not copies; `record` kinds resolve live at boot. Replaces the old free-text session summary. |
 | `checkpoint_show` | (none) | Return the current checkpoint — the stored one if present, otherwise one derived from the latest session. |
+
+### Extension tools — semantic answer cache (`cache` feature)
+
+| Tool | Params | When to use |
+|------|--------|-------------|
+| `cache_put` | `question` string (req), `answer` string (req), `code_refs?` string[], `ttl?` int, `valid_until?` string | Cache a question/answer pair so a future semantically similar question returns the stored answer instead of re-deriving it. `code_refs` (proxy_id \| canonical_id \| path[:line]) pin the answer to code; the entry is invalidated when that code changes. |
+| `cache_get` | `question` string (req), `threshold?` number (default 0.92), `top_k?` int (default 1) | Return a cached answer for a semantically similar question, or a miss. A hit re-checks TTL and code-ref fingerprints first, so a returned answer is neither expired nor invalidated by a code change. Miss reasons distinguish `no_match` / `below_threshold` / `stale_code` / `expired`. |
 
 ### Cross-agent delta — `recall_delta` (`event-log` feature, off by default)
 

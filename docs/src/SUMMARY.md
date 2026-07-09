@@ -35,6 +35,7 @@
 - [Code Search](./cli/code-search.md)
 - [AxilQL](./cli/axilql.md)
 - [Dependency Docs](./cli/dependency-docs.md)
+- [Semantic Answer Cache](./cli/cache.md)
 
 # Rust API
 

@@ -18,6 +18,7 @@ axil-workspace.workspace = true
 # Optional Tier-2 Extensions — gate so consumers can build a trimmed
 # MCP server binary without pulling them in. Matches axil-cli's pattern.
 axil-checkpoint = { workspace = true, optional = true }
+axil-cache = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "io-std"] }
@@ -36,12 +37,15 @@ axil-timeseries = { workspace = true, optional = true }
 tempfile = { workspace = true }
 
 [features]
-default = ["vector", "graph", "fts", "timeseries", "checkpoint"]
+default = ["vector", "graph", "fts", "timeseries", "checkpoint", "cache"]
 vector = ["dep:axil-vector"]
 graph = ["dep:axil-graph"]
 fts = ["dep:axil-fts"]
 timeseries = ["dep:axil-timeseries"]
 checkpoint = ["dep:axil-checkpoint", "axil-bundle/checkpoint"]
+# Semantic answer cache tools (`cache_get` / `cache_put`). Route through the
+# generic Extension MCP dispatch, so no hardcoded handler in this crate.
+cache = ["dep:axil-cache", "axil-bundle/cache"]
 # Vector with embedder (bge-small/etc.) for plugin-attach parity with CLI.
 embed = ["vector", "axil-vector/embed"]
 # Durable semantic event log + the `recall_delta` MCP tool. Off by default —
