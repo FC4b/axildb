@@ -11,7 +11,7 @@
 
 ### Agent memory in one local file. No server, no cloud, no LLM.
 
-*Think SQLite, but for your agent's memory — a file you embed, not a database you run.*
+*A memory that compounds: every session it learns, links, and prunes — so your agent starts tomorrow smarter than it ended today.*
 
 **Built in Rust · local-first · single ~5–10MB binary · vector + graph + full-text + time-series · MCP · up to ~80% fewer context tokens on large, semantic-search workloads**
 
