@@ -174,7 +174,7 @@ Everything below normally means standing up a vector DB **and** Neo4j **and** El
 
 **🔎 Multi-model retrieval** — HNSW vector search (local ONNX/BGE) · a **temporal knowledge graph** (typed edges, traversal, entity extraction + inference, time-aware `as_of` queries — no Neo4j) · Tantivy full-text · time-series. One `recall()` fuses them all (RRF) with per-result score explanations.
 
-**💻 Built for code agents** — structural code index + `code-search` / `code-context` (pointer-shaped, token-frugal) · SCIP cross-reference graph · version-pinned dependency-doc memory · structured session checkpoints · AxilQL · MCP server (full CLI parity).
+**💻 Built for code agents** — structural code index + `code-search` / `code-context` (pointer-shaped, token-frugal) · SCIP cross-reference graph · version-pinned dependency-doc memory · structured session checkpoints · a **semantic answer cache** that invalidates itself when the referenced code changes (not just a TTL) · portable memory **export/import** (mergeable JSONL — share memory with a teammate or another machine) · AxilQL · MCP server (full CLI parity).
 
 **🔌 Optional LLM upgrade** — plug in Claude / GPT / Ollama (or Claude Code skills) to sharpen entity extraction & consolidation beyond the algorithmic defaults. Everything above runs without it.
 
@@ -275,7 +275,7 @@ model = "gpt-4o-mini"                     # api_key via AXIL_LLM_API_KEY env var
 |-------|-------|
 | **Getting started** | [Install](docs/src/getting-started/installation.md) · [Quick Start](docs/src/getting-started/quick-start.md) · [Configuration](docs/src/getting-started/configuration.md) |
 | **Concepts** | [Architecture](docs/src/concepts/architecture.md) · [Memory Types](docs/src/concepts/memory-types.md) · [Engines](docs/src/concepts/plugins.md) · [Storage Model](docs/src/concepts/storage.md) |
-| **CLI reference** | [Data](docs/src/cli/data.md) · [Memory](docs/src/cli/memory.md) · [Code Search](docs/src/cli/code-search.md) · [Diagnostics](docs/src/cli/diagnostics.md) · [AxilQL](docs/src/cli/axilql.md) · [Dependency Docs](docs/src/cli/dependency-docs.md) |
+| **CLI reference** | [Data](docs/src/cli/data.md) · [Memory](docs/src/cli/memory.md) · [Code Search](docs/src/cli/code-search.md) · [Answer Cache](docs/src/cli/cache.md) · [Export & Import](docs/src/cli/export-import.md) · [Diagnostics](docs/src/cli/diagnostics.md) · [AxilQL](docs/src/cli/axilql.md) · [Dependency Docs](docs/src/cli/dependency-docs.md) |
 | **Agent integration** | [Claude Code](docs/src/agents/claude-code.md) · [Terminal Agents](docs/src/agents/terminal-agents.md) · [MCP Server](docs/src/agents/mcp.md) · [Multi-Agent](docs/src/agents/multi-agent.md) |
 | **Deep dives** | [Benchmarks](docs/src/advanced/benchmarks.md) · [Context Economics](docs/src/advanced/context-economics.md) · [Retrieval Pipeline](docs/src/advanced/retrieval-pipeline.md) · [Cognitive Memory](docs/src/advanced/cognitive.md) |
 | **Extending Axil** | [Three Tiers](docs/src/extending/overview.md) · [Engines](docs/src/extending/engines.md) · [Extensions](docs/src/extending/extensions.md) · [Adapters](docs/src/extending/adapters.md) |

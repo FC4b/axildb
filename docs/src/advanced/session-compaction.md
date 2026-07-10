@@ -236,10 +236,12 @@ importance and pinned records are protected. Auto-compact fires when the
 delete count crosses a configurable threshold. See
 [Memory Hygiene](./memory-hygiene.md) for the full maintenance toolkit.
 
-One current caveat: checkpoint records (`_checkpoint_records`) are **not
-yet swept** by the decay/TTL machinery — they accumulate slowly (one row
-per snapshot) and are pruned manually with `axil delete <ID>` until a
-cross-extension retention hook lands.
+Checkpoint records prune themselves on the write path: each new
+`snapshot` checkpoint trims that session's older snapshots down to the
+most recent three, so `_checkpoint_records` stays bounded without a
+background sweep. `final` checkpoints are never pruned — a session's
+closing state is permanent history (remove one manually with
+`axil delete <ID>` if you must).
 
 ## See also
 
