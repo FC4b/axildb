@@ -50,7 +50,8 @@ use axil_core::{Axil, AxilError, Op, Record, Result};
 
 /// Table holding cached question/answer pairs.
 ///
-/// Prefix `_cache_` follows the Phase-17 Extension convention. Kept plural so
+/// The `_cache_` prefix namespaces every table this Extension owns, so its
+/// rows never collide with core tables or another Extension's. Kept plural so
 /// the sibling counters table (`_cache_meta`) slots in under the same prefix.
 pub const TABLE_CACHE_ENTRIES: &str = "_cache_entries";
 
@@ -74,6 +75,8 @@ pub enum CacheError {
     MissingFields,
     #[error("invalid `valid_until` timestamp: {0}")]
     BadTimestamp(String),
+    #[error("ttl of {0} seconds overflows the maximum representable expiry")]
+    TtlOverflow(u64),
     #[error("axil error: {0}")]
     Axil(#[from] AxilError),
     #[error("json error: {0}")]
@@ -121,9 +124,22 @@ impl PutRequest {
                 .with_timezone(&Utc);
             return Ok(Some(parsed));
         }
-        Ok(self
-            .ttl
-            .map(|secs| Utc::now() + chrono::Duration::seconds(secs as i64)))
+        // A caller-supplied `ttl` is unbounded. `TimeDelta::seconds` panics on
+        // out-of-range input and a u64 past `i64::MAX` would wrap negative
+        // through `as i64`, so convert and add fallibly: `try_seconds` rejects
+        // a delta too large to represent and `checked_add_signed` rejects an
+        // expiry past chrono's maximum date. Either way the overflow surfaces
+        // as an error instead of a panic that would kill the process.
+        let Some(secs) = self.ttl else {
+            return Ok(None);
+        };
+        let secs_i64 = i64::try_from(secs).map_err(|_| CacheError::TtlOverflow(secs))?;
+        let delta =
+            chrono::TimeDelta::try_seconds(secs_i64).ok_or(CacheError::TtlOverflow(secs))?;
+        let expiry = Utc::now()
+            .checked_add_signed(delta)
+            .ok_or(CacheError::TtlOverflow(secs))?;
+        Ok(Some(expiry))
     }
 }
 
@@ -196,6 +212,8 @@ pub enum MissReason {
 }
 
 impl MissReason {
+    /// The stable snake_case wire token for this reason, as surfaced in the
+    /// CLI and MCP miss payloads.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::NoMatch => "no_match",
@@ -885,5 +903,46 @@ mod tests {
         };
         let vu = req.resolve_valid_until().unwrap().unwrap();
         assert!(vu > Utc::now());
+    }
+
+    #[test]
+    fn huge_ttl_is_an_error_not_a_panic() {
+        // Past i64::MAX: `as i64` would wrap negative and the old add panicked.
+        let req = PutRequest {
+            question: "q".into(),
+            answer: "a".into(),
+            ttl: Some(u64::MAX),
+            ..Default::default()
+        };
+        assert!(matches!(
+            req.resolve_valid_until(),
+            Err(CacheError::TtlOverflow(_))
+        ));
+
+        // In i64 range but large enough that `now + delta` overflows chrono's
+        // maximum date — the second panic path.
+        let req = PutRequest {
+            question: "q".into(),
+            answer: "a".into(),
+            ttl: Some(10_000_000_000_000_000),
+            ..Default::default()
+        };
+        assert!(matches!(
+            req.resolve_valid_until(),
+            Err(CacheError::TtlOverflow(_))
+        ));
+    }
+
+    #[test]
+    fn put_with_huge_ttl_returns_error_not_panic() {
+        // The panic was reachable straight through `put` from CLI/MCP input.
+        let (db, dir) = plain_db();
+        let mut req = put_req("q", "a");
+        req.ttl = Some(u64::MAX);
+        assert!(matches!(
+            put(&db, &req, dir.path()),
+            Err(CacheError::TtlOverflow(_))
+        ));
+        assert_eq!(db.list(TABLE_CACHE_ENTRIES).unwrap().len(), 0);
     }
 }
