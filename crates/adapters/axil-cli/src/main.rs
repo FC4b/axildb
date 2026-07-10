@@ -1157,8 +1157,11 @@ enum Command {
     /// Import memory from a JSONL file produced by `axil export`.
     ///
     /// Records are recreated through the normal insert path (so embeddings, FTS,
-    /// and code_refs are rebuilt) with their original ids preserved. Edges are
-    /// recreated between resolvable endpoints.
+    /// and code_refs are rebuilt) with their original ids preserved. A record
+    /// whose id already exists is OVERWRITTEN in place (reported as
+    /// `overwritten`); pass --dedup to skip existing ids and same-content
+    /// duplicates instead. Edges are recreated between resolvable endpoints,
+    /// never duplicated on re-import.
     Import {
         /// Path to the JSONL export file (or "-" to read from stdin).
         file: String,
@@ -4001,24 +4004,69 @@ fn is_axil_hook_command(cmd: &str) -> bool {
         || (cmd.contains("axil") && cmd.contains(" hook run"))
 }
 
-/// The executable to reference from agent configs. Prefers bare `axil`
-/// when it resolves on PATH (portable across machines sharing the repo);
-/// otherwise pins this binary's absolute path so the wiring works without
-/// any PATH setup.
-fn resolved_axil_exe() -> String {
-    let axil_on_path = std::env::var_os("PATH")
+/// True when an `axil` executable resolves on PATH.
+fn axil_is_on_path() -> bool {
+    std::env::var_os("PATH")
         .map(|p| {
             std::env::split_paths(&p)
                 .any(|d| d.join(format!("axil{}", std::env::consts::EXE_SUFFIX)).is_file())
         })
-        .unwrap_or(false);
-    if axil_on_path {
-        "axil".to_string()
-    } else {
-        std::env::current_exe()
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|_| "axil".to_string())
+        .unwrap_or(false)
+}
+
+/// Handshake the PATH `axil` against the current hook contract by running
+/// `axil hook run --help`: clap short-circuits `--help` to exit 0 before it
+/// ever reads stdin, so a zero exit proves the `hook run` subcommand exists.
+/// A binary predating the subcommand emits clap's usage error (exit 2), and a
+/// missing/non-executable one fails to spawn — both surface as `false`. stdin
+/// is nulled so an old binary that expected a payload sees immediate EOF
+/// instead of blocking. Kept non-interactive and quiet (all stdio nulled).
+fn probe_path_axil_hook_run() -> bool {
+    std::process::Command::new("axil")
+        .args(["hook", "run", "--help"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Pick the executable string wired into agent hook configs. Bare `axil` is
+/// only safe when a PATH copy passes `probe` — otherwise a stale released
+/// binary (every one predates `hook run`) would be invoked as
+/// `axil hook run --dialect …`, exit clap's usage code 2, and be read by the
+/// agent as a BLOCKING PreToolUse/Stop hook error — vetoing every tool call.
+/// On any doubt, pin `current_exe`'s absolute path; only when even that is
+/// unavailable fall back to the bare name. `probe`/`current_exe` are injected
+/// so the branch matrix is testable without a real PATH or subprocess.
+fn resolve_axil_exe_with(
+    on_path: bool,
+    probe: impl FnOnce() -> bool,
+    current_exe: impl FnOnce() -> Option<String>,
+) -> String {
+    if on_path && probe() {
+        return "axil".to_string();
     }
+    current_exe().unwrap_or_else(|| "axil".to_string())
+}
+
+/// The executable to reference from agent configs. Prefers bare `axil` when a
+/// PATH copy proves it speaks the current `hook run` contract (portable across
+/// machines sharing the repo); otherwise pins this binary's absolute path.
+/// Memoized: the handshake spawns at most once per process, not per dialect.
+fn resolved_axil_exe() -> String {
+    use std::sync::OnceLock;
+    static RESOLVED: OnceLock<String> = OnceLock::new();
+    RESOLVED
+        .get_or_init(|| {
+            resolve_axil_exe_with(axil_is_on_path(), probe_path_axil_hook_run, || {
+                std::env::current_exe()
+                    .ok()
+                    .map(|p| p.display().to_string())
+            })
+        })
+        .clone()
 }
 
 /// The command string wired into agent hook configs.
@@ -4260,12 +4308,17 @@ fn install_antigravity_plugin(cwd: &Path) -> Result<(PathBuf, bool)> {
     let group = |event: &str, timeout: i64| {
         json!([{ "hooks": [ { "type": "command", "command": cmd(event), "timeout": timeout } ] }])
     };
+    // PreInvocation, not SessionStart: Antigravity emits no session-start
+    // event, and PreInvocation is the dialect's only context-injection
+    // channel — its first fire carries the boot and later fires flush queued
+    // context. Registering SessionStart would parse to nothing and leave
+    // injection inert. Events must match parse_antigravity's accepted set.
     let hooks = json!({
         "hooks": {
-            "SessionStart": group("SessionStart", 10),
-            "PreToolUse":   group("PreToolUse", 10),
-            "PostToolUse":  group("PostToolUse", 10),
-            "Stop":         group("Stop", 15),
+            "PreInvocation": group("PreInvocation", 10),
+            "PreToolUse":    group("PreToolUse", 10),
+            "PostToolUse":   group("PostToolUse", 10),
+            "Stop":          group("Stop", 15),
         }
     });
     std::fs::write(
@@ -4640,8 +4693,7 @@ fn install_hooks_to_settings(path: &Path) -> Result<bool> {
     Ok(true)
 }
 
-/// 12.1: preview every file/entry that an `axil install` run would touch, without writing.
-#[allow(clippy::too_many_arguments)]
+/// Preview every file/entry that an `axil install` run would touch, without writing.
 #[allow(clippy::too_many_arguments)]
 fn dry_run_install_plan(
     cwd: &Path,
@@ -4682,7 +4734,7 @@ fn dry_run_install_plan(
             gitignore_path.display()
         ));
     }
-    if claude_code {
+    if claude_code || all {
         let cc_dir = cwd.join(".claude");
         files.push(cc_dir.join("CLAUDE.md").display().to_string());
         files.push(format!(
@@ -8172,27 +8224,62 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
 
             let opts = axil_core::ImportOptions { dedup, dry_run };
 
-            let report = if file == "-" {
+            let result = if file == "-" {
                 let stdin = io::stdin();
                 axil_core::import_from_reader(&db, &opts, stdin.lock())
-                    .context("import failed")?
             } else {
                 let f = std::fs::File::open(&file)
                     .with_context(|| format!("failed to open '{file}'"))?;
                 axil_core::import_from_reader(&db, &opts, io::BufReader::new(f))
-                    .context("import failed")?
+            };
+
+            // A mid-stream failure still committed everything before it (import
+            // is fail-fast with partial state) — surface the partial report so
+            // the accounting isn't lost with the error, then fail below.
+            let (report, interrupted) = match result {
+                Ok(report) => (report, None),
+                Err(axil_core::AxilError::ImportInterrupted { report, source }) => {
+                    (*report, Some(source.to_string()))
+                }
+                Err(e) => return Err(e).context("import failed"),
             };
 
             out.print(&json!({
                 "dry_run": dry_run,
+                "interrupted": interrupted.is_some(),
                 "imported": report.imported,
+                "overwritten": report.overwritten,
                 "skipped_id": report.skipped_id,
                 "skipped_dup": report.skipped_dup,
+                "superseded": report.superseded,
                 "edges_created": report.edges_created,
                 "edges_skipped": report.edges_skipped,
+                "edges_remapped": report.edges_remapped,
                 "id_remapped": report.id_remapped,
                 "embeddings": report.embeddings,
             }));
+            // An import that replaces or demotes existing records should never
+            // pass silently — the report counts it, but say it out loud too.
+            if report.overwritten > 0 {
+                eprintln!(
+                    "warning: {} record(s) overwritten in place (same id already existed) — \
+                     re-importing a stale export replaces newer local data; use --dedup to skip instead",
+                    report.overwritten
+                );
+            }
+            if report.superseded > 0 {
+                eprintln!(
+                    "warning: {} local record(s) superseded by newer imported near-duplicates",
+                    report.superseded
+                );
+            }
+            if let Some(source) = interrupted {
+                eprintln!(
+                    "error: import interrupted after partial write — the counts above are what \
+                     was committed before the failure: {source}"
+                );
+                anyhow::bail!("import interrupted: {source}");
+            }
             // Imported-but-unembedded records are invisible to semantic recall;
             // say so now with the fix, instead of letting it surface later as
             // mysteriously weaker recall.
@@ -19017,6 +19104,127 @@ mod upgrade_helper_tests {
             .contains("new version refused to load"));
         // The original plugin is restored byte-for-byte; the broken upgrade is gone.
         assert_eq!(std::fs::read(&target).unwrap(), b"OLD");
+    }
+}
+
+#[cfg(test)]
+mod installer_tests {
+    use super::*;
+
+    // A stale released binary on PATH predates `hook run`; wiring bare `axil`
+    // for it would exit clap's usage code 2 on every hook fire, which agents
+    // read as a blocking veto. So bare `axil` is chosen ONLY when the PATH
+    // handshake passes — otherwise the absolute path is pinned.
+    #[test]
+    fn resolves_bare_axil_only_when_handshake_passes() {
+        // On PATH and the handshake passes → portable bare name.
+        assert_eq!(
+            resolve_axil_exe_with(true, || true, || Some("/abs/axil".into())),
+            "axil"
+        );
+        // On PATH but the handshake fails (stale binary) → pin the absolute
+        // path; never bare `axil`.
+        assert_eq!(
+            resolve_axil_exe_with(true, || false, || Some("/abs/axil".into())),
+            "/abs/axil"
+        );
+        // Not on PATH → absolute path regardless of what the probe would say.
+        assert_eq!(
+            resolve_axil_exe_with(false, || true, || Some("/abs/axil".into())),
+            "/abs/axil"
+        );
+        // Absolute path unavailable → last-resort bare name.
+        assert_eq!(resolve_axil_exe_with(false, || true, || None), "axil");
+    }
+
+    // The probe must not consult its expensive closure when nothing is on PATH.
+    #[test]
+    fn handshake_probe_is_skipped_when_not_on_path() {
+        let mut probed = false;
+        let exe = resolve_axil_exe_with(
+            false,
+            || {
+                probed = true;
+                true
+            },
+            || Some("/abs/axil".into()),
+        );
+        assert_eq!(exe, "/abs/axil");
+        assert!(!probed, "probe must be short-circuited when off PATH");
+    }
+
+    // Antigravity's injection channel is PreInvocation, not SessionStart. The
+    // installer must register the events parse_antigravity accepts, or context
+    // injection is silently inert.
+    #[test]
+    fn antigravity_plugin_registers_preinvocation_not_sessionstart() {
+        let dir = tempfile::tempdir().unwrap();
+        let (plugin_dir, _registered) = install_antigravity_plugin(dir.path()).unwrap();
+
+        let hooks: Value =
+            serde_json::from_str(&std::fs::read_to_string(plugin_dir.join("hooks.json")).unwrap())
+                .unwrap();
+        let events = hooks["hooks"].as_object().expect("hooks object");
+        let keys: Vec<&str> = events.keys().map(String::as_str).collect();
+
+        assert!(
+            keys.contains(&"PreInvocation"),
+            "PreInvocation (the only injection channel) must be registered; got {keys:?}"
+        );
+        assert!(
+            !keys.contains(&"SessionStart"),
+            "SessionStart parses to nothing for Antigravity — must not be registered; got {keys:?}"
+        );
+        for e in ["PreToolUse", "PostToolUse", "Stop"] {
+            assert!(keys.contains(&e), "missing {e}; got {keys:?}");
+        }
+
+        // Each hook passes its event through --event (payloads carry none).
+        let cmd = events["PreInvocation"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap();
+        assert!(
+            cmd.contains("hook run --dialect antigravity") && cmd.contains("--event PreInvocation"),
+            "PreInvocation command wired wrong: {cmd}"
+        );
+    }
+
+    // `--all --dry-run` must preview the same Claude Code files the real
+    // `claude_code || all` install writes — the dry-run gate had drifted to a
+    // bare `claude_code`, under-reporting the plan for `--all`.
+    #[test]
+    fn dry_run_all_includes_claude_code_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let plan = dry_run_install_plan(
+            dir.path(),
+            false, // claude_code — deliberately off; `all` must still cover it
+            false, false, false, false, false, false, false, false, false, false,
+            true,  // all
+            true,  // local — avoids depending on the global skills dir
+        )
+        .unwrap();
+        let writes = plan["would_write"].as_array().unwrap();
+        assert!(
+            writes.iter().any(|w| w.as_str().unwrap_or("").contains("CLAUDE.md")),
+            "--all dry-run must list .claude/CLAUDE.md; got {writes:?}"
+        );
+
+        // Control: with nothing selected, the Claude file set is absent.
+        let empty = dry_run_install_plan(
+            dir.path(),
+            false, false, false, false, false, false, false, false, false, false, false,
+            false, // all
+            true,
+        )
+        .unwrap();
+        assert!(
+            !empty["would_write"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|w| w.as_str().unwrap_or("").contains("CLAUDE.md")),
+            "no-selection dry-run must not list Claude files"
+        );
     }
 }
 
