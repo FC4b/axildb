@@ -119,6 +119,14 @@ pub const CATALOG: &[FeatureInfo] = &[
         in_full: true,
     },
     FeatureInfo {
+        name: "cache",
+        tier: "extension",
+        description: "Semantic answer cache (code-aware invalidation)",
+        requires: &[],
+        in_default: true,
+        in_full: true,
+    },
+    FeatureInfo {
         name: "memory",
         tier: "extension",
         description: "Agent memory patterns (TTL, superseding, sessions)",
@@ -223,6 +231,7 @@ fn is_compiled(name: &str) -> bool {
         "scip" => cfg!(feature = "scip"),
         "deps" => cfg!(feature = "deps"),
         "checkpoint" => cfg!(feature = "checkpoint"),
+        "cache" => cfg!(feature = "cache"),
         "memory" => cfg!(feature = "memory"),
         "rerank" => cfg!(feature = "rerank"),
         "mcp" => cfg!(feature = "mcp"),
