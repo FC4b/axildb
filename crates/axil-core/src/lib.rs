@@ -102,7 +102,8 @@ pub use metrics::{
     AuditEntry, LatencyPercentiles, Metrics, MetricsSnapshot, OpType, SlowQueryEntry,
 };
 pub use portable::{
-    export_to_writer, import_from_reader, ExportOptions, ExportStats, ImportOptions, ImportReport,
+    export_to_writer, import_from_reader, EmbeddingVerification, ExportOptions, ExportStats,
+    ImportOptions, ImportReport,
 };
 pub use plugin::{
     parse_path, Capability, Direction, EdgeInfo, GraphIndex, Engine, SearchIndex, TextEmbedder,

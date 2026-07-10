@@ -1565,6 +1565,21 @@ impl Axil {
         self.embedder.is_some()
     }
 
+    /// Whether a stored vector exists for `id` in the vector index.
+    ///
+    /// Relies on the backend's [`VectorIndex::get_vector`]; a backend without
+    /// direct retrieval reports `false`. Auto-embedding on insert is
+    /// best-effort (an embedder failure must not lose the record), so a record
+    /// can exist without a vector — this is how callers (e.g. import
+    /// verification) detect that state instead of discovering it as silently
+    /// weaker recall.
+    pub fn has_embedding(&self, id: &RecordId) -> bool {
+        self.vector_index
+            .as_ref()
+            .and_then(|vi| vi.get_vector(id).ok().flatten())
+            .is_some()
+    }
+
     // ── Graph API ───────────────────────────────────────────────────
 
     fn require_graph_index(&self) -> Result<&dyn GraphIndex> {

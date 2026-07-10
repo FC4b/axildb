@@ -106,6 +106,34 @@ pub struct ImportOptions {
     pub dry_run: bool,
 }
 
+/// Post-import verification of the embedding index.
+///
+/// Auto-embedding on insert is deliberately best-effort — a mid-import
+/// embedder failure must never lose the record — which means an import can
+/// finish with records stored but not semantically searchable. This block
+/// surfaces that state in the report instead of leaving it silent: any
+/// `missing` (or an `engine_unavailable` with `affected > 0`) means the
+/// destination needs `axil heal --reindex` once its embedder is healthy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum EmbeddingVerification {
+    /// A vector index and embedder were attached; every imported record that
+    /// should have been embedded was checked against the index by id.
+    Verified {
+        /// Imported records that met the auto-embed condition.
+        expected: usize,
+        /// How many of those have a stored vector.
+        indexed: usize,
+        /// `expected - indexed` — stored but not semantically searchable.
+        missing: usize,
+    },
+    /// No vector index or no embedder was attached at import time, so
+    /// `affected` embeddable records were imported without embeddings.
+    EngineUnavailable { affected: usize },
+    /// Dry run — nothing was written, so there was nothing to verify.
+    SkippedDryRun,
+}
+
 /// Outcome of an import.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct ImportReport {
@@ -123,6 +151,10 @@ pub struct ImportReport {
     /// preserves original ids so checkpoint `references[]` and `code_refs`
     /// survive the round trip. Surfaced for honesty if that ever changes.
     pub id_remapped: usize,
+    /// Post-import embedding verification. `None` only in intermediate states;
+    /// [`import_from_reader`] always fills it before returning.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub embeddings: Option<EmbeddingVerification>,
 }
 
 // ── Wire format ─────────────────────────────────────────────────────
@@ -312,6 +344,9 @@ pub fn import_from_reader<R: BufRead>(
     let mut report = ImportReport::default();
     let mut header_seen = false;
     let mut edge_lines: Vec<EdgeLine> = Vec::new();
+    // Ids of imported records that met the auto-embed condition, verified
+    // against the vector index after the loop.
+    let mut embeddable: Vec<RecordId> = Vec::new();
 
     for (lineno, line) in reader.lines().enumerate() {
         let line = line
@@ -353,7 +388,15 @@ pub fn import_from_reader<R: BufRead>(
                 if is_rebuilt_index_table(&line.table) {
                     continue;
                 }
-                import_record(db, opts, &line, &mut present_ids, &mut content_hashes, &mut report)?;
+                import_record(
+                    db,
+                    opts,
+                    &line,
+                    &mut present_ids,
+                    &mut content_hashes,
+                    &mut embeddable,
+                    &mut report,
+                )?;
             }
             "edge" => {
                 // Buffer edges; apply them after every record line is processed so
@@ -381,6 +424,26 @@ pub fn import_from_reader<R: BufRead>(
         import_edge(db, opts, edge, &present_ids, &mut report)?;
     }
 
+    // Self-verification: importing is only half the contract — the records
+    // must also be *findable*. Embedding is the one index that can silently
+    // fail (best-effort by design), so check it explicitly and put the result
+    // in the report rather than leaving the gap for the user to discover as
+    // weaker recall.
+    report.embeddings = Some(if opts.dry_run {
+        EmbeddingVerification::SkippedDryRun
+    } else if db.has_vector_index() && db.has_embedder() {
+        let indexed = embeddable.iter().filter(|id| db.has_embedding(id)).count();
+        EmbeddingVerification::Verified {
+            expected: embeddable.len(),
+            indexed,
+            missing: embeddable.len() - indexed,
+        }
+    } else {
+        EmbeddingVerification::EngineUnavailable {
+            affected: embeddable.len(),
+        }
+    });
+
     Ok(report)
 }
 
@@ -391,6 +454,7 @@ fn import_record(
     line: &RecordLine,
     present_ids: &mut HashSet<String>,
     content_hashes: &mut HashMap<String, HashSet<String>>,
+    embeddable: &mut Vec<RecordId>,
     report: &mut ImportReport,
 ) -> Result<()> {
     if opts.dedup && present_ids.contains(&line.id) {
@@ -410,7 +474,11 @@ fn import_record(
 
     if !opts.dry_run {
         let record = build_record(line)?;
+        let track = expects_embedding(&line.table, &line.data).then(|| record.id.clone());
         db.insert_preserving(record)?;
+        if let Some(id) = track {
+            embeddable.push(id);
+        }
     }
 
     // Track the just-imported record so later lines and edges see it, and so a
@@ -471,6 +539,18 @@ fn import_edge(
         report.edges_created += 1;
     }
     Ok(())
+}
+
+/// Whether an imported record should end up with an embedding — mirrors the
+/// auto-embed condition in the insert path: a user (non-`_`) table with enough
+/// searchable text to embed. Kept in lockstep with `Axil::insert_record` so
+/// verification never flags a record insert would not have embedded anyway.
+fn expects_embedding(table: &str, data: &Value) -> bool {
+    if table.starts_with('_') {
+        return false;
+    }
+    let text = crate::util::searchable_text(data);
+    !text.is_empty() && text.len() > 5
 }
 
 /// Reconstruct a [`Record`] from an import line, preserving id, timestamps, and

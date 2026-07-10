@@ -211,3 +211,115 @@ fn default_export_excludes_system_tables() {
     let stats2 = axil_core::export_to_writer(&db_a, &opts, &mut buf2).unwrap();
     assert_eq!(stats2.records, 2);
 }
+
+/// Deterministic embedder for verification tests — real ONNX is unavailable
+/// in CI, and the point here is *whether* vectors land, not their quality.
+struct FakeEmbedder;
+
+impl axil_core::TextEmbedder for FakeEmbedder {
+    fn embed(&self, text: &str) -> axil_core::Result<Vec<f32>> {
+        let len = text.len() as f32;
+        Ok(vec![len, len / 2.0, 1.0])
+    }
+}
+
+/// Export two embeddable records, then import them into a destination that
+/// has a working (fake) embedder attached.
+fn export_two_records() -> Vec<u8> {
+    let (db_a, _dir_a) = full_db(3);
+    db_a.insert("decisions", json!({"summary": "adopt the fake embedder"}))
+        .unwrap();
+    db_a.insert("errors", json!({"error": "auth timeout on refresh"}))
+        .unwrap();
+    let mut buf: Vec<u8> = Vec::new();
+    axil_core::export_to_writer(&db_a, &ExportOptions::default(), &mut buf).unwrap();
+    // _dir_a drops here; the buffer is all we need.
+    buf
+}
+
+#[test]
+fn import_verifies_embeddings_when_embedder_present() {
+    let buf = export_two_records();
+
+    let dir = tempfile::tempdir().unwrap();
+    let db_b = Axil::open(dir.path().join("b.axil"))
+        .with_vector(3)
+        .unwrap()
+        .with_embedder(Box::new(FakeEmbedder))
+        .with_graph_engine()
+        .unwrap()
+        .with_fts_engine()
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let report =
+        axil_core::import_from_reader(&db_b, &ImportOptions::default(), buf.as_slice()).unwrap();
+    assert_eq!(report.imported, 2);
+    assert_eq!(
+        report.embeddings,
+        Some(axil_core::EmbeddingVerification::Verified {
+            expected: 2,
+            indexed: 2,
+            missing: 0
+        }),
+        "with a working embedder every imported record must be verified indexed"
+    );
+}
+
+#[test]
+fn import_flags_missing_embeddings_when_embedder_is_broken() {
+    let buf = export_two_records();
+
+    // `with_vector` attaches the VectorEngine as index AND embedder, but with
+    // no ONNX model available every embed call fails — the exact
+    // stored-but-unembedded state a broken runtime produces in the field.
+    // The report must count those records as missing, not stay silent.
+    let (db_b, _dir_b) = full_db(3);
+    let report =
+        axil_core::import_from_reader(&db_b, &ImportOptions::default(), buf.as_slice()).unwrap();
+    assert_eq!(report.imported, 2);
+    assert_eq!(
+        report.embeddings,
+        Some(axil_core::EmbeddingVerification::Verified {
+            expected: 2,
+            indexed: 0,
+            missing: 2
+        }),
+        "a present-but-failing embedder must surface as missing embeddings"
+    );
+}
+
+#[test]
+fn import_reports_engine_unavailable_without_vector_engine() {
+    let buf = export_two_records();
+
+    // Destination has no vector engine at all (e.g. `[engines] disabled`).
+    let dir = tempfile::tempdir().unwrap();
+    let db_b = Axil::open(dir.path().join("novec.axil"))
+        .with_graph_engine()
+        .unwrap()
+        .with_fts_engine()
+        .unwrap()
+        .build()
+        .unwrap();
+    let report =
+        axil_core::import_from_reader(&db_b, &ImportOptions::default(), buf.as_slice()).unwrap();
+    assert_eq!(report.imported, 2);
+    assert_eq!(
+        report.embeddings,
+        Some(axil_core::EmbeddingVerification::EngineUnavailable { affected: 2 })
+    );
+
+    // A dry run writes nothing, so there is nothing to verify.
+    let (db_c, _dir_c) = full_db(3);
+    let dry = ImportOptions {
+        dry_run: true,
+        ..Default::default()
+    };
+    let report = axil_core::import_from_reader(&db_c, &dry, buf.as_slice()).unwrap();
+    assert_eq!(
+        report.embeddings,
+        Some(axil_core::EmbeddingVerification::SkippedDryRun)
+    );
+}

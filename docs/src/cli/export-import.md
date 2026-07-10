@@ -89,8 +89,28 @@ import to win.
 `import` prints a JSON report:
 
 ```json
-{"dry_run":false,"imported":12,"skipped_id":0,"skipped_dup":0,"edges_created":4,"edges_skipped":0,"id_remapped":0}
+{"dry_run":false,"imported":12,"skipped_id":0,"skipped_dup":0,"edges_created":4,"edges_skipped":0,"id_remapped":0,
+ "embeddings":{"status":"verified","expected":12,"indexed":12,"missing":0}}
 ```
+
+### Self-verifying embeddings
+
+Auto-embedding is best-effort by design — an embedder failure mid-import must
+never lose the record — so an import *can* finish with records stored but not
+semantically searchable. Instead of leaving that gap silent, the report's
+`embeddings` block verifies the index after the fact:
+
+- `"status":"verified"` with `"missing":0` — every embeddable record has a
+  vector; nothing to do.
+- `"missing" > 0` — the embedder was attached but failed for those records
+  (e.g. a broken ONNX runtime). They are stored and full-text-searchable, but
+  invisible to semantic recall until you run `axil heal --reindex`.
+- `"status":"engine_unavailable"` — no vector engine or embedder was attached
+  at import time; run `axil heal --reindex` once embeddings are available.
+
+The CLI prints a warning with that exact fix whenever the check finds a gap,
+so no post-import ritual is needed: import, and act only if it tells you to.
+(`axil doctor` performs the same drift detection database-wide.)
 
 ### `--dedup`
 

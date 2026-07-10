@@ -8191,7 +8191,30 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                 "edges_created": report.edges_created,
                 "edges_skipped": report.edges_skipped,
                 "id_remapped": report.id_remapped,
+                "embeddings": report.embeddings,
             }));
+            // Imported-but-unembedded records are invisible to semantic recall;
+            // say so now with the fix, instead of letting it surface later as
+            // mysteriously weaker recall.
+            match &report.embeddings {
+                Some(axil_core::EmbeddingVerification::Verified { missing, .. })
+                    if *missing > 0 =>
+                {
+                    eprintln!(
+                        "warning: {missing} imported record(s) have no embedding — \
+                         semantic recall won't see them until `axil heal --reindex`"
+                    );
+                }
+                Some(axil_core::EmbeddingVerification::EngineUnavailable { affected })
+                    if *affected > 0 =>
+                {
+                    eprintln!(
+                        "warning: imported {affected} record(s) with no embedder attached — \
+                         run `axil heal --reindex` once embeddings are available"
+                    );
+                }
+                _ => {}
+            }
             Ok(EXIT_OK)
         }
 
