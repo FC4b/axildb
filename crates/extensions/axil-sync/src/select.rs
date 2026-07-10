@@ -76,11 +76,18 @@ pub fn select_distillate(db: &Axil, opts: &SelectOpts) -> Result<Vec<Op>, SyncEr
 /// Build a `record.upsert` op from a promoted record.
 fn record_to_op(db: &Axil, rec: &Record, member: &str, embed: bool) -> Result<Op, SyncError> {
     // Prefer an explicit `content` field; fall back to the whole record body.
-    let content = rec
-        .data
-        .get("content")
-        .cloned()
-        .unwrap_or_else(|| rec.data.clone());
+    // Strip Axil-internal (`_`-prefixed) fields first: the body carries volatile
+    // local state — `_importance`, `_effective_importance`, `_access_count` —
+    // that decay/access sweeps rewrite in place (`axil_core::importance`), so
+    // hashing them would churn `op_id` on every sweep and leak that state across
+    // the sync boundary. Both the content hash and the pushed payload use the
+    // stripped body.
+    let content = strip_internal_fields(
+        &rec.data
+            .get("content")
+            .cloned()
+            .unwrap_or_else(|| rec.data.clone()),
+    );
     let content_hash = content_hash(&content)?;
 
     // op_id is stable while the content is unchanged (re-syncs dedup) and
@@ -141,6 +148,26 @@ fn record_importance(data: &Value) -> f32 {
         .or_else(|| data.get("_importance").and_then(Value::as_f64))
         .map(|f| f as f32)
         .unwrap_or(1.0)
+}
+
+/// Drop Axil-internal (`_`-prefixed) top-level fields from a content value.
+///
+/// Mirrors the canonicalization in `axil_core::portable` (source of truth for
+/// the field set), which drops the same `_`-prefixed top-level keys before its
+/// export/import content hash — those fields are Axil-internal and drift on
+/// their own (importance decays, access counts climb, tiers change), so keeping
+/// them would make the "same content" hash differently over time and across
+/// machines. Non-object values pass through unchanged.
+fn strip_internal_fields(content: &Value) -> Value {
+    match content {
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .filter(|(k, _)| !k.starts_with('_'))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
 }
 
 /// Stable SHA-256 hex of a JSON value.
@@ -241,6 +268,43 @@ mod tests {
         let third = select_distillate(&db, &opts(&["decisions"])).unwrap();
         assert_ne!(first[0].op_id, third[0].op_id, "changed content → new op_id");
         assert_ne!(first[0].content_hash, third[0].content_hash);
+    }
+
+    #[test]
+    fn op_id_stable_across_volatile_field_drift() {
+        // A decay/access sweep rewrites `_effective_importance`/`_access_count`
+        // in a record's body. That internal churn must not change the op_id
+        // (which would re-push the record as "new"), and those volatile fields
+        // must never ride inside the pushed payload's content.
+        let tmp = TempDir::new().unwrap();
+        let db = db(&tmp);
+        let rec = db
+            .insert("decisions", json!({"summary": "chose A", "reason": "faster"}))
+            .unwrap();
+
+        let before = record_to_op(&db, &rec, "mem_a", false).unwrap();
+
+        // Simulate a sweep mutating the internal fields in place.
+        let mut mutated = rec.clone();
+        let obj = mutated.data.as_object_mut().unwrap();
+        obj.insert("_effective_importance".into(), json!(0.137));
+        obj.insert("_access_count".into(), json!(9));
+        obj.insert("_importance".into(), json!(0.42));
+        let after = record_to_op(&db, &mutated, "mem_a", false).unwrap();
+
+        assert_eq!(
+            before.op_id, after.op_id,
+            "volatile internal-field drift must not churn the op_id"
+        );
+        assert_eq!(before.content_hash, after.content_hash);
+
+        // The pushed payload's content excludes the volatile internal fields.
+        let content = &after.payload["content"];
+        assert!(content.get("_effective_importance").is_none());
+        assert!(content.get("_access_count").is_none());
+        assert!(content.get("_importance").is_none());
+        assert_eq!(content["summary"], "chose A");
+        assert_eq!(content["reason"], "faster");
     }
 
     #[test]
