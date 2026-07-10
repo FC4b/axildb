@@ -223,6 +223,292 @@ impl axil_core::TextEmbedder for FakeEmbedder {
     }
 }
 
+/// A full database with a working (fake) embedder attached, so auto-embed and
+/// auto-supersede actually fire on insert/import.
+fn full_db_with_embedder() -> (Axil, tempfile::TempDir) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("test.axil");
+    let db = Axil::open(&path)
+        .with_vector(3)
+        .unwrap()
+        .with_embedder(Box::new(FakeEmbedder))
+        .with_graph_engine()
+        .unwrap()
+        .with_fts_engine()
+        .unwrap()
+        .build()
+        .unwrap();
+    (db, dir)
+}
+
+fn rfc3339(s: &str) -> chrono::DateTime<chrono::Utc> {
+    chrono::DateTime::parse_from_rfc3339(s)
+        .unwrap()
+        .with_timezone(&chrono::Utc)
+}
+
+// ── Finding 1: validate the stream before mutating the DB ───────────────────
+
+#[test]
+fn headerless_file_imports_nothing() {
+    let (db_b, _dir_b) = full_db(3);
+
+    // A record line with no preceding header — a truncated/headerless stream.
+    let body = r#"{"kind":"record","table":"decisions","id":"01AN4Z07BY79KA1307SR9X4MV3","data":{"summary":"orphan record with no header"},"created_at":"2020-01-01T00:00:00Z"}
+"#;
+    let err = axil_core::import_from_reader(&db_b, &ImportOptions::default(), body.as_bytes())
+        .unwrap_err();
+
+    // Rejected before any mutation: nothing was written…
+    assert_eq!(
+        db_b.count("decisions").unwrap(),
+        0,
+        "a headerless file must import nothing"
+    );
+    // …and it is a plain rejection, not a partial-write interruption.
+    assert!(
+        !matches!(err, axil_core::AxilError::ImportInterrupted { .. }),
+        "a pre-header rejection must not masquerade as a partial import"
+    );
+}
+
+#[test]
+fn mid_stream_malformed_line_returns_partial_report() {
+    // A valid export of two records…
+    let (db_a, _dir_a) = full_db(3);
+    db_a.insert("decisions", json!({"summary": "first good record here"}))
+        .unwrap();
+    db_a.insert("decisions", json!({"summary": "second good record here"}))
+        .unwrap();
+    let mut buf: Vec<u8> = Vec::new();
+    axil_core::export_to_writer(&db_a, &ExportOptions::default(), &mut buf).unwrap();
+    let text = String::from_utf8(buf).unwrap();
+
+    // …corrupted by a malformed line between the two records (header is line 0,
+    // records are lines 1 and 2 in ULID order).
+    let mut lines: Vec<String> = text.lines().map(|s| s.to_string()).collect();
+    lines.insert(2, "{not valid json".to_string());
+    let corrupted = lines.join("\n");
+
+    let (db_b, _dir_b) = full_db(3);
+    let err = axil_core::import_from_reader(
+        &db_b,
+        &ImportOptions::default(),
+        corrupted.as_bytes(),
+    )
+    .unwrap_err();
+
+    match err {
+        axil_core::AxilError::ImportInterrupted { report, .. } => {
+            assert_eq!(
+                report.imported, 1,
+                "the record before the malformed line was committed and is accounted for"
+            );
+        }
+        other => panic!("expected ImportInterrupted carrying a partial report, got {other:?}"),
+    }
+    // Fail-fast leaves partial state — the first record really is in the DB.
+    assert_eq!(db_b.count("decisions").unwrap(), 1);
+}
+
+// ── Finding 2: overwrites are counted honestly; edges stay idempotent ───────
+
+#[test]
+fn reimport_without_dedup_overwrites_and_does_not_duplicate_edges() {
+    let (db_a, _dir_a) = full_db(3);
+    let d = db_a
+        .insert("decisions", json!({"summary": "keep the export format stable"}))
+        .unwrap();
+    let f = db_a.insert("files", json!({"path": "portable.rs"})).unwrap();
+    db_a.relate(&d.id, "modified", &f.id, None).unwrap();
+    let mut buf: Vec<u8> = Vec::new();
+    axil_core::export_to_writer(&db_a, &ExportOptions::default(), &mut buf).unwrap();
+
+    let (db_b, _dir_b) = full_db(3);
+    let first =
+        axil_core::import_from_reader(&db_b, &ImportOptions::default(), buf.as_slice()).unwrap();
+    assert_eq!(first.imported, 2);
+    assert_eq!(first.overwritten, 0);
+    assert_eq!(first.edges_created, 1);
+
+    // Re-import the SAME file WITHOUT --dedup: every id already exists, so each
+    // insert is an upsert — reported as overwritten, not a fresh import — and
+    // the edge already exists, so it is not duplicated.
+    let second =
+        axil_core::import_from_reader(&db_b, &ImportOptions::default(), buf.as_slice()).unwrap();
+    assert_eq!(second.imported, 0, "no genuinely new records");
+    assert_eq!(second.overwritten, 2, "both records overwrote their existing id");
+    assert_eq!(second.edges_created, 0, "edge already exists — not duplicated");
+    assert_eq!(second.edges_skipped, 1, "the duplicate edge is skipped");
+
+    // Exactly one `modified` edge exists (no duplicate).
+    let edges = db_b
+        .edges(&d.id, Some("modified"), Direction::Out)
+        .unwrap();
+    assert_eq!(edges.len(), 1, "re-import must not double the edge");
+}
+
+#[test]
+fn importing_older_copy_over_newer_record_reports_overwritten() {
+    let (db_a, _dir_a) = full_db(3);
+    let rec = db_a
+        .insert("decisions", json!({"summary": "v1 of the decision"}))
+        .unwrap();
+    let mut buf: Vec<u8> = Vec::new();
+    axil_core::export_to_writer(&db_a, &ExportOptions::default(), &mut buf).unwrap();
+
+    // B imports it, then locally updates that record to a newer version.
+    let (db_b, _dir_b) = full_db(3);
+    axil_core::import_from_reader(&db_b, &ImportOptions::default(), buf.as_slice()).unwrap();
+    db_b.update(&rec.id, json!({"summary": "v2 of the decision — locally newer"}))
+        .unwrap();
+
+    // Re-importing the stale export (still v1) overwrites the newer local v2 —
+    // the report must show it as an overwrite, not a fresh import.
+    let report =
+        axil_core::import_from_reader(&db_b, &ImportOptions::default(), buf.as_slice()).unwrap();
+    assert_eq!(report.imported, 0);
+    assert_eq!(report.overwritten, 1, "stale re-import overwrote the newer local record");
+
+    // The overwrite really happened (the honest report reflects reality).
+    let stored = db_b.get(&rec.id).unwrap().unwrap();
+    assert_eq!(
+        stored.data.get("summary").and_then(|v| v.as_str()),
+        Some("v1 of the decision"),
+        "the older exported content replaced the local record"
+    );
+}
+
+// ── Finding 3: dedup remaps the duplicate's edges onto the survivor ─────────
+
+#[test]
+fn dedup_remaps_deduped_records_edges_to_survivor() {
+    // Source A: a record + a distinct record with an edge pointing at it.
+    let (db_a, _dir_a) = full_db(3);
+    let dup = db_a
+        .insert("decisions", json!({"summary": "shared finding about auth timeouts"}))
+        .unwrap();
+    let other = db_a
+        .insert("notes", json!({"note": "context that references the finding"}))
+        .unwrap();
+    db_a.relate(&other.id, "references", &dup.id, None).unwrap();
+    let mut buf: Vec<u8> = Vec::new();
+    axil_core::export_to_writer(&db_a, &ExportOptions::default(), &mut buf).unwrap();
+
+    // Destination B already holds the same *content* as `dup`, under a
+    // different id (the same memory captured on another machine).
+    let (db_b, _dir_b) = full_db(3);
+    let survivor = db_b
+        .insert("decisions", json!({"summary": "shared finding about auth timeouts"}))
+        .unwrap();
+    assert_ne!(survivor.id, dup.id, "different ids across machines");
+
+    let opts = ImportOptions {
+        dedup: true,
+        dry_run: false,
+    };
+    let report = axil_core::import_from_reader(&db_b, &opts, buf.as_slice()).unwrap();
+
+    // `dup` deduped against `survivor`; only `other` is a fresh import.
+    assert_eq!(report.skipped_dup, 1);
+    assert_eq!(report.imported, 1);
+    // The edge that pointed at the deduped `dup` is reattached to `survivor`.
+    assert_eq!(report.edges_created, 1, "the edge survived rather than being dropped");
+    assert_eq!(report.edges_remapped, 1, "and it was remapped onto the survivor");
+
+    let neighbors = db_b
+        .neighbors(&other.id, Some("references"), Direction::Out)
+        .unwrap();
+    assert_eq!(neighbors.len(), 1);
+    assert_eq!(
+        neighbors[0].id, survivor.id,
+        "edge reattached to the surviving record, not the dropped duplicate"
+    );
+}
+
+// ── Finding 4: auto-supersede on import respects recency ────────────────────
+
+#[test]
+fn import_does_not_supersede_a_fresher_local_record() {
+    // Source A carries an OLD near-duplicate (embeddings don't travel; the
+    // destination re-embeds through its own FakeEmbedder).
+    let (db_a, _dir_a) = full_db(3);
+    db_a.insert_at(
+        "decisions",
+        json!({"summary": "auth timeout fix from an older session"}),
+        rfc3339("2020-01-01T00:00:00Z"),
+    )
+    .unwrap();
+    let mut buf: Vec<u8> = Vec::new();
+    axil_core::export_to_writer(&db_a, &ExportOptions::default(), &mut buf).unwrap();
+
+    // Destination B holds a FRESH local near-duplicate.
+    let (db_b, _dir_b) = full_db_with_embedder();
+    let fresh = db_b
+        .insert("decisions", json!({"summary": "auth timeout fix in the current session"}))
+        .unwrap();
+
+    let report =
+        axil_core::import_from_reader(&db_b, &ImportOptions::default(), buf.as_slice()).unwrap();
+    assert_eq!(report.imported, 1);
+    assert_eq!(
+        report.superseded, 0,
+        "an older import must not demote a fresher local record"
+    );
+
+    let stored = db_b.get(&fresh.id).unwrap().unwrap();
+    assert_ne!(
+        stored.data.get("_superseded").and_then(|v| v.as_bool()),
+        Some(true),
+        "the fresher local record must remain live"
+    );
+}
+
+#[test]
+fn import_supersedes_an_older_local_record_when_incoming_is_newer() {
+    // Source A carries a NEWER near-duplicate.
+    let (db_a, _dir_a) = full_db(3);
+    let incoming = db_a
+        .insert_at(
+            "decisions",
+            json!({"summary": "auth timeout fix from a newer session"}),
+            rfc3339("2025-01-01T00:00:00Z"),
+        )
+        .unwrap();
+    let mut buf: Vec<u8> = Vec::new();
+    axil_core::export_to_writer(&db_a, &ExportOptions::default(), &mut buf).unwrap();
+
+    // Destination B holds an OLDER local near-duplicate.
+    let (db_b, _dir_b) = full_db_with_embedder();
+    let local = db_b
+        .insert_at(
+            "decisions",
+            json!({"summary": "auth timeout fix in an older session"}),
+            rfc3339("2020-01-01T00:00:00Z"),
+        )
+        .unwrap();
+
+    let report =
+        axil_core::import_from_reader(&db_b, &ImportOptions::default(), buf.as_slice()).unwrap();
+    assert_eq!(report.imported, 1);
+    assert_eq!(
+        report.superseded, 1,
+        "a newer import supersedes the older near-duplicate local record"
+    );
+
+    let stored = db_b.get(&local.id).unwrap().unwrap();
+    assert_eq!(
+        stored.data.get("_superseded").and_then(|v| v.as_bool()),
+        Some(true),
+        "the older local record is superseded by the newer import"
+    );
+    assert_eq!(
+        stored.data.get("_superseded_by").and_then(|v| v.as_str()),
+        Some(incoming.id.to_string().as_str()),
+        "superseded pointer names the newer imported record"
+    );
+}
+
 /// Export two embeddable records, then import them into a destination that
 /// has a working (fake) embedder attached.
 fn export_two_records() -> Vec<u8> {
