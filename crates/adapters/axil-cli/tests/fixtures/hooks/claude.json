@@ -1,0 +1,67 @@
+{
+  "dialect": "claude",
+  "note": "Claude Code: snake_case stdin with hook_event_name; Bash/Edit/Write/Read/TodoWrite tools.",
+  "cases": [
+    {
+      "name": "PreToolUse Bash -> shell",
+      "event": null,
+      "payload": {
+        "hook_event_name": "PreToolUse",
+        "session_id": "s1",
+        "cwd": "/repo",
+        "tool_name": "Bash",
+        "tool_input": { "command": "ls -la src/" }
+      },
+      "expect": { "event": "PreTool", "tool": { "kind": "shell", "command": "ls -la src/", "exit_code": 0 } }
+    },
+    {
+      "name": "PreToolUse Edit -> file_edit",
+      "event": null,
+      "payload": {
+        "hook_event_name": "PreToolUse",
+        "session_id": "s1",
+        "tool_name": "Edit",
+        "tool_input": { "file_path": "/repo/src/a.rs", "new_string": "let x = 1;" }
+      },
+      "expect": { "event": "PreTool", "tool": { "kind": "file_edit", "path": "/repo/src/a.rs" } }
+    },
+    {
+      "name": "PostToolUse Bash exit 1 -> shell failure",
+      "event": null,
+      "payload": {
+        "hook_event_name": "PostToolUse",
+        "session_id": "s1",
+        "tool_name": "Bash",
+        "tool_input": { "command": "cargo test" },
+        "tool_response": { "exitCode": 1, "stdout": "error[E0308]" }
+      },
+      "expect": { "event": "PostTool", "tool": { "kind": "shell", "command": "cargo test", "exit_code": 1 } }
+    },
+    {
+      "name": "PostToolUse TodoWrite -> todo (1 completed)",
+      "event": null,
+      "payload": {
+        "hook_event_name": "PostToolUse",
+        "session_id": "s1",
+        "tool_name": "TodoWrite",
+        "tool_input": { "todos": [
+          { "content": "a", "status": "completed" },
+          { "content": "b", "status": "pending" }
+        ] }
+      },
+      "expect": { "event": "PostTool", "tool": { "kind": "todo", "completed_count": 1 } }
+    },
+    {
+      "name": "UserPromptSubmit -> no tool",
+      "event": null,
+      "payload": { "hook_event_name": "UserPromptSubmit", "session_id": "s1", "prompt": "fix the auth bug" },
+      "expect": { "event": "UserPrompt", "tool": null }
+    },
+    {
+      "name": "Stop -> no tool",
+      "event": null,
+      "payload": { "hook_event_name": "Stop", "session_id": "s1", "stop_hook_active": false },
+      "expect": { "event": "Stop", "tool": null }
+    }
+  ]
+}

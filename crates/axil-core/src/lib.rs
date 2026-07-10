@@ -56,6 +56,7 @@ pub mod llm_http;
 pub mod metrics;
 pub mod otel;
 pub mod plugin;
+pub mod portable;
 pub mod prefetch;
 pub mod query;
 pub mod query_class;
@@ -99,6 +100,10 @@ pub use diagnostics::{
 pub use error::{AxilError, Result};
 pub use metrics::{
     AuditEntry, LatencyPercentiles, Metrics, MetricsSnapshot, OpType, SlowQueryEntry,
+};
+pub use portable::{
+    export_to_writer, import_from_reader, EmbeddingVerification, ExportOptions, ExportStats,
+    ImportOptions, ImportReport,
 };
 pub use plugin::{
     parse_path, Capability, Direction, EdgeInfo, GraphIndex, Engine, SearchIndex, TextEmbedder,

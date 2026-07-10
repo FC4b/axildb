@@ -74,6 +74,10 @@ optional = true
 workspace = true
 optional = true
 
+[dependencies.axil-cache]
+workspace = true
+optional = true
+
 [dependencies.axil-memory]
 workspace = true
 optional = true
@@ -111,7 +115,7 @@ http-body-util = "0.1"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
 [features]
-default = ["core", "vector", "embed", "graph", "fts", "timeseries", "indexer", "scip", "deps", "checkpoint", "memory", "llm-http", "mcp", "ql", "http"]
+default = ["core", "vector", "embed", "graph", "fts", "timeseries", "indexer", "scip", "deps", "checkpoint", "cache", "memory", "llm-http", "mcp", "ql", "http"]
 core = []
 vector = ["dep:axil-vector"]
 embed = ["vector", "axil-vector/embed"]
@@ -122,6 +126,11 @@ indexer = ["dep:axil-indexer"]
 scip = ["dep:axil-scip", "graph"]
 deps = ["dep:axil-docs", "axil-bundle/deps"]
 checkpoint = ["dep:axil-checkpoint", "axil-bundle/checkpoint"]
+# Semantic answer cache Extension — reuse a derived answer on a similar
+# question, with code-aware invalidation. Fully generic Path-C dispatch, so no
+# `main.rs` wiring: the Extension declares its CLI surface and the external-
+# subcommand path routes `axil cache …` to it.
+cache = ["dep:axil-cache", "axil-bundle/cache"]
 # Default-off built-in HTTP doc fetcher (Phase 16 Path B). Offline-first
 # is the default posture; implies `deps`.
 web-docs = ["deps", "axil-docs/web-docs"]
@@ -148,4 +157,4 @@ http = ["dep:axum", "dep:tower-http"]
 # Runtime WASM plugins (Phase 22). Default-OFF: pulls Wasmtime in, so it's opt-in
 # to preserve the small-binary posture. `axil ext …` + .axil/plugins discovery.
 wasm-host = ["dep:axil-runtime", "axil-runtime/wasm-host"]
-full = ["vector", "embed", "graph", "fts", "timeseries", "indexer", "scip", "deps", "checkpoint", "rerank", "memory", "llm-http", "mcp", "ql", "http"]
+full = ["vector", "embed", "graph", "fts", "timeseries", "indexer", "scip", "deps", "checkpoint", "cache", "rerank", "memory", "llm-http", "mcp", "ql", "http"]

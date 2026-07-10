@@ -1,0 +1,21 @@
+[package]
+name = "axil-cache"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Semantic answer cache for Axil — reuse a derived answer when a similar question recurs, with code-aware invalidation"
+
+[dependencies]
+axil-core.workspace = true
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+# Content fingerprints for code-aware invalidation. sha2 is already a
+# workspace dependency (used by the proxy layer's proxy_id hashing), so this
+# adds no new third-party crate to the tree.
+sha2 = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

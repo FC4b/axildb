@@ -21,8 +21,11 @@ axil install --claude-code --bootstrap
 
 This creates:
 - `.axil/memory.axil` — the database
-- Hook scripts for automatic memory capture
-- Claude Code settings integration
+- Hook wiring in `.claude/settings.json` — every lifecycle event runs
+  `axil hook run --dialect claude` (the brain lives in the binary; no
+  bash/jq needed, works natively on Windows)
+- `AGENTS.md` managed block — the cross-tool memory contract (also read
+  by Codex, OpenCode, Qwen Code, Droid, …); skip with `--no-agents-md`
 
 ## How it works
 

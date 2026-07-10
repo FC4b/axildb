@@ -27,6 +27,11 @@ jobs:
             cmd: cargo check --workspace --all-targets
           - label: full
             cmd: cargo check -p axildb --no-default-features --features full
+          # axil-sync's HTTP transport is behind a default-off `http` feature
+          # (the `--workspace` check above only exercises its default, network-
+          # free build); this guards the feature-gated SyncClient.
+          - label: axil-sync http
+            cmd: cargo check -p axil-sync --features http
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -56,6 +61,14 @@ jobs:
           -p axil-ql
           -p axil-scip
           -p axil-vector
+      # The CLI's default features pull in ONNX (embed), so its full test run
+      # belongs to the nightly/local model job. But its pure-logic tests —
+      # the agent hook dialect parsers + golden fixtures, the install wizard,
+      # scip detection — are model-free and compile under `core` alone (the
+      # `cargo check --features core` job above proves that set builds). Run
+      # them here so a dialect field-mapping regression fails the per-PR gate.
+      - name: cargo test (axildb model-free — hook dialects, fixtures, wizard)
+        run: cargo test -p axildb --no-default-features --features core
 
   recall-gate:
     name: recall-quality gate (needle retention)

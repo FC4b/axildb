@@ -211,13 +211,35 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
+name = "axil-atlas-proto"
+version = "2.0.1"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "axil-bundle"
 version = "2.0.1"
 dependencies = [
+ "axil-cache",
  "axil-checkpoint",
  "axil-core",
  "axil-docs",
  "tempfile",
+]
+
+[[package]]
+name = "axil-cache"
+version = "2.0.1"
+dependencies = [
+ "axil-core",
+ "chrono",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -327,6 +349,7 @@ version = "2.0.1"
 dependencies = [
  "anyhow",
  "axil-bundle",
+ "axil-cache",
  "axil-checkpoint",
  "axil-core",
  "axil-docs",
@@ -392,6 +415,20 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "axil-sync"
+version = "2.0.1"
+dependencies = [
+ "axil-atlas-proto",
+ "axil-core",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.18",
+ "ureq",
 ]
 
 [[package]]
@@ -469,6 +506,7 @@ version = "2.0.1"
 dependencies = [
  "anyhow",
  "axil-bundle",
+ "axil-cache",
  "axil-checkpoint",
  "axil-core",
  "axil-docs",

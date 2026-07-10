@@ -35,33 +35,34 @@ Axil fills the gap: one Rust binary, cognitive memory with structured agent cogn
 - **Zep/Graphiti** — temporal knowledge graph, strongest bi-temporal. Community Edition deprecated.
 - **Letta** — full agent runtime, not a memory layer
 - **Cognee** — open-source KG + vector, entity extraction built-in
+- **Redis Iris / agent-memory-server** — Redis's 2026 "context engine." *Iris* (launched 2026-05-18) is a cloud bundle of four managed services on Redis Cloud — LangCache (semantic LLM-response cache), Agent Memory (two-tier session + long-term, LLM-based extraction/summarization/promotion), Context Retriever (entity schema → auto-generated MCP tools with row-level security), RDI (CDC from relational DBs) — on top of Redis Search; REST + Python/JS SDKs, reported <250ms P95 and ~$1.5/1M input-token preview pricing (reported/claimed, as of July 2026), cloud account + service keys required. The OSS **agent-memory-server** (Apache 2.0, ~290 stars, v0.15.x) is the self-hosted Agent Memory: Python 3.12 + Docker + Redis Stack (RediSearch) + `uv` + separate background workers, and it REQUIRES an LLM (via LiteLLM — OpenAI/Anthropic/Ollama/etc.) for automatic extraction, topic/entity recognition, and summarization — without one it degrades to manual CRUD. Two-tier memory + semantic/keyword/hybrid search, but NO decay/active forgetting, NO belief system, NO graph inference (RedisGraph was EOL'd in 2023), NO code-awareness (no code graph, no dep docs).
 
 ### Axil's Unique Position
 No existing solution combines: embeddable, Rust-native, plugin-based, knowledge graph + 5 memory types + entity extraction + inference, CLI-first, token-optimized, no LLM required, source-available (free for noncommercial use).
 
-| Feature | Axil | Memvid | HelixDB | SurrealDB | Mem0 | Hindsight |
-|---------|------|--------|---------|-----------|------|-----------|
-| Embeddable (no server) | ✅ | ✅ (.mv2) | ❌ | Optional | ❌ | ❌ (PG) |
-| Knowledge graph | ✅ | ❌ | ✅ | ✅ | ❌ | ✅ |
-| 5 memory types | ✅ | ❌ | ❌ | Advertised | ❌ | Partial |
-| Entity extraction | ✅ | ❌ | ❌ | Advertised | ✅ (Pro) | ✅ |
-| Knowledge consolidation | ✅ | ❌ | ❌ | Advertised | ❌ | ✅ |
-| Graph inference | ✅ | ❌ | ❌ | Advertised | ❌ | ❌ |
-| Built-in local embedding | ✅ (BGE) | ✅ (BGE) | ✅ | ❌ | Via LLM | Via LLM |
-| Token optimization | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| Query explanation | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| Built-in diagnostics | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| Relevance feedback | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| Auto-linking (no LLM) | ✅ | ❌ | ❌ | Via LLM | ❌ | Via LLM |
-| Memory consolidation (no LLM) | ✅ | ❌ | ❌ | Via LLM | ❌ | Via LLM |
-| Auto-importance scoring | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| Memory decay (active forgetting) | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| Belief system | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| Context-aware push | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| Auto-capture | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| Requires LLM | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ |
-| License | PolyForm NC | Apache 2.0 | AGPL-3.0 | BSL 1.1 | Apache 2.0 | MIT |
-| Binary size target | ~5-10MB | ~10-20MB | ~50MB+ | ~50MB | N/A | ~200MB+ |
+| Feature | Axil | Memvid | HelixDB | SurrealDB | Mem0 | Hindsight | Redis Iris |
+|---------|------|--------|---------|-----------|------|-----------|------------|
+| Embeddable (no server) | ✅ | ✅ (.mv2) | ❌ | Optional | ❌ | ❌ (PG) | ❌ (cloud) |
+| Knowledge graph | ✅ | ❌ | ✅ | ✅ | ❌ | ✅ | ❌ |
+| 5 memory types | ✅ | ❌ | ❌ | Advertised | ❌ | Partial | ❌ (2-tier) |
+| Entity extraction | ✅ | ❌ | ❌ | Advertised | ✅ (Pro) | ✅ | ✅ (via LLM) |
+| Knowledge consolidation | ✅ | ❌ | ❌ | Advertised | ❌ | ✅ | Via LLM |
+| Graph inference | ✅ | ❌ | ❌ | Advertised | ❌ | ❌ | ❌ |
+| Built-in local embedding | ✅ (BGE) | ✅ (BGE) | ✅ | ❌ | Via LLM | Via LLM | ❌ (cloud) |
+| Token optimization | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| Query explanation | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| Built-in diagnostics | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| Relevance feedback | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| Auto-linking (no LLM) | ✅ | ❌ | ❌ | Via LLM | ❌ | Via LLM | Via LLM |
+| Memory consolidation (no LLM) | ✅ | ❌ | ❌ | Via LLM | ❌ | Via LLM | Via LLM |
+| Auto-importance scoring | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| Memory decay (active forgetting) | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| Belief system | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| Context-aware push | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| Auto-capture | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| Requires LLM | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ (extraction) |
+| License | PolyForm NC | Apache 2.0 | AGPL-3.0 | BSL 1.1 | Apache 2.0 | MIT | Cloud / Apache 2.0 (OSS server) |
+| Binary size target | ~5-10MB | ~10-20MB | ~50MB+ | ~50MB | N/A | ~200MB+ | N/A (Python service) |
 
 ## Architecture
 
@@ -361,7 +362,7 @@ local, gitignored `tasks/` dir — they are not shipped in the public repo.)
 >   out-of-tree dataset; their gates emit a loud `::warning` skip when it's
 >   absent (a green CI run never means they verified anything). Committed
 >   500-question baselines live in `benchmarks/results/` (e.g.
->   `qtc-500.json` backs the 94.5% Recall-QTC figure); the LongMemEval gate
+>   `qtc-500.json` backs the 93.5% Recall-QTC figure); the LongMemEval gate
 >   compares against them when the dataset is present.
 
 ### Phase 7c: Web UI ✅

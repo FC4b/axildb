@@ -1,0 +1,41 @@
+{
+  "dialect": "codex",
+  "note": "OpenAI Codex: Claude wire-compatible; shell tool is literally 'Bash' (argv arrays tolerated), edits arrive as apply_patch (path parsed from the patch body).",
+  "cases": [
+    {
+      "name": "PreToolUse Bash with argv-array command -> shell",
+      "event": null,
+      "payload": {
+        "hook_event_name": "PreToolUse",
+        "session_id": "cx1",
+        "cwd": "/repo",
+        "tool_name": "Bash",
+        "tool_input": { "command": ["rg", "adaptive_ef", "src/"] }
+      },
+      "expect": { "event": "PreTool", "tool": { "kind": "shell", "command": "rg adaptive_ef src/", "exit_code": 0 } }
+    },
+    {
+      "name": "PreToolUse apply_patch (REAL captured payload) -> file_edit",
+      "note": "Captured live from codex-cli 0.124.0 (gpt-5.5). The patch body is at tool_input.command — NOT the docs' input/patch. Add File marker.",
+      "event": null,
+      "payload": {
+        "hook_event_name": "PreToolUse",
+        "session_id": "019f404a",
+        "cwd": "C:\\Users\\sigha\\tmp",
+        "model": "gpt-5.5",
+        "permission_mode": "bypassPermissions",
+        "tool_name": "apply_patch",
+        "tool_use_id": "call_P2SNOnqPS4HNqrLOegpPHsAr",
+        "turn_id": "019f404a-109d",
+        "tool_input": { "command": "*** Begin Patch\n*** Add File: note.txt\n+axil was here\n*** End Patch\n" }
+      },
+      "expect": { "event": "PreTool", "tool": { "kind": "file_edit", "path": "note.txt" } }
+    },
+    {
+      "name": "SessionStart (REAL captured payload) -> no tool",
+      "event": null,
+      "payload": { "hook_event_name": "SessionStart", "session_id": "019f404a", "cwd": "C:\\Users\\sigha\\tmp", "model": "gpt-5.5", "permission_mode": "bypassPermissions", "source": "startup" },
+      "expect": { "event": "SessionStart", "tool": null }
+    }
+  ]
+}

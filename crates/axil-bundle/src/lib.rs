@@ -53,6 +53,9 @@ pub fn builtin_extensions_all() -> Vec<Arc<dyn Extension>> {
     #[cfg(feature = "checkpoint")]
     exts.push(Arc::new(axil_checkpoint::CheckpointExtension));
 
+    #[cfg(feature = "cache")]
+    exts.push(Arc::new(axil_cache::CacheExtension));
+
     exts
 }
 

@@ -11,7 +11,7 @@
 
 ### Agent memory in one local file. No server, no cloud, no LLM.
 
-*Think SQLite, but for your agent's memory — a file you embed, not a database you run.*
+*A memory that compounds: every session it learns, links, and prunes — so your agent starts tomorrow smarter than it ended today.*
 
 **Built in Rust · local-first · single ~5–10MB binary · vector + graph + full-text + time-series · MCP · up to ~80% fewer context tokens on large, semantic-search workloads**
 
@@ -27,16 +27,17 @@
 
 ---
 
-Your coding agent is brilliant and amnesiac. Every session it re-reads the same files, re-learns the same architecture, repeats the same mistakes — and **burns tokens (your money) doing it.** Axil is the second brain that fixes this: it remembers your decisions, gotchas, and code structure across sessions, then hands the agent the *right* memory at the right moment instead of dumping the whole repo into context.
+Your coding agent is brilliant and amnesiac. Every session it re-reads the same files, re-learns the same architecture, repeats the same mistakes — and **burns tokens (your money) doing it.** Axil is the second brain that fixes this: it remembers your decisions, gotchas, and code structure across sessions, then hands the agent the *right* memory at the right moment instead of dumping the whole repo into context. When your agent outgrows a markdown notes file, the next step isn't a cloud platform — it's a smarter file.
 
 > **In a real, equal-correctness A/B test, agents answered the same coding questions with up to ~80% fewer context tokens on a large repo with semantic "where/how" queries (≈ parity on a tiny repo where `grep` already nails it).** → [the numbers & caveats](#token-savings--real-savings)
 
-- 🧠 **Remembers across sessions** — decisions, gotchas, and architecture learned once, never re-read. Vector + knowledge graph + full-text + time-series, all in a single `.axil` file.
-- 🕸️ **Knows your code, not just your text** — a SCIP **code-graph** (callers/callees, not keyword guesses) and **version-pinned dependency-doc memory** (your *exact* lib versions, zero network) — code-aware context most agent memory skips.
-- 💸 **Returns a pointer, not your whole repo** — a "where is X" lookup costs **~100 tokens**, not a stack of file reads. Fewer tokens, every turn.
-- ⚡ **A file you embed, not a server you run** — no Postgres, no cloud, no daemon. A ~5–10 MB binary, <100 ms commands, fully offline.
-- 🤖 **No LLM required** — local ONNX embeddings + rule-based cognition do the work with zero API calls; plug an LLM in only to sharpen extraction & consolidation.
-- 🔗 **One memory, every tool** — the same portable `.axil` brain is read *and* written by Claude Code, Cursor, Windsurf, Codex, any MCP client, or your own Rust. No vendor lock-in.
+Good agent memory has to be four things — navigable, fast, fresh, and compounding. Axil is all four, locally, for the code domain:
+
+- 🕸️ **Navigable** — not a flat log but a graph you can walk: a knowledge graph of typed edges, a SCIP **code-graph** (real callers/callees, not keyword guesses), and **version-pinned dependency-doc memory** (your *exact* lib versions, zero network) — fused with vector, full-text, and time-series in one `.axil` file. Ask "where is X" and get a pointer in **~100 tokens**, not a stack of file reads.
+- ⚡ **Fast** — a file you embed, not a server you run: no Postgres, no cloud, no daemon. **<100 ms** commands from a ~5–10 MB binary, zero network hop, fully offline.
+- 🔄 **Fresh** — memory that keeps up with the code: background hooks auto-capture decisions and errors as you work, and SCIP + dep-doc **drift detection** refreshes indexes only when they've gone stale (`--if-stale`) — recall tracks the code as it moves.
+- 🧠 **Compounding** — memory that gets *better* across sessions, not just bigger: active forgetting (decay + reinforcement), a belief system, consolidation with contradiction detection, and structured checkpoints — all rule-based, **no LLM required**.
+- 🔗 **One memory, every tool** — the same portable `.axil` brain is read *and* written by Claude Code, OpenAI Codex, GitHub Copilot CLI, Factory Droid, Google Antigravity, Qwen Code, OpenCode, Cursor, any MCP client, or your own Rust. No vendor lock-in.
 
 ## Quick start
 
@@ -63,10 +64,11 @@ cargo install axildb                     # installs the `axil` binary · default
 
 </details>
 
-**2. Wire it into your project** (recommended — agent memory). One command wires Axil into your Claude Code / Cursor / Codex project and indexes your code. From there the agent does the work: hooks inject context before each turn, capture decisions and errors as you go, and write a checkpoint at the end.
+**2. Wire it into your project** (recommended — agent memory). One command wires Axil into your coding-agent project and indexes your code. From there the agent does the work: hooks inject context before each turn, capture decisions and errors as you go, and write a checkpoint at the end.
 
 ```bash
-axil install --claude-code --bootstrap     # wire hooks + skills AND index your code, in one shot
+axil install                               # interactive: detects the agents in your project and wires them
+axil install --claude-code --bootstrap     # or name one: wire hooks + skills AND index your code, in one shot
 ```
 
 That's the whole setup. To *see the payoff immediately*, ask "where is X" the frugal way:
@@ -88,7 +90,7 @@ The DB auto-detects at `.axil/memory.axil`, so everyday commands need no `--db`.
 
 → Full install options (feature flags, SCIP indexers, manual setup): [Installation](docs/src/getting-started/installation.md).
 
-**Using another editor?** The same one-command setup wires the matching rules file — `axil install --cursor` (`.cursor/rules`), `axil install --windsurf` (`.windsurfrules`), or `axil install --codex` (`AGENTS.md`). For any MCP client, register the stdio server in one step — see the **[MCP Server guide](docs/src/agents/mcp.md)**:
+**Using another agent?** The same one command wires the full memory loop — the same brain, spoken in each tool's hook dialect — for **seven terminal agents**: `--claude-code`, `--codex` (OpenAI Codex), `--copilot` (GitHub Copilot CLI), `--droid` (Factory Droid), `--antigravity` (Google Antigravity), `--qwen` (Qwen Code), and `--opencode`. IDE rules files are one command too: `--cursor` (`.cursor/rules/`), `--windsurf` (`.windsurfrules`), or `--aider` (`CONVENTIONS.md`). `--all` sets up every detected agent at once. See the **[Terminal Agents guide](docs/src/agents/terminal-agents.md)**. For any MCP client, register the stdio server in one step — see the **[MCP Server guide](docs/src/agents/mcp.md)**:
 
 ```bash
 claude mcp add axil -- axil --db ./.axil/memory.axil mcp   # the DB is the global --db flag, not positional
@@ -148,6 +150,7 @@ The honest version — what you'd otherwise reach for, what it costs you, and wh
 | **A markdown notes file** | No retrieval or ranking — it grows unbounded and you paste the *whole* thing into context every turn | Ranked recall + active forgetting; hands the agent the *right* memory, not all of it |
 | **A vector DB** (pgvector, Chroma) | A service to run, and vectors *only* — no graph, no full-text, no cognition; you bolt an LLM on for extraction | One embedded file fuses vector + graph + full-text + time-series; rule-based cognition, **no LLM required** |
 | **An LLM-memory framework** (Mem0, Zep, Letta) | Needs an LLM **and** external databases just to store a memory; lower recall in our tests ([below](#benchmarks)) | No LLM, no server, no daemon — a ~5–10 MB binary, 100% offline, higher recall |
+| **A managed context engine** (Redis Iris / Agent Memory) | A cloud account and four managed services — or self-hosting Python + Docker + Redis + background workers — plus an LLM key just to extract memories | One offline binary, algorithmic extraction — no account, no cloud, no LLM |
 | **A single-file doc store** (Memvid) | Local and single-file like Axil — but a smart *doc* store: no knowledge graph, no entity extraction, no memory types | Structured agent memory: code-graph, entity inference, 5 memory types, consolidation |
 
 ## Token savings = real savings
@@ -171,7 +174,7 @@ Everything below normally means standing up a vector DB **and** Neo4j **and** El
 
 **🔎 Multi-model retrieval** — HNSW vector search (local ONNX/BGE) · a **temporal knowledge graph** (typed edges, traversal, entity extraction + inference, time-aware `as_of` queries — no Neo4j) · Tantivy full-text · time-series. One `recall()` fuses them all (RRF) with per-result score explanations.
 
-**💻 Built for code agents** — structural code index + `code-search` / `code-context` (pointer-shaped, token-frugal) · SCIP cross-reference graph · version-pinned dependency-doc memory · structured session checkpoints · AxilQL · MCP server (full CLI parity).
+**💻 Built for code agents** — structural code index + `code-search` / `code-context` (pointer-shaped, token-frugal) · SCIP cross-reference graph · version-pinned dependency-doc memory · structured session checkpoints · a **semantic answer cache** that invalidates itself when the referenced code changes (not just a TTL) · portable memory **export/import** (mergeable JSONL — share memory with a teammate or another machine) · AxilQL · MCP server (full CLI parity).
 
 **🔌 Optional LLM upgrade** — plug in Claude / GPT / Ollama (or Claude Code skills) to sharpen entity extraction & consolidation beyond the algorithmic defaults. Everything above runs without it.
 
@@ -272,8 +275,8 @@ model = "gpt-4o-mini"                     # api_key via AXIL_LLM_API_KEY env var
 |-------|-------|
 | **Getting started** | [Install](docs/src/getting-started/installation.md) · [Quick Start](docs/src/getting-started/quick-start.md) · [Configuration](docs/src/getting-started/configuration.md) |
 | **Concepts** | [Architecture](docs/src/concepts/architecture.md) · [Memory Types](docs/src/concepts/memory-types.md) · [Engines](docs/src/concepts/plugins.md) · [Storage Model](docs/src/concepts/storage.md) |
-| **CLI reference** | [Data](docs/src/cli/data.md) · [Memory](docs/src/cli/memory.md) · [Code Search](docs/src/cli/code-search.md) · [Diagnostics](docs/src/cli/diagnostics.md) · [AxilQL](docs/src/cli/axilql.md) · [Dependency Docs](docs/src/cli/dependency-docs.md) |
-| **Agent integration** | [Claude Code](docs/src/agents/claude-code.md) · [MCP Server](docs/src/agents/mcp.md) · [Multi-Agent](docs/src/agents/multi-agent.md) |
+| **CLI reference** | [Data](docs/src/cli/data.md) · [Memory](docs/src/cli/memory.md) · [Code Search](docs/src/cli/code-search.md) · [Answer Cache](docs/src/cli/cache.md) · [Export & Import](docs/src/cli/export-import.md) · [Diagnostics](docs/src/cli/diagnostics.md) · [AxilQL](docs/src/cli/axilql.md) · [Dependency Docs](docs/src/cli/dependency-docs.md) |
+| **Agent integration** | [Claude Code](docs/src/agents/claude-code.md) · [Terminal Agents](docs/src/agents/terminal-agents.md) · [MCP Server](docs/src/agents/mcp.md) · [Multi-Agent](docs/src/agents/multi-agent.md) |
 | **Deep dives** | [Benchmarks](docs/src/advanced/benchmarks.md) · [Context Economics](docs/src/advanced/context-economics.md) · [Retrieval Pipeline](docs/src/advanced/retrieval-pipeline.md) · [Cognitive Memory](docs/src/advanced/cognitive.md) |
 | **Extending Axil** | [Three Tiers](docs/src/extending/overview.md) · [Engines](docs/src/extending/engines.md) · [Extensions](docs/src/extending/extensions.md) · [Adapters](docs/src/extending/adapters.md) |
 

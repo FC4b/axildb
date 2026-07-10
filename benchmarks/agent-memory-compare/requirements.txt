@@ -1,0 +1,5 @@
+# Driver dependencies for run_ams.py (Python 3.12).
+# Kept intentionally minimal: stdlib + one HTTP client. The AMS REST surface is
+# simple enough that the official `agent-memory-client` SDK is not needed, and
+# raw requests keeps the exact request/response shapes visible + auditable.
+requests==2.32.3

@@ -220,11 +220,20 @@ pub fn write_for_session(
     write_checkpoint(db, session_id, checkpoint, kind)
 }
 
-// TODO(retention): `_checkpoint_records` grows unbounded — one row per
-// snapshot, no cleanup. Boot stays O(1) (latest_checkpoint uses an
-// indexed query) but disk grows ~tens of rows/day/repo. Wire into
-// axil-memory's TTL/decay machinery when that lands as a cross-
-// Extension hook; until then, prune manually via `axil store delete`.
+/// Number of `snapshot` checkpoints retained per session. Snapshots are
+/// mid-session progress markers, and `axil boot` only ever replays the
+/// latest one — older snapshots exist so an agent can glance a step or two
+/// back, not forever. Keeping a small window bounds `_checkpoint_records`
+/// growth on the write path itself, with no background sweep and no
+/// dependency on axil-memory's decay machinery. `final` checkpoints are
+/// never pruned.
+const SNAPSHOTS_RETAINED_PER_SESSION: usize = 3;
+
+/// Persist a checkpoint against `session_id`, stamped with `kind`.
+///
+/// After a `snapshot` write, this session's older snapshots are trimmed to
+/// [`SNAPSHOTS_RETAINED_PER_SESSION`] so mid-session checkpoints don't
+/// accumulate without bound. `final` checkpoints are always preserved.
 fn write_checkpoint(
     db: &Axil,
     session_id: &RecordId,
@@ -244,7 +253,7 @@ fn write_checkpoint(
             && obj
                 .get("summary")
                 .and_then(|v| v.as_str())
-                .map_or(true, str::is_empty)
+                .is_none_or(str::is_empty)
         {
             let embed_text = checkpoint.embedding_text();
             if !embed_text.is_empty() {
@@ -266,7 +275,56 @@ fn write_checkpoint(
         let _ = db.embed_field(&record.id, "summary");
     }
 
+    // Self-pruning retention: a fresh snapshot trims this session's older
+    // snapshots to the retention window. Best-effort — a failed prune never
+    // fails the write that already succeeded.
+    if kind == CheckpointKind::Snapshot {
+        prune_session_snapshots(db, session_id);
+    }
+
     Ok(record)
+}
+
+/// Trim `session_id`'s `snapshot` checkpoints down to
+/// [`SNAPSHOTS_RETAINED_PER_SESSION`], keeping the newest. `final`
+/// checkpoints are never considered. Best-effort: delete failures are
+/// ignored so retention can't break a checkpoint write.
+fn prune_session_snapshots(db: &Axil, session_id: &RecordId) {
+    let sid = session_id.to_string();
+    let mut snapshots: Vec<Record> = db
+        .list(TABLE_CHECKPOINTS)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|r| {
+            r.data.get("session_id").and_then(|v| v.as_str()) == Some(sid.as_str())
+                && r.data.get("kind").and_then(|v| v.as_str())
+                    == Some(CheckpointKind::Snapshot.as_str())
+        })
+        .collect();
+    if snapshots.len() <= SNAPSHOTS_RETAINED_PER_SESSION {
+        return;
+    }
+    // Newest first. `written_at` is a full-precision RFC 3339 stamp, so its
+    // lexical order is chronological and separates rapid same-second writes
+    // that a second-resolution `created_at` would tie; break remaining ties
+    // on the (time-ordered) ULID id for a total order.
+    snapshots.sort_by(|a, b| {
+        snapshot_written_at(b)
+            .cmp(snapshot_written_at(a))
+            .then_with(|| b.id.cmp(&a.id))
+    });
+    for stale in snapshots.into_iter().skip(SNAPSHOTS_RETAINED_PER_SESSION) {
+        let _ = db.delete(&stale.id);
+    }
+}
+
+/// The `written_at` stamp of a checkpoint row, or `""` when absent.
+fn snapshot_written_at(record: &Record) -> &str {
+    record
+        .data
+        .get("written_at")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
 }
 
 /// Find the most-recent active session, or start a new minimal one if
@@ -733,6 +791,62 @@ mod tests {
             Some("session B summary"),
             "derived checkpoint must reflect the newer session's summary, \
              not the stale checkpoint's text",
+        );
+    }
+
+    #[test]
+    fn snapshots_pruned_to_retention_window_final_preserved() {
+        use std::thread::sleep;
+        use std::time::Duration;
+
+        let (db, _dir) = temp_db();
+
+        // Write more snapshots than the window keeps, spacing each so its
+        // written_at stamp is strictly ordered.
+        let total = SNAPSHOTS_RETAINED_PER_SESSION + 2;
+        let mut ids = Vec::new();
+        for i in 0..total {
+            let h = Checkpoint::from_value(json!({ "state": format!("snapshot {i}") })).unwrap();
+            let rec = snapshot(&db, &h).unwrap();
+            ids.push(rec.id.clone());
+            sleep(Duration::from_millis(3));
+        }
+
+        // A final checkpoint against the same session must survive pruning.
+        let final_h = Checkpoint::from_value(json!({"goal": "ship it"})).unwrap();
+        let final_rec =
+            write_with_active_session(&db, &final_h, CheckpointKind::Final).unwrap();
+
+        let rows = db.list(TABLE_CHECKPOINTS).unwrap();
+        let count_kind = |kind: &str| {
+            rows.iter()
+                .filter(|r| r.data.get("kind").and_then(|v| v.as_str()) == Some(kind))
+                .count()
+        };
+        assert_eq!(
+            count_kind("snapshot"),
+            SNAPSHOTS_RETAINED_PER_SESSION,
+            "snapshots must be trimmed to the retention window",
+        );
+        assert_eq!(count_kind("final"), 1, "final checkpoint must be preserved");
+
+        // The two oldest snapshots are gone; the newest snapshot and the final
+        // both remain.
+        assert!(
+            db.get(&ids[0]).unwrap().is_none(),
+            "oldest snapshot should be pruned",
+        );
+        assert!(
+            db.get(&ids[1]).unwrap().is_none(),
+            "second-oldest snapshot should be pruned",
+        );
+        assert!(
+            db.get(ids.last().unwrap()).unwrap().is_some(),
+            "newest snapshot should be retained",
+        );
+        assert!(
+            db.get(&final_rec.id).unwrap().is_some(),
+            "final checkpoint should never be pruned",
         );
     }
 }

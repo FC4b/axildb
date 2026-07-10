@@ -29,11 +29,13 @@
 
 - [Overview](./cli/overview.md)
 - [Data Commands](./cli/data.md)
+- [Export & Import](./cli/export-import.md)
 - [Memory Commands](./cli/memory.md)
 - [Diagnostics](./cli/diagnostics.md)
 - [Code Search](./cli/code-search.md)
 - [AxilQL](./cli/axilql.md)
 - [Dependency Docs](./cli/dependency-docs.md)
+- [Semantic Answer Cache](./cli/cache.md)
 
 # Rust API
 
@@ -44,12 +46,15 @@
 # Agent Integration
 
 - [Claude Code Integration](./agents/claude-code.md)
+- [Terminal Agents](./agents/terminal-agents.md)
 - [MCP Server](./agents/mcp.md)
 - [Multi-Agent](./agents/multi-agent.md)
 
 # Advanced
 
 - [Cognitive Memory](./advanced/cognitive.md)
+- [Session Compaction & Token Budgets](./advanced/session-compaction.md)
+- [Optional LLM Grounding](./advanced/llm-grounding.md)
 - [Branching](./advanced/branching.md)
 - [Performance](./advanced/performance.md)
 - [Benchmarks](./advanced/benchmarks.md)

@@ -1,0 +1,48 @@
+{
+  "dialect": "droid",
+  "note": "Factory Droid: byte-for-byte the Claude contract with Droid tool names — Execute (shell), Create|Edit|ApplyPatch (file), Read, TodoWrite.",
+  "cases": [
+    {
+      "name": "PreToolUse Execute -> shell",
+      "event": null,
+      "payload": {
+        "hook_event_name": "PreToolUse",
+        "session_id": "dr1",
+        "cwd": "/repo",
+        "tool_name": "Execute",
+        "tool_input": { "command": "cargo build" }
+      },
+      "expect": { "event": "PreTool", "tool": { "kind": "shell", "command": "cargo build", "exit_code": 0 } }
+    },
+    {
+      "name": "PostToolUse Create -> file_edit",
+      "event": null,
+      "payload": {
+        "hook_event_name": "PostToolUse",
+        "session_id": "dr1",
+        "tool_name": "Create",
+        "tool_input": { "file_path": "/repo/src/new.rs", "content": "fn main() {}" },
+        "tool_response": { "filePath": "/repo/src/new.rs", "success": true }
+      },
+      "expect": { "event": "PostTool", "tool": { "kind": "file_edit", "path": "/repo/src/new.rs" } }
+    },
+    {
+      "name": "PostToolUse Execute failure -> shell exit 1",
+      "event": null,
+      "payload": {
+        "hook_event_name": "PostToolUse",
+        "session_id": "dr1",
+        "tool_name": "Execute",
+        "tool_input": { "command": "cargo test" },
+        "tool_response": { "exitCode": 1, "stdout": "boom" }
+      },
+      "expect": { "event": "PostTool", "tool": { "kind": "shell", "command": "cargo test", "exit_code": 1 } }
+    },
+    {
+      "name": "Stop -> no tool",
+      "event": null,
+      "payload": { "hook_event_name": "Stop", "session_id": "dr1", "stop_hook_active": false },
+      "expect": { "event": "Stop", "tool": null }
+    }
+  ]
+}

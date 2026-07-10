@@ -1,0 +1,47 @@
+{
+  "dialect": "copilot",
+  "note": "GitHub Copilot CLI: registered PascalCase so payloads arrive snake_case with hook_event_name; lowercase runtime tool names; postToolUseFailure carries only a top-level error string (must map to exit_code 1).",
+  "cases": [
+    {
+      "name": "PreToolUse bash (snake payload) -> shell",
+      "event": null,
+      "payload": {
+        "hook_event_name": "PreToolUse",
+        "session_id": "cp1",
+        "cwd": "/repo",
+        "tool_name": "bash",
+        "tool_input": { "command": "ls -la" }
+      },
+      "expect": { "event": "PreTool", "tool": { "kind": "shell", "command": "ls -la", "exit_code": 0 } }
+    },
+    {
+      "name": "PostToolUseFailure -> shell exit 1 (regression lock for the failure fix)",
+      "event": null,
+      "payload": {
+        "hook_event_name": "PostToolUse",
+        "session_id": "cp1",
+        "tool_name": "bash",
+        "tool_input": { "command": "git commit -m x" },
+        "error": "nothing to commit, working tree clean"
+      },
+      "expect": { "event": "PostTool", "tool": { "kind": "shell", "command": "git commit -m x", "exit_code": 1 } }
+    },
+    {
+      "name": "camelCase PreToolUse with JSON-string toolArgs -> shell",
+      "event": "preToolUse",
+      "payload": {
+        "sessionId": "cp1",
+        "cwd": "/tmp",
+        "toolName": "bash",
+        "toolArgs": "{\"command\":\"pwd\"}"
+      },
+      "expect": { "event": "PreTool", "tool": { "kind": "shell", "command": "pwd", "exit_code": 0 } }
+    },
+    {
+      "name": "Stop (agentStop alias) -> no tool",
+      "event": null,
+      "payload": { "hook_event_name": "Stop", "session_id": "cp1" },
+      "expect": { "event": "Stop", "tool": null }
+    }
+  ]
+}
