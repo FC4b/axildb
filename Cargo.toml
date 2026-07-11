@@ -90,17 +90,23 @@ required-features = ["graph"]
 name = "agent_memory"
 required-features = ["memory"]
 
+# Crates are versioned INDEPENDENTLY, not in lockstep — each crate carries its
+# own `version` in its manifest. There is deliberately no `version` key here:
+# release-plz bumps only the crates a PR actually changed (patch/minor/major
+# from conventional commits) and cascades those bumps to their dependents. To
+# realign every crate onto one number for a big release, run
+# `scripts/align-version.sh <version>` and commit with a `feat:` message.
 [workspace.package]
-version = "2.1.0"
 edition = "2021"
 license = "PolyForm-Noncommercial-1.0.0"
 repository = "https://github.com/FC4b/axildb"
 
 [workspace.dependencies]
 # Internal crates — declared once here (path for local builds, version for
-# crates.io). Members reference them via `axil-x.workspace = true`, so a release
-# bump touches only `[workspace.package] version` + the versions below, not a
-# pin scattered across every member manifest.
+# crates.io). Members reference them via `axil-x.workspace = true` for shared
+# fields, but each carries its own explicit `version` (independent versioning).
+# release-plz rewrites the version pins below as crates drift, so a released
+# crate's dependents pick up the new requirement automatically.
 axil-core = { path = "crates/axil-core", version = "2.1.0" }
 axil-bundle = { path = "crates/axil-bundle", version = "2.1.0" }
 axil-vector = { path = "crates/engines/axil-vector", version = "2.1.0" }
