@@ -110,6 +110,11 @@ impl Extension for CacheExtension {
                     }
                 }),
             ),
+            McpTool::new(
+                "cache_stats",
+                "Cumulative cache statistics: live entry count, lifetime hits/misses, hit rate, and how many entries were evicted for stale code or expiry.",
+                json!({ "type": "object", "properties": {} }),
+            ),
         ]))
     }
 
@@ -133,6 +138,7 @@ impl Extension for CacheExtension {
         match call.tool.as_str() {
             "cache_put" => handle_put_mcp(db, &call.params).map(Dispatch::Handled),
             "cache_get" => handle_get_mcp(db, &call.params).map(Dispatch::Handled),
+            "cache_stats" => handle_stats(db).map(Dispatch::Handled),
             _ => Ok(Dispatch::NotHandled),
         }
     }
@@ -196,6 +202,7 @@ fn handle_put_mcp(db: &Axil, params: &Value) -> CoreResult<Value> {
     Ok(json!({
         "stored": true,
         "id": record.id.to_string(),
+        "question": req.question,
         "code_refs": record.data.get("code_refs").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0),
         "valid_until": record.data.get("valid_until"),
     }))
@@ -250,6 +257,9 @@ fn hit_to_json(hit: &crate::CacheHit) -> Value {
         "answer": hit.answer,
         "score": hit.score,
         "hit_count": hit.hit_count,
+        // Surface the code the served answer is pinned to, so a caller can see
+        // what an invalidation would key on.
+        "code_refs": hit.code_refs,
     })
 }
 
@@ -381,6 +391,8 @@ mod tests {
         let names: Vec<&str> = surface.tools.iter().map(|t| t.name.as_str()).collect();
         assert!(names.contains(&"cache_get"));
         assert!(names.contains(&"cache_put"));
+        // CLI parity: `stats` is reachable over MCP too.
+        assert!(names.contains(&"cache_stats"));
     }
 
     #[test]
@@ -498,6 +510,8 @@ mod tests {
             .handled()
             .expect("handled");
         assert_eq!(v["stored"], true);
+        // Parity with the CLI put response, which echoes the question.
+        assert_eq!(v["question"], "mcp q");
 
         let getc = McpCall {
             tool: "cache_get".into(),
@@ -510,6 +524,40 @@ mod tests {
             .expect("handled");
         assert_eq!(v["result"], "hit");
         assert_eq!(v["hits"][0]["answer"], "mcp a");
+        // A hit always carries a `code_refs` array (empty here) so callers can
+        // see what an answer is pinned to.
+        assert!(v["hits"][0]["code_refs"].is_array());
+    }
+
+    #[test]
+    fn mcp_cache_stats_reports_counters() {
+        let (db, _dir) = temp_db();
+        let call = McpCall {
+            tool: "cache_stats".into(),
+            params: Value::Null,
+        };
+        let v = CacheExtension
+            .handle_mcp(&db, &call)
+            .unwrap()
+            .handled()
+            .expect("cache_stats handled");
+        assert_eq!(v["entries"], 0);
+        assert_eq!(v["total_hits"], 0);
+        assert_eq!(v["total_misses"], 0);
+    }
+
+    #[test]
+    fn hit_to_json_includes_code_refs() {
+        let hit = crate::CacheHit {
+            id: "1".into(),
+            question: "q".into(),
+            answer: "a".into(),
+            score: 1.0,
+            hit_count: 1,
+            code_refs: vec![json!({"path": "src/lib.rs"})],
+        };
+        let v = hit_to_json(&hit);
+        assert_eq!(v["code_refs"][0]["path"], "src/lib.rs");
     }
 
     #[test]

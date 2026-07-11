@@ -30,7 +30,7 @@
 //! the same approach `axil-checkpoint` takes when it reads `_sessions`
 //! without depending on `axil-memory`.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -79,12 +79,50 @@ pub enum StaleReason {
 }
 
 impl StaleReason {
+    /// A human-readable phrase for this staleness cause, used to build the
+    /// `cache get` miss detail string.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::ProxyChanged => "proxy content changed",
             Self::FileChanged => "file content changed",
         }
     }
+}
+
+/// The directory a proxy's index-root-relative `path` resolves against.
+///
+/// The indexer records proxy paths relative to the project/index root (see
+/// the indexer's scanner), not the process working directory, so resolving
+/// them against the cwd either misses the file or — worse — hashes a
+/// same-named file under the cwd and evicts on a false change. The root is
+/// recovered from the DB's own location: a database conventionally lives at
+/// `<root>/.axil/memory.axil`, so walk up from the DB file to the nearest
+/// project marker, falling back to the DB's parent directory. `None` only
+/// when the DB path has no parent at all — a genuinely unknowable root, which
+/// leaves the caller to fall back to the cwd.
+pub fn index_root(db: &Axil) -> Option<PathBuf> {
+    let start = db.path().parent()?;
+    // Same marker set the CLI's project-root detection uses, so the cache and
+    // the indexer agree on where the root is.
+    const MARKERS: &[&str] = &[
+        "Cargo.toml",
+        "package.json",
+        "pyproject.toml",
+        "go.mod",
+        "pom.xml",
+        "build.gradle",
+        ".git",
+    ];
+    let mut dir = start.to_path_buf();
+    loop {
+        if MARKERS.iter().any(|m| dir.join(m).exists()) {
+            return Some(dir);
+        }
+        if !dir.pop() {
+            break;
+        }
+    }
+    Some(start.to_path_buf())
 }
 
 /// Resolve a `--code-ref`-style spec into a normalized code-ref object with
@@ -101,20 +139,28 @@ impl StaleReason {
 /// stored in the fingerprint so the read-time re-hash is location-stable.
 pub fn resolve_ref(db: &Axil, spec: &str, base_dir: &Path) -> Value {
     let proxies = db.list(TABLE_CODE_PROXIES).unwrap_or_default();
+    // A proxy's `path` is stored relative to the index root, not the process
+    // cwd, so a matched proxy's file is fingerprinted against that root. A bare
+    // (unmatched) path is user-supplied and stays cwd-relative via `base_dir`.
+    let root = index_root(db);
+    let proxy_base = root.as_deref().unwrap_or(base_dir);
 
     // 1) Exact proxy_id / canonical_id match.
     if let Some(proxy) = proxies.iter().find(|r| {
         r.data.get("proxy_id").and_then(|v| v.as_str()) == Some(spec)
             || r.data.get("canonical_id").and_then(|v| v.as_str()) == Some(spec)
     }) {
-        return build_ref_from_proxy(&proxy.data, base_dir);
+        return build_ref_from_proxy(&proxy.data, proxy_base);
     }
 
-    // 2) path[:line] form.
-    let (path_part, line_part) = split_path_line(spec);
+    // 2) path[:line] form. Stored proxy paths use forward slashes, so fold a
+    // Windows-style `src\lib.rs` to `src/lib.rs` before matching — otherwise
+    // the spec string-mismatches and silently degrades to a path-only ref.
+    let (raw_path, line_part) = split_path_line(spec);
+    let path_part = raw_path.replace('\\', "/");
     let mut path_matches: Vec<&Value> = proxies
         .iter()
-        .filter(|r| r.data.get("path").and_then(|v| v.as_str()) == Some(path_part))
+        .filter(|r| r.data.get("path").and_then(|v| v.as_str()) == Some(path_part.as_str()))
         .map(|r| &r.data)
         .collect();
 
@@ -137,11 +183,11 @@ pub fn resolve_ref(db: &Axil, spec: &str, base_dir: &Path) -> Value {
     };
 
     match matched_proxy {
-        Some(proxy) => build_ref_from_proxy(proxy, base_dir),
+        Some(proxy) => build_ref_from_proxy(proxy, proxy_base),
         // No proxy matched — keep the path pointer and fingerprint the file
         // directly, so code refs work even before (or without) an index.
         None => {
-            let fp = fingerprint_path_only(path_part, base_dir);
+            let fp = fingerprint_path_only(&path_part, base_dir);
             let mut obj = serde_json::Map::new();
             obj.insert("spec".into(), json!(spec));
             obj.insert("path".into(), json!(path_part));
@@ -494,5 +540,91 @@ mod tests {
         assert_eq!(split_path_line("src/a.rs"), ("src/a.rs", None));
         // A trailing non-numeric segment is not a line number.
         assert_eq!(split_path_line("C:\\x"), ("C:\\x", None));
+    }
+
+    #[test]
+    fn windows_backslash_spec_matches_forward_slash_proxy() {
+        let (db, dir) = temp_db();
+        db.insert(
+            TABLE_CODE_PROXIES,
+            json!({
+                "proxy_id": "px_bs",
+                "kind": "symbol",
+                "path": "src/lib.rs",
+                "symbol": "login",
+                "proxy_text": "fn login()"
+            }),
+        )
+        .unwrap();
+        // A Windows-style spec must still resolve to the forward-slash proxy
+        // rather than degrading to a path-only fingerprint.
+        let r = resolve_ref(&db, "src\\lib.rs", dir.path());
+        assert_eq!(r.get("path").and_then(|v| v.as_str()), Some("src/lib.rs"));
+        let fp: CodeFingerprint =
+            serde_json::from_value(r.get("fingerprint").unwrap().clone()).unwrap();
+        assert!(
+            fp.proxy_hash.is_some(),
+            "backslash spec should have matched the proxy"
+        );
+        // A path-only ref carries a `spec` field; a proxy-matched ref does not.
+        assert!(r.get("spec").is_none());
+    }
+
+    #[test]
+    fn proxy_path_resolves_against_index_root_not_cwd() {
+        // The DB (and its project markers) live under `root`; the read runs
+        // from a different cwd (`cwd`) that holds a same-named decoy file.
+        let root = tempfile::tempdir().unwrap();
+        // Pin index_root to `root` deterministically even if the temp dir sits
+        // inside another repo.
+        std::fs::write(root.path().join("Cargo.toml"), "[package]\n").unwrap();
+        let db = Axil::open(root.path().join("db.axil")).build().unwrap();
+
+        std::fs::create_dir_all(root.path().join("src")).unwrap();
+        let real = "fn real() {}";
+        std::fs::write(root.path().join("src/lib.rs"), real).unwrap();
+
+        // Decoy same-named file under a different cwd. Resolving the proxy path
+        // against the cwd (the bug) would hash this and falsely evict.
+        let cwd = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(cwd.path().join("src")).unwrap();
+        std::fs::write(cwd.path().join("src/lib.rs"), "fn decoy() {}").unwrap();
+
+        db.insert(
+            TABLE_CODE_PROXIES,
+            json!({
+                "proxy_id": "px_root",
+                "kind": "file",
+                "path": "src/lib.rs",
+                "proxy_text": "file body"
+            }),
+        )
+        .unwrap();
+
+        // base_dir is the decoy cwd; the proxy path must still resolve against
+        // the index root.
+        let r = resolve_ref(&db, "px_root", cwd.path());
+        let fp: CodeFingerprint =
+            serde_json::from_value(r.get("fingerprint").unwrap().clone()).unwrap();
+        assert_eq!(
+            fp.file_hash,
+            Some(hash_str(real)),
+            "proxy file must be hashed at the index root, not the cwd"
+        );
+        assert_ne!(fp.file_hash, Some(hash_str("fn decoy() {}")));
+    }
+
+    #[test]
+    fn index_root_is_recovered_from_db_path() {
+        let (db, dir) = temp_db();
+        // A DB with a parent always yields a root; the marker walk only ever
+        // moves upward, so the DB's parent directory is under that root.
+        let root = index_root(&db).expect("root recoverable from a DB with a parent");
+        assert!(
+            dir.path().starts_with(&root),
+            "{:?} should sit under recovered root {:?}",
+            dir.path(),
+            root
+        );
     }
 }

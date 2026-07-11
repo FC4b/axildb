@@ -244,6 +244,7 @@ def score_question(
 class Config:
     server_url: str
     variant: str
+    limit: int
     top_k: int
     search_mode: str
     hybrid_alpha: float
@@ -564,6 +565,7 @@ def main() -> None:
     cfg = Config(
         server_url=args.server_url,
         variant=args.variant,
+        limit=args.limit,
         top_k=args.top_k,
         search_mode=args.search_mode,
         hybrid_alpha=args.hybrid_alpha,

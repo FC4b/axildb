@@ -612,10 +612,22 @@ impl Axil {
         Ok(())
     }
 
-    fn insert_record(&self, mut record: Record) -> Result<Record> {
+    fn insert_record(&self, record: Record) -> Result<Record> {
+        self.insert_record_inner(record).map(|(record, _superseded)| record)
+    }
+
+    /// Insert a record and report how many existing records it superseded.
+    ///
+    /// Identical to [`Axil::insert_record`], but returns the auto-supersede
+    /// count alongside the stored record so callers that need to account for
+    /// side effects (notably [`crate::portable`] import, which must surface how
+    /// many local records an import demoted) can see it. Normal inserts discard
+    /// the count via the [`Axil::insert_record`] wrapper.
+    fn insert_record_inner(&self, mut record: Record) -> Result<(Record, usize)> {
         let table = record.table.clone();
         let _span = crate::otel::span("axil.insert", &[("table", table.clone())]);
         let timer = self.metrics.start_timer(OpType::Insert);
+        let mut superseded_count = 0usize;
         // Auto-score importance if not already set.
         if record.data.get("_importance").is_none() && !table.starts_with('_') {
             let score = crate::importance::compute_importance(&record.data);
@@ -653,8 +665,11 @@ impl Axil {
                         .is_ok();
                     // Only supersede if the new record was successfully indexed
                     if indexed {
-                        if let Err(e) = self.auto_supersede_with_vector(&record, &vec) {
-                            eprintln!("warning: auto-supersede failed for {}: {e}", record.id);
+                        match self.auto_supersede_with_vector(&record, &vec) {
+                            Ok(n) => superseded_count = n,
+                            Err(e) => {
+                                eprintln!("warning: auto-supersede failed for {}: {e}", record.id)
+                            }
                         }
                     }
                 }
@@ -686,7 +701,7 @@ impl Axil {
 
         let elapsed = timer.finish();
         crate::otel::record_operation("insert", &table, elapsed);
-        Ok(record)
+        Ok((record, superseded_count))
     }
 
     /// Whether a record would be auto-embedded into the vector index on insert.
@@ -697,7 +712,11 @@ impl Axil {
     /// [`Axil::reembed_missing`] depends on this matching the insert gate, or it
     /// false-positives on records that were never meant to be embedded. Kept next
     /// to the insert path so any drift is immediately visible.
-    fn is_embeddable(record: &Record) -> bool {
+    ///
+    /// `pub(crate)` so [`crate::portable`] import can reuse the exact same gate
+    /// when deciding which imported records to verify as embedded, rather than
+    /// keeping a second copy that could silently drift.
+    pub(crate) fn is_embeddable(record: &Record) -> bool {
         if record.table.starts_with('_') {
             return false;
         }
@@ -856,6 +875,20 @@ impl Axil {
     /// is overwritten (upsert), matching the storage layer's id-keyed semantics.
     pub fn insert_preserving(&self, record: Record) -> Result<Record> {
         self.insert_record(record)
+    }
+
+    /// Like [`Axil::insert_preserving`], but also returns how many existing
+    /// records the insert auto-superseded.
+    ///
+    /// Used by [`crate::portable`] import so the `ImportReport` can honestly
+    /// surface how many local records an import demoted (auto-supersede fires
+    /// on the import path just as it does on a normal insert). The recency
+    /// guard in [`Axil::auto_supersede_with_vector`] means an import that
+    /// preserves an *older* `created_at` never supersedes a fresher local
+    /// record, so a non-zero count here always reflects a genuine, newer
+    /// incoming record replacing an older near-duplicate.
+    pub(crate) fn insert_preserving_counted(&self, record: Record) -> Result<(Record, usize)> {
+        self.insert_record_inner(record)
     }
 
     /// Insert multiple records in a single transaction.
@@ -4248,9 +4281,14 @@ impl Axil {
     }
 
     /// Auto-supersede using a pre-computed embedding vector.
-    fn auto_supersede_with_vector(&self, new_record: &Record, vector: &[f32]) -> Result<()> {
+    ///
+    /// Returns the number of existing records marked superseded. A normal
+    /// insert discards this; [`crate::portable`] import uses it to report how
+    /// many local records an import demoted.
+    fn auto_supersede_with_vector(&self, new_record: &Record, vector: &[f32]) -> Result<usize> {
         const SUPERSEDE_THRESHOLD: f32 = 0.92;
 
+        let mut superseded = 0usize;
         let candidates = self.similar_to_vector(vector, 10)?;
         for (candidate, score) in &candidates {
             if candidate.id == new_record.id {
@@ -4263,6 +4301,16 @@ impl Axil {
                 continue;
             }
             if crate::importance::is_pinned(&candidate.data) {
+                continue;
+            }
+
+            // Recency guard: never let an older record supersede a newer one.
+            // A normal insert always stamps `created_at = now()`, so this is a
+            // no-op for it (the incoming record is at least as new as anything
+            // already stored). It only bites the import path, which preserves
+            // the source `created_at`: an imported record must not demote a
+            // fresher local near-duplicate just because they are similar.
+            if new_record.created_at < candidate.created_at {
                 continue;
             }
 
@@ -4285,14 +4333,16 @@ impl Axil {
                     serde_json::json!(new_record.id.to_string()),
                 );
             }
-            let _ = self.storage.update(&candidate.id, data);
+            if self.storage.update(&candidate.id, data).is_ok() {
+                superseded += 1;
+            }
 
             // Create graph edge if available
             if self.has_graph_index() {
                 let _ = self.relate(&new_record.id, "supersedes", &candidate.id, None);
             }
         }
-        Ok(())
+        Ok(superseded)
     }
 
     /// Auto-link a record by extracting entities and creating graph edges.

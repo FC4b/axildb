@@ -137,16 +137,41 @@ pub enum EmbeddingVerification {
 /// Outcome of an import.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct ImportReport {
-    /// Records inserted (or, in a dry run, that would be inserted).
+    /// Records inserted as genuinely new (or, in a dry run, that would be).
+    /// A record that overwrote an existing id is counted in [`Self::overwritten`]
+    /// instead, never here.
     pub imported: usize,
+    /// Records that overwrote an existing same-id record (non-`--dedup` import).
+    ///
+    /// The import path inserts through an id-keyed upsert, so re-importing a
+    /// stale export replaces newer local data in place. Those overwrites are
+    /// counted here rather than lumped into [`Self::imported`], so the report
+    /// never hides that an import demoted or clobbered existing records. (Under
+    /// `--dedup` a same-id record is skipped instead — see [`Self::skipped_id`].)
+    pub overwritten: usize,
     /// Records skipped because their id already existed (`--dedup`).
     pub skipped_id: usize,
     /// Records skipped because a same-content record already existed (`--dedup`).
     pub skipped_dup: usize,
+    /// Existing records marked superseded as a side effect of this import.
+    ///
+    /// Auto-supersede fires on the import path just as on a normal insert, but a
+    /// recency guard means an imported record only supersedes a local one when
+    /// the incoming `created_at` is at least as new. A non-zero count therefore
+    /// always reflects a genuinely newer import replacing an older
+    /// near-duplicate — surfaced so an import that demotes local memory is
+    /// visible rather than silent.
+    pub superseded: usize,
     /// Edges created between resolvable endpoints.
     pub edges_created: usize,
-    /// Edges skipped: a missing endpoint, or a duplicate under `--dedup`.
+    /// Edges skipped: a missing endpoint, or a duplicate `(from, type, to)` that
+    /// already exists (import is edge-idempotent even without `--dedup`).
     pub edges_skipped: usize,
+    /// Edges (counted within [`Self::edges_created`]) whose endpoint was
+    /// redirected onto a content-deduped survivor. When `--dedup` drops a
+    /// duplicate record, edges that referenced it are reattached to the
+    /// surviving copy rather than dropped as dangling; this counts how many.
+    pub edges_remapped: usize,
     /// Records whose id had to be remapped on insert. Always 0 — the importer
     /// preserves original ids so checkpoint `references[]` and `code_refs`
     /// survive the round trip. Surfaced for honesty if that ever changes.
@@ -313,12 +338,29 @@ fn write_line<W: Write, T: Serialize>(writer: &mut W, value: &T) -> Result<()> {
 /// (embedding, FTS, graph auto-link, `code_refs`), and their **original ids are
 /// preserved** so cross-references survive. Edges are recreated with
 /// [`Axil::relate`]; an edge whose endpoint was not imported (and does not
-/// already exist) is skipped rather than dangling.
+/// already exist) is skipped rather than dangling, and a `(from, type, to)`
+/// that already exists is skipped so re-import never doubles an edge.
 ///
 /// With `opts.dedup`, a record is skipped when its id already exists or when a
-/// same-content record already exists in the same table; a duplicate edge is
-/// likewise skipped. With `opts.dry_run`, nothing is written but the report
-/// reflects what would happen.
+/// same-content record already exists in the same table (edges that referenced
+/// the dropped duplicate are reattached to the surviving copy). Without
+/// `--dedup`, a record whose id already exists is upserted, and that overwrite
+/// is reported as [`ImportReport::overwritten`] rather than a fresh import.
+/// With `opts.dry_run`, nothing is written but the report reflects what would
+/// happen.
+///
+/// ## Validation and partial state
+///
+/// The export **header must be the first non-empty line**. A truncated or
+/// headerless stream is rejected *before anything is written* — the returned
+/// error mutates nothing.
+///
+/// Past the header, import is **fail-fast with partial state**: each record is
+/// committed in its own storage transaction, so a mid-stream failure (a
+/// malformed line, an insert error) leaves everything before it committed. In
+/// that case the error is [`AxilError::ImportInterrupted`], which **carries the
+/// partial [`ImportReport`]** so the caller can see exactly what was written
+/// rather than losing the accounting with the error.
 pub fn import_from_reader<R: BufRead>(
     db: &Axil,
     opts: &ImportOptions,
@@ -327,101 +369,62 @@ pub fn import_from_reader<R: BufRead>(
     // Pre-scan existing state so dedup can consult it without a per-record query.
     // `present_ids` also tracks ids added during this import so intra-file
     // duplicates and edge endpoints resolve correctly (even in a dry run).
+    // `content_hashes` maps (table -> content hash -> surviving record id) so a
+    // deduped duplicate can remap its edges onto the record it matched.
     let mut present_ids: HashSet<String> = HashSet::new();
-    let mut content_hashes: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut content_hashes: HashMap<String, HashMap<String, String>> = HashMap::new();
     for table in db.tables()? {
         for record in db.list(&table)? {
-            present_ids.insert(record.id.to_string());
+            let id = record.id.to_string();
             if opts.dedup {
                 content_hashes
                     .entry(table.clone())
                     .or_default()
-                    .insert(content_hash(&record.data));
+                    .insert(content_hash(&record.data), id.clone());
             }
+            present_ids.insert(id);
         }
     }
 
     let mut report = ImportReport::default();
     let mut header_seen = false;
-    let mut edge_lines: Vec<EdgeLine> = Vec::new();
+    // Maps a content-deduped duplicate's id to the surviving record's id, so
+    // edges that referenced the duplicate reattach to the survivor.
+    let mut id_remap: HashMap<String, String> = HashMap::new();
     // Ids of imported records that met the auto-embed condition, verified
     // against the vector index after the loop.
     let mut embeddable: Vec<RecordId> = Vec::new();
 
-    for (lineno, line) in reader.lines().enumerate() {
-        let line = line
-            .map_err(|e| AxilError::plugin(format!("failed to read import line {lineno}: {e}")))?;
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
+    // Stream the file. A failure raised before the header is accepted mutated
+    // nothing (records are only processed after the header), so it propagates
+    // as its own plain error. A failure after the header may have committed
+    // records/edges already, so it is wrapped with the partial report.
+    let outcome = import_stream(
+        db,
+        opts,
+        reader,
+        &mut present_ids,
+        &mut content_hashes,
+        &mut id_remap,
+        &mut embeddable,
+        &mut report,
+        &mut header_seen,
+    );
+    if let Err(source) = outcome {
+        if header_seen {
+            return Err(AxilError::ImportInterrupted {
+                report: Box::new(report),
+                source: Box::new(source),
+            });
         }
-        let value: Value = serde_json::from_str(trimmed).map_err(|e| {
-            AxilError::InvalidQuery(format!("malformed JSONL at line {}: {e}", lineno + 1))
-        })?;
-        let kind = value.get("kind").and_then(|k| k.as_str()).unwrap_or("");
-
-        match kind {
-            "header" => {
-                let header: Header = serde_json::from_value(value).map_err(|e| {
-                    AxilError::InvalidQuery(format!("invalid export header: {e}"))
-                })?;
-                if header.format != FORMAT {
-                    return Err(AxilError::InvalidQuery(format!(
-                        "unrecognized export format '{}' (expected '{FORMAT}')",
-                        header.format
-                    )));
-                }
-                if header.format_version > FORMAT_VERSION {
-                    return Err(AxilError::InvalidQuery(format!(
-                        "export format version {} is newer than supported version {FORMAT_VERSION} \
-                         — upgrade axil to import this file",
-                        header.format_version
-                    )));
-                }
-                header_seen = true;
-            }
-            "record" => {
-                let line: RecordLine = serde_json::from_value(value).map_err(|e| {
-                    AxilError::InvalidQuery(format!("invalid record line: {e}"))
-                })?;
-                // Rebuilt indexes are regenerated on insert — never import them.
-                if is_rebuilt_index_table(&line.table) {
-                    continue;
-                }
-                import_record(
-                    db,
-                    opts,
-                    &line,
-                    &mut present_ids,
-                    &mut content_hashes,
-                    &mut embeddable,
-                    &mut report,
-                )?;
-            }
-            "edge" => {
-                // Buffer edges; apply them after every record line is processed so
-                // an edge can reference a record defined later in the stream.
-                let line: EdgeLine = serde_json::from_value(value)
-                    .map_err(|e| AxilError::InvalidQuery(format!("invalid edge line: {e}")))?;
-                edge_lines.push(line);
-            }
-            other => {
-                return Err(AxilError::InvalidQuery(format!(
-                    "unknown line kind '{other}' at line {}",
-                    lineno + 1
-                )));
-            }
-        }
+        return Err(source);
     }
 
+    // A file with no header at all (empty or all-blank) mutated nothing.
     if !header_seen {
         return Err(AxilError::InvalidQuery(
             "missing export header — is this an axil export file?".to_string(),
         ));
-    }
-
-    for edge in &edge_lines {
-        import_edge(db, opts, edge, &present_ids, &mut report)?;
     }
 
     // Self-verification: importing is only half the contract — the records
@@ -447,13 +450,119 @@ pub fn import_from_reader<R: BufRead>(
     Ok(report)
 }
 
+/// Drive the JSONL stream: validate the header, apply record lines, buffer and
+/// then apply edge lines. Split out from [`import_from_reader`] so the caller
+/// can wrap a mid-stream failure with the partial report while still returning
+/// a plain error for a file rejected before the header.
+///
+/// `header_seen` is written through so the caller can tell "rejected before any
+/// mutation" (still `false`) from "failed mid-import" (`true`).
+#[allow(clippy::too_many_arguments)]
+fn import_stream<R: BufRead>(
+    db: &Axil,
+    opts: &ImportOptions,
+    reader: R,
+    present_ids: &mut HashSet<String>,
+    content_hashes: &mut HashMap<String, HashMap<String, String>>,
+    id_remap: &mut HashMap<String, String>,
+    embeddable: &mut Vec<RecordId>,
+    report: &mut ImportReport,
+    header_seen: &mut bool,
+) -> Result<()> {
+    // Buffer edges; apply them after every record line is processed so an edge
+    // can reference a record defined later in the stream.
+    let mut edge_lines: Vec<EdgeLine> = Vec::new();
+
+    for (lineno, line) in reader.lines().enumerate() {
+        let line = line.map_err(|e| {
+            AxilError::plugin(format!("failed to read import line {}: {e}", lineno + 1))
+        })?;
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let value: Value = serde_json::from_str(trimmed).map_err(|e| {
+            AxilError::InvalidQuery(format!("malformed JSONL at line {}: {e}", lineno + 1))
+        })?;
+        let kind = value.get("kind").and_then(|k| k.as_str()).unwrap_or("");
+
+        // Require the header as the first non-empty line so a truncated or
+        // headerless file is rejected before any record is written. This runs
+        // while `*header_seen` is still false, i.e. before any mutation.
+        if !*header_seen && kind != "header" {
+            return Err(AxilError::InvalidQuery(format!(
+                "missing export header at line {}: the first non-empty line of an axil export \
+                 must be its header (nothing was imported)",
+                lineno + 1
+            )));
+        }
+
+        match kind {
+            "header" => {
+                let header: Header = serde_json::from_value(value)
+                    .map_err(|e| AxilError::InvalidQuery(format!("invalid export header: {e}")))?;
+                if header.format != FORMAT {
+                    return Err(AxilError::InvalidQuery(format!(
+                        "unrecognized export format '{}' (expected '{FORMAT}')",
+                        header.format
+                    )));
+                }
+                if header.format_version > FORMAT_VERSION {
+                    return Err(AxilError::InvalidQuery(format!(
+                        "export format version {} is newer than supported version {FORMAT_VERSION} \
+                         — upgrade axil to import this file",
+                        header.format_version
+                    )));
+                }
+                *header_seen = true;
+            }
+            "record" => {
+                let record_line: RecordLine = serde_json::from_value(value)
+                    .map_err(|e| AxilError::InvalidQuery(format!("invalid record line: {e}")))?;
+                // Rebuilt indexes are regenerated on insert — never import them.
+                if is_rebuilt_index_table(&record_line.table) {
+                    continue;
+                }
+                import_record(
+                    db,
+                    opts,
+                    &record_line,
+                    present_ids,
+                    content_hashes,
+                    id_remap,
+                    embeddable,
+                    report,
+                )?;
+            }
+            "edge" => {
+                let edge_line: EdgeLine = serde_json::from_value(value)
+                    .map_err(|e| AxilError::InvalidQuery(format!("invalid edge line: {e}")))?;
+                edge_lines.push(edge_line);
+            }
+            other => {
+                return Err(AxilError::InvalidQuery(format!(
+                    "unknown line kind '{other}' at line {}",
+                    lineno + 1
+                )));
+            }
+        }
+    }
+
+    for edge in &edge_lines {
+        import_edge(db, opts, edge, present_ids, id_remap, report)?;
+    }
+
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn import_record(
     db: &Axil,
     opts: &ImportOptions,
     line: &RecordLine,
     present_ids: &mut HashSet<String>,
-    content_hashes: &mut HashMap<String, HashSet<String>>,
+    content_hashes: &mut HashMap<String, HashMap<String, String>>,
+    id_remap: &mut HashMap<String, String>,
     embeddable: &mut Vec<RecordId>,
     report: &mut ImportReport,
 ) -> Result<()> {
@@ -464,18 +573,30 @@ fn import_record(
 
     let hash = content_hash(&line.data);
     if opts.dedup {
-        if let Some(hashes) = content_hashes.get(&line.table) {
-            if hashes.contains(&hash) {
-                report.skipped_dup += 1;
-                return Ok(());
+        if let Some(surviving) = content_hashes.get(&line.table).and_then(|h| h.get(&hash)) {
+            // A same-content record already exists (possibly under a different
+            // id). Skip the duplicate, but remap its id to the surviving record
+            // so edges that referenced this copy reattach to the survivor
+            // instead of being dropped as dangling.
+            report.skipped_dup += 1;
+            if surviving != &line.id {
+                id_remap.insert(line.id.clone(), surviving.clone());
             }
+            return Ok(());
         }
     }
 
+    // A non-dedup insert of an id that already exists is an id-keyed upsert
+    // (documented on `Axil::insert_preserving`): it replaces the existing
+    // record in place. Count it as an overwrite, not an honest new insert, so a
+    // stale re-import can't masquerade as fresh imports in the report.
+    let overwrites_existing = present_ids.contains(&line.id);
+
     if !opts.dry_run {
         let record = build_record(line)?;
-        let track = expects_embedding(&line.table, &line.data).then(|| record.id.clone());
-        db.insert_preserving(record)?;
+        let track = Axil::is_embeddable(&record).then(|| record.id.clone());
+        let (_stored, superseded) = db.insert_preserving_counted(record)?;
+        report.superseded += superseded;
         if let Some(id) = track {
             embeddable.push(id);
         }
@@ -488,9 +609,13 @@ fn import_record(
         content_hashes
             .entry(line.table.clone())
             .or_default()
-            .insert(hash);
+            .insert(hash, line.id.clone());
     }
-    report.imported += 1;
+    if overwrites_existing {
+        report.overwritten += 1;
+    } else {
+        report.imported += 1;
+    }
     Ok(())
 }
 
@@ -499,21 +624,32 @@ fn import_edge(
     opts: &ImportOptions,
     line: &EdgeLine,
     present_ids: &HashSet<String>,
+    id_remap: &HashMap<String, String>,
     report: &mut ImportReport,
 ) -> Result<()> {
+    // Resolve endpoints through the dedup remap: an endpoint that referenced a
+    // content-duplicate now points at the surviving record it was deduped onto,
+    // so the imported copy's graph context lands on the survivor.
+    let from_key = id_remap.get(&line.from).unwrap_or(&line.from);
+    let to_key = id_remap.get(&line.to).unwrap_or(&line.to);
+    let remapped = from_key != &line.from || to_key != &line.to;
+
     // Both endpoints must resolve, else the edge would dangle.
-    if !present_ids.contains(&line.from) || !present_ids.contains(&line.to) {
+    if !present_ids.contains(from_key) || !present_ids.contains(to_key) {
         report.edges_skipped += 1;
         return Ok(());
     }
 
-    let from = RecordId::from_string(line.from.clone())?;
-    let to = RecordId::from_string(line.to.clone())?;
+    let from = RecordId::from_string(from_key.clone())?;
+    let to = RecordId::from_string(to_key.clone())?;
 
-    // Under --dedup, skip an edge that already exists with the same
-    // (from, type, to) so re-import is idempotent. The lookup is read-only, so
-    // it runs in a dry run too and the report predicts the real outcome.
-    if opts.dedup && db.has_graph_index() {
+    // Skip an edge that already exists with the same (from, type, to) so
+    // re-import is edge-idempotent even without `--dedup` — `Axil::relate` has
+    // no idempotence, so without this a plain re-import doubles every edge, and
+    // remapping a duplicate's edge onto a survivor could otherwise recreate an
+    // edge the survivor already has. The lookup is read-only, so it runs in a
+    // dry run too and the report predicts the real outcome.
+    if db.has_graph_index() {
         let existing = db.edges(&from, Some(&line.edge_type), Direction::Out)?;
         if existing.iter().any(|e| e.to == to) {
             report.edges_skipped += 1;
@@ -528,7 +664,12 @@ fn import_edge(
             Some(line.props.clone())
         };
         match db.relate(&from, &line.edge_type, &to, props) {
-            Ok(_) => report.edges_created += 1,
+            Ok(_) => {
+                report.edges_created += 1;
+                if remapped {
+                    report.edges_remapped += 1;
+                }
+            }
             Err(_) => {
                 // Endpoint vanished between scan and relate, or no graph engine.
                 report.edges_skipped += 1;
@@ -537,20 +678,11 @@ fn import_edge(
         }
     } else {
         report.edges_created += 1;
+        if remapped {
+            report.edges_remapped += 1;
+        }
     }
     Ok(())
-}
-
-/// Whether an imported record should end up with an embedding — mirrors the
-/// auto-embed condition in the insert path: a user (non-`_`) table with enough
-/// searchable text to embed. Kept in lockstep with `Axil::insert_record` so
-/// verification never flags a record insert would not have embedded anyway.
-fn expects_embedding(table: &str, data: &Value) -> bool {
-    if table.starts_with('_') {
-        return false;
-    }
-    let text = crate::util::searchable_text(data);
-    !text.is_empty() && text.len() > 5
 }
 
 /// Reconstruct a [`Record`] from an import line, preserving id, timestamps, and

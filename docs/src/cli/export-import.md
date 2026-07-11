@@ -82,16 +82,30 @@ endpoint is skipped rather than left dangling.
 
 Without `--dedup`, importing a record whose id already exists **overwrites that
 record in place** (storage is keyed by id) — the engines re-fire on the imported
-content. Use `--dedup` whenever the destination may already contain any of the
-exported records; overwrite-by-id is only the right tool when you intend the
-import to win.
+content. Each overwrite is counted as `overwritten` in the report (never hidden
+inside `imported`) and echoed as a warning. Use `--dedup` whenever the
+destination may already contain any of the exported records; overwrite-by-id is
+only the right tool when you intend the import to win.
+
+An imported record can also **supersede** an existing near-duplicate (same
+auto-supersede rule as a normal insert), but only when the incoming record's
+`created_at` is at least as new — an older export can never demote fresher
+local memory. The report counts these as `superseded`.
 
 `import` prints a JSON report:
 
 ```json
-{"dry_run":false,"imported":12,"skipped_id":0,"skipped_dup":0,"edges_created":4,"edges_skipped":0,"id_remapped":0,
+{"dry_run":false,"interrupted":false,"imported":12,"overwritten":0,"skipped_id":0,"skipped_dup":0,
+ "superseded":0,"edges_created":4,"edges_skipped":0,"edges_remapped":0,"id_remapped":0,
  "embeddings":{"status":"verified","expected":12,"indexed":12,"missing":0}}
 ```
+
+The export header must be the first line of the stream — a truncated or
+headerless file is rejected **before anything is written**. Past the header,
+import is fail-fast with partial state: if it stops mid-stream (malformed line,
+insert error), everything before the failure is already committed, and the
+report is still printed with `"interrupted":true` so the counts show exactly
+what landed.
 
 ### Self-verifying embeddings
 
@@ -122,8 +136,11 @@ Skips a record when **either**:
   internal fields (e.g. importance score) removed, so the same memory matches
   even when two machines scored it differently.
 
-Duplicate edges (same `from`/type/`to`) are skipped too, so re-importing the same
-file is a no-op.
+Edges that referenced a content-deduped duplicate are reattached to the
+surviving record (`edges_remapped`) instead of being dropped, so the imported
+copy's graph context lands on the record that won. Duplicate edges (same
+`from`/type/`to`) are always skipped — with or without `--dedup` — so
+re-importing the same file never doubles an edge.
 
 ## Team workflow
 

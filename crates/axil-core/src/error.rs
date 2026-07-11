@@ -38,6 +38,27 @@ pub enum AxilError {
     /// or fall back to a read-only open) from a corrupt or missing file.
     #[error("database busy: already opened for writing by another process")]
     Busy,
+
+    /// An import stopped partway through, after the export header was accepted
+    /// and one or more records or edges had already been committed.
+    ///
+    /// Portable import is fail-fast with *partial state*: each imported record
+    /// is written in its own storage transaction, so a mid-stream failure (a
+    /// malformed line, an insert error) leaves everything before it committed.
+    /// This variant carries the partial [`ImportReport`] so the caller can see
+    /// exactly what was written instead of the accounting being discarded with
+    /// the error. Failures raised *before* the header is accepted mutate
+    /// nothing and surface as their own plain error rather than this variant.
+    ///
+    /// [`ImportReport`]: crate::portable::ImportReport
+    #[error("import interrupted after partial write: {source}")]
+    ImportInterrupted {
+        /// What was committed before the failure stopped the import.
+        report: Box<crate::portable::ImportReport>,
+        /// The underlying failure that stopped the import.
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
 }
 
 impl AxilError {
