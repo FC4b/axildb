@@ -192,11 +192,13 @@ jobs:
       # in ONNX (ort) at build time, and semver-checks builds rustdoc for every
       # crate, so a warm target/registry cache is what keeps this job affordable.
       - uses: Swatinem/rust-cache@v2
-      # No `package` filter: cargo-semver-checks scans the whole workspace and
-      # skips any crate it has no crates.io baseline for — both publish=false
-      # crates (axil-tests, axildb-umbrella) and any crate not yet released — so
-      # a newly added crate never reds this gate before its first publish. All 19
-      # currently-published crates have a crates.io baseline, so they are checked.
+      # `exclude` lists the crates that have no crates.io baseline: selecting a
+      # never-published crate is a HARD ERROR ("not found in registry" — verified
+      # empirically with cargo-semver-checks 0.48), not a skip, so the
+      # publish=false crates must be excluded explicitly. Bin-only crates
+      # (axildb) ARE skipped gracefully ("no library target" — also verified).
+      # When adding a new publishable crate, list it here until its first
+      # publish, then remove it.
       # feature-group: default-features mirrors what `cargo add <crate>` gives a
       # downstream (the published default surface) and avoids all-features pulling
       # extra optional code paths beyond the shipped defaults into the check.
@@ -212,3 +214,4 @@ jobs:
         with:
           rust-toolchain: manual
           feature-group: default-features
+          exclude: axildb-umbrella,axil-tests
