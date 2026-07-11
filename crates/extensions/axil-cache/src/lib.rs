@@ -73,10 +73,13 @@ pub enum CacheError {
     NotAnObject,
     #[error("cache put requires a non-empty `question` and `answer`")]
     MissingFields,
+    /// The expiry was unusable — an unparseable `valid_until` string, or a
+    /// `ttl` too large to represent as a timestamp. One variant covers both:
+    /// `CacheError` shipped without `#[non_exhaustive]` in 2.0.1, so adding a
+    /// variant is a semver-major change; reusing this one keeps overflow
+    /// handling additive.
     #[error("invalid `valid_until` timestamp: {0}")]
     BadTimestamp(String),
-    #[error("ttl of {0} seconds overflows the maximum representable expiry")]
-    TtlOverflow(u64),
     #[error("axil error: {0}")]
     Axil(#[from] AxilError),
     #[error("json error: {0}")]
@@ -133,12 +136,11 @@ impl PutRequest {
         let Some(secs) = self.ttl else {
             return Ok(None);
         };
-        let secs_i64 = i64::try_from(secs).map_err(|_| CacheError::TtlOverflow(secs))?;
-        let delta =
-            chrono::TimeDelta::try_seconds(secs_i64).ok_or(CacheError::TtlOverflow(secs))?;
-        let expiry = Utc::now()
-            .checked_add_signed(delta)
-            .ok_or(CacheError::TtlOverflow(secs))?;
+        let overflow =
+            || CacheError::BadTimestamp(format!("ttl of {secs} seconds overflows the expiry"));
+        let secs_i64 = i64::try_from(secs).map_err(|_| overflow())?;
+        let delta = chrono::TimeDelta::try_seconds(secs_i64).ok_or_else(overflow)?;
+        let expiry = Utc::now().checked_add_signed(delta).ok_or_else(overflow)?;
         Ok(Some(expiry))
     }
 }
@@ -916,7 +918,7 @@ mod tests {
         };
         assert!(matches!(
             req.resolve_valid_until(),
-            Err(CacheError::TtlOverflow(_))
+            Err(CacheError::BadTimestamp(_))
         ));
 
         // In i64 range but large enough that `now + delta` overflows chrono's
@@ -929,7 +931,7 @@ mod tests {
         };
         assert!(matches!(
             req.resolve_valid_until(),
-            Err(CacheError::TtlOverflow(_))
+            Err(CacheError::BadTimestamp(_))
         ));
     }
 
@@ -941,7 +943,7 @@ mod tests {
         req.ttl = Some(u64::MAX);
         assert!(matches!(
             put(&db, &req, dir.path()),
-            Err(CacheError::TtlOverflow(_))
+            Err(CacheError::BadTimestamp(_))
         ));
         assert_eq!(db.list(TABLE_CACHE_ENTRIES).unwrap().len(), 0);
     }
