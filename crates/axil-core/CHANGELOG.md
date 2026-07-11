@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.1.0](https://github.com/FC4b/axildb/compare/axil-core-v2.0.1...axil-core-v2.1.0) - 2026-07-11
+
+### Added
+
+- *(cli)* self-verifying import report for embeddings
+- *(cli)* portable memory export/import (JSONL, dedup)
+
+### Fixed
+
+- *(core)* honest import merge semantics
+
+### Other
+
+- Merge remote-tracking branch 'origin/main' into dev
+
 ## [2.0.0](https://github.com/FC4b/axildb/compare/axil-core-v1.2.0...axil-core-v2.0.0) - 2026-06-30
 
 ### Added

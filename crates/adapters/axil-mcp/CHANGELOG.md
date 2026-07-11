@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.1.0](https://github.com/FC4b/axildb/compare/axil-mcp-v2.0.1...axil-mcp-v2.1.0) - 2026-07-11
+
+### Added
+
+- *(cache)* semantic answer cache extension with code-aware invalidation
+
+### Other
+
+- Merge remote-tracking branch 'origin/main' into dev
+
 ## [2.0.0](https://github.com/FC4b/axildb/compare/axil-mcp-v1.2.0...axil-mcp-v2.0.0) - 2026-06-30
 
 ### Added
