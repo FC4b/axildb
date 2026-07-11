@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.1.0](https://github.com/FC4b/axildb/compare/axil-checkpoint-v2.0.1...axil-checkpoint-v2.1.0) - 2026-07-11
+
+### Added
+
+- *(checkpoint)* bound snapshot retention on the write path
+
 ## [1.1.1](https://github.com/FC4b/axildb/compare/axil-checkpoint-v1.1.0...axil-checkpoint-v1.1.1) - 2026-06-23
 
 ### Other

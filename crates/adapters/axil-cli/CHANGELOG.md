@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.1.0](https://github.com/FC4b/axildb/compare/axildb-v2.0.1...axildb-v2.1.0) - 2026-07-11
+
+### Added
+
+- *(cli)* self-verifying import report for embeddings
+- *(cli)* typed cache subcommand so it appears in axil --help
+- *(cache)* semantic answer cache extension with code-aware invalidation
+- *(cli)* portable memory export/import (JSONL, dedup)
+- *(cli)* Wave 3 — OpenCode integration via a local plugin (no npm)
+- *(cli)* Wave 2 — Antigravity CLI and Qwen Code hook dialects
+- *(cli)* Wave 1 — Codex, Copilot CLI, and Droid hook dialects
+- *(cli)* axil mcp install + installer hygiene for the terminal-agent waves
+- *(cli)* move the brain hook into the binary + AGENTS.md by default
+
+### Fixed
+
+- *(cli)* hook binary handshake, Antigravity injection wiring, import report surface
+- *(cli)* register cache feature in the features CATALOG
+- *(cli)* Antigravity works — plugin mechanism + stdin/pipe hang fixes
+- *(cli)* codex apply_patch edit capture — patch body is at tool_input.command
+- *(cli)* address review of the hook-capture probe
+- *(cli)* resolve 15 code-review findings across the terminal-agent waves
+
+### Other
+
+- Merge remote-tracking branch 'origin/main' into dev
+- *(cli)* golden-fixture gate for hook dialects + run axildb tests in CI
+- *(agents)* terminal-agent integrations + axil hook capture probe
+
 ## [2.0.1](https://github.com/FC4b/axildb/compare/axildb-v2.0.0...axildb-v2.0.1) - 2026-06-30
 
 ### Fixed
