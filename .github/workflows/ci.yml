@@ -175,3 +175,48 @@ jobs:
             echo "::error::ONNX Runtime failed to initialize — the embedder is broken on ${{ matrix.os }}"
             exit 1
           fi
+
+  semver-checks:
+    name: semver gate (public API vs crates.io)
+    # PR-only. On a PR we compare the branch's public API against the versions
+    # currently on crates.io, catching a breaking change that forgot to bump its
+    # crate's major. On push-to-main the just-merged (not-yet-released) code can
+    # legitimately differ from crates.io — release-plz bumps versions in a
+    # separate release PR — so running there would false-alarm.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      # Reuse the repo's cache pattern: the axildb crate's default features pull
+      # in ONNX (ort) at build time, and semver-checks builds rustdoc for every
+      # crate, so a warm target/registry cache is what keeps this job affordable.
+      - uses: Swatinem/rust-cache@v2
+      # Prebuilt binary install — the CLI is invoked directly (below) instead of
+      # obi1kenobi/cargo-semver-checks-action because the action omits
+      # `--workspace`: this repo's root manifest is a real package
+      # (axildb-umbrella), not a virtual workspace, so cargo's default selection
+      # is the root package alone — the action's run selected only the excluded
+      # umbrella and died with "no crates with library targets selected"
+      # (observed live on the first run of this gate).
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-semver-checks
+      # `--workspace` selects every member; `--exclude` then removes the crates
+      # that have no crates.io baseline — selecting a never-published crate is a
+      # HARD ERROR ("not found in registry", verified with 0.48), not a skip.
+      # Bin-only crates (axildb) ARE skipped gracefully ("no library target",
+      # also verified). When adding a new publishable crate, add an --exclude
+      # for it here until its first publish, then remove it.
+      # `--default-features` mirrors what `cargo add <crate>` gives a downstream
+      # (the published default surface).
+      #
+      # Escape hatch for an INTENTIONAL breaking change: bump that crate's major
+      # version in the SAME PR. cargo-semver-checks then sees the new major and
+      # accepts the break (a major bump is the sanctioned way to ship an
+      # incompatible API). With independent versioning only the broken crate needs it.
+      - name: cargo-semver-checks (all publishable crates vs crates.io)
+        run: |
+          cargo semver-checks check-release --workspace \
+            --exclude axildb-umbrella --exclude axil-tests \
+            --default-features
