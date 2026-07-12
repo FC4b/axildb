@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.1.1](https://github.com/FC4b/axildb/compare/axildb-v2.1.0...axildb-v2.1.1) - 2026-07-12
+
+### Other
+
+- *(release)* independent per-crate versioning
+
 ## [2.1.0](https://github.com/FC4b/axildb/compare/axildb-v2.0.1...axildb-v2.1.0) - 2026-07-11
 
 ### Added

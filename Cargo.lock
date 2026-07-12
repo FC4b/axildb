@@ -212,7 +212,7 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
 name = "axil-atlas-proto"
-version = "2.1.0"
+version = "2.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -220,7 +220,7 @@ dependencies = [
 
 [[package]]
 name = "axil-bundle"
-version = "2.1.0"
+version = "2.1.1"
 dependencies = [
  "axil-cache",
  "axil-checkpoint",
@@ -231,7 +231,7 @@ dependencies = [
 
 [[package]]
 name = "axil-cache"
-version = "2.1.0"
+version = "2.1.1"
 dependencies = [
  "axil-core",
  "chrono",
@@ -244,7 +244,7 @@ dependencies = [
 
 [[package]]
 name = "axil-checkpoint"
-version = "2.1.0"
+version = "2.1.1"
 dependencies = [
  "axil-core",
  "chrono",
@@ -256,7 +256,7 @@ dependencies = [
 
 [[package]]
 name = "axil-core"
-version = "2.1.0"
+version = "2.1.1"
 dependencies = [
  "chacha20poly1305",
  "chrono",
@@ -282,7 +282,7 @@ dependencies = [
 
 [[package]]
 name = "axil-docs"
-version = "2.1.0"
+version = "2.1.1"
 dependencies = [
  "axil-core",
  "serde",
@@ -295,7 +295,7 @@ dependencies = [
 
 [[package]]
 name = "axil-fts"
-version = "2.1.0"
+version = "2.1.1"
 dependencies = [
  "axil-core",
  "criterion",
@@ -309,7 +309,7 @@ dependencies = [
 
 [[package]]
 name = "axil-graph"
-version = "2.1.0"
+version = "2.1.1"
 dependencies = [
  "axil-core",
  "chrono",
@@ -325,7 +325,7 @@ dependencies = [
 
 [[package]]
 name = "axil-indexer"
-version = "2.1.0"
+version = "2.1.1"
 dependencies = [
  "axil-core",
  "chrono",
@@ -345,7 +345,7 @@ dependencies = [
 
 [[package]]
 name = "axil-mcp"
-version = "2.1.0"
+version = "2.1.1"
 dependencies = [
  "anyhow",
  "axil-bundle",
@@ -368,7 +368,7 @@ dependencies = [
 
 [[package]]
 name = "axil-memory"
-version = "2.1.0"
+version = "2.1.1"
 dependencies = [
  "axil-core",
  "chrono",
@@ -380,7 +380,7 @@ dependencies = [
 
 [[package]]
 name = "axil-ql"
-version = "2.1.0"
+version = "2.1.1"
 dependencies = [
  "axil-core",
  "chrono",
@@ -391,7 +391,7 @@ dependencies = [
 
 [[package]]
 name = "axil-runtime"
-version = "2.1.0"
+version = "2.1.1"
 dependencies = [
  "anyhow",
  "axil-core",
@@ -405,7 +405,7 @@ dependencies = [
 
 [[package]]
 name = "axil-scip"
-version = "2.1.0"
+version = "2.1.1"
 dependencies = [
  "axil-core",
  "axil-graph",
@@ -419,7 +419,7 @@ dependencies = [
 
 [[package]]
 name = "axil-sync"
-version = "2.1.0"
+version = "2.1.1"
 dependencies = [
  "axil-atlas-proto",
  "axil-core",
@@ -455,7 +455,7 @@ dependencies = [
 
 [[package]]
 name = "axil-timeseries"
-version = "2.1.0"
+version = "2.1.1"
 dependencies = [
  "axil-core",
  "chrono",
@@ -469,7 +469,7 @@ dependencies = [
 
 [[package]]
 name = "axil-vector"
-version = "2.1.0"
+version = "2.1.1"
 dependencies = [
  "axil-core",
  "criterion",
@@ -488,7 +488,7 @@ dependencies = [
 
 [[package]]
 name = "axil-workspace"
-version = "2.1.0"
+version = "2.1.1"
 dependencies = [
  "axil-core",
  "chrono",
@@ -502,7 +502,7 @@ dependencies = [
 
 [[package]]
 name = "axildb"
-version = "2.1.0"
+version = "2.1.1"
 dependencies = [
  "anyhow",
  "axil-bundle",
@@ -799,7 +799,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d8144c22e24bbcf26ade86cb6501a0916c46b7e4787abdb0045a467eb1645a1d"
 dependencies = [
  "ambient-authority",
- "rand 0.8.6",
+ "rand 0.8.7",
 ]
 
 [[package]]
@@ -1930,7 +1930,7 @@ dependencies = [
  "num-traits",
  "num_cpus",
  "parking_lot",
- "rand 0.9.4",
+ "rand 0.9.5",
  "rayon",
  "serde",
 ]
@@ -2965,7 +2965,7 @@ dependencies = [
  "glob",
  "opentelemetry",
  "percent-encoding",
- "rand 0.8.6",
+ "rand 0.8.7",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
@@ -3193,7 +3193,7 @@ dependencies = [
  "bit-vec",
  "bitflags 2.13.0",
  "num-traits",
- "rand 0.9.4",
+ "rand 0.9.5",
  "rand_chacha 0.9.0",
  "rand_xorshift",
  "regex-syntax",
@@ -3285,9 +3285,9 @@ dependencies = [
 
 [[package]]
 name = "rand"
-version = "0.8.6"
+version = "0.8.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5ca0ecfa931c29007047d1bc58e623ab12e5590e8c7cc53200d5202b69266d8a"
+checksum = "22f6172bdec972074665ed81ed53b71da00bfc44b65a753cfde883ec4c702a1a"
 dependencies = [
  "libc",
  "rand_chacha 0.3.1",
@@ -3296,9 +3296,9 @@ dependencies = [
 
 [[package]]
 name = "rand"
-version = "0.9.4"
+version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "44c5af06bb1b7d3216d91932aed5265164bf384dc89cd6ba05cf59a35f5f76ea"
+checksum = "b9ef1d0d795eb7d84685bca4f72f3649f064e6641543d3a8c415898726a57b41"
 dependencies = [
  "rand_chacha 0.9.0",
  "rand_core 0.9.5",
@@ -3349,7 +3349,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32cb0b9bc82b0a0876c2dd994a7e7a2683d3e7390ca40e6886785ef0c7e3ee31"
 dependencies = [
  "num-traits",
- "rand 0.8.6",
+ "rand 0.8.7",
 ]
 
 [[package]]
@@ -4279,7 +4279,7 @@ dependencies = [
  "monostate",
  "onig",
  "paste",
- "rand 0.9.4",
+ "rand 0.9.5",
  "rayon",
  "rayon-cond",
  "regex",
@@ -4425,7 +4425,7 @@ dependencies = [
  "indexmap 1.9.3",
  "pin-project",
  "pin-project-lite",
- "rand 0.8.6",
+ "rand 0.8.7",
  "slab",
  "tokio",
  "tokio-util",
@@ -4530,7 +4530,7 @@ version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "470dbf6591da1b39d43c14523b2b469c86879a53e8b758c8e090a470fe7b1fbe"
 dependencies = [
- "rand 0.9.4",
+ "rand 0.9.5",
  "web-time",
 ]
 
