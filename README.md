@@ -13,7 +13,7 @@
 
 *A memory that compounds: every session it learns, links, and prunes — so your agent starts tomorrow smarter than it ended today.*
 
-**Built in Rust · local-first · single ~5–10MB binary · vector + graph + full-text + time-series · MCP · up to ~78% fewer context tokens on large repos**
+**Built in Rust · local-first · single ~5–10MB binary · vector + graph + full-text + time-series · MCP · up to ~94% fewer context tokens on real-repo workloads**
 
 [![CI](https://github.com/FC4b/axildb/actions/workflows/ci.yml/badge.svg)](https://github.com/FC4b/axildb/actions/workflows/ci.yml)
 [![License: PolyForm NC](https://img.shields.io/badge/license-PolyForm--NC-blue.svg)](LICENSE)
@@ -29,12 +29,12 @@
 
 Your coding agent is brilliant and amnesiac. Every session it re-reads the same files, re-learns the same architecture, repeats the same mistakes — and **burns tokens (your money) doing it.** Axil is the second brain that fixes this: it remembers your decisions, gotchas, and code structure across sessions, then hands the agent the *right* memory at the right moment instead of dumping the whole repo into context. When your agent outgrows a markdown notes file, the next step isn't a cloud platform — it's a smarter file.
 
-> **In a real, equal-correctness A/B test (v2.1.1, Opus agents, 29 counted tasks), Axil answered the same "where/how" coding questions with 42–78% fewer context tokens — and fewer steps — on every repo tested (Django, FastAPI, even tiny Flask).** → [the numbers & caveats](#token-savings--real-savings)
+> **In a real, equal-correctness A/B test (v2.1.1, Opus agents, 39 counted task-runs pooled over two runs), Axil answered the same "where/how" coding questions with 53–94% fewer context tokens — and fewer steps — on every repo tested (Django, FastAPI, even tiny Flask).** → [the numbers & caveats](#token-savings--real-savings)
 
 <div align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="assets/hero-benchmarks-dark.png">
-    <img alt="Axil v2.1.1 measured three ways on Flask, FastAPI, and Django: 42–78% fewer context tokens for the same answer, 9–32% fewer steps to finish, and the correct answer file surfaced by the agent's Axil lookups in 77–91% of tasks — no LLM, no server." src="assets/hero-benchmarks-light.png" width="920">
+    <img alt="Axil v2.1.1 measured three ways on Flask, FastAPI, and Django: 53–94% fewer context tokens for the same answer, 10–43% fewer steps to finish, and the correct answer file surfaced by the agent's Axil lookups in 77–91% of tasks — no LLM, no server." src="assets/hero-benchmarks-light.png" width="920">
   </picture>
 </div>
 
@@ -166,15 +166,15 @@ The honest version — what you'd otherwise reach for, what it costs you, and wh
 
 | Corpus | Repo size | Context-token reduction | Steps to finish |
 |--------|-----------|------------------------:|----------------:|
-| **Django** | 906 source files | **~78%** | **32% fewer** |
-| **FastAPI** | mid-size | **~76%** | **30% fewer** |
-| **Flask** | 24 source files | **~42%** | **9% fewer** |
+| **FastAPI** | mid-size | **~94%** *(~78% excl. one outlier — see note)* | **43% fewer** |
+| **Django** | 906 source files | **~75%** | **39% fewer** |
+| **Flask** | 24 source files | **~53%** | **10% fewer** |
 
-The token win **scales with repo size**: on Django, locating the template engine's `Variable.resolve` cost an unaided agent **11,161 tokens** of grep-and-read versus **180 tokens** for Axil; the URL dispatcher, **1,522 → 186**. Even on tiny Flask, Axil saves **~42%** — smaller than Django because `grep` reading a tight line-range is already cheap there, so the win grows with repo size. The aggregates include honest per-task losses (e.g. FastAPI's `APIRouter`, where `grep` won), so they're measured, not cherry-picked.
+The win explodes when unaided discovery hits **large files**: answering "where does FastAPI run sync endpoints in a threadpool?", the grep-only agent read `routing.py` (253 KB) *whole* — **63,311 tokens** against Axil's **94** for the same verified answer. On Django, the template engine's `Variable.resolve` cost **11,161 → 180**; the URL dispatcher **1,522 → 186**. Even on tiny Flask, where a tight `grep`+range-read is nearly free, Axil still halves the bill. The aggregates include honest per-task losses (e.g. FastAPI's `APIRouter`, where `grep` won), so they're measured, not cherry-picked.
 
-The third hero panel — **"finds the right code"** — is a mechanical check on the same tasks: replay every Axil lookup the agent actually ran and test whether the ground-truth answer file surfaced (Flask **91%**, FastAPI **83%**, Django **77%**; [`code-recall artifacts`](benchmarks/results/context-ab/)). Running it caught a real bug: the indexer's default 100 KB file cap **silently skipped** FastAPI's `routing.py` (253 KB) — fixed to 512 KB + a loud skip warning in the next release; the panel is measured at the 512 KB cap.
+The third hero panel — **"finds the right code"** — is a mechanical check on the same tasks: replay every Axil lookup the agent actually ran and test whether the ground-truth answer file surfaced (Flask **91%**, FastAPI **83%**, Django **77%**; [`code-recall artifacts`](benchmarks/results/context-ab/)). Running it caught a real bug: the indexer's default 100 KB file cap **silently skipped** FastAPI's `routing.py` — fixed to 512 KB + a loud skip warning in the next release; the panel is measured at the 512 KB cap. (SCIP ingestion builds the call-graph but doesn't change these lookup surfaces — method-level proxies are the tracked next step.)
 
-> ⚠️ **A specific experiment, not a guarantee.** Three open-source Python repos (37 tasks, 29 counted at equal correctness: Flask *n*=11, FastAPI *n*=8, Django *n*=10), disciplined agents, measured on v2.1.1's structural index (no SCIP). Savings depend on repo size and question type — **largest on big codebases and semantic "where/how" questions**, smaller on tiny repos where `grep` is already cheap. Committed data: [`benchmarks/results/context-ab/`](benchmarks/results/context-ab/); task sets + harness: [`benchmarks/context-ab/`](benchmarks/context-ab/), [`scripts/context-ab.workflow.js`](scripts/context-ab.workflow.js), [`scripts/context-ab-score.py`](scripts/context-ab-score.py). Full methodology: [Context Economics](docs/src/advanced/context-economics.md).
+> ⚠️ **A specific experiment, not a guarantee.** Three open-source Python repos, two pooled same-day runs (39 task-runs counted at equal correctness: Flask *n*=20, FastAPI *n*=19, Django *n*=20), disciplined agents, v2.1.1 structural index. **Sensitivity:** FastAPI's ~94% includes the 63k-token whole-file read above; excluding that single pair it's ~78%. Discovery costs are heavy-tailed — per-run reductions ranged 42–69% (Flask), 75–98% (FastAPI), 72–78% (Django). Savings depend on repo size and question type; smallest on tiny repos where `grep` is already cheap. Committed data: [`benchmarks/results/context-ab/`](benchmarks/results/context-ab/); task sets + harness: [`benchmarks/context-ab/`](benchmarks/context-ab/), [`scripts/context-ab.workflow.js`](scripts/context-ab.workflow.js), [`scripts/context-ab-score.py`](scripts/context-ab-score.py). Full methodology: [Context Economics](docs/src/advanced/context-economics.md).
 
 ## What you get
 

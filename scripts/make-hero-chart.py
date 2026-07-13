@@ -108,7 +108,7 @@ def render(mode):
         ax.set_facecolor(t["surface"])
 
     panel(axes[0], tokens, t, "①  Fewer tokens",
-          "% fewer context tokens for the same answer  ·  bigger repo → bigger win",
+          "% fewer context tokens for the same answer  ·  pooled over two runs",
           xmin=0, xmax=108)
     panel(axes[1], steps, t, "②  Fewer steps",
           "% fewer tool roundtrips to finish  ·  Axil wins on every repo",

@@ -134,10 +134,13 @@ def main():
     ap.add_argument("--top-k", type=int, default=5)
     ap.add_argument("--from-manifests", action="store_true",
                     help="replay the withdb agents' recorded axil queries instead of verbatim task text")
+    ap.add_argument("--corpora", default=",".join(CORPORA),
+                    help="comma-separated subset of corpora to measure")
     args = ap.parse_args()
+    corpora = [c.strip() for c in args.corpora.split(",") if c.strip()]
 
     if args.from_manifests:
-        manifests = {c: os.path.join(args.exp_root, f"manifest-{c}-v2.json") for c in CORPORA}
+        manifests = {c: os.path.join(args.exp_root, f"manifest-{c}-v2.json") for c in corpora}
         per_corpus = replay_agent_queries(args.exp_root, manifests, args.top_k)
         report = {
             "benchmark": "context-ab-code-recall-agent-queries",
@@ -156,7 +159,7 @@ def main():
         return
 
     per_corpus = []
-    for corpus in CORPORA:
+    for corpus in corpora:
         fixture = os.path.join(ROOT, "benchmarks", "context-ab", f"tasks-{corpus}.json")
         sandbox = os.path.join(args.exp_root, "withdb", corpus)
         tasks = json.load(open(fixture))["tasks"]

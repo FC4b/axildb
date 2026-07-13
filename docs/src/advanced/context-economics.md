@@ -110,19 +110,31 @@ task fixtures: `benchmarks/context-ab/`. This run also measures
 **steps-to-finish** (consulted tool round-trips ≈ agent turns), the second
 axis on the README hero chart:
 
-| Corpus | n (both-correct) | no Axil tok | w/ Axil tok | Token reduction | Steps |
-|--------|--:|--:|--:|--:|:--|
-| flask (24 files) | 11/12 | 13,042 | 7,592 | **41.8%** | 22 → 20 (**9% fewer**) |
-| fastapi (mid) | 8/12 | 17,246 | 4,095 | **76.3%** | 23 → 16 (**30% fewer**) |
-| **django (906 files)** | 10/13 | 19,906 | **4,430** | **77.7%** | 28 → 19 (**32% fewer**) |
+Figures **pool two same-day runs** per corpus — v2 (index at the old
+100 KB default cap) and v3 (index at the fixed 512 KB default) — per-run
+splits are in the committed artifact:
 
-The reduction is **monotonic in repo size**, and the aggregates include
-per-task losses (fastapi's `APIRouter`, django's `SQLCompiler.as_sql` —
-both cases where a verbose fallback beat a tight grep) — measured, not
-cherry-picked. A cautionary tale on sample size: flask read **−20%**
-(Axil worse) on its first 3 tasks, **+50%** at n=7, and **+42%** at the
-full n=11. Small-n per-repo numbers swing hard — quote the committed n
-alongside the figure.
+| Corpus | task-runs (both-correct) | no Axil tok | w/ Axil tok | Token reduction | Steps |
+|--------|--:|--:|--:|--:|:--|
+| flask (24 files) | 20 | 22,190 | 10,476 | **52.8%** | 38 → 34 (**10% fewer**) |
+| fastapi (mid) | 19 | 87,951 | **5,384** | **93.9%** | 56 → 32 (**43% fewer**) |
+| **django (906 files)** | 20 | 32,978 | **8,102** | **75.4%** | 59 → 36 (**39% fewer**) |
+
+**Sensitivity (read before quoting fastapi's 94%):** one v3 task — "where
+does FastAPI run sync endpoints in a threadpool?" — cost the unaided agent
+**63,311 tokens** (it read `fastapi/routing.py`, 253 KB, *whole*) versus
+Axil's **94**. Excluding that single pair, fastapi is **78.5%**. It is
+included because it is real behavior: whole-file reads of large files are
+exactly the discovery cost a code index removes — but it shows discovery
+costs are heavy-tailed and single-run aggregates are fragile.
+
+The aggregates include per-task losses (fastapi's `APIRouter`, django's
+`SQLCompiler.as_sql` — cases where a verbose fallback beat a tight grep) —
+measured, not cherry-picked. Two cautionary tales on sample size: flask
+read **−20%** (Axil worse) on its first 3 tasks, **+50%** at n=7, **+42%**
+at n=11, and **+53%** pooled over 20 task-runs; per-run reductions ranged
+flask 42–69%, fastapi 75–98%, django 72–78%. Quote the committed n and
+pooling alongside any figure.
 
 **Retrieval recall on the same tasks** (the hero chart's third panel): a
 mechanical replay of every Axil lookup the agents actually ran, testing
@@ -136,6 +148,16 @@ found by this measurement, fixed to 512 KB + a loud skip warning), and a
 **verbatim-question diagnostic** (25–38%: pasting the full natural-language
 question as the query underperforms badly vs the short symbol/keyphrase
 queries agents actually issue — query *like an agent*).
+
+**SCIP does not move these numbers (yet).** Ingesting scip-python indexes
+(django: 43,902 entities, 152k call edges) leaves the replay recall
+identical — plain `code-search`/`fts` operate over the structural proxy
+table, which gains no method-level entries from SCIP (`proxy_backfill`
+upgrades only *provisional* regex entities, absent in a fresh index). The
+remaining misses (`SQLCompiler.as_sql`, `QuerySet._fetch_all`) are a
+proxy-granularity gap; minting method-level proxies from SCIP definitions
+is the tracked next step
+(`code-recall-agent-queries-scip-2026-07-13.json`).
 
 ### Earlier runs — 2026-06, flask + django only (the discipline lesson)
 
@@ -169,9 +191,10 @@ heavy `code-context` bundle at most once.
 
 > **The synthetic `context-savings` ~99% is an optimistic ceiling** — its
 > baseline assumes reading whole files. The defensible, equal-correctness
-> numbers (v2.1.1, 2026-07-13, 29 counted tasks) are **~78% on a large
-> repo, ~76% mid-size, ~42% on a tiny one** — the win scales with repo
-> size because on tiny repos a tight `grep`+range-read is already cheap.
+> numbers (v2.1.1, 2026-07-13, 39 pooled task-runs) are **~75% on a large
+> repo, ~94% mid-size (~78% excluding one whole-file-read outlier), ~53%
+> on a tiny one** — smallest on tiny repos where a tight `grep`+range-read
+> is already cheap, largest wherever unaided discovery hits big files.
 
 ## Fixing the conditional: lean `code-context`
 
@@ -196,9 +219,9 @@ net-cheaper on **both** small and large repos. The remaining per-task
 negatives are recall *misses* — the agent pays for extra queries when the
 first lookup doesn't surface the answer.
 
-The 2026-07-13 v2.1.1 live re-run (fresh agents, not re-scored
-trajectories — see the current headline above) confirms the direction of
-this prediction and lands higher: flask **+42%**, django **+78%**.
+The 2026-07-13 v2.1.1 live runs (fresh agents, not re-scored
+trajectories — see the current headline above) confirm the direction of
+this prediction and land higher: flask **+53%**, django **+75%** (pooled).
 
 ## Recall output discipline: compact default + near-dup collapse
 
