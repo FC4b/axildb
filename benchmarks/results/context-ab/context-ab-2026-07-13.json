@@ -1,0 +1,49 @@
+{
+  "benchmark": "context-ab",
+  "title": "Real A/B: same code-navigation task, with vs without Axil, at equal correctness",
+  "date": "2026-07-13",
+  "build": "axil v2.1.1 (release, CPU ONNX)",
+  "method": "For each task, a grep/read-only agent and an Axil-CLI-only agent (both Opus 4.8, general-purpose) answer the same where/how question in byte-identical sandboxes; a judge scores each; only tasks BOTH answer correctly are counted. Tokens recomputed mechanically by re-executing consulted artifacts (scripts/context-ab-score.py). Steps = consulted tool roundtrips (~agent turns).",
+  "agent_model": "claude-opus (opus 4.8) via Workflow",
+  "index": "axil index (structural proxies, top-level symbols); no SCIP",
+  "task_fixtures": "benchmarks/context-ab/tasks-{flask,django,fastapi}.json",
+  "per_repo": [
+    {
+      "corpus": "flask",
+      "size": "24 source files (tiny)",
+      "tasks_counted": 11,
+      "tasks_total": 12,
+      "tokens_no_axil": 13042,
+      "tokens_axil": 7592,
+      "token_reduction_pct": 41.8,
+      "steps_no_axil": 22,
+      "steps_axil": 20,
+      "step_reduction_pct": 9.1
+    },
+    {
+      "corpus": "fastapi",
+      "size": "mid-size",
+      "tasks_counted": 8,
+      "tasks_total": 12,
+      "tokens_no_axil": 17246,
+      "tokens_axil": 4095,
+      "token_reduction_pct": 76.3,
+      "steps_no_axil": 23,
+      "steps_axil": 16,
+      "step_reduction_pct": 30.4
+    },
+    {
+      "corpus": "django",
+      "size": "906 source files (large)",
+      "tasks_counted": 10,
+      "tasks_total": 13,
+      "tokens_no_axil": 19906,
+      "tokens_axil": 4430,
+      "token_reduction_pct": 77.7,
+      "steps_no_axil": 28,
+      "steps_axil": 19,
+      "step_reduction_pct": 32.1
+    }
+  ],
+  "notes": "Two rounds merged (12/12/13 tasks; 29 counted both-correct). Token reduction scales with repo size: flask(tiny) 41.8%, fastapi(mid) 76.3%, django(large) 77.7%. Steps fewer everywhere (9-32%). Sample-size lesson: flask read -20% at n=3, +50% at n=7, +42% at n=11 - always quote n. Aggregates include per-task losses (fastapi APIRouter, django SQLCompiler.as_sql) - measured, not cherry-picked."
+}

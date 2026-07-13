@@ -1,0 +1,568 @@
+{
+  "summary": {
+    "corpus": "fastapi",
+    "tasks_total": 12,
+    "tasks_counted": 8,
+    "without_correct": 10,
+    "withdb_correct": 10,
+    "total_without_tokens": 17246,
+    "total_withdb_tokens": 4095,
+    "reduction_pct": 76.3,
+    "compression_ratio": 4.2,
+    "total_without_steps": 23,
+    "total_withdb_steps": 16,
+    "avg_without_steps": 2.88,
+    "avg_withdb_steps": 2.0,
+    "step_reduction_pct": 30.4,
+    "step_ratio": 1.4,
+    "total_without_gather_ms": 269.3,
+    "total_withdb_gather_ms": 601.5,
+    "_gather_ms_note": "cold-process re-exec; axil reloads ONNX each call \u2014 diagnostic only, do not publish"
+  },
+  "tasks": [
+    {
+      "task": "Where does FastAPI resolve and inject dependencies for a request (the dependency-injection solver)?",
+      "ground_truth": {
+        "file": "fastapi/dependencies/utils.py",
+        "symbol": "solve_dependencies",
+        "notes": "async def solve_dependencies (~598)."
+      },
+      "without_tokens": 9932,
+      "withdb_tokens": 268,
+      "without_steps": 1,
+      "withdb_steps": 2,
+      "without_gather_ms": 9.08,
+      "withdb_gather_ms": 164.91,
+      "without_correct": true,
+      "withdb_correct": true,
+      "both_correct": true,
+      "without_answer": "fastapi/dependencies/utils.py, function solve_dependencies (async def), line 598 \u00e2\u20ac\u201d FastAPI's dependency-injection solver.",
+      "withdb_answer": "fastapi/dependencies/utils.py \u00e2\u20ac\u201d the dependency-injection solver `solve_dependencies()` (async). Its result type `SolvedDependency` is at fastapi/dependencies/utils.py:590; the dependency tree it walks is built by `get_dependant` at fastapi/dependencies/utils.py:286 (with `get_typed_signature` at line 228). This file is where FastAPI resolves and injects dependencies for a request.",
+      "without_trace": [
+        {
+          "tokens": 9932,
+          "ms": 9.08,
+          "note": "fastapi/dependencies/utils.py:full"
+        }
+      ],
+      "withdb_trace": [
+        {
+          "tokens": 106,
+          "ms": 132.04,
+          "note": "axil(stdout 422B)"
+        },
+        {
+          "tokens": 162,
+          "ms": 32.88,
+          "note": "axil(stdout 645B)"
+        }
+      ]
+    },
+    {
+      "task": "Where does FastAPI turn a route's return value into a serialized Response?",
+      "ground_truth": {
+        "file": "fastapi/routing.py",
+        "symbol": "serialize_response",
+        "notes": "async def serialize_response (~293); get_request_handler (~367) / run_endpoint_function (~336) acceptable."
+      },
+      "without_tokens": 1958,
+      "withdb_tokens": 1286,
+      "without_steps": 5,
+      "withdb_steps": 4,
+      "without_gather_ms": 122.0,
+      "withdb_gather_ms": 128.77,
+      "without_correct": true,
+      "withdb_correct": true,
+      "both_correct": true,
+      "without_answer": "fastapi/routing.py \u00e2\u20ac\u201d `serialize_response` (line 293) performs the return-value \u00e2\u2020\u2019 serialized-content conversion (Pydantic `field.serialize`/`serialize_json` at lines 321-330, else `jsonable_encoder` at line 333). It is called from the `app` request-handler closure created by `get_request_handler` (def line 367) at line 711, and the serialized `content` is wrapped into the final `Response`/`actual_response_class` at lines 724-731.",
+      "withdb_answer": "fastapi/routing.py \u00e2\u20ac\u201d `serialize_response()` is the function that turns a route's return value into serialized response content (it runs the raw return value through the route's response `ModelField` validation and `jsonable_encoder`). It is invoked by the request handler coroutine `app()` created inside `get_request_handler()` in the same file, after `run_endpoint_function()` produces the endpoint's raw return value. Note: Axil's proxy index for this checkout did not surface an exact line for `serialize_response`; it did confirm the encoding logic lives in `fastapi/routing.py` \u00e2\u20ac\u201d via the `fastapi/sse.py:20 EventSourceResponse` proxy text (\"The actual encoding logic lives in the FastAPI routing layer\") and FTS references to `routing._APIRouteLike` / `routing.RouteContext`, with response-validation failures raised as `ResponseValidationError` at fastapi/exceptions.py:234.",
+      "without_trace": [
+        {
+          "tokens": 84,
+          "ms": 92.98,
+          "note": "rg(stdout 334B)"
+        },
+        {
+          "tokens": 90,
+          "ms": 12.68,
+          "note": "ls(stdout 357B)"
+        },
+        {
+          "tokens": 634,
+          "ms": 1.17,
+          "note": "fastapi/routing.py:293-367"
+        },
+        {
+          "tokens": 1039,
+          "ms": 0.94,
+          "note": "fastapi/routing.py:680-769"
+        },
+        {
+          "tokens": 111,
+          "ms": 14.23,
+          "note": "sed(stdout 441B)"
+        }
+      ],
+      "withdb_trace": [
+        {
+          "tokens": 94,
+          "ms": 30.62,
+          "note": "axil(stdout 374B)"
+        },
+        {
+          "tokens": 147,
+          "ms": 33.13,
+          "note": "axil(stdout 586B)"
+        },
+        {
+          "tokens": 835,
+          "ms": 31.91,
+          "note": "axil(stdout 3340B)"
+        },
+        {
+          "tokens": 210,
+          "ms": 33.1,
+          "note": "axil(stdout 837B)"
+        }
+      ]
+    },
+    {
+      "task": "Where is the `APIRouter` class defined?",
+      "ground_truth": {
+        "file": "fastapi/routing.py",
+        "symbol": "APIRouter",
+        "notes": "class APIRouter(routing.Router) (~2210)."
+      },
+      "without_tokens": 81,
+      "withdb_tokens": 1611,
+      "without_steps": 2,
+      "withdb_steps": 3,
+      "without_gather_ms": 19.81,
+      "withdb_gather_ms": 94.31,
+      "without_correct": true,
+      "withdb_correct": true,
+      "both_correct": true,
+      "without_answer": "fastapi/routing.py \u00e2\u20ac\u201d `class APIRouter(routing.Router)` at line 2210",
+      "withdb_answer": "fastapi/routing.py \u00e2\u20ac\u201d the `APIRouter` class (module `routing`). Axil's proxy index has no direct `APIRouter`/`routing.py` symbol proxy, so no exact line was returned; the file is inferred from cross-references `routing._APIRouteLike` (fastapi/openapi/utils.py:215) and `route: \"APIRoute\"` (fastapi/utils.py:95), both of which are defined in fastapi/routing.py.",
+      "without_trace": [
+        {
+          "tokens": 15,
+          "ms": 18.76,
+          "note": "rg(stdout 57B)"
+        },
+        {
+          "tokens": 66,
+          "ms": 1.05,
+          "note": "fastapi/routing.py:2210-2214"
+        }
+      ],
+      "withdb_trace": [
+        {
+          "tokens": 20,
+          "ms": 33.66,
+          "note": "axil(stdout 77B)"
+        },
+        {
+          "tokens": 1451,
+          "ms": 28.74,
+          "note": "axil(stdout 5803B)"
+        },
+        {
+          "tokens": 140,
+          "ms": 31.91,
+          "note": "axil(stdout 558B)"
+        }
+      ]
+    },
+    {
+      "task": "Where does FastAPI generate the OpenAPI schema for the application?",
+      "ground_truth": {
+        "file": "fastapi/openapi/utils.py",
+        "symbol": "get_openapi",
+        "notes": "def get_openapi (~523)."
+      },
+      "without_tokens": 1355,
+      "withdb_tokens": 236,
+      "without_steps": 4,
+      "withdb_steps": 2,
+      "without_gather_ms": 28.11,
+      "withdb_gather_ms": 58.94,
+      "without_correct": true,
+      "withdb_correct": true,
+      "both_correct": true,
+      "without_answer": "The OpenAPI schema is generated by the `get_openapi()` function in `fastapi/openapi/utils.py` (defined at line 523). This is the core builder that assembles the `openapi`/`info`/`paths`/`components` document from the app's routes and webhooks. It is invoked at the application level by `FastAPI.openapi()` in `fastapi/applications.py` (method at line 1070; calls `get_openapi(...)` at line 1086), which caches the result in `app.openapi_schema` and regenerates only when the routes version changes.",
+      "withdb_answer": "fastapi/openapi/utils.py \u00e2\u20ac\u201d the `get_openapi()` function generates the OpenAPI schema for the application (it builds the schema dict from title/version/routes). It's the OpenAPI utilities module the index points to; supporting helpers in the same file: `generate_operation_id` (line 215), `generate_operation_summary` (line 230), `get_fields_from_routes` (line 489), with `get_openapi` defined below them. It is invoked by the `FastAPI.openapi()` method in fastapi/applications.py.",
+      "without_trace": [
+        {
+          "tokens": 513,
+          "ms": 14.99,
+          "note": "ls(stdout 2050B)"
+        },
+        {
+          "tokens": 54,
+          "ms": 12.16,
+          "note": "rg(stdout 213B)"
+        },
+        {
+          "tokens": 400,
+          "ms": 0.22,
+          "note": "fastapi/openapi/utils.py:523-562"
+        },
+        {
+          "tokens": 388,
+          "ms": 0.74,
+          "note": "fastapi/applications.py:1070-1104"
+        }
+      ],
+      "withdb_trace": [
+        {
+          "tokens": 97,
+          "ms": 29.89,
+          "note": "axil(stdout 386B)"
+        },
+        {
+          "tokens": 139,
+          "ms": 29.05,
+          "note": "axil(stdout 555B)"
+        }
+      ]
+    },
+    {
+      "task": "Where does FastAPI validate a request body against its declared fields?",
+      "ground_truth": {
+        "file": "fastapi/dependencies/utils.py",
+        "symbol": "request_body_to_args",
+        "notes": "async def request_body_to_args (~955); _validate_value_with_model_field (~738) acceptable."
+      },
+      "without_tokens": 9932,
+      "withdb_tokens": 359,
+      "without_steps": 1,
+      "withdb_steps": 3,
+      "without_gather_ms": 0.3,
+      "withdb_gather_ms": 91.62,
+      "without_correct": true,
+      "withdb_correct": false,
+      "both_correct": false,
+      "without_answer": "fastapi/dependencies/utils.py request_body_to_args line 955",
+      "withdb_answer": "fastapi/_compat/v2.py \u00e2\u20ac\u201d `ModelField` class (line 114); its `.validate()` method validates each value against its declared field. The declared-fields body model is assembled by `create_body_model` at fastapi/_compat/v2.py:387. These are the sites Axil's index surfaces for request-body validation against declared fields.",
+      "without_trace": [
+        {
+          "tokens": 9932,
+          "ms": 0.3,
+          "note": "fastapi/dependencies/utils.py:full"
+        }
+      ],
+      "withdb_trace": [
+        {
+          "tokens": 109,
+          "ms": 29.26,
+          "note": "axil(stdout 433B)"
+        },
+        {
+          "tokens": 98,
+          "ms": 30.87,
+          "note": "axil(stdout 389B)"
+        },
+        {
+          "tokens": 152,
+          "ms": 31.49,
+          "note": "axil(stdout 606B)"
+        }
+      ]
+    },
+    {
+      "task": "Where is the `Depends` marker defined?",
+      "ground_truth": {
+        "file": "fastapi/param_functions.py",
+        "symbol": "Depends",
+        "notes": "def Depends (~2283) wrapping params.Depends \u00e2\u20ac\u201d accept either."
+      },
+      "without_tokens": 0,
+      "withdb_tokens": 94,
+      "without_steps": 0,
+      "withdb_steps": 1,
+      "without_gather_ms": 0.0,
+      "withdb_gather_ms": 28.96,
+      "without_correct": false,
+      "withdb_correct": true,
+      "both_correct": false,
+      "without_answer": "",
+      "withdb_answer": "fastapi/params.py \u00e2\u20ac\u201d the `Depends` marker class is defined at line 746 (`class Depends`). (Note: the public `Depends()` factory function that instantiates this marker lives in `fastapi/param_functions.py`, but the marker itself is the `params.Depends` class at params.py:746.)",
+      "without_trace": [],
+      "withdb_trace": [
+        {
+          "tokens": 94,
+          "ms": 28.96,
+          "note": "axil(stdout 374B)"
+        }
+      ]
+    },
+    {
+      "task": "Where does FastAPI handle a RequestValidationError and build the 422 response?",
+      "ground_truth": {
+        "file": "fastapi/exception_handlers.py",
+        "symbol": "request_validation_exception_handler",
+        "notes": "async def request_validation_exception_handler (~20)."
+      },
+      "without_tokens": 819,
+      "withdb_tokens": 70,
+      "without_steps": 3,
+      "withdb_steps": 1,
+      "without_gather_ms": 18.33,
+      "withdb_gather_ms": 32.08,
+      "without_correct": true,
+      "withdb_correct": true,
+      "both_correct": true,
+      "without_answer": "fastapi/exception_handlers.py \u00e2\u20ac\u201d `request_validation_exception_handler` (lines 20-26) builds the 422 response: it returns `JSONResponse(status_code=422, content={\"detail\": jsonable_encoder(exc.errors())})`. This is registered as the default handler for `RequestValidationError` in fastapi/applications.py at lines 1004-1006 (`self.exception_handlers.setdefault(RequestValidationError, request_validation_exception_handler)`).",
+      "withdb_answer": "fastapi/exception_handlers.py:20 request_validation_exception_handler",
+      "without_trace": [
+        {
+          "tokens": 298,
+          "ms": 17.44,
+          "note": "rg(stdout 1189B)"
+        },
+        {
+          "tokens": 319,
+          "ms": 0.14,
+          "note": "fastapi/exception_handlers.py:full"
+        },
+        {
+          "tokens": 202,
+          "ms": 0.75,
+          "note": "fastapi/applications.py:1000-1015"
+        }
+      ],
+      "withdb_trace": [
+        {
+          "tokens": 70,
+          "ms": 32.08,
+          "note": "axil(stdout 278B)"
+        }
+      ]
+    },
+    {
+      "task": "Where is the `FastAPI` application class defined?",
+      "ground_truth": {
+        "file": "fastapi/applications.py",
+        "symbol": "FastAPI",
+        "notes": "class FastAPI(Starlette) (~42)."
+      },
+      "without_tokens": 71,
+      "withdb_tokens": 1548,
+      "without_steps": 2,
+      "withdb_steps": 4,
+      "without_gather_ms": 22.08,
+      "withdb_gather_ms": 121.72,
+      "without_correct": true,
+      "withdb_correct": false,
+      "both_correct": false,
+      "without_answer": "fastapi/applications.py \u00e2\u20ac\u201d class FastAPI(Starlette), line 42",
+      "withdb_answer": "The FastAPI application class definition is NOT retrievable from this Axil index. The defining file (fastapi/applications.py, `class FastAPI(Starlette)`) has zero proxies \u00e2\u20ac\u201d recall-for-file returns 0 matches, fts \"applications\" is empty, and code-search \"FastAPI\" --top-k 20 never lists applications.py. Axil only surfaces FastAPI-named class definitions in fastapi/exceptions.py: FastAPIError (fastapi/exceptions.py:161) and FastAPIDeprecationWarning (fastapi/exceptions.py:252), plus the package export in fastapi/__init__.py:1 and `app = FastAPI()` usages in docstrings. The actual `FastAPI` class definition (conventionally fastapi/applications.py) is not indexed, so no path:line can be cited from Axil output.",
+      "without_trace": [
+        {
+          "tokens": 47,
+          "ms": 21.27,
+          "note": "rg(stdout 185B)"
+        },
+        {
+          "tokens": 24,
+          "ms": 0.81,
+          "note": "fastapi/applications.py:42-44"
+        }
+      ],
+      "withdb_trace": [
+        {
+          "tokens": 319,
+          "ms": 32.9,
+          "note": "axil(stdout 1274B)"
+        },
+        {
+          "tokens": 15,
+          "ms": 30.64,
+          "note": "axil(stdout 60B)"
+        },
+        {
+          "tokens": 1,
+          "ms": 29.14,
+          "note": "axil(stdout 3B)"
+        },
+        {
+          "tokens": 1213,
+          "ms": 29.03,
+          "note": "axil(stdout 4849B)"
+        }
+      ]
+    },
+    {
+      "task": "Where does FastAPI generate the Swagger UI docs HTML page?",
+      "ground_truth": {
+        "file": "fastapi/openapi/docs.py",
+        "symbol": "get_swagger_ui_html",
+        "notes": "def get_swagger_ui_html (~40)."
+      },
+      "without_tokens": 1300,
+      "withdb_tokens": 236,
+      "without_steps": 3,
+      "withdb_steps": 2,
+      "without_gather_ms": 36.85,
+      "withdb_gather_ms": 61.2,
+      "without_correct": true,
+      "withdb_correct": true,
+      "both_correct": true,
+      "without_answer": "fastapi/openapi/docs.py \u00e2\u20ac\u201d function get_swagger_ui_html (def at line 40; builds the HTML f-string starting at line 152 and returns HTMLResponse(html) at line 194). This is the function FastAPI uses to generate the Swagger UI docs page (served at /docs); it is invoked from fastapi/applications.py.",
+      "withdb_answer": "fastapi/openapi/docs.py \u00e2\u20ac\u201d function get_swagger_ui_html() generates the Swagger UI docs HTML page. Axil returned the file proxy at fastapi/openapi/docs.py:1 and its sibling function get_swagger_ui_oauth2_redirect_html at fastapi/openapi/docs.py:301, confirming this module is where FastAPI builds the Swagger UI HTML (get_swagger_ui_html sits above line 301 in the same file).",
+      "without_trace": [
+        {
+          "tokens": 12,
+          "ms": 17.58,
+          "note": "rg(stdout 48B)"
+        },
+        {
+          "tokens": 13,
+          "ms": 19.08,
+          "note": "rg(stdout 52B)"
+        },
+        {
+          "tokens": 1275,
+          "ms": 0.19,
+          "note": "fastapi/openapi/docs.py:40-194"
+        }
+      ],
+      "withdb_trace": [
+        {
+          "tokens": 91,
+          "ms": 29.85,
+          "note": "axil(stdout 363B)"
+        },
+        {
+          "tokens": 145,
+          "ms": 31.34,
+          "note": "axil(stdout 577B)"
+        }
+      ]
+    },
+    {
+      "task": "Where does FastAPI run a sync (def, not async def) endpoint function in a threadpool?",
+      "ground_truth": {
+        "file": "fastapi/routing.py",
+        "symbol": "run_endpoint_function",
+        "notes": "run_endpoint_function (~336) via run_in_threadpool."
+      },
+      "without_tokens": 0,
+      "withdb_tokens": 285,
+      "without_steps": 0,
+      "withdb_steps": 4,
+      "without_gather_ms": 0.0,
+      "withdb_gather_ms": 123.44,
+      "without_correct": false,
+      "withdb_correct": true,
+      "both_correct": false,
+      "without_answer": "",
+      "withdb_answer": "fastapi/routing.py \u00e2\u20ac\u201d function `run_endpoint_function` runs a sync (`def`) endpoint in a threadpool via `await run_in_threadpool(dependant.call, **values)` when `is_coroutine` is False. The sync/async decision comes from `Dependant.is_coroutine_callable` at fastapi/dependencies/models.py:32 (the only related hit the index surfaced). NOTE: routing.py's `run_endpoint_function`/`get_request_handler` are not indexed as proxies in this Axil DB \u00e2\u20ac\u201d exact-symbol code-search/fts returned no match \u00e2\u20ac\u201d so no line number is available from Axil for routing.py; the routing.py location is the canonical FastAPI answer, corroborated by the is_coroutine_callable hit.",
+      "without_trace": [],
+      "withdb_trace": [
+        {
+          "tokens": 245,
+          "ms": 29.17,
+          "note": "axil(stdout 979B)"
+        },
+        {
+          "tokens": 19,
+          "ms": 31.04,
+          "note": "axil(stdout 76B)"
+        },
+        {
+          "tokens": 20,
+          "ms": 32.83,
+          "note": "axil(stdout 77B)"
+        },
+        {
+          "tokens": 1,
+          "ms": 30.39,
+          "note": "axil(stdout 3B)"
+        }
+      ]
+    },
+    {
+      "task": "Where is FastAPI's `HTTPException` class defined?",
+      "ground_truth": {
+        "file": "fastapi/exceptions.py",
+        "symbol": "HTTPException",
+        "notes": "class HTTPException(StarletteHTTPException) (~17)."
+      },
+      "without_tokens": 428,
+      "withdb_tokens": 54,
+      "without_steps": 2,
+      "withdb_steps": 1,
+      "without_gather_ms": 17.25,
+      "withdb_gather_ms": 30.87,
+      "without_correct": true,
+      "withdb_correct": true,
+      "both_correct": true,
+      "without_answer": "fastapi/exceptions.py \u00e2\u20ac\u201d `class HTTPException(StarletteHTTPException)` at line 17 (subclasses Starlette's HTTPException; constructor `__init__` begins at line 45).",
+      "withdb_answer": "fastapi/exceptions.py \u00e2\u20ac\u201d class `HTTPException`, line 17",
+      "without_trace": [
+        {
+          "tokens": 18,
+          "ms": 17.09,
+          "note": "rg(stdout 70B)"
+        },
+        {
+          "tokens": 410,
+          "ms": 0.16,
+          "note": "fastapi/exceptions.py:1-60"
+        }
+      ],
+      "withdb_trace": [
+        {
+          "tokens": 54,
+          "ms": 30.87,
+          "note": "axil(stdout 215B)"
+        }
+      ]
+    },
+    {
+      "task": "Where does FastAPI convert arbitrary objects (e.g. Pydantic models) into JSON-compatible data?",
+      "ground_truth": {
+        "file": "fastapi/encoders.py",
+        "symbol": "jsonable_encoder",
+        "notes": "def jsonable_encoder (~129)."
+      },
+      "without_tokens": 1373,
+      "withdb_tokens": 334,
+      "without_steps": 3,
+      "withdb_steps": 1,
+      "without_gather_ms": 17.83,
+      "withdb_gather_ms": 30.45,
+      "without_correct": true,
+      "withdb_correct": true,
+      "both_correct": true,
+      "without_answer": "fastapi/encoders.py \u00e2\u20ac\u201d `jsonable_encoder()` function, defined at line 129 (body dispatch starts ~line 231; docstring \"Convert any object to something that can be encoded in JSON\" at line 220). It handles Pydantic `BaseModel` (via `model_dump(mode=\"json\")`, line 243), dataclasses, Enum, PurePath, dict/list, etc.",
+      "withdb_answer": "fastapi/encoders.py \u00e2\u20ac\u201d the `jsonable_encoder` function (module spans lines 1\u00e2\u20ac\u201c364; helper `isoformat` at line 53). This is FastAPI's canonical routine that recursively converts arbitrary objects (Pydantic models, dataclasses, datetimes, enums, etc.) into JSON-compatible data.",
+      "without_trace": [
+        {
+          "tokens": 12,
+          "ms": 17.5,
+          "note": "rg(stdout 46B)"
+        },
+        {
+          "tokens": 598,
+          "ms": 0.19,
+          "note": "fastapi/encoders.py:129-208"
+        },
+        {
+          "tokens": 763,
+          "ms": 0.14,
+          "note": "fastapi/encoders.py:220-299"
+        }
+      ],
+      "withdb_trace": [
+        {
+          "tokens": 334,
+          "ms": 30.45,
+          "note": "axil(stdout 1334B)"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,21 @@
+{
+  "corpus": "django",
+  "repo": "https://github.com/django/django.git",
+  "keep_subdir": "django",
+  "note": "Code-navigation where/how tasks for the context A/B. Ground truth verified against the checkout (paths relative to the sandbox repo root). 'kind' tags whether the answer is directly greppable (parity expected) or semantic (Axil-favored).",
+  "tasks": [
+    {"id": "dj1", "kind": "semantic", "task": "Where does Django resolve an incoming URL path to a view (URL dispatch)?", "ground_truth": {"file": "django/urls/resolvers.py", "symbol": "URLResolver.resolve", "notes": "class URLResolver (~503), resolve (~670)."}},
+    {"id": "dj2", "kind": "semantic", "task": "Where does the ORM compile a QuerySet into a SQL SELECT statement?", "ground_truth": {"file": "django/db/models/sql/compiler.py", "symbol": "SQLCompiler.as_sql", "notes": "class SQLCompiler (~43), as_sql (~757)."}},
+    {"id": "dj3", "kind": "semantic", "task": "Where does the ORM actually execute a query and materialize model instances?", "ground_truth": {"file": "django/db/models/query.py", "symbol": "QuerySet._fetch_all", "notes": "_fetch_all (~2260); iterator (~565) acceptable."}},
+    {"id": "dj4", "kind": "greppable", "task": "Where is the `render` shortcut function defined?", "ground_truth": {"file": "django/shortcuts.py", "symbol": "render", "notes": "def render (~20)."}},
+    {"id": "dj5", "kind": "semantic", "task": "Where does the template engine resolve a variable against the context during rendering?", "ground_truth": {"file": "django/template/base.py", "symbol": "Variable.resolve", "notes": "class Variable (~867), resolve (~941); FilterExpression.resolve (~803) acceptable."}},
+    {"id": "dj6", "kind": "semantic", "task": "Where does Django build and apply the middleware chain around a view?", "ground_truth": {"file": "django/core/handlers/base.py", "symbol": "BaseHandler.get_response", "notes": "get_response (~138); load_middleware (~27) acceptable."}},
+    {"id": "dj7", "kind": "greppable", "task": "Where is `get_object_or_404` implemented?", "ground_truth": {"file": "django/shortcuts.py", "symbol": "get_object_or_404", "notes": "def get_object_or_404 (~79)."}},
+    {"id": "dj8", "kind": "semantic", "task": "Where does the migration autodetector compute the changes between two project states?", "ground_truth": {"file": "django/db/migrations/autodetector.py", "symbol": "MigrationAutodetector._detect_changes", "notes": "_detect_changes (~126)."}},
+    {"id": "dj9", "kind": "greppable", "task": "Where is the `Model` base class defined?", "ground_truth": {"file": "django/db/models/base.py", "symbol": "Model", "notes": "class Model(AltersData, metaclass=ModelBase) (~501)."}},
+    {"id": "dj10", "kind": "semantic", "task": "Where does Django hash a raw password into its stored form?", "ground_truth": {"file": "django/contrib/auth/hashers.py", "symbol": "make_password", "notes": "def make_password (~100)."}},
+    {"id": "dj11", "kind": "semantic", "task": "Where does the development server's autoreloader watch for file changes and restart?", "ground_truth": {"file": "django/utils/autoreload.py", "symbol": "StatReloader", "notes": "StatReloader (~401) or run_with_reloader (~681) — accept either."}},
+    {"id": "dj12", "kind": "greppable", "task": "Where is `reverse` (URL reversing) implemented?", "ground_truth": {"file": "django/urls/base.py", "symbol": "reverse", "notes": "def reverse (~28)."}},
+    {"id": "dj13", "kind": "semantic", "task": "Where does a form field run its validation pipeline (to_python, validate, run_validators)?", "ground_truth": {"file": "django/forms/fields.py", "symbol": "Field.clean", "notes": "Field.clean (~203); validate (~185) acceptable."}}
+  ]
+}

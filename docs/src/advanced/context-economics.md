@@ -101,7 +101,46 @@ scripts/context-ab-score.py --manifest experiments/context-ab/run.json \
 
 ## What the real experiment found
 
-Three runs, each counting only tasks both agents answered correctly:
+### Current headline — v2.1.1, 2026-07-13 (three repos, tokens *and* steps)
+
+The maintained baseline, re-measured end-to-end on **axil v2.1.1** with
+disciplined Opus 4.8 agents on three public repos. Committed data:
+[`benchmarks/results/context-ab/`](https://github.com/FC4b/axildb/tree/main/benchmarks/results/context-ab);
+task fixtures: `benchmarks/context-ab/`. This run also measures
+**steps-to-finish** (consulted tool round-trips ≈ agent turns), the second
+axis on the README hero chart:
+
+| Corpus | n (both-correct) | no Axil tok | w/ Axil tok | Token reduction | Steps |
+|--------|--:|--:|--:|--:|:--|
+| flask (24 files) | 11/12 | 13,042 | 7,592 | **41.8%** | 22 → 20 (**9% fewer**) |
+| fastapi (mid) | 8/12 | 17,246 | 4,095 | **76.3%** | 23 → 16 (**30% fewer**) |
+| **django (906 files)** | 10/13 | 19,906 | **4,430** | **77.7%** | 28 → 19 (**32% fewer**) |
+
+The reduction is **monotonic in repo size**, and the aggregates include
+per-task losses (fastapi's `APIRouter`, django's `SQLCompiler.as_sql` —
+both cases where a verbose fallback beat a tight grep) — measured, not
+cherry-picked. A cautionary tale on sample size: flask read **−20%**
+(Axil worse) on its first 3 tasks, **+50%** at n=7, and **+42%** at the
+full n=11. Small-n per-repo numbers swing hard — quote the committed n
+alongside the figure.
+
+**Retrieval recall on the same tasks** (the hero chart's third panel): a
+mechanical replay of every Axil lookup the agents actually ran, testing
+whether the ground-truth answer file surfaced — flask **91%**, fastapi
+**83%**, django **77%** (n = 11/12/13, index cap 512 KB;
+`benchmarks/results/context-ab/code-recall-agent-queries-512k-2026-07-13.json`).
+Two instructive companion artifacts are committed alongside: the
+**default-config run** (fastapi drops to **58%** because the indexer's
+old 100 KB default **silently skipped** `fastapi/routing.py`, 253 KB —
+found by this measurement, fixed to 512 KB + a loud skip warning), and a
+**verbatim-question diagnostic** (25–38%: pasting the full natural-language
+question as the query underperforms badly vs the short symbol/keyphrase
+queries agents actually issue — query *like an agent*).
+
+### Earlier runs — 2026-06, flask + django only (the discipline lesson)
+
+The original three runs, each counting only tasks both agents answered
+correctly:
 
 | Run | Corpus | Agent | no Axil | w/ Axil | Result |
 |-----|--------|-------|--:|--:|:--|
@@ -130,8 +169,9 @@ heavy `code-context` bundle at most once.
 
 > **The synthetic `context-savings` ~99% is an optimistic ceiling** — its
 > baseline assumes reading whole files. The defensible, equal-correctness
-> number is **~73% on a large/semantic workload, parity on
-> small/exact-symbol ones.**
+> numbers (v2.1.1, 2026-07-13, 29 counted tasks) are **~78% on a large
+> repo, ~76% mid-size, ~42% on a tiny one** — the win scales with repo
+> size because on tiny repos a tight `grep`+range-read is already cheap.
 
 ## Fixing the conditional: lean `code-context`
 
@@ -155,6 +195,10 @@ So the conditional is largely closed: with compact output Axil is
 net-cheaper on **both** small and large repos. The remaining per-task
 negatives are recall *misses* — the agent pays for extra queries when the
 first lookup doesn't surface the answer.
+
+The 2026-07-13 v2.1.1 live re-run (fresh agents, not re-scored
+trajectories — see the current headline above) confirms the direction of
+this prediction and lands higher: flask **+42%**, django **+78%**.
 
 ## Recall output discipline: compact default + near-dup collapse
 

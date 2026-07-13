@@ -1,6 +1,6 @@
 export const meta = {
   name: 'context-ab',
-  description: 'Real A/B: same flask task answered with vs without Axil, measured at equal correctness',
+  description: 'Real A/B: same code-nav task answered with vs without Axil (any corpus), measured at equal correctness',
   phases: [
     { title: 'Solve', detail: 'per task: one agent uses grep/read only, one uses axil only' },
     { title: 'Verify', detail: 'judge each answer correct vs ground truth' },
@@ -11,9 +11,10 @@ export const meta = {
 // args = { withoutRoot, withdbRoot, axilBin, outPath, tasks: [{id, task, ground_truth}] }
 const A = typeof args === 'string' ? JSON.parse(args) : args
 const { withoutRoot, withdbRoot, axilBin, outPath } = A
+const corpus = A.corpus || 'flask'    // which public repo this run measures
 const tasks = Array.isArray(A.tasks) ? A.tasks : JSON.parse(A.tasks)
 const disciplined = !!A.disciplined   // tool-disciplined withdb agent (cheap queries first)
-log(`context-ab: ${tasks.length} tasks, disciplined=${disciplined}, withoutRoot=${withoutRoot}`)
+log(`context-ab: corpus=${corpus}, ${tasks.length} tasks, disciplined=${disciplined}, withoutRoot=${withoutRoot}`)
 
 const SOLVE = {
   type: 'object',
@@ -51,7 +52,7 @@ const VERDICT = {
 }
 
 function withoutPrompt(t) {
-  return `You are an engineer with NO prior knowledge of this codebase, working in a checkout of the Flask web framework at the absolute path:
+  return `You are an engineer with NO prior knowledge of this codebase, working in a checkout of the ${corpus} project at the absolute path:
   ${withoutRoot}
 
 TASK: ${t.task}
@@ -116,19 +117,19 @@ const results = await pipeline(
   tasks,
   async (t) => {
     const [without, withdb] = await parallel([
-      () => agent(withoutPrompt(t), { schema: SOLVE, phase: 'Solve', label: `without#${t.id}` }),
-      () => agent(withdbPrompt(t), { schema: SOLVE, phase: 'Solve', label: `withdb#${t.id}` }),
+      () => agent(withoutPrompt(t), { schema: SOLVE, phase: 'Solve', label: `without#${t.id}`, model: 'opus', agentType: 'general-purpose' }),
+      () => agent(withdbPrompt(t), { schema: SOLVE, phase: 'Solve', label: `withdb#${t.id}`, model: 'opus', agentType: 'general-purpose' }),
     ])
     return { task: t, without, withdb }
   },
   async (s) => {
-    const verdict = await agent(verifyPrompt(s), { schema: VERDICT, phase: 'Verify', label: `verify#${s.task.id}` })
+    const verdict = await agent(verifyPrompt(s), { schema: VERDICT, phase: 'Verify', label: `verify#${s.task.id}`, model: 'opus' })
     return { ...s, verdict }
   },
 )
 
 const manifest = {
-  corpus: 'flask',
+  corpus,
   tasks: results.filter(Boolean).map((r) => ({
     id: r.task.id,
     task: r.task.task,
@@ -151,7 +152,7 @@ phase('Emit')
 const json = JSON.stringify(manifest, null, 2)
 await agent(
   `Write the following text VERBATIM to the absolute file path ${outPath} using the Write tool. Do not add, remove, reformat, or wrap it in code fences — write exactly these bytes and nothing else:\n\n${json}`,
-  { phase: 'Emit', label: 'write-manifest' },
+  { phase: 'Emit', label: 'write-manifest', agentType: 'general-purpose' },
 )
 
 const counted = manifest.tasks.filter((t) => t.without.verdict.correct && t.withdb.verdict.correct)
