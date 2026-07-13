@@ -3449,22 +3449,76 @@ fn scip_indexer_command(lang: &str) -> Option<(&'static str, Vec<&'static str>)>
     }
 }
 
-/// Returns true if `bin` is invokable (resolvable via PATH or absolute).
-/// Cheap shell-out — `which` on unix, `where` on windows.
+/// Resolve `bin` to something `Command::new` can actually launch.
+///
+/// On Unix this is `bin` itself when `which` finds it. On Windows the
+/// distinction matters: npm installs CLIs (scip-python, scip-typescript)
+/// as `.cmd` shims, which `where` reports as present but CreateProcess
+/// cannot execute — so a bare `Command::new("scip-python")` fails with
+/// NotFound even though the probe said "installed". Resolve via `where`,
+/// prefer a real `.exe`/`.com`, and fall back to the full path of a
+/// `.cmd`/`.bat` shim (std routes those through cmd.exe with safe quoting).
+#[cfg(feature = "scip")]
+fn resolve_indexer_program(bin: &str) -> Option<std::path::PathBuf> {
+    if cfg!(target_os = "windows") {
+        let out = std::process::Command::new("where")
+            .arg(bin)
+            .stderr(std::process::Stdio::null())
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let text = String::from_utf8_lossy(&out.stdout);
+        let hits: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+        // Extensionless hits (Git-Bash shims) are unspawnable from
+        // CreateProcess, so only native binaries and cmd/bat shims count.
+        for exts in [&["exe", "com"][..], &["cmd", "bat"][..]] {
+            for hit in &hits {
+                let lower = hit.to_ascii_lowercase();
+                if exts.iter().any(|e| lower.ends_with(&format!(".{e}"))) {
+                    return Some(std::path::PathBuf::from(hit));
+                }
+            }
+        }
+        None
+    } else {
+        let found = std::process::Command::new("which")
+            .arg(bin)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        found.then(|| std::path::PathBuf::from(bin))
+    }
+}
+
+/// Returns true if `bin` is invokable — same resolution the spawn uses,
+/// so `scip status` can never report an indexer the refresh can't run.
 #[cfg(feature = "scip")]
 fn binary_on_path(bin: &str) -> bool {
-    let probe = if cfg!(target_os = "windows") {
-        "where"
-    } else {
-        "which"
-    };
-    std::process::Command::new(probe)
-        .arg(bin)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    resolve_indexer_program(bin).is_some()
+}
+
+/// Recognize known indexer crash signatures and return a targeted,
+/// actionable hint. Currently: scip-python's Windows startup crash from
+/// an unescaped `new RegExp(path.sep)` (path.sep is `\` on Windows — an
+/// invalid regex), which kills the CLI before it indexes anything.
+#[cfg(feature = "scip")]
+fn indexer_crash_hint(bin: &str, stderr: &str) -> Option<String> {
+    if bin == "scip-python"
+        && stderr.contains("Invalid regular expression")
+        && stderr.contains("PythonEnvironment")
+    {
+        return Some(
+            "known scip-python bug on Windows (unescaped RegExp(path.sep) at startup). \
+             Fix: patch the installed bundle — see docs/src/getting-started/installation.md#windows--scip-python \
+             — or track https://github.com/sourcegraph/scip-python/issues for the upstream fix"
+                .to_string(),
+        );
+    }
+    None
 }
 
 #[cfg(feature = "scip")]
@@ -7109,6 +7163,33 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                             }
                         }
                     }
+                }
+            }
+
+            // Windows: verify the ONNX Runtime DLL setup up front — a wrong
+            // setup otherwise panics deep inside ort on the first embed call
+            // (System32 ships an ancient 1.10 DLL that shadows a missing
+            // app-dir copy). Mirrors the runtime preflight in axil-vector.
+            #[cfg(all(feature = "embed", target_os = "windows"))]
+            {
+                use axil_core::diagnostics::{CheckResult, Severity};
+                match axil_vector::embed::preflight_ort_dll() {
+                    Ok(()) => report.add_check(CheckResult {
+                        name: "onnxruntime_dll".to_string(),
+                        status: Severity::Ok,
+                        detail: "ONNX Runtime DLL resolution looks correct".to_string(),
+                        fix: None,
+                    }),
+                    Err(e) => report.add_check(CheckResult {
+                        name: "onnxruntime_dll".to_string(),
+                        status: Severity::Error,
+                        detail: e,
+                        fix: Some(
+                            "place a >=1.22 onnxruntime.dll next to axil.exe (release \
+                             archives bundle one; `cargo binstall axildb` sets this up)"
+                                .to_string(),
+                        ),
+                    }),
                 }
             }
 
@@ -11846,16 +11927,19 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                         let (bin, args_template) = scip_indexer_command(lang)
                             .expect("languages come from MARKERS or were validated above");
 
-                        if !binary_on_path(bin) {
-                            if explicit {
-                                anyhow::bail!(
-                                    "indexer `{bin}` not found on PATH. {}",
-                                    suggest_scip_installers(&[lang])
-                                );
+                        let program = match resolve_indexer_program(bin) {
+                            Some(p) => p,
+                            None => {
+                                if explicit {
+                                    anyhow::bail!(
+                                        "indexer `{bin}` not found on PATH. {}",
+                                        suggest_scip_installers(&[lang])
+                                    );
+                                }
+                                entries.push(missing_indexer_entry(project, bin));
+                                continue;
                             }
-                            entries.push(missing_indexer_entry(project, bin));
-                            continue;
-                        }
+                        };
 
                         if let Some(parent) = out_path.parent() {
                             std::fs::create_dir_all(parent).with_context(|| {
@@ -11904,21 +11988,39 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                             }
                         };
                         let started = std::time::Instant::now();
-                        let run = std::process::Command::new(bin)
+                        // Capture rather than inherit: on failure the child's
+                        // stderr is both forwarded and inspected for known
+                        // crash signatures (e.g. scip-python's Windows bug).
+                        let run = std::process::Command::new(&program)
                             .args(&resolved_args)
                             .current_dir(&project.dir)
-                            .status();
+                            .output();
                         if let Some(s) = spinner {
                             s.finish_and_clear();
                         }
                         let indexer_secs = started.elapsed().as_secs_f64();
 
                         let error = match run {
-                            Err(e) => Some(format!("failed to spawn `{bin}`: {e}")),
-                            Ok(status) if !status.success() => Some(format!(
-                                "`{bin}` exited with status {status} (cwd: {})",
-                                project.dir.display()
+                            Err(e) => Some(format!(
+                                "failed to spawn `{bin}` ({}): {e}",
+                                program.display()
                             )),
+                            Ok(ref out_run) if !out_run.status.success() => {
+                                let child_err = String::from_utf8_lossy(&out_run.stderr);
+                                if !child_err.is_empty() {
+                                    eprint!("{child_err}");
+                                }
+                                let mut msg = format!(
+                                    "`{bin}` exited with status {} (cwd: {})",
+                                    out_run.status,
+                                    project.dir.display()
+                                );
+                                if let Some(hint) = indexer_crash_hint(bin, &child_err) {
+                                    msg.push_str("\n  hint: ");
+                                    msg.push_str(&hint);
+                                }
+                                Some(msg)
+                            }
                             Ok(_) => {
                                 let scip_size =
                                     std::fs::metadata(out_path).map(|m| m.len()).unwrap_or(0);

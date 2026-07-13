@@ -476,6 +476,47 @@ fn log_execution_provider_once(msg: &str) {
     axil_core::util::log_once_if_verbose(&LOGGED, &format!("[axil-vector] {msg}"));
 }
 
+/// Windows only: this build needs onnxruntime.dll ≥ 1.22 (ORT API 22).
+/// `cargo install`/`cargo build` don't place one next to axil.exe, so the
+/// loader falls back to the PATH search — usually finding
+/// `C:\Windows\System32\onnxruntime.dll`, a 1.10-era DLL that ships with
+/// Windows itself — and ort *panics* at init ("The given version [22] is
+/// not supported"). Catch that exact setup before touching ort and fail
+/// with instructions instead of a panic. System32's copy is effectively
+/// always ancient (no installer upgrades it), so existence is a reliable
+/// signal; `ORT_DYLIB_PATH` skips the check for users who point at their
+/// own runtime.
+#[cfg(all(feature = "embed", target_os = "windows"))]
+pub fn preflight_ort_dll() -> Result<(), String> {
+    if std::env::var_os("ORT_DYLIB_PATH").is_some() {
+        return Ok(());
+    }
+    let exe_dir_has_dll = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("onnxruntime.dll").is_file()))
+        .unwrap_or(false);
+    if exe_dir_has_dll {
+        return Ok(()); // app-dir DLL wins the loader search — correct setup
+    }
+    let sys32 = std::env::var_os("SystemRoot").map(|r| {
+        std::path::PathBuf::from(r)
+            .join("System32")
+            .join("onnxruntime.dll")
+    });
+    if let Some(p) = sys32.filter(|p| p.is_file()) {
+        return Err(format!(
+            "no onnxruntime.dll next to the axil binary — Windows would load {} instead, \
+             which is the OS-bundled ORT 1.10 and too old for this build (needs >= 1.22), \
+             causing a crash at startup. Fix: place a matching onnxruntime.dll next to \
+             axil.exe — release archives bundle one, `cargo binstall axildb` sets this up, \
+             and source builds can copy target\\release\\onnxruntime.dll. See \
+             docs/src/getting-started/installation.md#windows--onnx",
+            p.display()
+        ));
+    }
+    Ok(())
+}
+
 /// Build one ONNX session for `model_file`. Tries each compile-time-
 /// enabled GPU execution provider in priority order (CUDA → DirectML),
 /// falling back to CPU on the first one that registers. `log_ep` is the
@@ -486,6 +527,9 @@ fn build_session(
     model_file: &std::path::Path,
     log_ep: bool,
 ) -> Result<ort::session::Session, String> {
+    #[cfg(target_os = "windows")]
+    preflight_ort_dll()?;
+
     fn fresh_builder() -> Result<ort::session::builder::SessionBuilder, String> {
         ort::session::Session::builder()
             .map_err(|e| format!("ONNX session builder error: {e}"))?

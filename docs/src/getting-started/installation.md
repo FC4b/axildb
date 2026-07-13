@@ -147,6 +147,42 @@ copy target\release\onnxruntime.dll $env:USERPROFILE\.cargo\bin\
 Use ONNX Runtime ≥ 1.22 (API 22); `ORT_DYLIB_PATH` does **not** help under the
 `download-binaries` feature. The prebuilt archives avoid all of this.
 
+Both `axil doctor` and the embedder itself check for this setup on Windows and
+fail with these instructions instead of crashing inside the ONNX runtime.
+
+## Windows + scip-python
+
+`@sourcegraph/scip-python` (the Python SCIP indexer `axil scip refresh` uses)
+currently **crashes at startup on Windows** with:
+
+```
+SyntaxError: Invalid regular expression: /\/g: \ at end of pattern
+    at ...PythonEnvironment.ts:4
+```
+
+This is an upstream bug — `new RegExp(path.sep, 'g')` with Windows' `\`
+separator is an invalid regex — and it kills the CLI before it indexes
+anything. `axil scip refresh` detects this crash signature and points here.
+
+Until the upstream fix ships, patch the two installed bundles (idempotent —
+re-run after any `npm update -g`):
+
+```powershell
+# %APPDATA%\npm\node_modules\@sourcegraph\scip-python\dist\{scip-python.js, scip-python-test.js}
+# replace:  new RegExp(o.sep,"g")
+# with:     new RegExp(o.sep==="\\"?"\\\\":o.sep,"g")
+$dist = "$env:APPDATA\npm\node_modules\@sourcegraph\scip-python\dist"
+foreach ($f in "scip-python.js", "scip-python-test.js") {
+  (Get-Content "$dist\$f" -Raw) -replace [regex]::Escape('new RegExp(o.sep,"g")'),
+    'new RegExp(o.sep==="\\"?"\\\\":o.sep,"g")' | Set-Content "$dist\$f" -Encoding utf8 -NoNewline
+}
+scip-python --version   # should print a version instead of a stack trace
+```
+
+Also note: npm installs `scip-python`/`scip-typescript` as `.cmd` shims.
+`axil scip refresh`/`status` resolve those correctly (preferring a real
+`.exe` when present, falling back to the `.cmd` shim).
+
 ## Verify installation
 
 ```bash
