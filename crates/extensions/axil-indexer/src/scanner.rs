@@ -282,6 +282,7 @@ pub fn scan_files(root: &Path, config: &IndexConfig) -> Vec<ScannedFile> {
     walker.add_custom_ignore_filename(".axilignore");
 
     let mut files = Vec::new();
+    let mut skipped_large: Vec<(String, u64)> = Vec::new();
 
     for entry in walker.build().flatten() {
         let path = entry.path();
@@ -365,6 +366,9 @@ pub fn scan_files(root: &Path, config: &IndexConfig) -> Vec<ScannedFile> {
         };
         let size = metadata.len();
         if size > max_size {
+            // A silently missing file poisons recall: queries for its symbols
+            // return nothing and nothing says why. Record it and warn below.
+            skipped_large.push((rel, size));
             continue;
         }
 
@@ -377,6 +381,26 @@ pub fn scan_files(root: &Path, config: &IndexConfig) -> Vec<ScannedFile> {
             size_bytes: size,
             modified,
         });
+    }
+
+    // Skipping a large file must be loud: its symbols simply vanish from
+    // code-search/fts otherwise. One bounded summary line, not per-file spam.
+    if !skipped_large.is_empty() {
+        skipped_large.sort_by(|a, b| b.1.cmp(&a.1)); // largest first
+        let shown: Vec<String> = skipped_large
+            .iter()
+            .take(3)
+            .map(|(p, s)| format!("{} ({} KB)", p, s / 1024))
+            .collect();
+        let more = skipped_large.len().saturating_sub(3);
+        let more_note = if more > 0 { format!(", +{more} more") } else { String::new() };
+        eprintln!(
+            "[axil-index] skipped {} file(s) over max_file_size_kb = {} KB: {}{} — their symbols will NOT be searchable; raise [index].max_file_size_kb in axil.toml to include them",
+            skipped_large.len(),
+            config.max_file_size_kb,
+            shown.join(", "),
+            more_note,
+        );
     }
 
     // Sort by path for deterministic output
@@ -412,7 +436,10 @@ mod tests {
         std::fs::write(src.join("main.rs"), "fn main() {}").unwrap();
         std::fs::write(src.join("big.rs"), "x".repeat(200_000)).unwrap(); // > 100KB
 
-        let config = IndexConfig::default();
+        // Pin the cap explicitly: this tests that the config is respected,
+        // not what the shipped default happens to be.
+        let mut config = IndexConfig::default();
+        config.max_file_size_kb = 100;
         let files = scan_files(dir.path(), &config);
 
         assert_eq!(files.len(), 1); // big.rs should be skipped
