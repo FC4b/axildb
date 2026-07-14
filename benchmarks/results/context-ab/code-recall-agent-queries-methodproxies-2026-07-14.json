@@ -1,0 +1,430 @@
+{
+  "benchmark": "context-ab-code-recall-agent-queries",
+  "metric": "answer-file surfaced: ground-truth PRIMARY file appears in the stdout of at least one axil lookup the withdb agent actually ran (recorded in the A/B manifests); agent-failure tasks (no lookups recorded) excluded",
+  "query_protocol": "replay of agent-issued commands (code-search / fts / code-context), binary path normalized to the current build",
+  "per_corpus": [
+    {
+      "corpus": "flask",
+      "tasks_scored": 11,
+      "agent_failures_excluded": 1,
+      "hits": 10,
+      "recall": 0.909
+    },
+    {
+      "corpus": "fastapi",
+      "tasks_scored": 12,
+      "agent_failures_excluded": 0,
+      "hits": 9,
+      "recall": 0.75
+    },
+    {
+      "corpus": "django",
+      "tasks_scored": 13,
+      "agent_failures_excluded": 0,
+      "hits": 13,
+      "recall": 1.0
+    }
+  ],
+  "detail": [
+    {
+      "corpus": "flask",
+      "tasks_scored": 11,
+      "agent_failures_excluded": 1,
+      "hits": 10,
+      "recall": 0.909,
+      "rows": [
+        {
+          "id": "fl1",
+          "task": "Where is the `jsonify` helper implemented?",
+          "gt_file": "src/flask/json/__init__.py",
+          "hit": true,
+          "queries": [
+            "D:/github/axildb/target/release/axil code-search \"jsonify\" --top-k 5"
+          ]
+        },
+        {
+          "id": "fl2",
+          "task": "Where is the module-level `url_for` helper defined?",
+          "gt_file": "src/flask/helpers.py",
+          "hit": true,
+          "queries": [
+            "D:/github/axildb/target/release/axil code-search \"url_for\" --top-k 5"
+          ]
+        },
+        {
+          "id": "fl3",
+          "task": "Where does Flask dispatch an incoming request to the matched view function?",
+          "gt_file": "src/flask/app.py",
+          "hit": true,
+          "queries": [
+            "D:/github/axildb/target/release/axil fts \"full_dispatch_request view_functions\" --limit 5"
+          ]
+        },
+        {
+          "id": "fl4",
+          "task": "Where does Flask push the application context onto the context stack?",
+          "gt_file": "src/flask/ctx.py",
+          "hit": true,
+          "queries": [
+            "D:/github/axildb/target/release/axil code-search \"AppContext push\" --top-k 5",
+            "D:/github/axildb/target/release/axil code-context --task \"Where does Flask push the application context onto the context stack?\" --budget 1200"
+          ]
+        },
+        {
+          "id": "fl5",
+          "task": "Where is the `Blueprint` class defined?",
+          "gt_file": "src/flask/blueprints.py",
+          "hit": true,
+          "queries": [
+            "D:/github/axildb/target/release/axil code-search \"Blueprint\" --top-k 5"
+          ]
+        },
+        {
+          "id": "fl6",
+          "task": "Where does Flask load configuration from a Python file (from_pyfile)?",
+          "gt_file": "src/flask/config.py",
+          "hit": true,
+          "queries": [
+            "D:/github/axildb/target/release/axil code-search \"from_pyfile\" --top-k 5",
+            "D:/github/axildb/target/release/axil fts \"from_pyfile\" --limit 5"
+          ]
+        },
+        {
+          "id": "fl7",
+          "task": "How does Flask turn a raised HTTPException into a response?",
+          "gt_file": "src/flask/app.py",
+          "hit": true,
+          "queries": [
+            "D:/github/axildb/target/release/axil fts \"HTTPException\" --limit 5",
+            "D:/github/axildb/target/release/axil fts \"HTTPException response\" --limit 5",
+            "D:/github/axildb/target/release/axil fts \"handle_http_exception aborter error handler HTTPException\" --limit 8",
+            "D:/github/axildb/target/release/axil code-context --task \"How does Flask turn a raised HTTPException into a response?\" --budget 1200"
+          ]
+        },
+        {
+          "id": "fl8",
+          "task": "Where is the `render_template` function defined?",
+          "gt_file": "src/flask/templating.py",
+          "hit": true,
+          "queries": [
+            "D:/github/axildb/target/release/axil code-search \"render_template\" --top-k 5"
+          ]
+        },
+        {
+          "id": "fl10",
+          "task": "Where is the `session` proxy object defined?",
+          "gt_file": "src/flask/globals.py",
+          "hit": false,
+          "queries": [
+            "D:/github/axildb/target/release/axil code-search \"session proxy\" --top-k 5",
+            "D:/github/axildb/target/release/axil code-search \"globals session current_app request\" --top-k 5",
+            "D:/github/axildb/target/release/axil code-context --task \"Where is the session proxy object defined in globals.py?\" --budget 1200"
+          ]
+        },
+        {
+          "id": "fl11",
+          "task": "Where does Flask serialize the session and set the session cookie on the response?",
+          "gt_file": "src/flask/sessions.py",
+          "hit": true,
+          "queries": [
+            "D:/github/axildb/target/release/axil code-search \"save_session set cookie serialize session\" --top-k 5",
+            "D:/github/axildb/target/release/axil fts \"response.set_cookie save_session\" --limit 5"
+          ]
+        },
+        {
+          "id": "fl12",
+          "task": "Where does Flask stream a file from disk as a response (send file helpers)?",
+          "gt_file": "src/flask/helpers.py",
+          "hit": true,
+          "queries": [
+            "D:/github/axildb/target/release/axil code-search \"send_file\" --top-k 5",
+            "D:/github/axildb/target/release/axil fts \"send_file\" --limit 5"
+          ]
+        }
+      ]
+    },
+    {
+      "corpus": "fastapi",
+      "tasks_scored": 12,
+      "agent_failures_excluded": 0,
+      "hits": 9,
+      "recall": 0.75,
+      "rows": [
+        {
+          "id": "fa1",
+          "task": "Where does FastAPI resolve and inject dependencies for a request (the dependency-injection solver)?",
+          "gt_file": "fastapi/dependencies/utils.py",
+          "hit": false,
+          "queries": [
+            "D:/github/axildb/target/release/axil code-search \"resolve dependencies for request\" --top-k 5",
+            "D:/github/axildb/target/release/axil code-context --task \"Where does FastAPI resolve and inject dependencies for a request (the dependency-injection solver)?\" --budget 1200"
+          ]
+        },
+        {
+          "id": "fa2",
+          "task": "Where does FastAPI turn a route's return value into a serialized Response?",
+          "gt_file": "fastapi/routing.py",
+          "hit": true,
+          "queries": [
+            "D:/github/axildb/target/release/axil code-search \"serialize response return value route\" --top-k 5",
+            "D:/github/axildb/target/release/axil code-context --task \"Where does FastAPI turn a route's return value into a serialized Response?\" --budget 1200",
+            "D:/github/axildb/target/release/axil fts \"routing\" --limit 10",
+            "D:/github/axildb/target/release/axil code-search \"RouteContext class routing request response handler\" --top-k 10"
+          ]
+        },
+        {
+          "id": "fa3",
+          "task": "Where is the `APIRouter` class defined?",
+          "gt_file": "fastapi/routing.py",
+          "hit": true,
+          "queries": [
+            "D:/github/axildb/target/release/axil code-search \"APIRouter\" --top-k 5",
+            "D:/github/axildb/target/release/axil fts \"class APIRouter Route\" --limit 8",
+            "D:/github/axildb/target/release/axil code-context --task \"Where is the APIRouter class defined?\" --budget 1200"
+          ]
+        },
+        {
+          "id": "fa4",
+          "task": "Where does FastAPI generate the OpenAPI schema for the application?",
+          "gt_file": "fastapi/openapi/utils.py",
+          "hit": true,
+          "queries": [
+            "D:/github/axildb/target/release/axil code-search \"get_openapi generate OpenAPI schema\" --top-k 5",
+            "D:/github/axildb/target/release/axil code-search \"get_openapi title version routes output dict\" --top-k 8"
+          ]
+        },
+        {
+          "id": "fa5",
+          "task": "Where does FastAPI validate a request body against its declared fields?",
+          "gt_file": "fastapi/dependencies/utils.py",
+          "hit": false,
+          "queries": [
+            "D:/github/axildb/target/release/axil code-search \"request_body_to_args validate request body fields\" --top-k 5",
+            "D:/github/axildb/target/release/axil code-search \"ModelField validate field value against type\" --top-k 5",
+            "D:/github/axildb/target/release/axil code-context --task \"Where does FastAPI validate a request body against its declared fields?\" --budget 1200"
+          ]
+        },
+        {
+          "id": "fa6",
+          "task": "Where is the `Depends` marker defined?",
+          "gt_file": "fastapi/param_functions.py",
+          "hit": false,
+          "queries": [
+            "D:/github/axildb/target/release/axil code-search \"Depends\" --top-k 5"
+          ]
+        },
+        {
+          "id": "fa7",
+          "task": "Where does FastAPI handle a RequestValidationError and build the 422 response?",
+          "gt_file": "fastapi/exception_handlers.py",
+          "hit": true,
+          "queries": [
+            "axil code-search request_validation_exception_handler"
+          ]
+        },
+        {
+          "id": "fa8",
+          "task": "Where is the `FastAPI` application class defined?",
+          "gt_file": "fastapi/applications.py",
+          "hit": true,
+          "queries": [
+            "D:/github/axildb/target/release/axil code-search \"FastAPI\" --top-k 20",
+            "D:/github/axildb/target/release/axil recall-for-file \"fastapi/applications.py\" --top-k 5",
+            "D:/github/axildb/target/release/axil fts \"applications\" --limit 5",
+            "D:/github/axildb/target/release/axil fts \"class FastAPI\" --limit 5"
+          ]
+        },
+        {
+          "id": "fa9",
+          "task": "Where does FastAPI generate the Swagger UI docs HTML page?",
+          "gt_file": "fastapi/openapi/docs.py",
+          "hit": true,
+          "queries": [
+            "D:/github/axildb/target/release/axil code-search \"swagger ui html\" --top-k 5",
+            "D:/github/axildb/target/release/axil code-context --task \"Where does FastAPI generate the Swagger UI docs HTML page?\" --budget 1200"
+          ]
+        },
+        {
+          "id": "fa10",
+          "task": "Where does FastAPI run a sync (def, not async def) endpoint function in a threadpool?",
+          "gt_file": "fastapi/routing.py",
+          "hit": true,
+          "queries": [
+            "D:/github/axildb/target/release/axil fts \"is_coroutine\" --limit 5",
+            "D:/github/axildb/target/release/axil code-search \"run_endpoint_function is_coroutine_callable\" --top-k 5",
+            "D:/github/axildb/target/release/axil code-search \"run_endpoint_function\" --top-k 5",
+            "D:/github/axildb/target/release/axil fts \"run_endpoint_function\" --limit 5"
+          ]
+        },
+        {
+          "id": "fa11",
+          "task": "Where is FastAPI's `HTTPException` class defined?",
+          "gt_file": "fastapi/exceptions.py",
+          "hit": true,
+          "queries": [
+            "D:/github/axildb/target/release/axil code-search \"HTTPException\" --top-k 5"
+          ]
+        },
+        {
+          "id": "fa12",
+          "task": "Where does FastAPI convert arbitrary objects (e.g. Pydantic models) into JSON-compatible data?",
+          "gt_file": "fastapi/encoders.py",
+          "hit": true,
+          "queries": [
+            "D:/github/axildb/target/release/axil fts \"encoders\" --limit 5"
+          ]
+        }
+      ]
+    },
+    {
+      "corpus": "django",
+      "tasks_scored": 13,
+      "agent_failures_excluded": 0,
+      "hits": 13,
+      "recall": 1.0,
+      "rows": [
+        {
+          "id": "dj1",
+          "task": "Where does Django resolve an incoming URL path to a view (URL dispatch)?",
+          "gt_file": "django/urls/resolvers.py",
+          "hit": true,
+          "queries": [
+            "D:/github/axildb/target/release/axil code-search \"resolve url path to view URLResolver\" --top-k 5",
+            "D:/github/axildb/target/release/axil code-search \"URLResolver.resolve method match path return ResolverMatch\" --top-k 5"
+          ]
+        },
+        {
+          "id": "dj2",
+          "task": "Where does the ORM compile a QuerySet into a SQL SELECT statement?",
+          "gt_file": "django/db/models/sql/compiler.py",
+          "hit": true,
+          "queries": [
+            "D:/github/axildb/target/release/axil code-search \"SQLCompiler as_sql compile QuerySet SELECT\" --top-k 5",
+            "D:/github/axildb/target/release/axil fts \"class SQLCompiler get_from_clause\" --limit 6"
+          ]
+        },
+        {
+          "id": "dj3",
+          "task": "Where does the ORM actually execute a query and materialize model instances?",
+          "gt_file": "django/db/models/query.py",
+          "hit": true,
+          "queries": [
+            "D:/github/axildb/target/release/axil code-search \"ModelIterable execute_sql materialize model instances from query results\" --top-k 5",
+            "D:/github/axildb/target/release/axil code-search \"ModelIterable\" --top-k 5",
+            "D:/github/axildb/target/release/axil code-search \"SQLCompiler execute_sql results_iter\" --top-k 5",
+            "D:/github/axildb/target/release/axil fts \"ModelIterable\" --limit 5",
+            "D:/github/axildb/target/release/axil fts \"def execute_sql\" --limit 5",
+            "D:/github/axildb/target/release/axil code-context --task \"Where does the ORM actually execute a query and materialize model instances?\" --budget 1200",
+            "D:/github/axildb/target/release/axil fts \"Run the query against the database return results\" --limit 5",
+            "D:/github/axildb/target/release/axil code-search \"iterate queryset build model instances from database rows\" --top-k 5",
+            "D:/github/axildb/target/release/axil fts \"SQLCompiler\" --limit 5",
+            "D:/github/axildb/target/release/axil fts \"class QuerySet\" --limit 5",
+            "D:/github/axildb/target/release/axil fts \"from_db\" --limit 5",
+            "D:/github/axildb/target/release/axil code-search \"QuerySet _fetch_all iterable class execute compiler yield model objects\" --top-k 6",
+            "D:/github/axildb/target/release/axil fts \"results_iter\" --limit 5",
+            "D:/github/axildb/target/release/axil fts \"main QuerySet implementation public API for the ORM\" --limit 5",
+            "D:/github/axildb/target/release/axil code-search \"Model class metaclass from_db save_base django db models base\" --top-k 6"
+          ]
+        },
+        {
+          "id": "dj4",
+          "task": "Where is the `render` shortcut function defined?",
+          "gt_file": "django/shortcuts.py",
+          "hit": true,
+          "queries": [
+            "D:/github/axildb/target/release/axil code-search \"render\" --top-k 5"
+          ]
+        },
+        {
+          "id": "dj5",
+          "task": "Where does the template engine resolve a variable against the context during rendering?",
+          "gt_file": "django/template/base.py",
+          "hit": true,
+          "queries": [
+            "D:/github/axildb/target/release/axil code-search \"Variable resolve context\" --top-k 5",
+            "D:/github/axildb/target/release/axil code-search \"Variable resolve _resolve_lookup\" --top-k 5"
+          ]
+        },
+        {
+          "id": "dj6",
+          "task": "Where does Django build and apply the middleware chain around a view?",
+          "gt_file": "django/core/handlers/base.py",
+          "hit": true,
+          "queries": [
+            "D:/github/axildb/target/release/axil code-search \"load_middleware\" --top-k 5",
+            "D:/github/axildb/target/release/axil code-search \"BaseHandler load_middleware get_response _middleware_chain\" --top-k 8"
+          ]
+        },
+        {
+          "id": "dj7",
+          "task": "Where is `get_object_or_404` implemented?",
+          "gt_file": "django/shortcuts.py",
+          "hit": true,
+          "queries": [
+            "D:/github/axildb/target/release/axil code-search \"get_object_or_404\" --top-k 5"
+          ]
+        },
+        {
+          "id": "dj8",
+          "task": "Where does the migration autodetector compute the changes between two project states?",
+          "gt_file": "django/db/migrations/autodetector.py",
+          "hit": true,
+          "queries": [
+            "D:/github/axildb/target/release/axil code-search \"MigrationAutodetector _detect_changes\" --top-k 5",
+            "D:/github/axildb/target/release/axil fts \"_detect_changes\" --limit 5"
+          ]
+        },
+        {
+          "id": "dj9",
+          "task": "Where is the `Model` base class defined?",
+          "gt_file": "django/db/models/base.py",
+          "hit": true,
+          "queries": [
+            "D:/github/axildb/target/release/axil code-search \"class Model\" --top-k 5",
+            "D:/github/axildb/target/release/axil fts \"class Model(AltersData, metaclass=ModelBase)\" --limit 5",
+            "D:/github/axildb/target/release/axil code-search \"ModelBase\" --top-k 8",
+            "D:/github/axildb/target/release/axil code-search \"QuerySet\" --top-k 5"
+          ]
+        },
+        {
+          "id": "dj10",
+          "task": "Where does Django hash a raw password into its stored form?",
+          "gt_file": "django/contrib/auth/hashers.py",
+          "hit": true,
+          "queries": [
+            "D:/github/axildb/target/release/axil code-search \"make_password\" --top-k 5"
+          ]
+        },
+        {
+          "id": "dj11",
+          "task": "Where does the development server's autoreloader watch for file changes and restart?",
+          "gt_file": "django/utils/autoreload.py",
+          "hit": true,
+          "queries": [
+            "D:/github/axildb/target/release/axil code-search \"autoreload watch file changes restart\" --top-k 5",
+            "D:/github/axildb/target/release/axil code-search \"run_with_reloader StatReloader tick watched_files\" --top-k 6"
+          ]
+        },
+        {
+          "id": "dj12",
+          "task": "Where is `reverse` (URL reversing) implemented?",
+          "gt_file": "django/urls/base.py",
+          "hit": true,
+          "queries": [
+            "D:/github/axildb/target/release/axil code-search \"reverse url reversing\" --top-k 5"
+          ]
+        },
+        {
+          "id": "dj13",
+          "task": "Where does a form field run its validation pipeline (to_python, validate, run_validators)?",
+          "gt_file": "django/forms/fields.py",
+          "hit": true,
+          "queries": [
+            "D:/github/axildb/target/release/axil code-search \"forms Field clean method\" --top-k 5",
+            "D:/github/axildb/target/release/axil fts \"run_validators\" --limit 8"
+          ]
+        }
+      ]
+    }
+  ]
+}
