@@ -1,6 +1,6 @@
 [package]
 name = "axil-fts"
-version = "2.1.1"
+version = "2.1.2"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true

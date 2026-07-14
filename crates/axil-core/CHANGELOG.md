@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.1.2](https://github.com/FC4b/axildb/compare/axil-core-v2.1.1...axil-core-v2.1.2) - 2026-07-14
+
+### Fixed
+
+- *(index)* raise max_file_size_kb default to 512 and warn loudly on skips
+
 ## [2.1.1](https://github.com/FC4b/axildb/compare/axil-core-v2.1.0...axil-core-v2.1.1) - 2026-07-12
 
 ### Other

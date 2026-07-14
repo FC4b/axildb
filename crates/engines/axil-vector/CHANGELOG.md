@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.1.2](https://github.com/FC4b/axildb/compare/axil-vector-v2.1.1...axil-vector-v2.1.2) - 2026-07-14
+
+### Fixed
+
+- *(vector)* attempt ORT init before diagnosing — the DLL preflight was a false-positive gate
+- *(windows)* survive npm .cmd shims, ONNX DLL mismatch, and scip-python crash
+
 ## [2.1.1](https://github.com/FC4b/axildb/compare/axil-vector-v2.1.0...axil-vector-v2.1.1) - 2026-07-12
 
 ### Other
