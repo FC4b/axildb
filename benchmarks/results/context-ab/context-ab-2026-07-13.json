@@ -1,0 +1,95 @@
+{
+  "benchmark": "context-ab",
+  "title": "Real A/B: same code-navigation task, with vs without Axil, at equal correctness",
+  "date": "2026-07-13",
+  "build": "axil v2.1.1 (release, CPU ONNX)",
+  "method": "For each task, a grep/read-only agent and an Axil-CLI-only agent (both Opus 4.8, general-purpose) answer the same where/how question in byte-identical sandboxes; a judge scores each; only tasks BOTH answer correctly are counted. Tokens recomputed mechanically by re-executing consulted artifacts (scripts/context-ab-score.py). Steps = consulted tool roundtrips (~agent turns). Figures POOL two same-day runs per corpus: v2 (index at the old 100 KB default) and v3 (index at the fixed 512 KB default) - per-run splits included.",
+  "agent_model": "claude-opus (opus 4.8) via Workflow",
+  "index": "axil index structural proxies; v2 run @100KB default cap, v3 run @512KB (fixed default); no SCIP effect on these surfaces",
+  "task_fixtures": "benchmarks/context-ab/tasks-{flask,django,fastapi}.json",
+  "per_repo": [
+    {
+      "corpus": "flask",
+      "size": "24 source files (tiny)",
+      "tasks_counted": 20,
+      "tokens_no_axil": 22190,
+      "tokens_axil": 10476,
+      "token_reduction_pct": 52.8,
+      "steps_no_axil": 38,
+      "steps_axil": 34,
+      "step_reduction_pct": 10.5,
+      "runs": [
+        {
+          "run": "v2 (index @100KB default)",
+          "n": 11,
+          "tokens_no_axil": 13042,
+          "tokens_axil": 7592,
+          "reduction_pct": 41.8
+        },
+        {
+          "run": "v3 (index @512KB, fixed default)",
+          "n": 9,
+          "tokens_no_axil": 9148,
+          "tokens_axil": 2884,
+          "reduction_pct": 68.5
+        }
+      ]
+    },
+    {
+      "corpus": "fastapi",
+      "size": "mid-size",
+      "tasks_counted": 19,
+      "tokens_no_axil": 87951,
+      "tokens_axil": 5384,
+      "token_reduction_pct": 93.9,
+      "steps_no_axil": 56,
+      "steps_axil": 32,
+      "step_reduction_pct": 42.9,
+      "runs": [
+        {
+          "run": "v2 (index @100KB default)",
+          "n": 8,
+          "tokens_no_axil": 17246,
+          "tokens_axil": 4095,
+          "reduction_pct": 76.3
+        },
+        {
+          "run": "v3 (index @512KB, fixed default)",
+          "n": 11,
+          "tokens_no_axil": 70705,
+          "tokens_axil": 1289,
+          "reduction_pct": 98.2
+        }
+      ]
+    },
+    {
+      "corpus": "django",
+      "size": "906 source files (large)",
+      "tasks_counted": 20,
+      "tokens_no_axil": 32978,
+      "tokens_axil": 8102,
+      "token_reduction_pct": 75.4,
+      "steps_no_axil": 59,
+      "steps_axil": 36,
+      "step_reduction_pct": 39.0,
+      "runs": [
+        {
+          "run": "v2 (index @100KB default)",
+          "n": 10,
+          "tokens_no_axil": 19906,
+          "tokens_axil": 4430,
+          "reduction_pct": 77.7
+        },
+        {
+          "run": "v3 (index @512KB, fixed default)",
+          "n": 10,
+          "tokens_no_axil": 13072,
+          "tokens_axil": 3672,
+          "reduction_pct": 71.9
+        }
+      ]
+    }
+  ],
+  "sensitivity": "fastapi pooled 93.9% includes one v3 task (fa10) where the unaided agent read fastapi/routing.py WHOLE: 63,311 tokens vs Axil 94 for the same verified answer. Excluding that single pair: 78.5%. Included because it is real behavior - whole-file reads of large files are exactly the discovery cost a code index removes.",
+  "notes": "Pooled over 39 counted task-run pairs (flask 20, fastapi 19, django 20). Rate-limited/StructuredOutput-failed agent runs excluded by the both-correct rule (infra failures, not task failures). Discovery costs are heavy-tailed; per-run reductions ranged flask 41.8-68.5%, fastapi 75.4-98.2%, django 71.9-77.7%."
+}

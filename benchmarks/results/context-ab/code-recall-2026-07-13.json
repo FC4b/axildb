@@ -1,0 +1,606 @@
+{
+  "benchmark": "context-ab-code-recall",
+  "metric": "answer-file@5: ground-truth PRIMARY file among top-5 pointers; query = task text verbatim; alternates not credited (conservative)",
+  "query_protocol": "axil code-search '<task>' --top-k 5 --json (fts@5 recorded as diagnostic)",
+  "per_corpus": [
+    {
+      "corpus": "flask",
+      "tasks": 12,
+      "code_search_at5": 4,
+      "code_search_recall": 0.333,
+      "fts_at5": 4,
+      "fts_recall": 0.333,
+      "either_at5": 4,
+      "either_recall": 0.333
+    },
+    {
+      "corpus": "fastapi",
+      "tasks": 12,
+      "code_search_at5": 3,
+      "code_search_recall": 0.25,
+      "fts_at5": 1,
+      "fts_recall": 0.083,
+      "either_at5": 3,
+      "either_recall": 0.25
+    },
+    {
+      "corpus": "django",
+      "tasks": 13,
+      "code_search_at5": 4,
+      "code_search_recall": 0.308,
+      "fts_at5": 5,
+      "fts_recall": 0.385,
+      "either_at5": 5,
+      "either_recall": 0.385
+    }
+  ],
+  "detail": [
+    {
+      "corpus": "flask",
+      "tasks": 12,
+      "code_search_at5": 4,
+      "code_search_recall": 0.333,
+      "fts_at5": 4,
+      "fts_recall": 0.333,
+      "either_at5": 4,
+      "either_recall": 0.333,
+      "rows": [
+        {
+          "id": "fl1",
+          "kind": "greppable",
+          "task": "Where is the `jsonify` helper implemented?",
+          "gt_file": "src/flask/json/__init__.py",
+          "code_search_hit": false,
+          "fts_hit": false,
+          "either_hit": false,
+          "code_search_paths": [
+            "src/flask/debughelpers.py"
+          ]
+        },
+        {
+          "id": "fl2",
+          "kind": "greppable",
+          "task": "Where is the module-level `url_for` helper defined?",
+          "gt_file": "src/flask/helpers.py",
+          "code_search_hit": false,
+          "fts_hit": false,
+          "either_hit": false,
+          "code_search_paths": [
+            "src/flask/debughelpers.py"
+          ]
+        },
+        {
+          "id": "fl3",
+          "kind": "semantic",
+          "task": "Where does Flask dispatch an incoming request to the matched view function?",
+          "gt_file": "src/flask/app.py",
+          "code_search_hit": false,
+          "fts_hit": false,
+          "either_hit": false,
+          "code_search_paths": [
+            "src/flask/views.py",
+            "src/flask/views.py",
+            "src/flask/wrappers.py",
+            "src/flask/ctx.py",
+            "src/flask/ctx.py"
+          ]
+        },
+        {
+          "id": "fl4",
+          "kind": "semantic",
+          "task": "Where does Flask push the application context onto the context stack?",
+          "gt_file": "src/flask/ctx.py",
+          "code_search_hit": true,
+          "fts_hit": true,
+          "either_hit": true,
+          "code_search_paths": [
+            "src/flask/ctx.py",
+            "src/flask/ctx.py",
+            "src/flask/ctx.py",
+            "src/flask/ctx.py",
+            "src/flask/helpers.py"
+          ]
+        },
+        {
+          "id": "fl5",
+          "kind": "greppable",
+          "task": "Where is the `Blueprint` class defined?",
+          "gt_file": "src/flask/blueprints.py",
+          "code_search_hit": false,
+          "fts_hit": false,
+          "either_hit": false,
+          "code_search_paths": []
+        },
+        {
+          "id": "fl6",
+          "kind": "semantic",
+          "task": "Where does Flask load configuration from a Python file (from_pyfile)?",
+          "gt_file": "src/flask/config.py",
+          "code_search_hit": true,
+          "fts_hit": true,
+          "either_hit": true,
+          "code_search_paths": [
+            "src/flask/cli.py",
+            "src/flask/json/__init__.py",
+            "src/flask/helpers.py",
+            "src/flask/config.py",
+            "src/flask/helpers.py"
+          ]
+        },
+        {
+          "id": "fl7",
+          "kind": "semantic",
+          "task": "How does Flask turn a raised HTTPException into a response?",
+          "gt_file": "src/flask/app.py",
+          "code_search_hit": false,
+          "fts_hit": false,
+          "either_hit": false,
+          "code_search_paths": [
+            "src/flask/helpers.py",
+            "src/flask/cli.py",
+            "src/flask/wrappers.py",
+            "src/flask/debughelpers.py",
+            "src/flask/json/__init__.py"
+          ]
+        },
+        {
+          "id": "fl8",
+          "kind": "greppable",
+          "task": "Where is the `render_template` function defined?",
+          "gt_file": "src/flask/templating.py",
+          "code_search_hit": false,
+          "fts_hit": false,
+          "either_hit": false,
+          "code_search_paths": [
+            "src/flask/sansio/blueprints.py"
+          ]
+        },
+        {
+          "id": "fl9",
+          "kind": "semantic",
+          "task": "Where does the @app.route decorator actually register a URL rule?",
+          "gt_file": "src/flask/sansio/scaffold.py",
+          "code_search_hit": false,
+          "fts_hit": false,
+          "either_hit": false,
+          "code_search_paths": [
+            "src/flask/helpers.py",
+            "src/flask/cli.py",
+            "src/flask/sansio/app.py",
+            "src/flask/app.py",
+            "src/flask/cli.py"
+          ]
+        },
+        {
+          "id": "fl10",
+          "kind": "greppable",
+          "task": "Where is the `session` proxy object defined?",
+          "gt_file": "src/flask/globals.py",
+          "code_search_hit": false,
+          "fts_hit": false,
+          "either_hit": false,
+          "code_search_paths": [
+            "src/flask/wrappers.py"
+          ]
+        },
+        {
+          "id": "fl11",
+          "kind": "semantic",
+          "task": "Where does Flask serialize the session and set the session cookie on the response?",
+          "gt_file": "src/flask/sessions.py",
+          "code_search_hit": true,
+          "fts_hit": true,
+          "either_hit": true,
+          "code_search_paths": [
+            "src/flask/sessions.py",
+            "src/flask/sessions.py",
+            "src/flask/sessions.py",
+            "src/flask/sessions.py",
+            "src/flask/sessions.py"
+          ]
+        },
+        {
+          "id": "fl12",
+          "kind": "semantic",
+          "task": "Where does Flask stream a file from disk as a response (send file helpers)?",
+          "gt_file": "src/flask/helpers.py",
+          "code_search_hit": true,
+          "fts_hit": true,
+          "either_hit": true,
+          "code_search_paths": [
+            "src/flask/helpers.py",
+            "src/flask/helpers.py",
+            "src/flask/helpers.py",
+            "src/flask/templating.py",
+            "src/flask/templating.py"
+          ]
+        }
+      ]
+    },
+    {
+      "corpus": "fastapi",
+      "tasks": 12,
+      "code_search_at5": 3,
+      "code_search_recall": 0.25,
+      "fts_at5": 1,
+      "fts_recall": 0.083,
+      "either_at5": 3,
+      "either_recall": 0.25,
+      "rows": [
+        {
+          "id": "fa1",
+          "kind": "semantic",
+          "task": "Where does FastAPI resolve and inject dependencies for a request (the dependency-injection solver)?",
+          "gt_file": "fastapi/dependencies/utils.py",
+          "code_search_hit": true,
+          "fts_hit": false,
+          "either_hit": true,
+          "code_search_paths": [
+            "fastapi/dependencies/utils.py",
+            "fastapi/exceptions.py",
+            "fastapi/exceptions.py",
+            "fastapi/security/oauth2.py",
+            "fastapi/security/oauth2.py"
+          ]
+        },
+        {
+          "id": "fa2",
+          "kind": "semantic",
+          "task": "Where does FastAPI turn a route's return value into a serialized Response?",
+          "gt_file": "fastapi/routing.py",
+          "code_search_hit": false,
+          "fts_hit": false,
+          "either_hit": false,
+          "code_search_paths": [
+            "fastapi/exceptions.py",
+            "fastapi/exceptions.py",
+            "fastapi/responses.py",
+            "fastapi/responses.py",
+            "fastapi/openapi/models.py"
+          ]
+        },
+        {
+          "id": "fa3",
+          "kind": "greppable",
+          "task": "Where is the `APIRouter` class defined?",
+          "gt_file": "fastapi/routing.py",
+          "code_search_hit": false,
+          "fts_hit": false,
+          "either_hit": false,
+          "code_search_paths": [
+            "fastapi/dependencies/utils.py"
+          ]
+        },
+        {
+          "id": "fa4",
+          "kind": "semantic",
+          "task": "Where does FastAPI generate the OpenAPI schema for the application?",
+          "gt_file": "fastapi/openapi/utils.py",
+          "code_search_hit": false,
+          "fts_hit": false,
+          "either_hit": false,
+          "code_search_paths": [
+            "fastapi/openapi/models.py",
+            "fastapi/exceptions.py",
+            "fastapi/exceptions.py",
+            "fastapi/security/api_key.py",
+            "fastapi/security/api_key.py"
+          ]
+        },
+        {
+          "id": "fa5",
+          "kind": "semantic",
+          "task": "Where does FastAPI validate a request body against its declared fields?",
+          "gt_file": "fastapi/dependencies/utils.py",
+          "code_search_hit": false,
+          "fts_hit": false,
+          "either_hit": false,
+          "code_search_paths": [
+            "fastapi/exceptions.py",
+            "fastapi/exceptions.py",
+            "fastapi/_compat/v2.py",
+            "fastapi/params.py",
+            "fastapi/exception_handlers.py"
+          ]
+        },
+        {
+          "id": "fa6",
+          "kind": "greppable",
+          "task": "Where is the `Depends` marker defined?",
+          "gt_file": "fastapi/param_functions.py",
+          "code_search_hit": false,
+          "fts_hit": false,
+          "either_hit": false,
+          "code_search_paths": []
+        },
+        {
+          "id": "fa7",
+          "kind": "semantic",
+          "task": "Where does FastAPI handle a RequestValidationError and build the 422 response?",
+          "gt_file": "fastapi/exception_handlers.py",
+          "code_search_hit": true,
+          "fts_hit": false,
+          "either_hit": true,
+          "code_search_paths": [
+            "fastapi/exceptions.py",
+            "fastapi/exceptions.py",
+            "fastapi/exceptions.py",
+            "fastapi/exceptions.py",
+            "fastapi/exception_handlers.py"
+          ]
+        },
+        {
+          "id": "fa8",
+          "kind": "greppable",
+          "task": "Where is the `FastAPI` application class defined?",
+          "gt_file": "fastapi/applications.py",
+          "code_search_hit": false,
+          "fts_hit": false,
+          "either_hit": false,
+          "code_search_paths": [
+            "fastapi/dependencies/utils.py"
+          ]
+        },
+        {
+          "id": "fa9",
+          "kind": "semantic",
+          "task": "Where does FastAPI generate the Swagger UI docs HTML page?",
+          "gt_file": "fastapi/openapi/docs.py",
+          "code_search_hit": true,
+          "fts_hit": true,
+          "either_hit": true,
+          "code_search_paths": [
+            "fastapi/openapi/docs.py",
+            "fastapi/exceptions.py",
+            "fastapi/exceptions.py",
+            "fastapi/openapi/docs.py",
+            "fastapi/openapi/utils.py"
+          ]
+        },
+        {
+          "id": "fa10",
+          "kind": "semantic",
+          "task": "Where does FastAPI run a sync (def, not async def) endpoint function in a threadpool?",
+          "gt_file": "fastapi/routing.py",
+          "code_search_hit": false,
+          "fts_hit": false,
+          "either_hit": false,
+          "code_search_paths": [
+            "fastapi/exceptions.py",
+            "fastapi/exceptions.py",
+            "fastapi/security/api_key.py",
+            "fastapi/security/api_key.py",
+            "fastapi/exceptions.py"
+          ]
+        },
+        {
+          "id": "fa11",
+          "kind": "greppable",
+          "task": "Where is FastAPI's `HTTPException` class defined?",
+          "gt_file": "fastapi/exceptions.py",
+          "code_search_hit": false,
+          "fts_hit": false,
+          "either_hit": false,
+          "code_search_paths": [
+            "fastapi/dependencies/utils.py"
+          ]
+        },
+        {
+          "id": "fa12",
+          "kind": "semantic",
+          "task": "Where does FastAPI convert arbitrary objects (e.g. Pydantic models) into JSON-compatible data?",
+          "gt_file": "fastapi/encoders.py",
+          "code_search_hit": false,
+          "fts_hit": false,
+          "either_hit": false,
+          "code_search_paths": [
+            "fastapi/openapi/models.py",
+            "fastapi/openapi/models.py",
+            "fastapi/openapi/models.py",
+            "fastapi/exceptions.py",
+            "fastapi/exceptions.py"
+          ]
+        }
+      ]
+    },
+    {
+      "corpus": "django",
+      "tasks": 13,
+      "code_search_at5": 4,
+      "code_search_recall": 0.308,
+      "fts_at5": 5,
+      "fts_recall": 0.385,
+      "either_at5": 5,
+      "either_recall": 0.385,
+      "rows": [
+        {
+          "id": "dj1",
+          "kind": "semantic",
+          "task": "Where does Django resolve an incoming URL path to a view (URL dispatch)?",
+          "gt_file": "django/urls/resolvers.py",
+          "code_search_hit": false,
+          "fts_hit": false,
+          "either_hit": false,
+          "code_search_paths": [
+            "django/shortcuts.py",
+            "django/utils/http.py",
+            "django/template/defaulttags.py",
+            "django/urls/base.py",
+            "django/contrib/auth/views.py"
+          ]
+        },
+        {
+          "id": "dj2",
+          "kind": "semantic",
+          "task": "Where does the ORM compile a QuerySet into a SQL SELECT statement?",
+          "gt_file": "django/db/models/sql/compiler.py",
+          "code_search_hit": false,
+          "fts_hit": false,
+          "either_hit": false,
+          "code_search_paths": [
+            "django/db/backends/ddl_references.py",
+            "django/db/migrations/operations/special.py",
+            "django/core/management/sql.py",
+            "django/core/management/sql.py",
+            "django/forms/widgets.py"
+          ]
+        },
+        {
+          "id": "dj3",
+          "kind": "semantic",
+          "task": "Where does the ORM actually execute a query and materialize model instances?",
+          "gt_file": "django/db/models/query.py",
+          "code_search_hit": false,
+          "fts_hit": false,
+          "either_hit": false,
+          "code_search_paths": [
+            "django/contrib/admin/utils.py",
+            "django/core/management/utils.py",
+            "django/core/management/__init__.py",
+            "django/forms/models.py",
+            "django/contrib/admin/utils.py"
+          ]
+        },
+        {
+          "id": "dj4",
+          "kind": "greppable",
+          "task": "Where is the `render` shortcut function defined?",
+          "gt_file": "django/shortcuts.py",
+          "code_search_hit": false,
+          "fts_hit": false,
+          "either_hit": false,
+          "code_search_paths": []
+        },
+        {
+          "id": "dj5",
+          "kind": "semantic",
+          "task": "Where does the template engine resolve a variable against the context during rendering?",
+          "gt_file": "django/template/base.py",
+          "code_search_hit": true,
+          "fts_hit": true,
+          "either_hit": true,
+          "code_search_paths": [
+            "django/template/base.py",
+            "django/template/context.py",
+            "django/template/context.py",
+            "django/template/engine.py",
+            "django/template/context_processors.py"
+          ]
+        },
+        {
+          "id": "dj6",
+          "kind": "semantic",
+          "task": "Where does Django build and apply the middleware chain around a view?",
+          "gt_file": "django/core/handlers/base.py",
+          "code_search_hit": false,
+          "fts_hit": false,
+          "either_hit": false,
+          "code_search_paths": [
+            "django/contrib/admindocs/middleware.py",
+            "django/middleware/csrf.py",
+            "django/utils/decorators.py",
+            "django/core/serializers/base.py",
+            "django/core/exceptions.py"
+          ]
+        },
+        {
+          "id": "dj7",
+          "kind": "greppable",
+          "task": "Where is `get_object_or_404` implemented?",
+          "gt_file": "django/shortcuts.py",
+          "code_search_hit": false,
+          "fts_hit": false,
+          "either_hit": false,
+          "code_search_paths": [
+            "django/contrib/gis/db/backends/oracle/operations.py",
+            "django/db/migrations/optimizer.py"
+          ]
+        },
+        {
+          "id": "dj8",
+          "kind": "semantic",
+          "task": "Where does the migration autodetector compute the changes between two project states?",
+          "gt_file": "django/db/migrations/autodetector.py",
+          "code_search_hit": true,
+          "fts_hit": true,
+          "either_hit": true,
+          "code_search_paths": [
+            "django/db/migrations/autodetector.py",
+            "django/utils/html.py",
+            "django/db/migrations/autodetector.py",
+            "django/core/checks/commands.py",
+            "django/db/migrations/executor.py"
+          ]
+        },
+        {
+          "id": "dj9",
+          "kind": "greppable",
+          "task": "Where is the `Model` base class defined?",
+          "gt_file": "django/db/models/base.py",
+          "code_search_hit": false,
+          "fts_hit": false,
+          "either_hit": false,
+          "code_search_paths": []
+        },
+        {
+          "id": "dj10",
+          "kind": "semantic",
+          "task": "Where does Django hash a raw password into its stored form?",
+          "gt_file": "django/contrib/auth/hashers.py",
+          "code_search_hit": true,
+          "fts_hit": true,
+          "either_hit": true,
+          "code_search_paths": [
+            "django/contrib/auth/templatetags/auth.py",
+            "django/contrib/auth/forms.py",
+            "django/contrib/auth/forms.py",
+            "django/contrib/auth/forms.py",
+            "django/contrib/auth/hashers.py"
+          ]
+        },
+        {
+          "id": "dj11",
+          "kind": "semantic",
+          "task": "Where does the development server's autoreloader watch for file changes and restart?",
+          "gt_file": "django/utils/autoreload.py",
+          "code_search_hit": true,
+          "fts_hit": true,
+          "either_hit": true,
+          "code_search_paths": [
+            "django/template/autoreload.py",
+            "django/utils/translation/reloader.py",
+            "django/utils/autoreload.py",
+            "django/core/files/uploadedfile.py",
+            "django/utils/translation/reloader.py"
+          ]
+        },
+        {
+          "id": "dj12",
+          "kind": "greppable",
+          "task": "Where is `reverse` (URL reversing) implemented?",
+          "gt_file": "django/urls/base.py",
+          "code_search_hit": false,
+          "fts_hit": false,
+          "either_hit": false,
+          "code_search_paths": []
+        },
+        {
+          "id": "dj13",
+          "kind": "semantic",
+          "task": "Where does a form field run its validation pipeline (to_python, validate, run_validators)?",
+          "gt_file": "django/forms/fields.py",
+          "code_search_hit": false,
+          "fts_hit": true,
+          "either_hit": true,
+          "code_search_paths": [
+            "django/contrib/auth/password_validation.py",
+            "django/core/validators.py",
+            "django/core/validators.py",
+            "django/core/validators.py",
+            "django/core/validators.py"
+          ]
+        }
+      ]
+    }
+  ]
+}

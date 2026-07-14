@@ -476,6 +476,50 @@ fn log_execution_provider_once(msg: &str) {
     axil_core::util::log_once_if_verbose(&LOGGED, &format!("[axil-vector] {msg}"));
 }
 
+/// Windows only: diagnose the DLL-resolution setup that makes ort fail at
+/// init. This build needs onnxruntime.dll ≥ 1.22 (ORT API 22); when no
+/// runtime sits next to axil.exe and `ORT_DYLIB_PATH` is unset, the loader
+/// can fall back to `C:\Windows\System32\onnxruntime.dll` — a 1.10-era DLL
+/// that ships with Windows itself — and ort *panics* at init ("The given
+/// version [22] is not supported").
+///
+/// IMPORTANT: this is a *diagnostic*, not a gate. Whether init actually
+/// fails depends on how this ort build locates its runtime (a fresh source
+/// build can load the build-script's downloaded copy just fine with none of
+/// the above satisfied — pre-failing on the heuristic broke exactly that
+/// case in CI). Callers must attempt the real init and only consult this to
+/// enrich a genuine failure; `axil doctor` reports it as advisory state.
+#[cfg(all(feature = "embed", target_os = "windows"))]
+pub fn preflight_ort_dll() -> Result<(), String> {
+    if std::env::var_os("ORT_DYLIB_PATH").is_some() {
+        return Ok(());
+    }
+    let exe_dir_has_dll = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("onnxruntime.dll").is_file()))
+        .unwrap_or(false);
+    if exe_dir_has_dll {
+        return Ok(()); // app-dir DLL wins the loader search — correct setup
+    }
+    let sys32 = std::env::var_os("SystemRoot").map(|r| {
+        std::path::PathBuf::from(r)
+            .join("System32")
+            .join("onnxruntime.dll")
+    });
+    if let Some(p) = sys32.filter(|p| p.is_file()) {
+        return Err(format!(
+            "no onnxruntime.dll next to the axil binary — Windows would load {} instead, \
+             which is the OS-bundled ORT 1.10 and too old for this build (needs >= 1.22), \
+             causing a crash at startup. Fix: place a matching onnxruntime.dll next to \
+             axil.exe — release archives bundle one, `cargo binstall axildb` sets this up, \
+             and source builds can copy target\\release\\onnxruntime.dll. See \
+             docs/src/getting-started/installation.md#windows--onnx",
+            p.display()
+        ));
+    }
+    Ok(())
+}
+
 /// Build one ONNX session for `model_file`. Tries each compile-time-
 /// enabled GPU execution provider in priority order (CUDA → DirectML),
 /// falling back to CPU on the first one that registers. `log_ep` is the
@@ -486,6 +530,36 @@ fn build_session(
     model_file: &std::path::Path,
     log_ep: bool,
 ) -> Result<ort::session::Session, String> {
+    // The first ort call in the process runs ORT's global init, which
+    // *panics* (not errors) when the resolved onnxruntime.dll is too old.
+    // Attempt it under catch_unwind and translate a panic into an error —
+    // enriched with the DLL-resolution diagnosis when it applies. Do NOT
+    // pre-fail on the diagnosis alone: a fresh source build can init fine
+    // via ort's own downloaded runtime with no app-dir DLL at all.
+    #[cfg(target_os = "windows")]
+    {
+        let first_touch = std::panic::catch_unwind(|| ort::session::Session::builder());
+        match first_touch {
+            Ok(r) => {
+                r.map_err(|e| format!("ONNX session builder error: {e}"))?;
+            }
+            Err(p) => {
+                let panic_msg = p
+                    .downcast_ref::<String>()
+                    .cloned()
+                    .or_else(|| p.downcast_ref::<&str>().map(|s| s.to_string()))
+                    .unwrap_or_else(|| "unknown panic".to_string());
+                let hint = preflight_ort_dll()
+                    .err()
+                    .map(|d| format!(" Likely cause: {d}"))
+                    .unwrap_or_default();
+                return Err(format!(
+                    "Failed to initialize ORT API ({panic_msg}).{hint}"
+                ));
+            }
+        }
+    }
+
     fn fresh_builder() -> Result<ort::session::builder::SessionBuilder, String> {
         ort::session::Session::builder()
             .map_err(|e| format!("ONNX session builder error: {e}"))?

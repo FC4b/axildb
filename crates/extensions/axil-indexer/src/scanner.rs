@@ -276,12 +276,19 @@ pub fn scan_files(root: &Path, config: &IndexConfig) -> Vec<ScannedFile> {
         .hidden(true) // skip hidden files/dirs
         .git_ignore(true) // respect .gitignore
         .git_global(false)
-        .git_exclude(true);
+        .git_exclude(true)
+        // The index root is the ignore boundary. Without this, a project
+        // nested inside another repo inherits that repo's .gitignore — e.g. a
+        // checkout under a workspace whose .gitignore has `models/` silently
+        // loses every `**/models/` subtree (Django's db/models vanished this
+        // way). The project's own .gitignore/.axilignore still apply.
+        .parents(false);
 
     // Respect .axilignore files (same syntax as .gitignore)
     walker.add_custom_ignore_filename(".axilignore");
 
     let mut files = Vec::new();
+    let mut skipped_large: Vec<(String, u64)> = Vec::new();
 
     for entry in walker.build().flatten() {
         let path = entry.path();
@@ -365,6 +372,9 @@ pub fn scan_files(root: &Path, config: &IndexConfig) -> Vec<ScannedFile> {
         };
         let size = metadata.len();
         if size > max_size {
+            // A silently missing file poisons recall: queries for its symbols
+            // return nothing and nothing says why. Record it and warn below.
+            skipped_large.push((rel, size));
             continue;
         }
 
@@ -377,6 +387,26 @@ pub fn scan_files(root: &Path, config: &IndexConfig) -> Vec<ScannedFile> {
             size_bytes: size,
             modified,
         });
+    }
+
+    // Skipping a large file must be loud: its symbols simply vanish from
+    // code-search/fts otherwise. One bounded summary line, not per-file spam.
+    if !skipped_large.is_empty() {
+        skipped_large.sort_by(|a, b| b.1.cmp(&a.1)); // largest first
+        let shown: Vec<String> = skipped_large
+            .iter()
+            .take(3)
+            .map(|(p, s)| format!("{} ({} KB)", p, s / 1024))
+            .collect();
+        let more = skipped_large.len().saturating_sub(3);
+        let more_note = if more > 0 { format!(", +{more} more") } else { String::new() };
+        eprintln!(
+            "[axil-index] skipped {} file(s) over max_file_size_kb = {} KB: {}{} — their symbols will NOT be searchable; raise [index].max_file_size_kb in axil.toml to include them",
+            skipped_large.len(),
+            config.max_file_size_kb,
+            shown.join(", "),
+            more_note,
+        );
     }
 
     // Sort by path for deterministic output
@@ -405,6 +435,36 @@ mod tests {
     }
 
     #[test]
+    fn scan_ignores_parent_repo_gitignore() {
+        // A project nested inside another git repo must not inherit that
+        // repo's ignore rules: only ignore files at or below the index root
+        // apply. The parent here ignores `models/`, which would otherwise
+        // swallow the project's `models/` source directory.
+        let parent = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(parent.path().join(".git")).unwrap();
+        std::fs::write(parent.path().join(".gitignore"), "models/\n").unwrap();
+
+        let proj = parent.path().join("proj");
+        std::fs::create_dir_all(proj.join("models")).unwrap();
+        std::fs::write(proj.join("models").join("a.py"), "def f():\n    pass\n").unwrap();
+        std::fs::write(proj.join("b.py"), "def g():\n    pass\n").unwrap();
+
+        let config = IndexConfig::default();
+        let files = scan_files(&proj, &config);
+        let rels: Vec<&str> = files.iter().map(|f| f.rel_path.as_str()).collect();
+        assert!(rels.contains(&"models/a.py"), "parent .gitignore leaked: {rels:?}");
+        assert!(rels.contains(&"b.py"), "{rels:?}");
+
+        // The project's OWN .gitignore still applies.
+        std::fs::write(proj.join(".gitignore"), "models/\n").unwrap();
+        std::fs::create_dir_all(proj.join(".git")).unwrap();
+        let files = scan_files(&proj, &config);
+        let rels: Vec<&str> = files.iter().map(|f| f.rel_path.as_str()).collect();
+        assert!(!rels.contains(&"models/a.py"), "own .gitignore ignored: {rels:?}");
+        assert!(rels.contains(&"b.py"), "{rels:?}");
+    }
+
+    #[test]
     fn scan_respects_config() {
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("src");
@@ -412,7 +472,10 @@ mod tests {
         std::fs::write(src.join("main.rs"), "fn main() {}").unwrap();
         std::fs::write(src.join("big.rs"), "x".repeat(200_000)).unwrap(); // > 100KB
 
-        let config = IndexConfig::default();
+        // Pin the cap explicitly: this tests that the config is respected,
+        // not what the shipped default happens to be.
+        let mut config = IndexConfig::default();
+        config.max_file_size_kb = 100;
         let files = scan_files(dir.path(), &config);
 
         assert_eq!(files.len(), 1); // big.rs should be skipped

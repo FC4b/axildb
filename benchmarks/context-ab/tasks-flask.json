@@ -1,0 +1,20 @@
+{
+  "corpus": "flask",
+  "repo": "https://github.com/pallets/flask.git",
+  "keep_subdir": "src",
+  "note": "Code-navigation where/how tasks for the context A/B. Ground truth verified against the checkout (paths relative to the sandbox repo root). 'kind' tags whether the answer is directly greppable (parity expected) or semantic (Axil-favored).",
+  "tasks": [
+    {"id": "fl1", "kind": "greppable", "task": "Where is the `jsonify` helper implemented?", "ground_truth": {"file": "src/flask/json/__init__.py", "symbol": "jsonify", "notes": "def jsonify (~line 138)."}},
+    {"id": "fl2", "kind": "greppable", "task": "Where is the module-level `url_for` helper defined?", "ground_truth": {"file": "src/flask/helpers.py", "symbol": "url_for", "notes": "Module-level url_for (~line 200); Flask.url_for in app.py delegates to it — accept either."}},
+    {"id": "fl3", "kind": "semantic", "task": "Where does Flask dispatch an incoming request to the matched view function?", "ground_truth": {"file": "src/flask/app.py", "symbol": "Flask.dispatch_request", "notes": "dispatch_request (~966) or full_dispatch_request (~992) both acceptable."}},
+    {"id": "fl4", "kind": "semantic", "task": "Where does Flask push the application context onto the context stack?", "ground_truth": {"file": "src/flask/ctx.py", "symbol": "AppContext.push", "notes": "class AppContext (~260), push (~416); RequestContext.push also acceptable."}},
+    {"id": "fl5", "kind": "greppable", "task": "Where is the `Blueprint` class defined?", "ground_truth": {"file": "src/flask/blueprints.py", "symbol": "Blueprint", "notes": "blueprints.py re-exports (class Blueprint(SansioBlueprint) ~18); real definition at src/flask/sansio/blueprints.py (~119) — accept either."}},
+    {"id": "fl6", "kind": "semantic", "task": "Where does Flask load configuration from a Python file (from_pyfile)?", "ground_truth": {"file": "src/flask/config.py", "symbol": "Config.from_pyfile", "notes": "from_pyfile (~187); from_object/from_envvar acceptable."}},
+    {"id": "fl7", "kind": "semantic", "task": "How does Flask turn a raised HTTPException into a response?", "ground_truth": {"file": "src/flask/app.py", "symbol": "Flask.handle_http_exception", "notes": "handle_http_exception (~830); handle_user_exception (~865) acceptable."}},
+    {"id": "fl8", "kind": "greppable", "task": "Where is the `render_template` function defined?", "ground_truth": {"file": "src/flask/templating.py", "symbol": "render_template", "notes": "def render_template (~136)."}},
+    {"id": "fl9", "kind": "semantic", "task": "Where does the @app.route decorator actually register a URL rule?", "ground_truth": {"file": "src/flask/sansio/scaffold.py", "symbol": "Scaffold.route", "notes": "route (~336) or add_url_rule (scaffold ~368 / sansio/app.py ~605) — accept either."}},
+    {"id": "fl10", "kind": "greppable", "task": "Where is the `session` proxy object defined?", "ground_truth": {"file": "src/flask/globals.py", "symbol": "session", "notes": "session = LocalProxy(...) (~60)."}},
+    {"id": "fl11", "kind": "semantic", "task": "Where does Flask serialize the session and set the session cookie on the response?", "ground_truth": {"file": "src/flask/sessions.py", "symbol": "SecureCookieSessionInterface.save_session", "notes": "save_session (~337 concrete; ~263 interface) — accept either."}},
+    {"id": "fl12", "kind": "semantic", "task": "Where does Flask stream a file from disk as a response (send file helpers)?", "ground_truth": {"file": "src/flask/helpers.py", "symbol": "send_file", "notes": "send_file (~417); send_from_directory (~543) acceptable."}}
+  ]
+}

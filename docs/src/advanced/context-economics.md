@@ -101,7 +101,80 @@ scripts/context-ab-score.py --manifest experiments/context-ab/run.json \
 
 ## What the real experiment found
 
-Three runs, each counting only tasks both agents answered correctly:
+### Current headline — v2.1.1, 2026-07-13 (three repos, tokens *and* steps)
+
+The maintained baseline, re-measured end-to-end on **axil v2.1.1** with
+disciplined Opus 4.8 agents on three public repos. Committed data:
+[`benchmarks/results/context-ab/`](https://github.com/FC4b/axildb/tree/main/benchmarks/results/context-ab);
+task fixtures: `benchmarks/context-ab/`. This run also measures
+**steps-to-finish** (consulted tool round-trips ≈ agent turns), the second
+axis on the README hero chart:
+
+Figures **pool two same-day runs** per corpus — v2 (index at the old
+100 KB default cap) and v3 (index at the fixed 512 KB default) — per-run
+splits are in the committed artifact:
+
+| Corpus | task-runs (both-correct) | no Axil tok | w/ Axil tok | Token reduction | Steps |
+|--------|--:|--:|--:|--:|:--|
+| flask (24 files) | 20 | 22,190 | 10,476 | **52.8%** | 38 → 34 (**10% fewer**) |
+| fastapi (mid) | 19 | 87,951 | **5,384** | **93.9%** | 56 → 32 (**43% fewer**) |
+| **django (906 files)** | 20 | 32,978 | **8,102** | **75.4%** | 59 → 36 (**39% fewer**) |
+
+**Sensitivity (read before quoting fastapi's 94%):** one v3 task — "where
+does FastAPI run sync endpoints in a threadpool?" — cost the unaided agent
+**63,311 tokens** (it read `fastapi/routing.py`, 253 KB, *whole*) versus
+Axil's **94**. Excluding that single pair, fastapi is **78.5%**. It is
+included because it is real behavior: whole-file reads of large files are
+exactly the discovery cost a code index removes — but it shows discovery
+costs are heavy-tailed and single-run aggregates are fragile.
+
+The aggregates include per-task losses (fastapi's `APIRouter`, django's
+`SQLCompiler.as_sql` — cases where a verbose fallback beat a tight grep) —
+measured, not cherry-picked. Two cautionary tales on sample size: flask
+read **−20%** (Axil worse) on its first 3 tasks, **+50%** at n=7, **+42%**
+at n=11, and **+53%** pooled over 20 task-runs; per-run reductions ranged
+flask 42–69%, fastapi 75–98%, django 72–78%. Quote the committed n and
+pooling alongside any figure.
+
+**Retrieval recall on the same tasks** (the hero chart's third panel): a
+mechanical replay of every Axil lookup the agents actually ran, testing
+whether the ground-truth answer file surfaced — flask **91%**, fastapi
+**83%**, django **77%** (n = 11/12/13, index cap 512 KB;
+`benchmarks/results/context-ab/code-recall-agent-queries-512k-2026-07-13.json`).
+Two instructive companion artifacts are committed alongside: the
+**default-config run** (fastapi drops to **58%** because the indexer's
+old 100 KB default **silently skipped** `fastapi/routing.py`, 253 KB —
+found by this measurement, fixed to 512 KB + a loud skip warning), and a
+**verbatim-question diagnostic** (25–38%: pasting the full natural-language
+question as the query underperforms badly vs the short symbol/keyphrase
+queries agents actually issue — query *like an agent*).
+
+**Post-v2.1.1 fixes re-measured (2026-07-14,
+`code-recall-agent-queries-methodproxies-2026-07-14.json`).** Two fixes in
+the working tree — method-level Python proxies (`Class.method` symbols) and
+the ignore-boundary fix (a nested project no longer inherits its *parent*
+repo's `.gitignore`, which had silently excluded Django's entire
+`db/models/` subtree from every earlier run) — move the same replay to
+flask **91%**, fastapi **75%**, django **100%** (aggregate 83%→89%).
+Django's perfect score is both fixes working; the fastapi/flask dips are
+**ranking dilution**: ~4× more symbol proxies now compete, so broad queries
+can crowd the file-level answer out of the top-5 (`fa1`, `fl10`). Result
+diversification across proxy kinds is the tracked follow-up.
+
+**SCIP does not move these numbers (yet).** Ingesting scip-python indexes
+(django: 43,902 entities, 152k call edges) leaves the replay recall
+identical — plain `code-search`/`fts` operate over the structural proxy
+table, which gains no method-level entries from SCIP (`proxy_backfill`
+upgrades only *provisional* regex entities, absent in a fresh index). The
+remaining misses (`SQLCompiler.as_sql`, `QuerySet._fetch_all`) are a
+proxy-granularity gap; minting method-level proxies from SCIP definitions
+is the tracked next step
+(`code-recall-agent-queries-scip-2026-07-13.json`).
+
+### Earlier runs — 2026-06, flask + django only (the discipline lesson)
+
+The original three runs, each counting only tasks both agents answered
+correctly:
 
 | Run | Corpus | Agent | no Axil | w/ Axil | Result |
 |-----|--------|-------|--:|--:|:--|
@@ -130,8 +203,10 @@ heavy `code-context` bundle at most once.
 
 > **The synthetic `context-savings` ~99% is an optimistic ceiling** — its
 > baseline assumes reading whole files. The defensible, equal-correctness
-> number is **~73% on a large/semantic workload, parity on
-> small/exact-symbol ones.**
+> numbers (v2.1.1, 2026-07-13, 39 pooled task-runs) are **~75% on a large
+> repo, ~94% mid-size (~78% excluding one whole-file-read outlier), ~53%
+> on a tiny one** — smallest on tiny repos where a tight `grep`+range-read
+> is already cheap, largest wherever unaided discovery hits big files.
 
 ## Fixing the conditional: lean `code-context`
 
@@ -155,6 +230,10 @@ So the conditional is largely closed: with compact output Axil is
 net-cheaper on **both** small and large repos. The remaining per-task
 negatives are recall *misses* — the agent pays for extra queries when the
 first lookup doesn't surface the answer.
+
+The 2026-07-13 v2.1.1 live runs (fresh agents, not re-scored
+trajectories — see the current headline above) confirm the direction of
+this prediction and land higher: flask **+53%**, django **+75%** (pooled).
 
 ## Recall output discipline: compact default + near-dup collapse
 

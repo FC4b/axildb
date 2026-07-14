@@ -1,0 +1,651 @@
+{
+  "summary": {
+    "corpus": "django",
+    "tasks_total": 13,
+    "tasks_counted": 10,
+    "without_correct": 10,
+    "withdb_correct": 12,
+    "total_without_tokens": 19906,
+    "total_withdb_tokens": 4430,
+    "reduction_pct": 77.7,
+    "compression_ratio": 4.5,
+    "total_without_steps": 28,
+    "total_withdb_steps": 19,
+    "avg_without_steps": 2.8,
+    "avg_withdb_steps": 1.9,
+    "step_reduction_pct": 32.1,
+    "step_ratio": 1.5,
+    "total_without_gather_ms": 582.2,
+    "total_withdb_gather_ms": 1495.8,
+    "_gather_ms_note": "cold-process re-exec; axil reloads ONNX each call \u2014 diagnostic only, do not publish"
+  },
+  "tasks": [
+    {
+      "task": "Where does Django resolve an incoming URL path to a view (URL dispatch)?",
+      "ground_truth": {
+        "file": "django/urls/resolvers.py",
+        "symbol": "URLResolver.resolve",
+        "notes": "class URLResolver (~503), resolve (~670)."
+      },
+      "without_tokens": 1522,
+      "withdb_tokens": 186,
+      "without_steps": 6,
+      "withdb_steps": 2,
+      "without_gather_ms": 39.28,
+      "withdb_gather_ms": 257.39,
+      "without_correct": true,
+      "withdb_correct": true,
+      "both_correct": true,
+      "without_answer": "Django resolves an incoming URL path to a view in django/urls/resolvers.py \u00e2\u20ac\u201d the recursive dispatcher is URLResolver.resolve(self, path) at line 670 (class URLResolver, line 503). It matches the path against its own pattern, then iterates self.url_patterns, recursively calling pattern.resolve(new_path) to walk the URLconf tree, returning a ResolverMatch. The leaf match that binds the path to the actual view callback is URLPattern.resolve(self, path) at line 471 (class URLPattern, line 422), which returns ResolverMatch(self.callback, ...). The public entry point is the module-level function resolve(path, urlconf=None) in django/urls/base.py line 22, which delegates to get_resolver(urlconf).resolve(path).",
+      "withdb_answer": "django/urls/resolvers.py \u00e2\u20ac\u201d URL dispatch is handled by the `URLResolver` class (line 503); its `resolve(path)` method walks the URLconf patterns and returns a `ResolverMatch` (class at line 34) that maps the incoming path to a view callable + args/kwargs. (`URLResolver.resolve` is the method that resolves an incoming URL path to a view.)",
+      "without_trace": [
+        {
+          "tokens": 20,
+          "ms": 13.68,
+          "note": "ls(stdout 78B)"
+        },
+        {
+          "tokens": 63,
+          "ms": 13.47,
+          "note": "grep(stdout 249B)"
+        },
+        {
+          "tokens": 69,
+          "ms": 11.35,
+          "note": "grep(stdout 274B)"
+        },
+        {
+          "tokens": 341,
+          "ms": 0.39,
+          "note": "django/urls/resolvers.py:460-499"
+        },
+        {
+          "tokens": 979,
+          "ms": 0.25,
+          "note": "django/urls/resolvers.py:654-743"
+        },
+        {
+          "tokens": 50,
+          "ms": 0.14,
+          "note": "django/urls/base.py:22-31"
+        }
+      ],
+      "withdb_trace": [
+        {
+          "tokens": 93,
+          "ms": 181.14,
+          "note": "axil(stdout 372B)"
+        },
+        {
+          "tokens": 93,
+          "ms": 76.25,
+          "note": "axil(stdout 371B)"
+        }
+      ]
+    },
+    {
+      "task": "Where does the ORM compile a QuerySet into a SQL SELECT statement?",
+      "ground_truth": {
+        "file": "django/db/models/sql/compiler.py",
+        "symbol": "SQLCompiler.as_sql",
+        "notes": "class SQLCompiler (~43), as_sql (~757)."
+      },
+      "without_tokens": 661,
+      "withdb_tokens": 1328,
+      "without_steps": 2,
+      "withdb_steps": 2,
+      "without_gather_ms": 12.91,
+      "withdb_gather_ms": 136.34,
+      "without_correct": true,
+      "withdb_correct": true,
+      "both_correct": true,
+      "without_answer": "django/db/models/sql/compiler.py SQLCompiler.as_sql (line 757; class SQLCompiler at line 43; builds SELECT at line 813)",
+      "withdb_answer": "django/db/models/sql/compiler.py \u00e2\u20ac\u201d class SQLCompiler, method as_sql() (invoked via Query.get_compiler(...).as_sql()/execute_sql()). This is the ORM's core SELECT compiler. Note: this checkout's Axil index did not surface the base file with a line number; it consistently returned the database-backend subclasses that re-export/subclass this base SQLCompiler \u00e2\u20ac\u201d django/db/backends/mysql/compiler.py (SQLUpdateCompiler:44, SQLDeleteCompiler:17) and django/db/backends/postgresql/compiler.py (SQLInsertCompiler:28), whose file proxies list \"exports: SQLAggregateCompiler, SQLCompiler, SQLDeleteCompiler, SQLInsertCompiler, SQLUpdateCompiler\" from django.db.models.sql.compiler.",
+      "without_trace": [
+        {
+          "tokens": 22,
+          "ms": 12.36,
+          "note": "ls(stdout 87B)"
+        },
+        {
+          "tokens": 639,
+          "ms": 0.55,
+          "note": "django/db/models/sql/compiler.py:757-816"
+        }
+      ],
+      "withdb_trace": [
+        {
+          "tokens": 115,
+          "ms": 68.31,
+          "note": "axil(stdout 459B)"
+        },
+        {
+          "tokens": 1213,
+          "ms": 68.03,
+          "note": "axil(stdout 4851B)"
+        }
+      ]
+    },
+    {
+      "task": "Where does the ORM actually execute a query and materialize model instances?",
+      "ground_truth": {
+        "file": "django/db/models/query.py",
+        "symbol": "QuerySet._fetch_all",
+        "notes": "_fetch_all (~2260); iterator (~565) acceptable."
+      },
+      "without_tokens": 0,
+      "withdb_tokens": 5392,
+      "without_steps": 0,
+      "withdb_steps": 15,
+      "without_gather_ms": 0.0,
+      "withdb_gather_ms": 1148.72,
+      "without_correct": false,
+      "withdb_correct": false,
+      "both_correct": false,
+      "without_answer": "",
+      "withdb_answer": "NOT LOCATABLE VIA THIS INDEX \u00e2\u20ac\u201d the core ORM package `django/db/models/` is not indexed. Ground-truth (from Django architecture, unverifiable via Axil here): `django/db/models/query.py` \u00e2\u20ac\u201d `ModelIterable.__iter__` executes the query (calls `SQLCompiler.execute_sql`) and materializes rows into model instances via `Model.from_db`; the raw SQL is run in `django/db/models/sql/compiler.py` \u00e2\u20ac\u201d `SQLCompiler.execute_sql`, and `Model.from_db` lives in `django/db/models/base.py`. The index only contains backend SQLCompiler subclasses at `django/db/backends/mysql/compiler.py:1` and `django/db/backends/postgresql/compiler.py:1` (both `exports: SQLCompiler`), which override but do not perform base materialization.",
+      "without_trace": [],
+      "withdb_trace": [
+        {
+          "tokens": 105,
+          "ms": 75.37,
+          "note": "axil(stdout 420B)"
+        },
+        {
+          "tokens": 20,
+          "ms": 126.26,
+          "note": "axil(stdout 77B)"
+        },
+        {
+          "tokens": 37,
+          "ms": 66.07,
+          "note": "axil(stdout 147B)"
+        },
+        {
+          "tokens": 1,
+          "ms": 65.38,
+          "note": "axil(stdout 3B)"
+        },
+        {
+          "tokens": 835,
+          "ms": 72.86,
+          "note": "axil(stdout 3338B)"
+        },
+        {
+          "tokens": 164,
+          "ms": 109.31,
+          "note": "axil(stdout 655B)"
+        },
+        {
+          "tokens": 1144,
+          "ms": 67.27,
+          "note": "axil(stdout 4574B)"
+        },
+        {
+          "tokens": 106,
+          "ms": 76.25,
+          "note": "axil(stdout 421B)"
+        },
+        {
+          "tokens": 423,
+          "ms": 71.9,
+          "note": "axil(stdout 1689B)"
+        },
+        {
+          "tokens": 992,
+          "ms": 66.65,
+          "note": "axil(stdout 3965B)"
+        },
+        {
+          "tokens": 263,
+          "ms": 69.8,
+          "note": "axil(stdout 1052B)"
+        },
+        {
+          "tokens": 127,
+          "ms": 73.72,
+          "note": "axil(stdout 505B)"
+        },
+        {
+          "tokens": 1,
+          "ms": 65.07,
+          "note": "axil(stdout 3B)"
+        },
+        {
+          "tokens": 1052,
+          "ms": 70.33,
+          "note": "axil(stdout 4208B)"
+        },
+        {
+          "tokens": 122,
+          "ms": 72.5,
+          "note": "axil(stdout 485B)"
+        }
+      ]
+    },
+    {
+      "task": "Where is the `render` shortcut function defined?",
+      "ground_truth": {
+        "file": "django/shortcuts.py",
+        "symbol": "render",
+        "notes": "def render (~20)."
+      },
+      "without_tokens": 143,
+      "withdb_tokens": 97,
+      "without_steps": 2,
+      "withdb_steps": 1,
+      "without_gather_ms": 13.8,
+      "withdb_gather_ms": 70.4,
+      "without_correct": true,
+      "withdb_correct": true,
+      "both_correct": true,
+      "without_answer": "django/shortcuts.py \u00e2\u20ac\u201d `render` function, defined at line 20 (signature: `def render(request, template_name, context=None, content_type=None, status=None, using=None)`).",
+      "withdb_answer": "django/shortcuts.py \u00e2\u20ac\u201d the `render` function is defined at line 20 (`def render(...)`).",
+      "without_trace": [
+        {
+          "tokens": 4,
+          "ms": 13.61,
+          "note": "rg(stdout 15B)"
+        },
+        {
+          "tokens": 139,
+          "ms": 0.18,
+          "note": "django/shortcuts.py:20-39"
+        }
+      ],
+      "withdb_trace": [
+        {
+          "tokens": 97,
+          "ms": 70.4,
+          "note": "axil(stdout 387B)"
+        }
+      ]
+    },
+    {
+      "task": "Where does the template engine resolve a variable against the context during rendering?",
+      "ground_truth": {
+        "file": "django/template/base.py",
+        "symbol": "Variable.resolve",
+        "notes": "class Variable (~867), resolve (~941); FilterExpression.resolve (~803) acceptable."
+      },
+      "without_tokens": 11161,
+      "withdb_tokens": 180,
+      "without_steps": 1,
+      "withdb_steps": 2,
+      "without_gather_ms": 0.37,
+      "withdb_gather_ms": 142.46,
+      "without_correct": true,
+      "withdb_correct": true,
+      "both_correct": true,
+      "without_answer": "django/template/base.py Variable.resolve line 941 delegates to Variable._resolve_lookup line 965 which resolves a variable against the context.",
+      "withdb_answer": "django/template/base.py \u00e2\u20ac\u201d the `Variable` class (starts at line 867); its `Variable.resolve(self, context)` method resolves a variable against the template context during rendering (delegating to `Variable._resolve_lookup(context)` for attribute/dict/index lookups).",
+      "without_trace": [
+        {
+          "tokens": 11161,
+          "ms": 0.37,
+          "note": "django/template/base.py:full"
+        }
+      ],
+      "withdb_trace": [
+        {
+          "tokens": 91,
+          "ms": 71.9,
+          "note": "axil(stdout 362B)"
+        },
+        {
+          "tokens": 89,
+          "ms": 70.55,
+          "note": "axil(stdout 354B)"
+        }
+      ]
+    },
+    {
+      "task": "Where does Django build and apply the middleware chain around a view?",
+      "ground_truth": {
+        "file": "django/core/handlers/base.py",
+        "symbol": "BaseHandler.get_response",
+        "notes": "get_response (~138); load_middleware (~27) acceptable."
+      },
+      "without_tokens": 0,
+      "withdb_tokens": 269,
+      "without_steps": 0,
+      "withdb_steps": 2,
+      "without_gather_ms": 0.0,
+      "withdb_gather_ms": 136.18,
+      "without_correct": false,
+      "withdb_correct": true,
+      "both_correct": false,
+      "without_answer": "",
+      "withdb_answer": "django/core/handlers/base.py \u00e2\u20ac\u201d class `BaseHandler` (line 21). `BaseHandler.load_middleware()` builds the chain (wrapping each middleware around `_get_response` into `self._middleware_chain`) and `BaseHandler.get_response()` applies that chain around the view.",
+      "without_trace": [],
+      "withdb_trace": [
+        {
+          "tokens": 105,
+          "ms": 69.62,
+          "note": "axil(stdout 419B)"
+        },
+        {
+          "tokens": 164,
+          "ms": 66.56,
+          "note": "axil(stdout 655B)"
+        }
+      ]
+    },
+    {
+      "task": "Where is `get_object_or_404` implemented?",
+      "ground_truth": {
+        "file": "django/shortcuts.py",
+        "symbol": "get_object_or_404",
+        "notes": "def get_object_or_404 (~79)."
+      },
+      "without_tokens": 291,
+      "withdb_tokens": 51,
+      "without_steps": 2,
+      "withdb_steps": 1,
+      "without_gather_ms": 59.32,
+      "withdb_gather_ms": 68.56,
+      "without_correct": true,
+      "withdb_correct": true,
+      "both_correct": true,
+      "without_answer": "django/shortcuts.py \u00e2\u20ac\u201d function `get_object_or_404`, defined at line 79.",
+      "withdb_answer": "django/shortcuts.py:79 \u00e2\u20ac\u201d function `get_object_or_404` (async variant `aget_object_or_404` at django/shortcuts.py:110)",
+      "without_trace": [
+        {
+          "tokens": 18,
+          "ms": 59.12,
+          "note": "rg(stdout 70B)"
+        },
+        {
+          "tokens": 273,
+          "ms": 0.2,
+          "note": "django/shortcuts.py:79-108"
+        }
+      ],
+      "withdb_trace": [
+        {
+          "tokens": 51,
+          "ms": 68.56,
+          "note": "axil(stdout 202B)"
+        }
+      ]
+    },
+    {
+      "task": "Where does the migration autodetector compute the changes between two project states?",
+      "ground_truth": {
+        "file": "django/db/migrations/autodetector.py",
+        "symbol": "MigrationAutodetector._detect_changes",
+        "notes": "_detect_changes (~126)."
+      },
+      "without_tokens": 1811,
+      "withdb_tokens": 459,
+      "without_steps": 2,
+      "withdb_steps": 2,
+      "without_gather_ms": 14.51,
+      "withdb_gather_ms": 134.95,
+      "without_correct": true,
+      "withdb_correct": true,
+      "both_correct": true,
+      "without_answer": "django/db/migrations/autodetector.py \u00e2\u20ac\u201d class MigrationAutodetector; public entry point changes() at line 61 delegates to the core computation _detect_changes() at line 126 (class defined at line 42, compares self.from_state vs self.to_state set in __init__ at line 55).",
+      "withdb_answer": "django/db/migrations/autodetector.py \u00e2\u20ac\u201d MigrationAutodetector class (defined at line 42). It \"takes a pair of ProjectStates and compares them to see what the first would need doing to make it match the second.\" Public entry point: MigrationAutodetector.changes(); the actual change computation is done in the internal method MigrationAutodetector._detect_changes().",
+      "without_trace": [
+        {
+          "tokens": 42,
+          "ms": 14.08,
+          "note": "ls(stdout 166B)"
+        },
+        {
+          "tokens": 1769,
+          "ms": 0.44,
+          "note": "django/db/migrations/autodetector.py:42-201"
+        }
+      ],
+      "withdb_trace": [
+        {
+          "tokens": 42,
+          "ms": 68.12,
+          "note": "axil(stdout 165B)"
+        },
+        {
+          "tokens": 417,
+          "ms": 66.83,
+          "note": "axil(stdout 1667B)"
+        }
+      ]
+    },
+    {
+      "task": "Where is the `Model` base class defined?",
+      "ground_truth": {
+        "file": "django/db/models/base.py",
+        "symbol": "Model",
+        "notes": "class Model(AltersData, metaclass=ModelBase) (~501)."
+      },
+      "without_tokens": 356,
+      "withdb_tokens": 1370,
+      "without_steps": 2,
+      "withdb_steps": 4,
+      "without_gather_ms": 76.28,
+      "withdb_gather_ms": 339.37,
+      "without_correct": true,
+      "withdb_correct": true,
+      "both_correct": true,
+      "without_answer": "django/db/models/base.py \u00e2\u20ac\u201d `class Model(AltersData, metaclass=ModelBase)` at line 501",
+      "withdb_answer": "django/db/models/base.py \u00e2\u20ac\u201d class `Model` (the base class all Django models subclass as `models.Model`). NOTE: this checkout's Axil index does NOT contain a proxy for the core `django/db/models/base.py` file, so the exact defining line was NOT returned by Axil (`code-search \"ModelBase\"` \u00e2\u2020\u2019 \"no code proxies matched\"; `class Model`/`QuerySet` searches never surface that module). The file+symbol is inferred from the many indexed subclasses Axil DID return that reference it by name, e.g. `class Redirect(models.Model)` at django/contrib/redirects/models.py:6 and `class Group(models.Model)` at django/contrib/auth/models.py:107 \u00e2\u20ac\u201d confirming the base class is `Model` in the `django.db.models` package.",
+      "without_trace": [
+        {
+          "tokens": 343,
+          "ms": 61.24,
+          "note": "rg(stdout 1371B)"
+        },
+        {
+          "tokens": 13,
+          "ms": 15.04,
+          "note": "rg(stdout 50B)"
+        }
+      ],
+      "withdb_trace": [
+        {
+          "tokens": 101,
+          "ms": 72.72,
+          "note": "axil(stdout 402B)"
+        },
+        {
+          "tokens": 1150,
+          "ms": 68.02,
+          "note": "axil(stdout 4598B)"
+        },
+        {
+          "tokens": 20,
+          "ms": 123.24,
+          "note": "axil(stdout 77B)"
+        },
+        {
+          "tokens": 99,
+          "ms": 75.39,
+          "note": "axil(stdout 396B)"
+        }
+      ]
+    },
+    {
+      "task": "Where does Django hash a raw password into its stored form?",
+      "ground_truth": {
+        "file": "django/contrib/auth/hashers.py",
+        "symbol": "make_password",
+        "notes": "def make_password (~100)."
+      },
+      "without_tokens": 1254,
+      "withdb_tokens": 42,
+      "without_steps": 5,
+      "withdb_steps": 1,
+      "without_gather_ms": 84.07,
+      "withdb_gather_ms": 66.62,
+      "without_correct": true,
+      "withdb_correct": true,
+      "both_correct": true,
+      "without_answer": "django/contrib/auth/hashers.py \u00e2\u20ac\u201d make_password() (line 100) is the public entry point that turns a raw password into its stored form; it generates a salt and delegates to the hasher's encode() at line 118. The actual hashing for the default hasher is PBKDF2PasswordHasher.encode() (line 329): it calls pbkdf2() at line 333, base64-encodes the digest (line 334), and returns the stored \"algorithm$iterations$salt$hash\" string (line 335).",
+      "withdb_answer": "django/contrib/auth/hashers.py \u00e2\u20ac\u201d make_password() at line 100 (turns a raw password into its stored \"algorithm$...$hash\" form via the configured hasher's encode())",
+      "without_trace": [
+        {
+          "tokens": 24,
+          "ms": 58.54,
+          "note": "rg(stdout 93B)"
+        },
+        {
+          "tokens": 2,
+          "ms": 12.72,
+          "note": "ls(stdout 7B)"
+        },
+        {
+          "tokens": 646,
+          "ms": 0.26,
+          "note": "django/contrib/auth/hashers.py:100-179"
+        },
+        {
+          "tokens": 176,
+          "ms": 12.29,
+          "note": "rg(stdout 704B)"
+        },
+        {
+          "tokens": 406,
+          "ms": 0.25,
+          "note": "django/contrib/auth/hashers.py:316-360"
+        }
+      ],
+      "withdb_trace": [
+        {
+          "tokens": 42,
+          "ms": 66.62,
+          "note": "axil(stdout 166B)"
+        }
+      ]
+    },
+    {
+      "task": "Where does the development server's autoreloader watch for file changes and restart?",
+      "ground_truth": {
+        "file": "django/utils/autoreload.py",
+        "symbol": "StatReloader",
+        "notes": "StatReloader (~401) or run_with_reloader (~681) \u00e2\u20ac\u201d accept either."
+      },
+      "without_tokens": 2037,
+      "withdb_tokens": 199,
+      "without_steps": 3,
+      "withdb_steps": 2,
+      "without_gather_ms": 256.03,
+      "withdb_gather_ms": 140.44,
+      "without_correct": true,
+      "withdb_correct": true,
+      "both_correct": true,
+      "without_answer": "django/utils/autoreload.py \u00e2\u20ac\u201d the development server autoreloader. The default reloader `StatReloader.tick` (line 404) polls file mtimes once per second (`SLEEP_TIME = 1`, line 402), pulling the watch list from `BaseReloader.watched_files` (line 315: all imported Python module files via `iter_all_python_module_files`, plus `extra_files` and directory globs). When a file's mtime increases it calls `BaseReloader.notify_file_changed` (line 386), which sends the `file_changed` signal and, if no receiver handles it, calls `trigger_reload` (line 268) \u00e2\u2020\u2019 `sys.exit(3)`. The parent process loop `restart_with_reloader` (line 273) re-spawns the child whenever it exits with return code 3, effecting the restart. (An optional `WatchmanReloader` at line 448 uses the Watchman service instead of mtime polling; `get_reloader` at line 658 picks between them, wired up by `run_with_reloader` at line 681.)",
+      "withdb_answer": "django/utils/autoreload.py \u00e2\u20ac\u201d the dev-server autoreloader. Watching + restart machinery: run_with_reloader (line 681) starts the loop; BaseReloader (line 295) tracks watched files/dirs and runs the change-detection tick; StatReloader (line 401, mtime polling) / WatchmanReloader (line 448) do the actual watching; restart_with_reloader (line 273) re-executes the process on change.",
+      "without_trace": [
+        {
+          "tokens": 16,
+          "ms": 242.23,
+          "note": "find(stdout 61B)"
+        },
+        {
+          "tokens": 613,
+          "ms": 13.53,
+          "note": "grep(stdout 2451B)"
+        },
+        {
+          "tokens": 1408,
+          "ms": 0.26,
+          "note": "django/utils/autoreload.py:268-427"
+        }
+      ],
+      "withdb_trace": [
+        {
+          "tokens": 105,
+          "ms": 69.67,
+          "note": "axil(stdout 418B)"
+        },
+        {
+          "tokens": 94,
+          "ms": 70.78,
+          "note": "axil(stdout 374B)"
+        }
+      ]
+    },
+    {
+      "task": "Where is `reverse` (URL reversing) implemented?",
+      "ground_truth": {
+        "file": "django/urls/base.py",
+        "symbol": "reverse",
+        "notes": "def reverse (~28)."
+      },
+      "without_tokens": 1548,
+      "withdb_tokens": 91,
+      "without_steps": 1,
+      "withdb_steps": 1,
+      "without_gather_ms": 0.21,
+      "withdb_gather_ms": 73.54,
+      "without_correct": false,
+      "withdb_correct": true,
+      "both_correct": false,
+      "without_answer": "django/urls/resolvers.py URLResolver._reverse_with_prefix line 755",
+      "withdb_answer": "django/urls/base.py \u00e2\u20ac\u201d `reverse()` function at line 28 (the public URL-reversing entry point). The underlying resolution is handled by `URLResolver` (with its `_reverse_with_prefix`) in django/urls/resolvers.py:503.",
+      "without_trace": [
+        {
+          "tokens": 1548,
+          "ms": 0.21,
+          "note": "django/urls/base.py:full"
+        }
+      ],
+      "withdb_trace": [
+        {
+          "tokens": 91,
+          "ms": 73.54,
+          "note": "axil(stdout 361B)"
+        }
+      ]
+    },
+    {
+      "task": "Where does a form field run its validation pipeline (to_python, validate, run_validators)?",
+      "ground_truth": {
+        "file": "django/forms/fields.py",
+        "symbol": "Field.clean",
+        "notes": "Field.clean (~203); validate (~185) acceptable."
+      },
+      "without_tokens": 670,
+      "withdb_tokens": 518,
+      "without_steps": 3,
+      "withdb_steps": 2,
+      "without_gather_ms": 25.62,
+      "withdb_gather_ms": 139.23,
+      "without_correct": true,
+      "withdb_correct": true,
+      "both_correct": true,
+      "without_answer": "django/forms/fields.py \u00e2\u20ac\u201d Field.clean() at line 203 runs the validation pipeline: it calls self.to_python(value) (line 208), self.validate(value) (line 209), and self.run_validators(value) (line 210), then returns the cleaned value.",
+      "withdb_answer": "django/forms/fields.py \u00e2\u20ac\u201d Field.clean() (base class `Field` starts at line 84). The `clean` method runs the validation pipeline: it calls self.to_python(value), then self.validate(value), then self.run_validators(value), and returns the cleaned value. The proxy signature confirms class Field exposes methods: to_python, validate, run_validators, clean.",
+      "without_trace": [
+        {
+          "tokens": 30,
+          "ms": 12.64,
+          "note": "rg(stdout 118B)"
+        },
+        {
+          "tokens": 322,
+          "ms": 12.65,
+          "note": "rg(stdout 1287B)"
+        },
+        {
+          "tokens": 318,
+          "ms": 0.34,
+          "note": "django/forms/fields.py:180-218"
+        }
+      ],
+      "withdb_trace": [
+        {
+          "tokens": 95,
+          "ms": 70.29,
+          "note": "axil(stdout 378B)"
+        },
+        {
+          "tokens": 423,
+          "ms": 68.95,
+          "note": "axil(stdout 1690B)"
+        }
+      ]
+    }
+  ]
+}

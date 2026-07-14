@@ -1,0 +1,507 @@
+{
+  "summary": {
+    "corpus": "flask",
+    "tasks_total": 12,
+    "tasks_counted": 9,
+    "without_correct": 9,
+    "withdb_correct": 10,
+    "total_without_tokens": 9148,
+    "total_withdb_tokens": 2884,
+    "reduction_pct": 68.5,
+    "compression_ratio": 3.2,
+    "total_without_steps": 16,
+    "total_withdb_steps": 14,
+    "avg_without_steps": 1.78,
+    "avg_withdb_steps": 1.56,
+    "step_reduction_pct": 12.5,
+    "step_ratio": 1.1,
+    "total_without_gather_ms": 122.2,
+    "total_withdb_gather_ms": 502.0,
+    "_gather_ms_note": "cold-process re-exec; axil reloads ONNX each call \u2014 diagnostic only, do not publish"
+  },
+  "tasks": [
+    {
+      "task": "Where is the `jsonify` helper implemented?",
+      "ground_truth": {
+        "file": "src/flask/json/__init__.py",
+        "symbol": "jsonify",
+        "notes": "def jsonify (~line 138)."
+      },
+      "without_tokens": 336,
+      "withdb_tokens": 33,
+      "without_steps": 2,
+      "withdb_steps": 1,
+      "without_gather_ms": 17.8,
+      "withdb_gather_ms": 135.48,
+      "without_correct": true,
+      "withdb_correct": true,
+      "both_correct": true,
+      "without_answer": "src/flask/json/__init__.py \u00e2\u20ac\u201d `def jsonify(*args, **kwargs) -> Response` at line 138. It serializes its arguments to JSON and delegates to `current_app.json.response(...)` (the app's JSONProvider). Flask re-exports it from `src/flask/__init__.py`.",
+      "withdb_answer": "src/flask/json/__init__.py \u00e2\u20ac\u201d `jsonify` function, defined at line 138",
+      "without_trace": [
+        {
+          "tokens": 22,
+          "ms": 17.63,
+          "note": "rg(stdout 87B)"
+        },
+        {
+          "tokens": 314,
+          "ms": 0.16,
+          "note": "src/flask/json/__init__.py:138-167"
+        }
+      ],
+      "withdb_trace": [
+        {
+          "tokens": 33,
+          "ms": 135.48,
+          "note": "axil(stdout 132B)"
+        }
+      ]
+    },
+    {
+      "task": "Where is the module-level `url_for` helper defined?",
+      "ground_truth": {
+        "file": "src/flask/helpers.py",
+        "symbol": "url_for",
+        "notes": "Module-level url_for (~line 200); Flask.url_for in app.py delegates to it \u00e2\u20ac\u201d accept either."
+      },
+      "without_tokens": 121,
+      "withdb_tokens": 47,
+      "without_steps": 2,
+      "withdb_steps": 1,
+      "without_gather_ms": 18.93,
+      "withdb_gather_ms": 27.91,
+      "without_correct": true,
+      "withdb_correct": true,
+      "both_correct": true,
+      "without_answer": "src/flask/helpers.py \u00e2\u20ac\u201d `def url_for(endpoint, *, _anchor=None, _method=None, _scheme=None, _external=None, **values)` at line 200. It's a thin wrapper that delegates to `current_app.url_for()`.",
+      "withdb_answer": "src/flask/helpers.py \u00e2\u20ac\u201d function `url_for`, defined at line 200 (module-level helper)",
+      "without_trace": [
+        {
+          "tokens": 10,
+          "ms": 18.7,
+          "note": "rg(stdout 38B)"
+        },
+        {
+          "tokens": 111,
+          "ms": 0.23,
+          "note": "src/flask/helpers.py:200-214"
+        }
+      ],
+      "withdb_trace": [
+        {
+          "tokens": 47,
+          "ms": 27.91,
+          "note": "axil(stdout 186B)"
+        }
+      ]
+    },
+    {
+      "task": "Where does Flask dispatch an incoming request to the matched view function?",
+      "ground_truth": {
+        "file": "src/flask/app.py",
+        "symbol": "Flask.dispatch_request",
+        "notes": "dispatch_request (~966) or full_dispatch_request (~992) both acceptable."
+      },
+      "without_tokens": 16356,
+      "withdb_tokens": 946,
+      "without_steps": 1,
+      "withdb_steps": 3,
+      "without_gather_ms": 0.41,
+      "withdb_gather_ms": 87.56,
+      "without_correct": false,
+      "withdb_correct": true,
+      "both_correct": false,
+      "without_answer": "test",
+      "withdb_answer": "src/flask/app.py \u00e2\u20ac\u201d Flask.dispatch_request (the Flask class is indexed at line 109; dispatch_request is the method that dispatches to the matched view). It resolves the matched URL rule's endpoint and calls the view via `self.ensure_sync(self.view_functions[rule.endpoint])(**view_args)`; it is invoked by Flask.full_dispatch_request, also in src/flask/app.py.",
+      "without_trace": [
+        {
+          "tokens": 16356,
+          "ms": 0.41,
+          "note": "src/flask/app.py:full"
+        }
+      ],
+      "withdb_trace": [
+        {
+          "tokens": 45,
+          "ms": 29.03,
+          "note": "axil(stdout 178B)"
+        },
+        {
+          "tokens": 870,
+          "ms": 29.42,
+          "note": "axil(stdout 3478B)"
+        },
+        {
+          "tokens": 31,
+          "ms": 29.11,
+          "note": "axil(stdout 122B)"
+        }
+      ]
+    },
+    {
+      "task": "Where does Flask push the application context onto the context stack?",
+      "ground_truth": {
+        "file": "src/flask/ctx.py",
+        "symbol": "AppContext.push",
+        "notes": "class AppContext (~260), push (~416); RequestContext.push also acceptable."
+      },
+      "without_tokens": 297,
+      "withdb_tokens": 0,
+      "without_steps": 1,
+      "withdb_steps": 1,
+      "without_gather_ms": 0.22,
+      "withdb_gather_ms": 13.59,
+      "without_correct": true,
+      "withdb_correct": true,
+      "both_correct": true,
+      "without_answer": "src/flask/ctx.py AppContext.push line 433",
+      "withdb_answer": "src/flask/ctx.py AppContext.push (class at line 260)",
+      "without_trace": [
+        {
+          "tokens": 297,
+          "ms": 0.22,
+          "note": "src/flask/ctx.py:416-445"
+        }
+      ],
+      "withdb_trace": [
+        {
+          "tokens": 0,
+          "ms": 13.59,
+          "note": "axil(stdout 0B)"
+        }
+      ]
+    },
+    {
+      "task": "Where is the `Blueprint` class defined?",
+      "ground_truth": {
+        "file": "src/flask/blueprints.py",
+        "symbol": "Blueprint",
+        "notes": "blueprints.py re-exports (class Blueprint(SansioBlueprint) ~18); real definition at src/flask/sansio/blueprints.py (~119) \u00e2\u20ac\u201d accept either."
+      },
+      "without_tokens": 1136,
+      "withdb_tokens": 89,
+      "without_steps": 1,
+      "withdb_steps": 1,
+      "without_gather_ms": 0.15,
+      "withdb_gather_ms": 28.03,
+      "without_correct": true,
+      "withdb_correct": true,
+      "both_correct": true,
+      "without_answer": "src/flask/blueprints.py line 18, class Blueprint(SansioBlueprint)",
+      "withdb_answer": "The `Blueprint` class is defined at `src/flask/blueprints.py:18` (`class Blueprint(SansioBlueprint)` \u00e2\u20ac\u201d the concrete class exported as `flask.Blueprint`). Its base implementation lives in `src/flask/sansio/blueprints.py:119` (`class Blueprint(Scaffold)`).",
+      "without_trace": [
+        {
+          "tokens": 1136,
+          "ms": 0.15,
+          "note": "src/flask/blueprints.py:full"
+        }
+      ],
+      "withdb_trace": [
+        {
+          "tokens": 89,
+          "ms": 28.03,
+          "note": "axil(stdout 355B)"
+        }
+      ]
+    },
+    {
+      "task": "Where does Flask load configuration from a Python file (from_pyfile)?",
+      "ground_truth": {
+        "file": "src/flask/config.py",
+        "symbol": "Config.from_pyfile",
+        "notes": "from_pyfile (~187); from_object/from_envvar acceptable."
+      },
+      "without_tokens": 449,
+      "withdb_tokens": 206,
+      "without_steps": 2,
+      "withdb_steps": 2,
+      "without_gather_ms": 17.16,
+      "withdb_gather_ms": 58.4,
+      "without_correct": true,
+      "withdb_correct": true,
+      "both_correct": true,
+      "without_answer": "src/flask/config.py \u00e2\u20ac\u201d Config.from_pyfile (defined at line 187; loads the file at lines 204-216: joins filename with self.root_path, creates a types.ModuleType, then open/compile/exec the Python file into the module dict and calls self.from_object(d))",
+      "withdb_answer": "src/flask/config.py \u00e2\u20ac\u201d Config.from_pyfile (method of class Config(dict), which is defined at line 50; Axil indexes from_pyfile as a method of this Config class)",
+      "without_trace": [
+        {
+          "tokens": 12,
+          "ms": 16.94,
+          "note": "rg(stdout 45B)"
+        },
+        {
+          "tokens": 437,
+          "ms": 0.21,
+          "note": "src/flask/config.py:187-226"
+        }
+      ],
+      "withdb_trace": [
+        {
+          "tokens": 16,
+          "ms": 28.84,
+          "note": "axil(stdout 62B)"
+        },
+        {
+          "tokens": 190,
+          "ms": 29.57,
+          "note": "axil(stdout 760B)"
+        }
+      ]
+    },
+    {
+      "task": "How does Flask turn a raised HTTPException into a response?",
+      "ground_truth": {
+        "file": "src/flask/app.py",
+        "symbol": "Flask.handle_http_exception",
+        "notes": "handle_http_exception (~830); handle_user_exception (~865) acceptable."
+      },
+      "without_tokens": 0,
+      "withdb_tokens": 1480,
+      "without_steps": 0,
+      "withdb_steps": 8,
+      "without_gather_ms": 0.0,
+      "withdb_gather_ms": 236.78,
+      "without_correct": false,
+      "withdb_correct": false,
+      "both_correct": false,
+      "without_answer": "",
+      "withdb_answer": "Grounded in Axil's index: a raised HTTPException is turned into a response through Flask's make_response coercion. Raise side: src/flask/helpers.py:281 `abort(code, ...)` raises a werkzeug HTTPException via the app's `aborter`. Conversion side: src/flask/helpers.py:151 `make_response(*args) -> Response` \u00e2\u20ac\u201d its docstring ends on \"...force the re[sponse]\"; because a werkzeug HTTPException is itself a WSGI-callable/response, Flask \"forces\" it into a `Response` (src/flask/wrappers.py:222 Response). CAVEAT: the actual handler dispatch chain (Flask.full_dispatch_request -> handle_user_exception -> handle_http_exception -> finalize_request/Flask.make_response) lives in src/flask/app.py, which is NOT indexed in this checkout \u00e2\u20ac\u201d FTS for handle_http_exception, full_dispatch_request, and force_type all returned empty and no app.py proxy ever appeared, so helpers.py is the closest the index gets.",
+      "without_trace": [],
+      "withdb_trace": [
+        {
+          "tokens": 88,
+          "ms": 29.81,
+          "note": "axil(stdout 350B)"
+        },
+        {
+          "tokens": 20,
+          "ms": 30.88,
+          "note": "axil(stdout 77B)"
+        },
+        {
+          "tokens": 298,
+          "ms": 29.32,
+          "note": "axil(stdout 1190B)"
+        },
+        {
+          "tokens": 1,
+          "ms": 28.93,
+          "note": "axil(stdout 3B)"
+        },
+        {
+          "tokens": 1,
+          "ms": 29.11,
+          "note": "axil(stdout 3B)"
+        },
+        {
+          "tokens": 1,
+          "ms": 28.95,
+          "note": "axil(stdout 3B)"
+        },
+        {
+          "tokens": 935,
+          "ms": 28.69,
+          "note": "axil(stdout 3738B)"
+        },
+        {
+          "tokens": 136,
+          "ms": 31.08,
+          "note": "axil(stdout 543B)"
+        }
+      ]
+    },
+    {
+      "task": "Where is the `render_template` function defined?",
+      "ground_truth": {
+        "file": "src/flask/templating.py",
+        "symbol": "render_template",
+        "notes": "def render_template (~136)."
+      },
+      "without_tokens": 176,
+      "withdb_tokens": 72,
+      "without_steps": 2,
+      "withdb_steps": 1,
+      "without_gather_ms": 17.28,
+      "withdb_gather_ms": 28.66,
+      "without_correct": true,
+      "withdb_correct": true,
+      "both_correct": true,
+      "without_answer": "src/flask/templating.py \u00e2\u20ac\u201d `render_template` function, defined at line 136 (`def render_template(template_name_or_list, **context) -> str`).",
+      "withdb_answer": "src/flask/templating.py:136 \u00e2\u20ac\u201d function `render_template` (defined in the `templating` module)",
+      "without_trace": [
+        {
+          "tokens": 36,
+          "ms": 17.12,
+          "note": "rg(stdout 143B)"
+        },
+        {
+          "tokens": 140,
+          "ms": 0.16,
+          "note": "src/flask/templating.py:136-150"
+        }
+      ],
+      "withdb_trace": [
+        {
+          "tokens": 72,
+          "ms": 28.66,
+          "note": "axil(stdout 288B)"
+        }
+      ]
+    },
+    {
+      "task": "Where does the @app.route decorator actually register a URL rule?",
+      "ground_truth": {
+        "file": "src/flask/sansio/scaffold.py",
+        "symbol": "Scaffold.route",
+        "notes": "route (~336) or add_url_rule (scaffold ~368 / sansio/app.py ~605) \u00e2\u20ac\u201d accept either."
+      },
+      "without_tokens": 0,
+      "withdb_tokens": 0,
+      "without_steps": 0,
+      "withdb_steps": 0,
+      "without_gather_ms": 0.0,
+      "withdb_gather_ms": 0.0,
+      "without_correct": false,
+      "withdb_correct": false,
+      "both_correct": false,
+      "without_answer": "",
+      "withdb_answer": "test",
+      "without_trace": [],
+      "withdb_trace": []
+    },
+    {
+      "task": "Where is the `session` proxy object defined?",
+      "ground_truth": {
+        "file": "src/flask/globals.py",
+        "symbol": "session",
+        "notes": "session = LocalProxy(...) (~60)."
+      },
+      "without_tokens": 4738,
+      "withdb_tokens": 95,
+      "without_steps": 2,
+      "withdb_steps": 1,
+      "without_gather_ms": 19.57,
+      "withdb_gather_ms": 30.12,
+      "without_correct": true,
+      "withdb_correct": true,
+      "both_correct": true,
+      "without_answer": "src/flask/globals.py \u00e2\u20ac\u201d `session` module-level global (a `LocalProxy` bound to the `_cv_app` context var's \"session\" attribute), defined at line 60.",
+      "withdb_answer": "src/flask/globals.py -- session LocalProxy",
+      "without_trace": [
+        {
+          "tokens": 4500,
+          "ms": 19.43,
+          "note": "rg(stdout 17998B)"
+        },
+        {
+          "tokens": 238,
+          "ms": 0.14,
+          "note": "src/flask/globals.py:40-69"
+        }
+      ],
+      "withdb_trace": [
+        {
+          "tokens": 95,
+          "ms": 30.12,
+          "note": "axil(stdout 378B)"
+        }
+      ]
+    },
+    {
+      "task": "Where does Flask serialize the session and set the session cookie on the response?",
+      "ground_truth": {
+        "file": "src/flask/sessions.py",
+        "symbol": "SecureCookieSessionInterface.save_session",
+        "notes": "save_session (~337 concrete; ~263 interface) \u00e2\u20ac\u201d accept either."
+      },
+      "without_tokens": 521,
+      "withdb_tokens": 810,
+      "without_steps": 2,
+      "withdb_steps": 3,
+      "without_gather_ms": 12.05,
+      "withdb_gather_ms": 93.61,
+      "without_correct": true,
+      "withdb_correct": true,
+      "both_correct": true,
+      "without_answer": "src/flask/sessions.py \u00e2\u20ac\u201d SecureCookieSessionInterface.save_session (def at line 337). Serialization: line 373 `val = self.get_signing_serializer(app).dumps(dict(session))`; cookie set on response: line 374 `response.set_cookie(name, val, expires=..., httponly=..., ...)`.",
+      "withdb_answer": "src/flask/sessions.py \u00e2\u20ac\u201d SecureCookieSessionInterface.save_session (class SecureCookieSessionInterface at line 284). save_session serializes the session via get_signing_serializer (itsdangerous) and sets it on the response with response.set_cookie(...).",
+      "without_trace": [
+        {
+          "tokens": 99,
+          "ms": 11.85,
+          "note": "rg(stdout 393B)"
+        },
+        {
+          "tokens": 422,
+          "ms": 0.2,
+          "note": "src/flask/sessions.py:337-386"
+        }
+      ],
+      "withdb_trace": [
+        {
+          "tokens": 95,
+          "ms": 30.12,
+          "note": "axil(stdout 378B)"
+        },
+        {
+          "tokens": 41,
+          "ms": 34.66,
+          "note": "axil(stdout 162B)"
+        },
+        {
+          "tokens": 674,
+          "ms": 28.84,
+          "note": "axil(stdout 2694B)"
+        }
+      ]
+    },
+    {
+      "task": "Where does Flask stream a file from disk as a response (send file helpers)?",
+      "ground_truth": {
+        "file": "src/flask/helpers.py",
+        "symbol": "send_file",
+        "notes": "send_file (~417); send_from_directory (~543) acceptable."
+      },
+      "without_tokens": 1374,
+      "withdb_tokens": 1532,
+      "without_steps": 2,
+      "withdb_steps": 3,
+      "without_gather_ms": 19.06,
+      "withdb_gather_ms": 86.2,
+      "without_correct": true,
+      "withdb_correct": true,
+      "both_correct": true,
+      "without_answer": "src/flask/helpers.py \u00e2\u20ac\u201d `send_file` (line 417), which delegates to `werkzeug.utils.send_file` (line 528). Companion safe wrapper `send_from_directory` at line 543.",
+      "withdb_answer": "src/flask/helpers.py \u00e2\u20ac\u201d Flask's send-file helpers send_file and send_from_directory. Axil confirms send_from_directory at src/flask/helpers.py:543, a secure wrapper that streams a file from disk by calling send_file, which is defined just above it in the same module (src/flask/helpers.py).",
+      "without_trace": [
+        {
+          "tokens": 23,
+          "ms": 18.82,
+          "note": "rg(stdout 90B)"
+        },
+        {
+          "tokens": 1351,
+          "ms": 0.25,
+          "note": "src/flask/helpers.py:417-546"
+        }
+      ],
+      "withdb_trace": [
+        {
+          "tokens": 52,
+          "ms": 28.35,
+          "note": "axil(stdout 205B)"
+        },
+        {
+          "tokens": 1378,
+          "ms": 27.97,
+          "note": "axil(stdout 5511B)"
+        },
+        {
+          "tokens": 102,
+          "ms": 29.88,
+          "note": "axil(stdout 405B)"
+        }
+      ]
+    }
+  ]
+}

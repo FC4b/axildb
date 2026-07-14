@@ -317,7 +317,7 @@ impl Default for IndexConfig {
             auto_index: true,
             languages: vec!["auto".to_string()],
             ignore: Vec::new(),
-            max_file_size_kb: 100,
+            max_file_size_kb: 512,
             index_tests: false,
             index_private: false,
             symbol_depth: "public".to_string(),
@@ -555,7 +555,7 @@ pub fn default_config_toml() -> String {
 # auto_index = true                         # re-index on session start
 # languages = ["auto"]                      # or ["rust", "typescript", "python"]
 # ignore = []                               # extra ignore patterns
-# max_file_size_kb = 100                    # skip files larger than this
+# max_file_size_kb = 512                    # skip files larger than this (skips are warned loudly)
 # index_tests = false                       # include test files
 # index_private = false                     # include private functions/types
 # symbol_depth = "public"                   # "public" | "all" | "none"
