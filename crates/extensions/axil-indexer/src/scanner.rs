@@ -276,7 +276,13 @@ pub fn scan_files(root: &Path, config: &IndexConfig) -> Vec<ScannedFile> {
         .hidden(true) // skip hidden files/dirs
         .git_ignore(true) // respect .gitignore
         .git_global(false)
-        .git_exclude(true);
+        .git_exclude(true)
+        // The index root is the ignore boundary. Without this, a project
+        // nested inside another repo inherits that repo's .gitignore — e.g. a
+        // checkout under a workspace whose .gitignore has `models/` silently
+        // loses every `**/models/` subtree (Django's db/models vanished this
+        // way). The project's own .gitignore/.axilignore still apply.
+        .parents(false);
 
     // Respect .axilignore files (same syntax as .gitignore)
     walker.add_custom_ignore_filename(".axilignore");
@@ -426,6 +432,36 @@ mod tests {
     fn project_type_display() {
         assert_eq!(ProjectType::Rust.as_str(), "rust");
         assert_eq!(ProjectType::TypeScript.as_str(), "typescript");
+    }
+
+    #[test]
+    fn scan_ignores_parent_repo_gitignore() {
+        // A project nested inside another git repo must not inherit that
+        // repo's ignore rules: only ignore files at or below the index root
+        // apply. The parent here ignores `models/`, which would otherwise
+        // swallow the project's `models/` source directory.
+        let parent = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(parent.path().join(".git")).unwrap();
+        std::fs::write(parent.path().join(".gitignore"), "models/\n").unwrap();
+
+        let proj = parent.path().join("proj");
+        std::fs::create_dir_all(proj.join("models")).unwrap();
+        std::fs::write(proj.join("models").join("a.py"), "def f():\n    pass\n").unwrap();
+        std::fs::write(proj.join("b.py"), "def g():\n    pass\n").unwrap();
+
+        let config = IndexConfig::default();
+        let files = scan_files(&proj, &config);
+        let rels: Vec<&str> = files.iter().map(|f| f.rel_path.as_str()).collect();
+        assert!(rels.contains(&"models/a.py"), "parent .gitignore leaked: {rels:?}");
+        assert!(rels.contains(&"b.py"), "{rels:?}");
+
+        // The project's OWN .gitignore still applies.
+        std::fs::write(proj.join(".gitignore"), "models/\n").unwrap();
+        std::fs::create_dir_all(proj.join(".git")).unwrap();
+        let files = scan_files(&proj, &config);
+        let rels: Vec<&str> = files.iter().map(|f| f.rel_path.as_str()).collect();
+        assert!(!rels.contains(&"models/a.py"), "own .gitignore ignored: {rels:?}");
+        assert!(rels.contains(&"b.py"), "{rels:?}");
     }
 
     #[test]
