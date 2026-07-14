@@ -28,7 +28,7 @@ import matplotlib.pyplot as plt
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ART = os.path.join(ROOT, "benchmarks/results/context-ab/context-ab-2026-07-13.json")
 RECALL_ART = os.path.join(
-    ROOT, "benchmarks/results/context-ab/code-recall-agent-queries-512k-2026-07-13.json")
+    ROOT, "benchmarks/results/context-ab/code-recall-agent-queries-methodproxies-2026-07-14.json")
 OUT_DIR = os.path.join(ROOT, "assets")
 
 # --- data (traceable to committed artifacts) ---
@@ -117,17 +117,18 @@ def render(mode):
           "answer file surfaced by the agent's Axil lookups (replay)",
           xmin=0, xmax=118)
 
-    fig.suptitle("What Axil buys your agent — measured on v2.1.1",
+    fig.suptitle("What Axil buys your agent — measured on v2.1.x",
                  x=0.012, y=0.975, ha="left", fontsize=14.5, fontweight="bold",
                  color=t["ink"])
     n_str = " / ".join(str(by[c]["tasks_counted"]) for c in order)
     fig.text(0.012, 0.055,
-             "①② Equal-correctness coding A/B (2026-07-13): grep-only vs Axil-only Opus agents, identical sandboxes, "
-             f"same questions; only both-correct tasks counted (n = {n_str}).",
+             "①② Equal-correctness coding A/B on v2.1.1 (2026-07-13): grep-only vs Axil-only Opus agents, identical "
+             f"sandboxes, same questions; only both-correct tasks counted (n = {n_str}).",
              fontsize=7.4, color=t["muted"], ha="left")
     fig.text(0.012, 0.022,
-             f"③ Mechanical replay of the agents' recorded queries (n = {recall_n}); index cap 512 KB — the v2.1.1 default "
-             "(100 KB) skipped large files silently, fixed in the next release.   Method + data: benchmarks/context-ab/ · benchmarks/results/",
+             f"③ Mechanical replay of the agents' recorded queries (n = {recall_n}) on the released index "
+             "(axil-indexer 2.2.0: method-level proxies, 512 KB default, ignore-boundary fix).   "
+             "Method + data: benchmarks/context-ab/ · benchmarks/results/",
              fontsize=7.4, color=t["muted"], ha="left")
 
     fig.subplots_adjust(left=0.075, right=0.985, top=0.74, bottom=0.16, wspace=0.5)

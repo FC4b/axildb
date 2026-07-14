@@ -149,17 +149,19 @@ found by this measurement, fixed to 512 KB + a loud skip warning), and a
 question as the query underperforms badly vs the short symbol/keyphrase
 queries agents actually issue — query *like an agent*).
 
-**Post-v2.1.1 fixes re-measured (2026-07-14,
-`code-recall-agent-queries-methodproxies-2026-07-14.json`).** Two fixes in
-the working tree — method-level Python proxies (`Class.method` symbols) and
-the ignore-boundary fix (a nested project no longer inherits its *parent*
+**Released fixes re-measured (2026-07-14,
+`code-recall-agent-queries-methodproxies-2026-07-14.json`).** Two index
+fixes — method-level Python proxies (`Class.method` symbols) and the
+ignore-boundary fix (a nested project no longer inherits its *parent*
 repo's `.gitignore`, which had silently excluded Django's entire
-`db/models/` subtree from every earlier run) — move the same replay to
-flask **91%**, fastapi **75%**, django **100%** (aggregate 83%→89%).
-Django's perfect score is both fixes working; the fastapi/flask dips are
-**ranking dilution**: ~4× more symbol proxies now compete, so broad queries
-can crowd the file-level answer out of the top-5 (`fa1`, `fl10`). Result
-diversification across proxy kinds is the tracked follow-up.
+`db/models/` subtree from every earlier run) — shipped in
+**axil-indexer 2.2.0 / axildb 2.1.2** and move the same replay to flask
+**91%**, fastapi **75%**, django **100%** (aggregate 83%→89%). These are
+the README hero-panel figures. Django's perfect score is both fixes
+working; the fastapi/flask dips are **ranking dilution**: ~4× more symbol
+proxies now compete, so broad queries can crowd the file-level answer out
+of the top-5 (`fa1`, `fl10`). Result diversification across proxy kinds is
+the tracked follow-up.
 
 **SCIP does not move these numbers (yet).** Ingesting scip-python indexes
 (django: 43,902 entities, 152k call edges) leaves the replay recall
