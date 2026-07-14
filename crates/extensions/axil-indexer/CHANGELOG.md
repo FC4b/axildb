@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.0](https://github.com/FC4b/axildb/compare/axil-indexer-v2.1.1...axil-indexer-v2.2.0) - 2026-07-14
+
+### Added
+
+- *(index)* method-level Python symbols — Class.method proxies
+
+### Fixed
+
+- *(index)* the index root is the ignore boundary — stop inheriting parent-repo gitignore
+- *(index)* raise max_file_size_kb default to 512 and warn loudly on skips
+
 ## [2.1.1](https://github.com/FC4b/axildb/compare/axil-indexer-v2.1.0...axil-indexer-v2.1.1) - 2026-07-12
 
 ### Other

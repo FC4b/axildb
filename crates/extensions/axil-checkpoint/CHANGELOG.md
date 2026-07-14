@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.1.2](https://github.com/FC4b/axildb/compare/axil-checkpoint-v2.1.1...axil-checkpoint-v2.1.2) - 2026-07-14
+
+### Other
+
+- updated the following local packages: axil-core
+
 ## [2.1.1](https://github.com/FC4b/axildb/compare/axil-checkpoint-v2.1.0...axil-checkpoint-v2.1.1) - 2026-07-12
 
 ### Other
