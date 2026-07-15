@@ -556,6 +556,20 @@ axil/
   the code is the way it is* — which phase shipped it is git-history noise that
   goes stale. Write the rationale, drop the bookkeeping. (Phase numbers belong
   in `tasks/`, commit messages, and Axil memory — not the source.)
+- **Oracle-scoped autonomy.** Autonomous / multi-agent implementation runs are
+  for *net-new, exact-oracle* surfaces only: a new Tier-1 Engine behind its
+  trait + parity tests, a new adapter behind conformance tests, a new dep-docs
+  ecosystem behind lockfile fixtures, or any semantics a behavior oracle pins
+  exactly. The mature recall core (`crates/axil-core/src/query.rs`,
+  `scoring.rs`, and the `brain.rs` recall paths) requires human review on
+  *every* change: its quality oracle is threshold-based, not exact — the per-PR
+  needle gate (`scripts/needle-recall-gate.sh`, FTS-only, fails if any planted
+  needle misses top-5 — recall@5 must be 1.0 — or retention < 90%) and the
+  LongMemEval gate (`scripts/longmemeval-gate.sh`, on core
+  paths + nightly, fails on >2% recall regression) *bound* regressions but do
+  not *define* correctness, so a green run is necessary, never sufficient.
+  Small edits to this mature code are harder for agents than net-new features
+  (observed on pgrust, malisper.me) — route them through a human, not a swarm.
 - **Per-task contributor mechanics** (which tier, which gate, which parity test,
   how to fuzz) live in [docs/agent-guides/](docs/agent-guides/README.md) — a thin
   pointer index, so this file stays lean.

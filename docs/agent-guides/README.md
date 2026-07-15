@@ -45,6 +45,12 @@ before you push.
 > when their out-of-tree dataset is absent — a green CI run never means they
 > verified anything. Committed baselines live in `benchmarks/results/`.
 
+> **Recall core is human-review-only.** These gates are threshold-based, not
+> exact oracles — they bound recall regressions, they do not define
+> correctness. Changes to `query.rs` / `scoring.rs` / the `brain.rs` recall
+> paths need human review, not autonomous/multi-agent runs. See the
+> **Oracle-scoped autonomy** convention in the root [`CLAUDE.md`](../../CLAUDE.md).
+
 ## Parity & drift tests
 
 Some surfaces must not drift apart silently. These tests fail the build if they

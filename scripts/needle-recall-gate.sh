@@ -8,9 +8,9 @@
 # returned within top-k, or if a recalled needle token did not survive intact.
 #
 # No network, no API key, no embedding model (FTS-only) — deterministic and
-# offline. Run it manually or as a pre-commit hook. CI wiring is intentionally
-# out of scope (the GitHub Actions piece is deferred); this gate is
-# the local stand-in that protects the recall path.
+# offline. Run it manually or as a pre-commit hook. It is also wired into CI:
+# .github/workflows/ci.yml runs it on every PR (AXIL_BIN pointed at the debug
+# build), so a recall regression fails the build, not just a local run.
 #
 # Usage:  scripts/needle-recall-gate.sh
 # Exit:   0  pass

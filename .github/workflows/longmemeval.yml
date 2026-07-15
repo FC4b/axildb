@@ -1,0 +1,141 @@
+name: longmemeval
+
+# Wires the LongMemEval recall-quality gate (scripts/longmemeval-gate.sh) into
+# CI. This is the ONE gate that guards end-to-end retrieval quality against a
+# committed baseline (benchmarks/longmemeval/baseline.jsonl — the recall-qtc
+# 500-question run, avg_recall 0.93547, i.e. the 93.5 % Recall-QTC figure) — the
+# per-PR needle gate only exercises FTS over a contested corpus of planted
+# needles (~30 adversarial cases), so an RRF/scoring change that degrades real
+# recall could otherwise merge green.
+#
+# Skip-loud posture (repo policy for dataset-gated harnesses): the ~265 MB
+# LongMemEval `s` split is out-of-tree/gitignored. It is NEVER downloaded from a
+# hard-coded public URL here — a green run must never *imply* verification. The
+# job restores it only from (a) a GitHub Actions cache, or (b) an optional
+# repo-secret URL (LONGMEMEVAL_DATASET_URL). When neither is configured the
+# dataset is absent, the gate self-skips (exit 0), and this workflow ALSO prints
+# a top-level ::warning so a passing check is never mistaken for a verified one.
+#
+# Expected on-disk path (what the gate/harness look for):
+#   benchmarks/longmemeval/data/longmemeval_s_cleaned.json
+# Seed it once by configuring the LONGMEMEVAL_DATASET_URL secret (or priming the
+# actions/cache key below via a manual dispatch on a runner that has the file);
+# after the first successful download it is cached for subsequent runs.
+
+on:
+  # PR trigger scoped to the recall core: a change to scoring/query/brain/db or
+  # the vector engine is exactly what can move recall numbers. Docs/other crates
+  # don't need to pay for this gate.
+  pull_request:
+    paths:
+      - crates/axil-core/src/query.rs
+      - crates/axil-core/src/scoring.rs
+      - crates/axil-core/src/brain.rs
+      - crates/axil-core/src/db.rs
+      - crates/engines/axil-vector/**
+      - scripts/longmemeval-gate.sh
+      - .github/workflows/longmemeval.yml
+  # Nightly full run (offset from nightly-bench.yml's 07:00 so the two don't
+  # contend for the shared runner/cache at the same minute).
+  schedule:
+    - cron: "30 7 * * *"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  # Optional out-of-band dataset source. Unset on forks / by default → the job
+  # skips loudly. Set it in repo secrets to a URL serving the cleaned `s` split.
+  LME_DATASET_URL: ${{ secrets.LONGMEMEVAL_DATASET_URL }}
+
+jobs:
+  longmemeval-gate:
+    name: ${{ github.event_name == 'pull_request' && 'longmemeval liveness smoke (PR — not a quality gate)' || 'longmemeval recall-quality gate (nightly/manual)' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      # Cache both the root workspace and the excluded harness workspace — the
+      # harness builds via its own manifest, so it needs its own target cached
+      # to keep the (nightly, dataset-present) run tractable.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            benchmarks/longmemeval
+      # The bge-small ONNX model is auto-downloaded by the embedder at runtime
+      # (recall/recall-qtc/vector all embed). Cache ~/.axil/models so a
+      # dataset-present run doesn't re-fetch it from HuggingFace each night. This
+      # is only ever populated when the gate actually runs (dataset present).
+      - name: cache ONNX embedding model
+        uses: actions/cache@v4
+        with:
+          path: ~/.axil/models
+          key: axil-onnx-bge-small-v1
+
+      # Dataset restore, attempt 1: GitHub Actions cache (read-write, so a
+      # successful secret-URL download below is persisted for next time).
+      - name: restore LongMemEval dataset (cache)
+        uses: actions/cache@v4
+        with:
+          path: benchmarks/longmemeval/data/longmemeval_s_cleaned.json
+          key: longmemeval-s-cleaned-v1
+
+      # Dataset restore, attempt 2: optional repo-secret URL. No-op unless the
+      # secret is configured AND the cache missed. Never a hard-coded public URL.
+      - name: fetch LongMemEval dataset (secret URL, optional)
+        shell: bash
+        run: |
+          set -euo pipefail
+          dest="benchmarks/longmemeval/data/longmemeval_s_cleaned.json"
+          if [ -f "$dest" ]; then
+            echo "dataset already present (cache hit) — skipping fetch"
+            exit 0
+          fi
+          if [ -z "${LME_DATASET_URL:-}" ]; then
+            echo "LONGMEMEVAL_DATASET_URL not configured — nothing to fetch"
+            exit 0
+          fi
+          mkdir -p "$(dirname "$dest")"
+          echo "fetching dataset from configured secret URL"
+          curl -fL --retry 3 -o "$dest" "$LME_DATASET_URL"
+
+      # Surface the skip at the WORKFLOW level too (the gate script self-warns,
+      # but a job-level ::warning is what shows on the checks summary). A green
+      # check here does NOT mean recall was verified when the dataset is absent.
+      - name: check dataset presence (skip-loud)
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -f benchmarks/longmemeval/data/longmemeval_s_cleaned.json ]; then
+            echo "::warning::longmemeval gate SKIPPED — dataset absent; recall quality NOT verified"
+          else
+            echo "dataset present — gate will run for real"
+          fi
+
+      # The gate self-skips (exit 0) when the dataset is absent, so this step is
+      # safe to run unconditionally.
+      #
+      # PR runs are a fast liveness smoke: 20 questions over the `recall`
+      # strategy with a slack tolerance — the committed baseline is the
+      # recall-qtc 500-question run, so a strict 2% compare of a 20-q recall
+      # smoke against it would false-alarm on the N/strategy mismatch. The slack
+      # tolerance still trips a *collapse* (recall path broken / returning ~0) or
+      # a harness crash (exit 1), which is the per-PR signal we want. The strict
+      # apples-to-apples 2% gate against the baseline is the nightly full run.
+      #
+      # Nightly / manual runs use the gate defaults (recall-qtc, 500 questions,
+      # 2% tolerance) — the exact strategy and N the baseline was recorded at.
+      - name: run longmemeval gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "[ci] PR liveness smoke: recall strategy, 20 questions, slack tolerance"
+            echo "[ci] NOT a quality gate — the 500q recall-qtc baseline is a strategy/N mismatch, so this only trips on collapse (recall path broken / ~0) or a harness crash."
+            echo "[ci] Honest upgrade path (follow-up, not this branch): commit a fixed-subset (20q, recall strategy) baseline so PR runs get an apples-to-apples compare."
+            scripts/longmemeval-gate.sh --questions 20 --strategy recall --tolerance 0.5
+          else
+            echo "[ci] full gate: default strategy (recall-qtc) at 500 questions vs baseline"
+            scripts/longmemeval-gate.sh
+          fi
