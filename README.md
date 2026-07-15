@@ -48,6 +48,51 @@ Good agent memory has to be four things — navigable, fast, fresh, and compound
 
 ## Quick start
 
+**The fastest path: let your agent install it.** Axil is agent-first, so the quickest setup is to paste the prompt below into your AI coding tool (Claude Code, Codex, Copilot CLI, Cursor, …). The agent installs the binary, wires the hooks for *itself*, and indexes your code — you run nothing by hand:
+
+<details open>
+<summary><b>📋 Copy-paste install prompt</b> — drop into any AI coding agent, hit enter, done</summary>
+
+```text
+Set up Axil (a local, single-file agent-memory database — https://github.com/FC4b/axildb) in
+this project so you gain persistent, cross-session memory. Do every step yourself with your
+shell tools; don't ask me to run anything.
+
+1. Check for an existing install: run `axil --version`. If it prints a version, skip to step 3.
+
+2. Install the `axil` binary — try these in order until one succeeds on this OS:
+   a. `cargo binstall axildb`  (prebuilt, no compile; if cargo-binstall is missing, first run
+      `cargo install cargo-binstall`)
+   b. else download the archive for this platform from
+      https://github.com/FC4b/axildb/releases/latest and extract it, keeping the bundled
+      onnxruntime library next to the `axil` binary
+   c. else `cargo install axildb`  (builds from source, needs a C toolchain). On Windows this
+      omits the ONNX runtime — put a matching onnxruntime.dll (ORT >= 1.22) next to axil.exe.
+   Re-run `axil --version` to confirm it's on PATH (otherwise call it by full path, e.g.
+   ~/.cargo/bin/axil).
+
+3. Wire Axil into THIS project and index the code. Pass the flag for the assistant you are,
+   plus --bootstrap to build the code index:
+     Claude Code -> `axil install --claude-code --bootstrap`
+     Codex -> --codex | Copilot CLI -> --copilot | Factory Droid -> --droid |
+     Google Antigravity -> --antigravity | Qwen Code -> --qwen | OpenCode -> --opencode |
+     Cursor -> --cursor | Windsurf -> --windsurf | Aider -> --aider
+   Unsure which you are? Run `axil install --all --bootstrap` (sets up every detected agent).
+
+4. Verify: run `axil doctor` (health check), `axil boot` (prints a fresh "resume here" block),
+   and `axil code-search "<a symbol you know is in this repo>" --top-k 3` (retrieval works).
+
+5. From now on, follow the memory rules the installer wrote into CLAUDE.md / AGENTS.md: run
+   `axil boot` at session start; `axil recall "<topic>"` or `axil code-search "<symbol>"`
+   before grepping; `axil store …` and `axil checkpoint …` after each unit of work.
+
+Report the install method you used and the verification output when done.
+```
+
+</details>
+
+**Prefer to run it yourself?** The same thing by hand, in two steps:
+
 **1. Install** — a prebuilt `axil` binary, no toolchain, no ~3-min compile. The archives **bundle a known-good ONNX runtime next to the binary**, so vector search and embeddings work out of the box (including on Windows):
 
 ```bash
