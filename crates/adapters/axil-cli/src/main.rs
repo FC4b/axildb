@@ -5946,19 +5946,32 @@ fn open_with_vector(path: &Path, dimensions: Option<usize>) -> Result<Axil> {
 /// Open a database with embedder loaded (for recall/search commands).
 #[cfg(feature = "embed")]
 fn open_with_embedder(path: &Path) -> Result<Axil> {
-    let mut builder = attach_detected_engines(Axil::open(path))?;
-    // Require an existing vector store — don't silently create one on read operations.
+    // Probe BEFORE attaching engines. `attach_detected_engines` opens the
+    // vector store's redb file and holds it for the life of the builder, so a
+    // probe placed after it collides with its own process's lock and reads a
+    // healthy store as missing. Probe errors (lock held by another process,
+    // corrupt metadata) propagate as-is instead of collapsing into "not found".
     if axil_vector::read_stored_dimensions(path)
-        .ok()
-        .flatten()
+        .context("failed to probe vector store")?
         .is_none()
     {
-        anyhow::bail!("no vector store found — run `axil init` first or use `axil store --embed` to create one");
+        // Require an existing vector store — don't silently create one on read operations.
+        anyhow::bail!("no vector store found — run `axil init <path>` first to create one");
     }
-    builder = builder
-        .with_embedder_model(resolve_embedding_model(path))
-        .context("failed to load embedder model")?;
-    builder.build().context("failed to open database")
+    // The store exists, so `attach_detected_engines` attaches the vector index
+    // + embedder itself (unless the operator disabled the engine in axil.toml).
+    // Attaching a second embedder here would re-open the redb file this
+    // process already holds and fail.
+    let db = attach_detected_engines(Axil::open(path))?
+        .build()
+        .context("failed to open database")?;
+    if !db.has_embedder() {
+        anyhow::bail!(
+            "the vector engine is disabled in axil.toml ([engines] disabled) — \
+             re-enable it to run embedding commands"
+        );
+    }
+    Ok(db)
 }
 
 /// Open with embedder if available, otherwise fall back to `open_with_all_detected`.
@@ -6086,21 +6099,12 @@ fn wire_llm(db: Axil, db_path: &Path) -> Result<Axil> {
     #[cfg(feature = "llm-http")]
     {
         if let Some(http_llm) = axil_core::HttpLlm::from_config(&config.llm) {
-            let mut builder = attach_detected_engines(Axil::open(db_path))?;
-            // Restore embedder so --embed still works alongside --llm.
-            #[cfg(feature = "embed")]
-            {
-                if axil_vector::read_stored_dimensions(db_path)
-                    .ok()
-                    .flatten()
-                    .is_some()
-                {
-                    builder = builder
-                        .with_embedder_model(axil_vector::models::EmbeddingModel::BgeSmall)
-                        .context("failed to load embedder model in wire_llm")?;
-                }
-            }
-            builder = builder
+            // `attach_detected_engines` already attaches the vector index +
+            // embedder (with the configured model) when the store exists, so
+            // --embed keeps working alongside --llm. Attaching a second
+            // embedder here would re-open the redb file this process already
+            // holds and fail.
+            let builder = attach_detected_engines(Axil::open(db_path))?
                 .with_llm(std::sync::Arc::new(http_llm))
                 .with_llm_config(config.llm);
             return builder.build().context("failed to open database with LLM");

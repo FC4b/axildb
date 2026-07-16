@@ -180,6 +180,26 @@ jobs:
             echo "::error::ONNX Runtime failed to initialize — the embedder is broken on ${{ matrix.os }}"
             exit 1
           fi
+          # Regression gate for the open_with_embedder ordering bug: the probe
+          # used to run AFTER attach_detected_engines had opened the vector
+          # store, so redb rejected the second open of the file this process
+          # already held and the swallowed error surfaced as a bogus
+          # "no vector store found" on every healthy database. `store --embed`
+          # and `search` are the exact hard-failing surfaces from the field
+          # report; plain `store`/`recall` above never caught it because they
+          # ride auto-embed and the best-effort fallback.
+          out3=$("$BIN" --db "$DB" store notes '{"summary":"explicit embed path check"}' --embed summary 2>&1)
+          echo "$out3"
+          out4=$("$BIN" --db "$DB" search "explicit embed path" 2>&1)
+          echo "$out4"
+          if printf '%s\n%s\n' "$out3" "$out4" | grep -qi "no vector store found"; then
+            echo "::error::open_with_embedder regression — healthy vector store reported as missing"
+            exit 1
+          fi
+          if ! printf '%s\n' "$out3" | grep -q '"id"'; then
+            echo "::error::store --embed did not return a record id"
+            exit 1
+          fi
 
   semver-checks:
     name: semver gate (public API vs crates.io)
