@@ -200,6 +200,26 @@ jobs:
             echo "::error::store --embed did not return a record id"
             exit 1
           fi
+          # Auto-create: `store --embed` on a database with no vector store
+          # must create one (an agent's first write is often a store --embed)
+          # rather than bail.
+          DB2="$RUNNER_TEMP/smoke-autocreate.axil"
+          "$BIN" init "$DB2"
+          rm "$DB2.vec"
+          out5=$("$BIN" --db "$DB2" store notes '{"summary":"first embed auto-creates the vector store"}' --embed summary 2>&1)
+          echo "$out5"
+          if printf '%s\n' "$out5" | grep -qi "no vector store found"; then
+            echo "::error::store --embed failed to auto-create a missing vector store"
+            exit 1
+          fi
+          if ! printf '%s\n' "$out5" | grep -q '"id"'; then
+            echo "::error::store --embed on a store-less database did not return a record id"
+            exit 1
+          fi
+          if [ ! -f "$DB2.vec" ]; then
+            echo "::error::store --embed did not create the .vec companion file"
+            exit 1
+          fi
 
   semver-checks:
     name: semver gate (public API vs crates.io)

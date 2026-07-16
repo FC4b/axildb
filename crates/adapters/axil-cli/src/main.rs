@@ -5956,7 +5956,10 @@ fn open_with_embedder(path: &Path) -> Result<Axil> {
         .is_none()
     {
         // Require an existing vector store — don't silently create one on read operations.
-        anyhow::bail!("no vector store found — run `axil init <path>` first to create one");
+        anyhow::bail!(
+            "no vector store found — run `axil init <path>` or store with \
+             `--embed <field>` to create one"
+        );
     }
     // The store exists, so `attach_detected_engines` attaches the vector index
     // + embedder itself (unless the operator disabled the engine in axil.toml).
@@ -5965,6 +5968,46 @@ fn open_with_embedder(path: &Path) -> Result<Axil> {
     let db = attach_detected_engines(Axil::open(path))?
         .build()
         .context("failed to open database")?;
+    if !db.has_embedder() {
+        anyhow::bail!(
+            "the vector engine is disabled in axil.toml ([engines] disabled) — \
+             re-enable it to run embedding commands"
+        );
+    }
+    Ok(db)
+}
+
+/// Like [`open_with_embedder`], but for write commands with an explicit
+/// `--embed`: a missing vector store is created (with the configured model's
+/// dimensions) instead of an error. Read commands keep the strict probe —
+/// they must never create storage as a side effect.
+#[cfg(feature = "embed")]
+fn open_with_embedder_creating(path: &Path) -> Result<Axil> {
+    let store_missing = axil_vector::read_stored_dimensions(path)
+        .context("failed to probe vector store")?
+        .is_none();
+    let mut builder = attach_detected_engines(Axil::open(path))?;
+    if store_missing {
+        // Honor `[engines] disabled` — creating storage the operator turned
+        // off would resurrect the engine behind their back. The has_embedder
+        // check below turns that case into a clear error instead.
+        let config = path
+            .parent()
+            .and_then(|dir| axil_core::load_config_from(dir).ok())
+            .unwrap_or_default();
+        if !config.is_engine_disabled("vec") {
+            // attach_detected_engines only attaches when the store exists;
+            // create it now so `--embed` works on a fresh database.
+            builder = builder
+                .with_embedder_model(resolve_embedding_model(path))
+                .context("failed to create vector store")?;
+            eprintln!(
+                "axil: created vector store at {}",
+                axil_vector::vector_db_path(path).display()
+            );
+        }
+    }
+    let db = builder.build().context("failed to open database")?;
     if !db.has_embedder() {
         anyhow::bail!(
             "the vector engine is disabled in axil.toml ([engines] disabled) — \
@@ -7965,7 +8008,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
 
             #[cfg(feature = "embed")]
             let db = if embed.is_some() {
-                open_with_embedder(&db_path)?
+                open_with_embedder_creating(&db_path)?
             } else {
                 open_with_all_detected(&db_path)?
             };
@@ -15470,7 +15513,7 @@ fn run_session(cmd: SessionCommand, db_path: &Path, out: &Output) -> Result<i32>
         } => {
             #[cfg(feature = "embed")]
             let db = if embed.is_some() {
-                open_with_embedder(db_path)?
+                open_with_embedder_creating(db_path)?
             } else {
                 open_with_all_detected(db_path)?
             };
