@@ -113,11 +113,38 @@ pub fn is_model_available(model: &EmbeddingModel) -> bool {
     dir.join("model.onnx").exists() && dir.join("tokenizer.json").exists()
 }
 
-/// Download a single file from a URL to a local path.
+/// Download a single file from a URL to a local path, retrying on failure.
+///
+/// HuggingFace intermittently 504s / rate-limits (especially shared CI
+/// runner IPs), so transient failures get a short exponential backoff
+/// before giving up — a one-shot request turns a blip into a hard error
+/// for whatever command triggered the auto-download.
+fn download_file(url: &str, dest: &Path) -> Result<(), String> {
+    const ATTEMPTS: u32 = 3;
+    let mut last_err = String::new();
+    for attempt in 1..=ATTEMPTS {
+        match download_file_once(url, dest) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                last_err = e;
+                if attempt < ATTEMPTS {
+                    let wait = 2u64.pow(attempt);
+                    eprintln!(
+                        "  [retry] attempt {attempt}/{ATTEMPTS} failed: {last_err} — retrying in {wait}s"
+                    );
+                    std::thread::sleep(std::time::Duration::from_secs(wait));
+                }
+            }
+        }
+    }
+    Err(format!("{last_err} (after {ATTEMPTS} attempts)"))
+}
+
+/// Single download attempt.
 ///
 /// Downloads to a `.tmp` file first, computes SHA256 checksum, then atomically
 /// renames on success. Stores the checksum in a `.sha256` sidecar file.
-fn download_file(url: &str, dest: &Path) -> Result<(), String> {
+fn download_file_once(url: &str, dest: &Path) -> Result<(), String> {
     let tmp = dest.with_extension("tmp");
 
     // Use ureq HTTP client instead of external curl binary.
