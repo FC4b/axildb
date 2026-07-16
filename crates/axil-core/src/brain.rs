@@ -2292,14 +2292,29 @@ pub struct NeedleEvalReport {
 
 /// Run a dataset-free, no-model needle-retention retrieval eval.
 ///
-/// Inserts a small synthetic corpus of distinct records — several carrying a
-/// distinctive "needle" token (a UUID, error code, or anomaly) scattered among
-/// distractors — then recalls each by a natural-language query and asserts the
+/// Inserts a synthetic corpus of records — each carrying a distinctive "needle"
+/// token (a UUID, error code, version tag, dotted config key, anomaly …) — among
+/// distractors, then recalls each by a natural-language query and asserts the
 /// planted record comes back within top-k AND its needle survived intact. This
 /// guards the recall path against silent regressions (a scoring/dedup/truncation
 /// change that stops a known record from surfacing) with zero external data and
 /// no embedding model: it runs over FTS, so the caller must pass a DB with an
 /// FTS index attached (otherwise recall returns nothing and every needle misses).
+///
+/// The corpus is deliberately *adversarial*, not lexically separable: for many
+/// cases it also plants near-collision sibling records that share most of the
+/// query's vocabulary and differ only in the discriminating token (a different
+/// error code, an adjacent version/build/port/region, a superseded column or
+/// flag), plus vocabulary-overlap distractors that share two or three content
+/// words with a query. A ranker that leaned on any single shared term — instead
+/// of the conjunction or the distinguishing token — would drop the target out
+/// of top-k, so passing this gate constrains the scoring path, not just the
+/// index plumbing. Cases also cover multi-token needles with separators
+/// (`AXR-2291-K`, `cfg`-style dotted keys, file:line, `sha256:` prefixes) whose
+/// tokenization must not mangle retention, and long-document needles buried
+/// mid-way in 200+ words of plausible prose to guard against truncation. A
+/// final programmatically-built case plants a needle just below the FTS
+/// per-field index cutoff to catch the boundary silently shrinking.
 pub fn run_needle_eval(db: &Axil) -> Result<NeedleEvalReport> {
     const TOP_K: usize = 5;
 
@@ -2314,8 +2329,119 @@ pub fn run_needle_eval(db: &Axil) -> Result<NeedleEvalReport> {
         "The nightly backup job verifies checksums before pruning old snapshots.",
         "Rewrote the CSV importer to stream rows instead of loading the whole file.",
     ];
-    for d in distractors {
+
+    // Contested decoys — near-collision siblings and vocabulary-overlap
+    // distractors crafted to compete with specific cases below. Each shares most
+    // of a case's query vocabulary but misses the discriminating token(s), so a
+    // correct ranker must rank on the conjunction / the distinguishing token, not
+    // on any single shared word. These are what make top-k genuinely contested
+    // rather than trivially separable.
+    // Each contested cluster gets four same-table siblings that share most of
+    // the case's query vocabulary but miss the discriminating token (a different
+    // error code, port, version, column, flag …). Four is chosen so a ranker
+    // that ignores the discriminator cannot sneak the target into a five-slot
+    // top-k by luck. No decoy carries the full query conjunction or the needle
+    // token — only the target does both.
+    let decoys = [
+        // ── sibling_error_code (needle E_AUTH_5521): adjacent error codes. ──
+        "Investigated an auth token refresh failure under error code E_AUTH_5522 that turned out to be a DNS blip.",
+        "An auth token refresh failure logged error code E_AUTH_5523 during a load-balancer reset.",
+        "The auth token refresh retry loop hit error code E_AUTH_5524 after a certificate rotation.",
+        "A stale auth token refresh surfaced error code E_AUTH_5520 when the retry budget was exhausted.",
+        "The auth token refresh failure runbook maps error code E_AUTH_5519 to a retry storm.",
+        // ── sibling_ticket_suffix (needle AXR-2291-K): adjacent ticket ids. ──
+        "Incident ticket AXR-2291-J tracked a database failover false alarm during scheduled maintenance.",
+        "Incident ticket AXR-2291-H covered a database failover rehearsal that completed cleanly.",
+        "Incident ticket AXR-2291-L logged a database failover drill during the maintenance window.",
+        "Incident ticket AXR-2291-M tracked a database failover postmortem review meeting.",
+        "Incident ticket AXR-2291-N reviewed the database failover alert routing rules.",
+        // ── sibling_version_digits (needle v2.3.10): adjacent SDK versions. ──
+        "Payment SDK version v2.3.1 only patched a rounding bug in the refunds path.",
+        "Payment SDK version v2.3.2 refreshed the webhook signature docs without an API change.",
+        "Payment SDK version v2.3.11 deprecated an unrelated retry helper and needs no migrate step.",
+        "Payment SDK version v2.3.9 kept the old webhook signature and requires no migration.",
+        "Payment SDK version v2.3.3 tweaked webhook signature retries and needs no migrate step.",
+        // ── sibling_listener_port (needle 8443): same gateway, other ports. ──
+        "The API gateway plain listener binds port 8080 for health checks and readiness probes.",
+        "The API gateway admin listener binds port 9443 for internal tooling only.",
+        "The API gateway metrics listener binds port 8444 for the scrape endpoint.",
+        "The API gateway legacy listener binds port 8442 without mutual auth.",
+        "The API gateway staging listener binds port 8445 while mutual auth is validated.",
+        // ── sibling_latency_threshold (needle 350ms): same alert, other values. ──
+        "The upload service p95 latency alert threshold stayed at 200ms after the review.",
+        "The upload service p99 latency alert threshold was briefly 300ms before we tuned it.",
+        "The upload service p90 latency alert threshold is 250ms and rarely pages oncall.",
+        "The download service p99 latency alert threshold sits at 400ms for the batch path.",
+        "The upload service p99 latency alert threshold draft proposed 375ms but was rejected.",
+        // ── sibling_schema_column (needle orders_v3.total_cents): sibling columns. ──
+        "The legacy report still reads orders_v2.total_cents and mis-rounds partial refunds.",
+        "The reporting column orders_v1.total_cents was dropped after the currency rounding migration.",
+        "An audit query reads orders_v2.total_amount for the currency rounding reconciliation.",
+        "The reporting column refunds_v2.total_cents tracks a different currency rounding path.",
+        "The reporting column orders_v3.total_amount ignores currency rounding for gift cards.",
+        // ── sibling_feature_flag (needle flag_search_v4_enabled): sibling flags. ──
+        "The old search canary used flag_search_v3_enabled and is now fully retired.",
+        "The search canary rollout briefly used flag_search_v2_enabled for one percent of traffic.",
+        "A separate rollout gate flag_search_beta_enabled controls the beta search index.",
+        "The retired flag flag_search_v5_disabled never shipped to production traffic.",
+        "A kill switch flag_search_v4_disabled exists for the search canary rollout.",
+        // ── trap_build_number (needle build-4210): adjacent builds. ──
+        "Artifact build-4201 failed the smoke tests and was held back from staging.",
+        "Artifact build-4209 passed the release pipeline but was never promoted to staging.",
+        "Artifact build-4211 is queued in the release pipeline behind the promotion freeze.",
+        "Artifact build-4212 was cut from the release pipeline after a flaky smoke test.",
+        "The release pipeline rejected artifact build-4200 during the promotion dry run.",
+        // ── trap_region_code (needle us-east-2): adjacent regions. ──
+        "The us-east-1 read replica lagged badly and was deliberately not promoted.",
+        "During the outage rehearsal we validated replica promotion in us-west-2.",
+        "The eu-central-1 replica was excluded from failover promotion during the outage.",
+        "A failover runbook covers replica promotion for ap-southeast-2 primaries.",
+        "The us-west-1 primary survived the outage without any replica promotion.",
+        // ── conjunction_shard_merge (needle merge_iops_ceiling): partial overlaps. ──
+        "Raised the search index shard count from 8 to 16 for the analytics tenant.",
+        "A merge in the deploy config caused disk pressure on the build box.",
+        "The io throttle policy for the backup job was relaxed overnight.",
+        "The shard merge scheduler for the search index runs during off-peak windows.",
+        "Disk io spikes during search index merges were traced to a disabled throttle.",
+        // ── conjunction_cache_evict (needle eviction_policy_v2). ──
+        "Redis cluster failover took twelve seconds during the memory upgrade.",
+        "The lru idea was floated for the CDN but we shipped ttl instead.",
+        "The redis cache eviction policy was documented but the memory pressure alert never fired.",
+        "An lru cache in front of the pricing service cut memory pressure noticeably.",
+        "Memory pressure on the redis cache prompted an eviction policy review last quarter.",
+        // ── conjunction_queue_backpressure (needle consumer_backpressure_on). ──
+        "The message queue broker was scaled out to three nodes.",
+        "Consumer group rebalancing caused a brief lag spike after deploy.",
+        "The message queue consumer lag alert paged twice during the backfill.",
+        "Backpressure on the ingest pipeline was tuned to smooth burst load.",
+        "The consumer lag alert for the message queue was retuned after the backfill.",
+        // ── conjunction_tls_cert (needle cert_rotator_nightly). ──
+        "tls handshake latency dropped after we enabled session resumption.",
+        "Certificate pinning was removed from the mobile app this quarter.",
+        "The certificate expiry dashboard tracks renewal dates across all tls endpoints.",
+        "Rotation of the signing keys was automated ahead of the audit.",
+        "The tls certificate expiry report flagged three services before renewal season.",
+        // ── conjunction_db_migration (needle dual_write_cutover). ──
+        "The database backup retention window was extended to thirty days.",
+        "Zero downtime deploys now use a blue-green swap.",
+        "The database migration rollback plan was rehearsed on a staging clone.",
+        "A dual write shim briefly synced the old and new tables during backfill.",
+        "The database migration checklist requires a rollback rehearsal before any cutover.",
+        // ── conjunction_ratelimit (needle token_bucket_v2). ──
+        "Burst traffic from the flash sale doubled steady-state QPS.",
+        "A token leak in the SDK auth header was patched.",
+        "The api rate limit uses a leaky bucket with a fixed refill during burst windows.",
+        "The token bucket sizing for the internal api was left at its default.",
+        "The api rate limit refill cadence was profiled under sustained burst windows.",
+    ];
+    // Generic distractors live in `notes`; the contested decoys go in the SAME
+    // table as the targets (`decisions`) so they exert real same-table ranking
+    // pressure and are eligible for same-table dedup against the targets.
+    for d in distractors.iter() {
         db.insert("notes", serde_json::json!({ "summary": d }))?;
+    }
+    for d in decoys.iter() {
+        db.insert("decisions", serde_json::json!({ "summary": d }))?;
     }
 
     // Needle cases: a natural-language query, the full text holding the needle,
@@ -2363,6 +2489,165 @@ pub fn run_needle_eval(db: &Axil) -> Result<NeedleEvalReport> {
             text: "Switched the passwordless login flow to email magic-link tokens with a 10 minute TTL.",
             needle: "magic-link",
         },
+        // ── Near-collision siblings: a decoy above shares most of the query
+        //    vocabulary; only the discriminating token pins the right record. ──
+        Case {
+            name: "sibling_error_code",
+            query: "auth token refresh failure error code E_AUTH_5521 retry",
+            text: "Fixed the auth token refresh failure under error code E_AUTH_5521 by widening the retry window.",
+            needle: "E_AUTH_5521",
+        },
+        Case {
+            name: "sibling_ticket_suffix",
+            query: "incident ticket AXR-2291-K database failover",
+            text: "Incident ticket AXR-2291-K tracked the database failover that dropped read replicas for eight minutes.",
+            needle: "AXR-2291-K",
+        },
+        Case {
+            name: "sibling_version_digits",
+            query: "payment sdk version v2.3.10 webhook signature migrate",
+            text: "Payment SDK version v2.3.10 dropped the legacy webhook signature; migrate before upgrading.",
+            needle: "v2.3.10",
+        },
+        Case {
+            name: "sibling_listener_port",
+            query: "api gateway tls listener port 8443 mutual auth",
+            text: "The API gateway TLS listener binds port 8443 for mutual-auth clients.",
+            needle: "8443",
+        },
+        Case {
+            name: "sibling_latency_threshold",
+            query: "upload service p99 latency alert threshold 350ms page oncall",
+            text: "Set the upload service p99 latency alert threshold to 350ms before we page on-call.",
+            needle: "350ms",
+        },
+        Case {
+            name: "sibling_schema_column",
+            query: "reporting column orders_v3.total_cents currency rounding",
+            text: "Reporting now reads orders_v3.total_cents to fix the currency rounding bug in the old column.",
+            needle: "orders_v3.total_cents",
+        },
+        Case {
+            name: "sibling_feature_flag",
+            query: "search canary rollout flag_search_v4_enabled traffic",
+            text: "Enabled the search canary rollout via flag_search_v4_enabled for five percent of traffic.",
+            needle: "flag_search_v4_enabled",
+        },
+        Case {
+            name: "trap_build_number",
+            query: "release pipeline artifact build-4210 promotion staging",
+            text: "Promoted artifact build-4210 to staging after the smoke tests passed.",
+            needle: "build-4210",
+        },
+        Case {
+            name: "trap_region_code",
+            query: "failover replica promotion us-east-2 outage primary",
+            text: "During the outage we promoted the read replica in us-east-2 to primary.",
+            needle: "us-east-2",
+        },
+        // ── Multi-token needles with separators. Each query carries the needle's
+        //    tokenizer-visible parts (e.g. `1.4.0-beta.2`, `9f2a1c`, `scoring.rs`,
+        //    `365`) so recall now depends on the needle round-tripping through the
+        //    FTS tokenizer, not on prose alone. The raw punctuated needle can't be
+        //    passed verbatim in a query: tantivy's QueryParser reads `:` as a field
+        //    separator and `>=`, `/`, leading `--`/`=` as syntax and rejects them
+        //    (mid-token `-` and `.` are fine — see the sibling/version cases). The
+        //    stored record keeps the full needle, so retention still checks the
+        //    verbatim token survived. ──
+        Case {
+            name: "sep_semver_range",
+            query: "pinned websocket client 1.4.0-beta.2 reconnect fix",
+            text: "Pinned the websocket client to the prerelease constraint >=1.4.0-beta.2 to get the reconnect fix.",
+            needle: ">=1.4.0-beta.2",
+        },
+        Case {
+            name: "sep_env_var",
+            query: "environment variable AXIL_RECALL_FUSION_ALPHA override recall fusion boot",
+            text: "Set the environment variable AXIL_RECALL_FUSION_ALPHA to override the default recall fusion alpha at boot.",
+            needle: "AXIL_RECALL_FUSION_ALPHA",
+        },
+        Case {
+            name: "sep_file_path",
+            query: "keyword score max bm25 scoring.rs 365 source location",
+            text: "The keyword score takes the max of bm25 and overlap at crates/axil-core/src/scoring.rs:365.",
+            needle: "crates/axil-core/src/scoring.rs:365",
+        },
+        Case {
+            name: "sep_hash_prefix",
+            query: "base image artifact digest sha256 9f2a1c supply chain provenance",
+            text: "Pinned the base image by artifact digest sha256:9f2a1c for supply-chain provenance.",
+            needle: "sha256:9f2a1c",
+        },
+        Case {
+            name: "sep_cli_flag",
+            query: "cognitive recall filter weak memories min-importance 0.35 command",
+            text: "Filter weak memories from cognitive recall with the flag --min-importance=0.35 on the query command.",
+            needle: "--min-importance=0.35",
+        },
+        // ── Long-document needles: the token sits mid-way in 200+ words of
+        //    plausible prose, guarding against snippet/truncation regressions. ──
+        Case {
+            name: "longdoc_uuid",
+            query: "api latency degradation connection pool exhaustion reindex",
+            text: "Incident review for the api latency degradation on the evening of the sale. The initial alert fired when p95 api latency crossed the threshold and stayed elevated for eleven minutes. The on-call engineer first suspected a downstream payment provider slowdown, but the provider dashboards were green. Deeper inspection of the application metrics showed the database connection pool was saturated: every worker was blocked waiting to acquire a connection, and the pool had no headroom because a background reindex job had quietly opened a large batch of long-lived transactions. The correlation id for the first blocked request was b41e77d0-52aa-4c93-8c17-33e0dd9910ff, which let us trace the exact code path through the order service and confirm the pool exhaustion hypothesis. We mitigated by pausing the reindex job and raising the pool ceiling, after which latency recovered within two minutes. Follow-up actions include isolating batch jobs onto a separate connection pool, adding a saturation alert on pool acquisition wait time, and documenting the reindex job's transaction footprint. The broader lesson is that connection pool exhaustion presents as a latency degradation that looks like a downstream dependency problem, so our runbook now lists pool saturation as the first thing to rule out during any api latency incident.",
+            needle: "b41e77d0-52aa-4c93-8c17-33e0dd9910ff",
+        },
+        Case {
+            name: "longdoc_error_code",
+            query: "offline sync conflict resolution mobile client merge",
+            text: "Design note on offline sync conflict resolution for the mobile client. When a device reconnects after working offline, it replays its queued mutations against the server's current state, and any mutation that targets a record modified in the meantime must be reconciled. The first version used last-write-wins, which silently discarded field edits and generated a stream of support tickets. The redesign introduces a three-way merge: the client sends the base version it started from, the server computes the delta between that base and the current record, and non-overlapping field changes are merged automatically. Overlapping edits to the same field surface error code E_SYNC_9006 to the client, which then prompts the user to choose a winner rather than guessing. To keep the merge deterministic the server sorts fields by name before applying deltas, and it stamps each merged record with the ids of both contributing revisions so the history stays auditable. Testing focused on the pathological cases: two devices editing the same order offline, a device replaying a mutation for a record another device had deleted, and clock skew between devices. The rollout was gated behind a per-tenant flag and monitored with a dashboard that tracks the rate of unresolved conflicts, so a spike is visible before it becomes a support problem.",
+            needle: "E_SYNC_9006",
+        },
+        Case {
+            name: "longdoc_symbol",
+            query: "billing settlement window nightly job timezone boundary",
+            text: "Architecture note on how the billing subsystem computes settlement windows. Each tenant has a billing timezone, and the settlement window is the local-day boundary in that timezone, not UTC midnight. The nightly job walks every active tenant, converts the tenant's local day boundary into a UTC range, and sums the ledger entries that fall inside it. The subtle part is daylight-saving transitions: on the spring-forward day a local day is twenty-three hours long and on the fall-back day it is twenty-five, so a naive UTC-offset calculation double-counts or drops an hour of transactions twice a year. To handle this the job calls recompute_settlement_window, which resolves the boundary using the tenant's IANA timezone database entry rather than a fixed offset, so the window is always exactly one local calendar day regardless of DST. The function is idempotent and keyed by tenant and local date, so a re-run after a failure produces the same window and never double-bills. We also backfill: when a tenant changes billing timezone, the job recomputes the affected windows for the current period only, leaving already-settled periods frozen for audit. Monitoring tracks the count of windows recomputed per night and alerts if it deviates from the tenant count, which would signal a skipped or duplicated tenant.",
+            needle: "recompute_settlement_window",
+        },
+        Case {
+            name: "longdoc_numeric",
+            query: "data migration dry run rows skipped validation report",
+            text: "Incident summary for the customer data migration dry run. The migration moves account records from the legacy store into the new schema, and we always execute a dry run first that validates every row without writing anything. The dry run reads each legacy account, maps it onto the new schema, runs the full validation suite, and records any row that would fail so we can fix the data before the real cutover. On this pass the validator flagged a batch of rows with malformed phone numbers and a smaller set with dates in an ambiguous format. In total the report listed 17,431 rows that would be skipped by the real migration, out of just over two million, which is well within the tolerance we set but still worth triaging. The largest single category was legacy accounts created before the phone-number format was standardized, and those we can normalize with a deterministic cleanup script. A second category involved records whose owning organization had already been deleted, which are safe to drop entirely. We updated the migration runbook to run the cleanup script before the dry run rather than after, so the skipped-row count reflects only genuinely un-migratable records, and we added the skipped count to the go/no-go checklist for the cutover.",
+            needle: "17,431",
+        },
+        // ── Vocabulary-overlap conjunctions: no single query term is unique to
+        //    the target; only the full conjunction ranks it above its overlaps. ──
+        Case {
+            name: "conjunction_shard_merge",
+            query: "search index shard merge disk io throttle",
+            text: "We throttle the search index shard merge so disk io stays bounded during peak hours; the tuning param is merge_iops_ceiling.",
+            needle: "merge_iops_ceiling",
+        },
+        Case {
+            name: "conjunction_cache_evict",
+            query: "redis cache eviction policy memory pressure lru",
+            text: "We set the redis cache eviction policy to lru after memory pressure caused random drops; the key is eviction_policy_v2.",
+            needle: "eviction_policy_v2",
+        },
+        Case {
+            name: "conjunction_queue_backpressure",
+            query: "message queue consumer backpressure lag alert",
+            text: "We added backpressure so the message queue consumer slows when lag crosses the alert threshold; the flag is consumer_backpressure_on.",
+            needle: "consumer_backpressure_on",
+        },
+        Case {
+            name: "conjunction_tls_cert",
+            query: "tls certificate rotation expiry renewal automation",
+            text: "We run tls certificate rotation via automation two weeks before expiry to cut manual renewal toil; the job is cert_rotator_nightly.",
+            needle: "cert_rotator_nightly",
+        },
+        Case {
+            name: "conjunction_db_migration",
+            query: "database migration rollback zero downtime dual write",
+            text: "We ran the database migration with dual write and a tested rollback path for a zero downtime cutover; the runbook is dual_write_cutover.",
+            needle: "dual_write_cutover",
+        },
+        Case {
+            name: "conjunction_ratelimit",
+            query: "api rate limit token bucket refill burst window",
+            text: "We rebuilt the api rate limit as a token bucket with a burst window and steady refill; the module is token_bucket_v2.",
+            needle: "token_bucket_v2",
+        },
     ];
 
     let mut target_ids = Vec::with_capacity(cases.len());
@@ -2372,8 +2657,13 @@ pub fn run_needle_eval(db: &Axil) -> Result<NeedleEvalReport> {
     }
 
     // Recall with the agent-facing config (dedup enabled) so the gate covers the
-    // shipped path. The corpus is lexically distinct, so dedup is a no-op today;
-    // a future regression that wrongly collapses a distinct record would fail.
+    // shipped path. Decoys now live in the SAME table (`decisions`) as the
+    // targets, so same-table SimHash dedup could in principle collapse a target
+    // with a near-collision sibling — but siblings differ from their target by a
+    // whole clause (a different error code, port, version, column, flag …), so
+    // they stay outside SimHash's tight hamming threshold and are never merged.
+    // Were one ever collapsed, the query pins the target as the higher-scored
+    // survivor anyway.
     let cfg = crate::scoring::RecallConfig {
         dedup: crate::scoring::DedupConfig {
             enabled: true,
@@ -2407,7 +2697,52 @@ pub fn run_needle_eval(db: &Axil) -> Result<NeedleEvalReport> {
         });
     }
 
-    let total = cases.len();
+    // Boundary guard: the FTS engine truncates each indexed field at
+    // MAX_INDEXED_TEXT_LEN (65_536 bytes in axil-fts). The needle is the LAST
+    // token of the document, ending within ~200 bytes of that cutoff, and the
+    // query is the needle token ALONE — recall succeeds only if the needle
+    // itself survived indexing. If the boundary ever silently shrank, the
+    // needle would fall outside the indexed prefix and this case would miss
+    // (filler terms can't rescue it: they aren't in the query). Built
+    // programmatically (repeating filler) so the source stays small instead of
+    // pasting ~64 KB of literal prose.
+    {
+        let boundary_needle = "boundary_needle_a7f3c9e1";
+        let filler = "the settlement pipeline reconciles ledger entries across tenant shards during the nightly batch window. ";
+        let mut text = String::with_capacity(66_000);
+        // Fill to ~65_350 so the trailing needle (24 bytes + separator) still
+        // lands under the 65_536-byte cutoff even after the loop overshoots by
+        // up to one filler sentence (~105 bytes).
+        while text.len() < 65_350 {
+            text.push_str(filler);
+        }
+        text.push_str(boundary_needle);
+        debug_assert!(text.len() < 65_536, "boundary doc must not be truncated");
+        let rec = db.insert("decisions", serde_json::json!({ "summary": text }))?;
+        let query = boundary_needle.to_string();
+        let hits = db.recall(&query, TOP_K, Some(cfg.clone()))?;
+        let rank = hits.iter().position(|h| h.record.id == rec.id);
+        let was_recalled = rank.is_some();
+        let was_retained = rank
+            .map(|r| crate::util::record_text(&hits[r].record).contains(boundary_needle))
+            .unwrap_or(false);
+        if was_recalled {
+            recalled += 1;
+        }
+        if was_retained {
+            retained += 1;
+        }
+        results.push(NeedleResult {
+            name: "longdoc_boundary".to_string(),
+            query,
+            needle: boundary_needle.to_string(),
+            recalled: was_recalled,
+            retained: was_retained,
+            rank,
+        });
+    }
+
+    let total = results.len();
     Ok(NeedleEvalReport {
         total,
         recalled,
@@ -2618,7 +2953,10 @@ mod tests {
         for i in 0..5 {
             let raw_start = std::time::Instant::now();
             let _ = db
-                .insert("context", json!({"summary": format!("baseline insert {i}")}))
+                .insert(
+                    "context",
+                    json!({"summary": format!("baseline insert {i}")}),
+                )
                 .unwrap();
             let raw_us = raw_start.elapsed().as_micros() as u64;
 

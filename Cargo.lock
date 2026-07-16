@@ -444,6 +444,7 @@ dependencies = [
  "axil-indexer",
  "axil-mcp",
  "axil-memory",
+ "axil-ql",
  "axil-timeseries",
  "axil-vector",
  "chrono",

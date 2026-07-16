@@ -69,6 +69,11 @@ jobs:
       # them here so a dialect field-mapping regression fails the per-PR gate.
       - name: cargo test (axildb model-free — hook dialects, fixtures, wizard)
         run: cargo test -p axildb --no-default-features --features core
+      # Model-free exact-output cross-surface oracle (API vs AxilQL vs MCP
+      # parity). The rest of axil-tests stays out of the per-PR gate — some of
+      # those tests need ONNX models.
+      - name: cargo test (axil-tests behavior oracle)
+        run: cargo test -p axil-tests --test behavior_oracle
 
   recall-gate:
     name: recall-quality gate (needle retention)
