@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "axil-client"
+version = "0.1.0"
+description = "Thin, pure-stdlib Python client for the Axil CLI (subprocess-based, no PyO3)."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "PolyForm-Noncommercial-1.0.0" }
+authors = [{ name = "Axil" }]
+keywords = ["axil", "memory", "agent", "vector", "graph", "cli"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Intended Audience :: Developers",
+    "Topic :: Database",
+]
+dependencies = []  # pure standard library
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[project.urls]
+Homepage = "https://github.com/FC4b/axildb"
+Repository = "https://github.com/FC4b/axildb"
+
+[tool.setuptools]
+packages = ["axil_client"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
