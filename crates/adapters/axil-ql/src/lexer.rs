@@ -37,6 +37,8 @@ pub enum TokenKind {
     Traverse,
     Get,
     Count,
+    Agg,
+    Group,
     Where,
     And,
     From,
@@ -69,6 +71,11 @@ pub enum TokenKind {
     Gte, // >=
     Lte, // <=
 
+    // Punctuation (aggregate specs: avg(field), a, b)
+    LParen, // (
+    RParen, // )
+    Comma,  // ,
+
     // Identifiers (table names, field names, record IDs, boost types)
     Ident(String),
 
@@ -87,6 +94,8 @@ impl fmt::Display for TokenKind {
             TokenKind::Traverse => write!(f, "TRAVERSE"),
             TokenKind::Get => write!(f, "GET"),
             TokenKind::Count => write!(f, "COUNT"),
+            TokenKind::Agg => write!(f, "AGG"),
+            TokenKind::Group => write!(f, "GROUP"),
             TokenKind::Where => write!(f, "WHERE"),
             TokenKind::And => write!(f, "AND"),
             TokenKind::From => write!(f, "FROM"),
@@ -114,6 +123,9 @@ impl fmt::Display for TokenKind {
             TokenKind::Lt => write!(f, "<"),
             TokenKind::Gte => write!(f, ">="),
             TokenKind::Lte => write!(f, "<="),
+            TokenKind::LParen => write!(f, "("),
+            TokenKind::RParen => write!(f, ")"),
+            TokenKind::Comma => write!(f, ","),
             TokenKind::Ident(s) => write!(f, "{s}"),
             TokenKind::TraversalPath(s) => write!(f, "{s}"),
             TokenKind::Eof => write!(f, "end of input"),
@@ -361,6 +373,36 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, LexError> {
                 col += 1;
                 continue;
             }
+            b'(' => {
+                tokens.push(Token {
+                    kind: TokenKind::LParen,
+                    span: start_span,
+                    text: "(".to_string(),
+                });
+                pos += 1;
+                col += 1;
+                continue;
+            }
+            b')' => {
+                tokens.push(Token {
+                    kind: TokenKind::RParen,
+                    span: start_span,
+                    text: ")".to_string(),
+                });
+                pos += 1;
+                col += 1;
+                continue;
+            }
+            b',' => {
+                tokens.push(Token {
+                    kind: TokenKind::Comma,
+                    span: start_span,
+                    text: ",".to_string(),
+                });
+                pos += 1;
+                col += 1;
+                continue;
+            }
             _ => {}
         }
 
@@ -386,6 +428,10 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, LexError> {
                 TokenKind::Get
             } else if text.eq_ignore_ascii_case("COUNT") {
                 TokenKind::Count
+            } else if text.eq_ignore_ascii_case("AGG") {
+                TokenKind::Agg
+            } else if text.eq_ignore_ascii_case("GROUP") {
+                TokenKind::Group
             } else if text.eq_ignore_ascii_case("WHERE") {
                 TokenKind::Where
             } else if text.eq_ignore_ascii_case("AND") {

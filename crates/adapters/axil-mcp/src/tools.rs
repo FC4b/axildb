@@ -222,6 +222,39 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
                 "required": ["table"]
             }),
         },
+        #[cfg(feature = "ql")]
+        ToolDefinition {
+            name: "aggregate".into(),
+            description: "Aggregate a table: count / avg / min / max / sum, optionally grouped. `metrics` is an array of specs — \"count\", \"avg(field)\", \"min(field)\", \"max(field)\", \"sum(field)\". `where` uses the same syntax as the `query` tool. Non-numeric or missing values are skipped for avg/min/max/sum and reported per group as `skipped`. Returns {table, group_by, groups:[{group, count, ...}], total_rows}.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "table": {
+                        "type": "string",
+                        "description": "Table name"
+                    },
+                    "metrics": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Metric specs: count, avg(field), min(field), max(field), sum(field)"
+                    },
+                    "group_by": {
+                        "type": "string",
+                        "description": "Group results by this field's value (missing → null group)"
+                    },
+                    "where": {
+                        "type": "string",
+                        "description": "Filter expression, e.g. \"oos_sharpe > 0.3 AND family = 'meanrev'\""
+                    },
+                    "include_archived": {
+                        "type": "boolean",
+                        "description": "Include archived records (excluded by default)",
+                        "default": false
+                    }
+                },
+                "required": ["table"]
+            }),
+        },
 
         // ─── Intent-native writes (Track B) ─────────────────────────
         ToolDefinition {
@@ -384,6 +417,8 @@ pub fn dispatch(db: &Axil, tool_name: &str, args: &Value) -> ToolCallResult {
         "get" => handle_get(db, args),
         "list" => handle_list(db, args),
         "query" => handle_query(db, args),
+        #[cfg(feature = "ql")]
+        "aggregate" => handle_aggregate(db, args),
         "delete" => handle_delete(db, args),
         "remember_decision" => handle_remember_decision(db, args),
         "remember_error" => handle_remember_error(db, args),
@@ -956,6 +991,87 @@ fn handle_query(db: &Axil, args: &Value) -> ToolCallResult {
             ToolCallResult::json(&json!(records))
         }
         Err(e) => ToolCallResult::error(format!("query failed: {e}")),
+    }
+}
+
+#[cfg(feature = "ql")]
+fn handle_aggregate(db: &Axil, args: &Value) -> ToolCallResult {
+    let table = match args.get("table").and_then(|v| v.as_str()) {
+        Some(t) => t,
+        None => return ToolCallResult::error("missing required parameter: table"),
+    };
+
+    let mut metrics: Vec<axil_ql::AggMetric> = Vec::new();
+    if let Some(arr) = args.get("metrics").and_then(|v| v.as_array()) {
+        for m in arr {
+            let Some(spec) = m.as_str() else {
+                return ToolCallResult::error("each metric must be a string");
+            };
+            match parse_metric_spec(spec) {
+                Ok(metric) => metrics.push(metric),
+                Err(e) => return ToolCallResult::error(format!("invalid metric '{spec}': {e}")),
+            }
+        }
+    }
+
+    let group_by = args.get("group_by").and_then(|v| v.as_str());
+    let include_archived = args
+        .get("include_archived")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    let mut wheres: Vec<axil_core::query::WhereClause> = Vec::new();
+    if let Some(where_str) = args.get("where").and_then(|v| v.as_str()) {
+        match parse_where_expr(where_str) {
+            Ok(conds) => {
+                for (field, op, value) in conds {
+                    wheres.push(axil_core::query::WhereClause { field, op, value });
+                }
+            }
+            Err(e) => return ToolCallResult::error(format!("invalid where: {e}")),
+        }
+    }
+
+    let req = axil_ql::AggRequest {
+        table,
+        metrics: &metrics,
+        group_by,
+        where_clauses: &wheres,
+        include_archived,
+    };
+    match axil_ql::aggregate(db, &req) {
+        Ok(value) => ToolCallResult::json(&value),
+        Err(e) => ToolCallResult::error(format!("aggregate failed: {e}")),
+    }
+}
+
+/// Parse a metric spec string (`count` | `avg(field)` | `min(field)` |
+/// `max(field)` | `sum(field)`).
+#[cfg(feature = "ql")]
+fn parse_metric_spec(s: &str) -> Result<axil_ql::AggMetric, String> {
+    let s = s.trim();
+    if s.eq_ignore_ascii_case("count") || s.eq_ignore_ascii_case("count()") {
+        return Ok(axil_ql::AggMetric::Count);
+    }
+    let open = s
+        .find('(')
+        .ok_or_else(|| "expected `count` or `func(field)`".to_string())?;
+    if !s.ends_with(')') {
+        return Err("expected a closing ')'".to_string());
+    }
+    let func = s[..open].trim().to_ascii_lowercase();
+    let field = s[open + 1..s.len() - 1].trim().to_string();
+    if field.is_empty() {
+        return Err("field name must not be empty".to_string());
+    }
+    match func.as_str() {
+        "avg" => Ok(axil_ql::AggMetric::Avg(field)),
+        "min" => Ok(axil_ql::AggMetric::Min(field)),
+        "max" => Ok(axil_ql::AggMetric::Max(field)),
+        "sum" => Ok(axil_ql::AggMetric::Sum(field)),
+        other => Err(format!(
+            "unknown function '{other}' (valid: count, avg, min, max, sum)"
+        )),
     }
 }
 
@@ -1653,6 +1769,59 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db = Axil::open(dir.path().join("q3.axil")).build().unwrap();
         let result = dispatch(&db, "query", &json!({"table":"t","where":"nonsense"}));
+        assert_eq!(result.is_error, Some(true));
+    }
+
+    #[cfg(feature = "ql")]
+    #[test]
+    fn aggregate_tool_is_advertised() {
+        let names: Vec<String> = tool_definitions().into_iter().map(|d| d.name).collect();
+        assert!(names.iter().any(|n| n == "aggregate"));
+    }
+
+    #[cfg(feature = "ql")]
+    #[test]
+    fn aggregate_tool_histogram_and_avg() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Axil::open(dir.path().join("agg.axil")).build().unwrap();
+        db.insert("autopsies", json!({"kill_reason":"drawdown","decay":2.0}))
+            .unwrap();
+        db.insert("autopsies", json!({"kill_reason":"drawdown","decay":4.0}))
+            .unwrap();
+        db.insert("autopsies", json!({"kill_reason":"fees","decay":9.0}))
+            .unwrap();
+
+        let result = dispatch(
+            &db,
+            "aggregate",
+            &json!({
+                "table": "autopsies",
+                "metrics": ["count", "avg(decay)"],
+                "group_by": "kill_reason"
+            }),
+        );
+        assert!(result.is_error.is_none(), "aggregate errored: {result:?}");
+        let body = parse_json_payload(&result);
+        assert_eq!(body["total_rows"], 3);
+        let groups = body["groups"].as_array().unwrap();
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0]["group"], "drawdown");
+        assert_eq!(groups[0]["count"], 2);
+        assert_eq!(groups[0]["avg_decay"], 3.0);
+        assert_eq!(groups[1]["group"], "fees");
+        assert_eq!(groups[1]["count"], 1);
+    }
+
+    #[cfg(feature = "ql")]
+    #[test]
+    fn aggregate_tool_invalid_metric_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Axil::open(dir.path().join("agg2.axil")).build().unwrap();
+        let result = dispatch(
+            &db,
+            "aggregate",
+            &json!({"table":"t","metrics":["median(x)"]}),
+        );
         assert_eq!(result.is_error, Some(true));
     }
 

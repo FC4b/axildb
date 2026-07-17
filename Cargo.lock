@@ -356,6 +356,7 @@ dependencies = [
  "axil-fts",
  "axil-graph",
  "axil-indexer",
+ "axil-ql",
  "axil-timeseries",
  "axil-vector",
  "axil-workspace",

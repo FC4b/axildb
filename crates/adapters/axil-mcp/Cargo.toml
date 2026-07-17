@@ -19,6 +19,9 @@ axil-workspace.workspace = true
 # MCP server binary without pulling them in. Matches axil-cli's pattern.
 axil-checkpoint = { workspace = true, optional = true }
 axil-cache = { workspace = true, optional = true }
+# AxilQL adapter — supplies the shared aggregation executor behind the
+# `aggregate` tool. Optional so a trimmed MCP build can drop it.
+axil-ql = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "io-std"] }
@@ -37,12 +40,14 @@ axil-timeseries = { workspace = true, optional = true }
 tempfile = { workspace = true }
 
 [features]
-default = ["vector", "graph", "fts", "timeseries", "checkpoint", "cache"]
+default = ["vector", "graph", "fts", "timeseries", "checkpoint", "cache", "ql"]
 vector = ["dep:axil-vector"]
 graph = ["dep:axil-graph"]
 fts = ["dep:axil-fts"]
 timeseries = ["dep:axil-timeseries"]
 checkpoint = ["dep:axil-checkpoint", "axil-bundle/checkpoint"]
+# AxilQL-backed `aggregate` tool. Default-on; drop it for a trimmed server.
+ql = ["dep:axil-ql"]
 # Semantic answer cache tools (`cache_get` / `cache_put`). Route through the
 # generic Extension MCP dispatch, so no hardcoded handler in this crate.
 cache = ["dep:axil-cache", "axil-bundle/cache"]

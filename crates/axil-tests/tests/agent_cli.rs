@@ -662,6 +662,105 @@ fn test_query_where_contains() {
     assert_eq!(results[0]["data"]["summary"], "auth timeout bug");
 }
 
+// ─── Aggregations (agg) ─────────────────────────────────────────────────────
+
+#[test]
+fn test_agg_count_group_by_kill_reason() {
+    let (_dir, db) = temp_db();
+    let db_str = db.to_str().unwrap();
+
+    run_axil(&["init", db_str]);
+    run_axil(&[
+        "--db", db_str, "store", "autopsies", r#"{"kill_reason":"drawdown"}"#,
+    ]);
+    run_axil(&[
+        "--db", db_str, "store", "autopsies", r#"{"kill_reason":"drawdown"}"#,
+    ]);
+    run_axil(&[
+        "--db", db_str, "store", "autopsies", r#"{"kill_reason":"fees"}"#,
+    ]);
+
+    let (stdout, _, code) = run_axil(&[
+        "--db",
+        db_str,
+        "agg",
+        "autopsies",
+        "--count",
+        "--group-by",
+        "kill_reason",
+    ]);
+    assert_eq!(code, 0, "agg should succeed; stderr may explain");
+    let env = parse_json(&stdout);
+    assert_eq!(env["table"], "autopsies");
+    assert_eq!(env["group_by"], "kill_reason");
+    assert_eq!(env["total_rows"], 3);
+    let groups = env["groups"].as_array().unwrap();
+    // Sorted by group key: "drawdown" (2) before "fees" (1).
+    assert_eq!(groups.len(), 2);
+    assert_eq!(groups[0]["group"], "drawdown");
+    assert_eq!(groups[0]["count"], 2);
+    assert_eq!(groups[1]["group"], "fees");
+    assert_eq!(groups[1]["count"], 1);
+}
+
+#[test]
+fn test_agg_avg_decay_per_family() {
+    let (_dir, db) = temp_db();
+    let db_str = db.to_str().unwrap();
+
+    run_axil(&["init", db_str]);
+    run_axil(&[
+        "--db", db_str, "store", "autopsies", r#"{"family":"meanrev","decay":2.0}"#,
+    ]);
+    run_axil(&[
+        "--db", db_str, "store", "autopsies", r#"{"family":"meanrev","decay":4.0}"#,
+    ]);
+    run_axil(&[
+        "--db", db_str, "store", "autopsies", r#"{"family":"momentum","decay":9.0}"#,
+    ]);
+
+    let (stdout, _, code) = run_axil(&[
+        "--db", db_str, "agg", "autopsies", "--avg", "decay", "--group-by", "family",
+    ]);
+    assert_eq!(code, 0);
+    let env = parse_json(&stdout);
+    let groups = env["groups"].as_array().unwrap();
+    assert_eq!(groups.len(), 2);
+    assert_eq!(groups[0]["group"], "meanrev");
+    assert_eq!(groups[0]["avg_decay"], 3.0);
+    assert_eq!(groups[0]["skipped"], 0);
+    assert_eq!(groups[1]["group"], "momentum");
+    assert_eq!(groups[1]["avg_decay"], 9.0);
+}
+
+#[test]
+fn test_agg_include_archived_changes_count() {
+    let (_dir, db) = temp_db();
+    let db_str = db.to_str().unwrap();
+
+    run_axil(&["init", db_str]);
+    run_axil(&["--db", db_str, "store", "autopsies", r#"{"family":"meanrev"}"#]);
+    run_axil(&[
+        "--db",
+        db_str,
+        "store",
+        "autopsies",
+        r#"{"family":"meanrev","_archived":true}"#,
+    ]);
+
+    // Default excludes archived.
+    let (stdout, _, _) = run_axil(&["--db", db_str, "agg", "autopsies", "--count"]);
+    let env = parse_json(&stdout);
+    assert_eq!(env["total_rows"], 1);
+
+    // --include-archived counts the discarded trial too (deflated-Sharpe math).
+    let (stdout, _, _) = run_axil(&[
+        "--db", db_str, "agg", "autopsies", "--count", "--include-archived",
+    ]);
+    let env = parse_json(&stdout);
+    assert_eq!(env["total_rows"], 2);
+}
+
 // ─── Link + Neighbors + Traverse (graph) ───────────────────────────────────
 
 #[test]

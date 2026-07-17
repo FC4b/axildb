@@ -1,8 +1,8 @@
 //! AxilQL — A minimal, verb-first query language for Axil.
 //!
 //! AxilQL is a lightweight DSL that compiles to the existing `QueryBuilder` API.
-//! It supports 15 keywords: `RECALL`, `FIND`, `TRAVERSE`, `GET`, `COUNT`,
-//! `WHERE`, `AND`, `FROM`, `TOP`, `LIMIT`, `OFFSET`, `ORDER BY`, `BOOST`,
+//! Keywords: `RECALL`, `FIND`, `TRAVERSE`, `GET`, `COUNT`, `AGG`, `WHERE`,
+//! `AND`, `FROM`, `TOP`, `LIMIT`, `OFFSET`, `ORDER BY`, `GROUP BY`, `BOOST`,
 //! `PROFILE`, and `IN`.
 //!
 //! # Example
@@ -20,12 +20,14 @@
 //! Input string → Lexer (tokenize) → Parser (AST) → Compiler (QueryBuilder) → Results
 //! ```
 
+pub mod aggregate;
 pub mod ast;
 pub mod compiler;
 pub mod lexer;
 pub mod parser;
 
 // Re-export primary API.
+pub use aggregate::{aggregate, AggError, AggMetric, AggRequest};
 pub use ast::Query;
 pub use compiler::{execute, CompileError, QueryResult};
 pub use parser::{parse, ParseError};
@@ -150,8 +152,8 @@ pub fn syntax_metadata() -> &'static SyntaxMetadata {
     use std::sync::OnceLock;
     static META: OnceLock<SyntaxMetadata> = OnceLock::new();
     META.get_or_init(|| SyntaxMetadata {
-        commands: vec!["RECALL", "FIND", "TRAVERSE", "GET", "COUNT"],
-        clauses: vec!["WHERE", "AND", "FROM", "TOP", "LIMIT", "OFFSET"],
+        commands: vec!["RECALL", "FIND", "TRAVERSE", "GET", "COUNT", "AGG"],
+        clauses: vec!["WHERE", "AND", "FROM", "TOP", "LIMIT", "OFFSET", "GROUP", "BY"],
         modifiers: vec!["BOOST", "PROFILE", "EXPLAIN", "ORDER", "BY"],
         directions: vec!["ASC", "DESC", "IN"],
         literals: vec!["true", "false", "null"],
@@ -278,7 +280,8 @@ mod tests {
         assert!(meta.commands.contains(&"TRAVERSE"));
         assert!(meta.commands.contains(&"GET"));
         assert!(meta.commands.contains(&"COUNT"));
-        assert_eq!(meta.commands.len(), 5);
+        assert!(meta.commands.contains(&"AGG"));
+        assert_eq!(meta.commands.len(), 6);
     }
 
     #[test]

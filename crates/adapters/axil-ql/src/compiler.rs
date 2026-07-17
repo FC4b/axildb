@@ -70,6 +70,43 @@ fn sort_direction(dir: &SortDir) -> SortDirection {
     }
 }
 
+/// Convert AST WHERE conditions to core [`WhereClause`]s.
+fn conditions_to_where(conds: &[Condition]) -> Vec<axil_core::query::WhereClause> {
+    conds
+        .iter()
+        .map(|c| axil_core::query::WhereClause {
+            field: c.field.clone(),
+            op: compare_op_to_core(&c.op),
+            value: condition_to_json(&c.value),
+        })
+        .collect()
+}
+
+/// Count the records in `table` matching the given predicates.
+fn filtered_count(
+    db: &Axil,
+    table: &str,
+    wheres: &[axil_core::query::WhereClause],
+) -> Result<usize, CompileError> {
+    let mut qb = db.query().table(table);
+    for wc in wheres {
+        qb = qb.where_field(&wc.field, wc.op.clone(), wc.value.clone());
+    }
+    Ok(qb.exec()?.len())
+}
+
+/// Convert an AST [`AggSpec`] to the executor's [`aggregate::AggMetric`].
+fn agg_spec_to_metric(s: &AggSpec) -> crate::aggregate::AggMetric {
+    use crate::aggregate::AggMetric;
+    match s {
+        AggSpec::Count => AggMetric::Count,
+        AggSpec::Avg(f) => AggMetric::Avg(f.clone()),
+        AggSpec::Min(f) => AggMetric::Min(f.clone()),
+        AggSpec::Max(f) => AggMetric::Max(f.clone()),
+        AggSpec::Sum(f) => AggMetric::Sum(f.clone()),
+    }
+}
+
 /// Convert a Record to JSON output format.
 fn record_to_json(r: &Record) -> serde_json::Value {
     let mut json = serde_json::json!({
@@ -151,21 +188,66 @@ pub fn execute(db: &Axil, query: &Query) -> Result<QueryResult, CompileError> {
             }
         }
 
-        Query::Count { table } => {
-            let count = match table {
-                Some(t) => db.count(t)?,
-                None => {
-                    let tables = db.tables()?;
-                    let mut total = 0usize;
-                    for t in &tables {
-                        total += db.count(t)?;
+        Query::Count {
+            table,
+            where_conditions,
+        } => {
+            let count = if where_conditions.is_empty() {
+                match table {
+                    Some(t) => db.count(t)?,
+                    None => {
+                        let tables = db.tables()?;
+                        let mut total = 0usize;
+                        for t in &tables {
+                            total += db.count(t)?;
+                        }
+                        total
                     }
-                    total
+                }
+            } else {
+                let wheres = conditions_to_where(where_conditions);
+                match table {
+                    Some(t) => filtered_count(db, t, &wheres)?,
+                    None => {
+                        let tables = db.tables()?;
+                        let mut total = 0usize;
+                        for t in &tables {
+                            total += filtered_count(db, t, &wheres)?;
+                        }
+                        total
+                    }
                 }
             };
             Ok(QueryResult {
                 count,
                 results: vec![serde_json::json!({"count": count})],
+                profile: None,
+                plan: None,
+                elapsed_ms: start.elapsed().as_secs_f64() * 1000.0,
+            })
+        }
+
+        Query::Agg {
+            table,
+            metrics,
+            where_conditions,
+            group_by,
+        } => {
+            let wheres = conditions_to_where(where_conditions);
+            let agg_metrics: Vec<crate::aggregate::AggMetric> =
+                metrics.iter().map(agg_spec_to_metric).collect();
+            let req = crate::aggregate::AggRequest {
+                table,
+                metrics: &agg_metrics,
+                group_by: group_by.as_deref(),
+                where_clauses: &wheres,
+                include_archived: false,
+            };
+            let value = crate::aggregate::aggregate(db, &req)
+                .map_err(|e| CompileError { message: e.message })?;
+            Ok(QueryResult {
+                results: vec![value],
+                count: 1,
                 profile: None,
                 plan: None,
                 elapsed_ms: start.elapsed().as_secs_f64() * 1000.0,
@@ -401,13 +483,23 @@ fn execute_explain(db: &Axil, query: &Query) -> Result<QueryResult, CompileError
             }],
             estimated_cost: axil_core::EstimatedCost::Low,
         },
-        Query::Count { table } => axil_core::QueryPlan {
+        Query::Count { table, .. } => axil_core::QueryPlan {
             plan: vec![axil_core::PlanStep {
                 step: 1,
                 step_type: "count".to_string(),
                 params: serde_json::json!({"table": table}),
             }],
             estimated_cost: axil_core::EstimatedCost::Low,
+        },
+        Query::Agg {
+            table, group_by, ..
+        } => axil_core::QueryPlan {
+            plan: vec![axil_core::PlanStep {
+                step: 1,
+                step_type: "aggregate".to_string(),
+                params: serde_json::json!({"table": table, "group_by": group_by}),
+            }],
+            estimated_cost: axil_core::EstimatedCost::Medium,
         },
         Query::Recall {
             text,
@@ -566,5 +658,50 @@ mod tests {
         let query = parser::parse("COUNT FROM logs").unwrap();
         let result = execute(&db, &query).unwrap();
         assert_eq!(result.count, 2);
+    }
+
+    #[test]
+    fn compile_count_with_where() {
+        let (_dir, db) = setup_db();
+        db.insert("logs", serde_json::json!({"level": "error"})).unwrap();
+        db.insert("logs", serde_json::json!({"level": "error"})).unwrap();
+        db.insert("logs", serde_json::json!({"level": "info"})).unwrap();
+
+        let query = parser::parse(r#"COUNT FROM logs WHERE level = "error""#).unwrap();
+        let result = execute(&db, &query).unwrap();
+        assert_eq!(result.count, 2);
+    }
+
+    #[test]
+    fn compile_agg_group_by() {
+        let (_dir, db) = setup_db();
+        db.insert("t", serde_json::json!({"family": "meanrev", "decay": 2.0})).unwrap();
+        db.insert("t", serde_json::json!({"family": "meanrev", "decay": 4.0})).unwrap();
+        db.insert("t", serde_json::json!({"family": "momentum", "decay": 9.0})).unwrap();
+
+        let query = parser::parse("AGG count, avg(decay) FROM t GROUP BY family").unwrap();
+        let result = execute(&db, &query).unwrap();
+        // The Agg result is a single envelope value.
+        assert_eq!(result.count, 1);
+        let env = &result.results[0];
+        assert_eq!(env["table"], "t");
+        assert_eq!(env["group_by"], "family");
+        assert_eq!(env["total_rows"], 3);
+        let groups = env["groups"].as_array().unwrap();
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0]["group"], "meanrev");
+        assert_eq!(groups[0]["count"], 2);
+        assert_eq!(groups[0]["avg_decay"], 3.0);
+    }
+
+    #[test]
+    fn compile_agg_with_where() {
+        let (_dir, db) = setup_db();
+        db.insert("t", serde_json::json!({"family": "meanrev", "sharpe": 0.5})).unwrap();
+        db.insert("t", serde_json::json!({"family": "meanrev", "sharpe": 0.1})).unwrap();
+
+        let query = parser::parse("AGG count FROM t WHERE sharpe > 0.3").unwrap();
+        let result = execute(&db, &query).unwrap();
+        assert_eq!(result.results[0]["total_rows"], 1);
     }
 }

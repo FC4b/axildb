@@ -128,6 +128,7 @@ an error, or a preference: they auto-embed, auto-supersede, and dedupe.
 | `get` | `id` string (req) | Fetch a single record by ID. |
 | `list` | `table` string (req), `limit?` int (default 50) | List records in a table. |
 | `query` | `table` string (req), `where?` string, `order_by?`, `direction?` (`asc`/`desc`), `limit?` int, `offset?` int | Query a table with typed field predicates, ordering, and pagination. The `where` string mirrors the CLI `--where` syntax: conditions joined by `AND` (case-insensitive), operators `= != > < >= <= contains`, quoted values forced to strings, unquoted numbers compared numerically. Flat top-level fields only — no OR, parentheses, or nested dot-paths. |
+| `aggregate` (`ql` feature) | `table` string (req), `metrics?` string[] (`count`/`avg(f)`/`min(f)`/`max(f)`/`sum(f)`), `group_by?`, `where?` string, `include_archived?` bool | Aggregate a table into per-group `count`/`avg`/`min`/`max`/`sum`. Non-numeric or missing values are skipped for the numeric metrics and reported per group as `skipped`. Returns `{table, group_by, groups:[{group, count, …}], total_rows}`. |
 | `delete` | `id` string (req) | Delete a record by ID. |
 | `link` | `from` string (req), `edge_type` string (req), `to` string (req), `props?` object | Create a graph edge between two records. |
 

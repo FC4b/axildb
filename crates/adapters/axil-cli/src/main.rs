@@ -1502,6 +1502,45 @@ enum Command {
         profile: bool,
     },
 
+    // ── Aggregations ────────────────────────────────────────────────
+    /// Aggregate a table: count / avg / min / max / sum, optionally grouped.
+    ///
+    /// Metric flags are repeatable and combine, e.g.
+    /// `axil agg autopsies --count --avg decay --group-by family`.
+    /// `--where` uses the same syntax as `query` (AND-composed, quoted strings,
+    /// `contains`). Non-numeric or missing values are skipped for
+    /// avg/min/max/sum and reported per group as `skipped`. `--include-archived`
+    /// counts archived/discarded records too (excluded by default).
+    #[cfg(feature = "ql")]
+    Agg {
+        /// Table name.
+        table: String,
+        /// Count rows (per group when --group-by is set).
+        #[arg(long)]
+        count: bool,
+        /// Average of a numeric field. Repeatable.
+        #[arg(long = "avg")]
+        avg: Vec<String>,
+        /// Minimum of a numeric field. Repeatable.
+        #[arg(long = "min")]
+        min: Vec<String>,
+        /// Maximum of a numeric field. Repeatable.
+        #[arg(long = "max")]
+        max: Vec<String>,
+        /// Sum of a numeric field. Repeatable.
+        #[arg(long = "sum")]
+        sum: Vec<String>,
+        /// Group results by this field's value (missing → null group).
+        #[arg(long = "group-by")]
+        group_by: Option<String>,
+        /// Filter: "field>value", "a>1 AND b<2", "family = 'x'". Repeatable.
+        #[arg(long = "where")]
+        where_clauses: Vec<String>,
+        /// Include archived records (excluded by default).
+        #[arg(long)]
+        include_archived: bool,
+    },
+
     // ── Time-series commands ─────────────────────────────────────────
     /// Show recent records (created within a duration: 3d, 1h, 30m, 90s).
     #[cfg(feature = "timeseries")]
@@ -9772,6 +9811,52 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                     Ok(EXIT_ERROR)
                 }
             }
+        }
+
+        // ── Aggregations ────────────────────────────────────────────
+        #[cfg(feature = "ql")]
+        Command::Agg {
+            table,
+            count,
+            avg,
+            min,
+            max,
+            sum,
+            group_by,
+            where_clauses,
+            include_archived,
+        } => {
+            let db_path = require_db(&db_opt)?;
+            let db = open_read_command(&db_path)?;
+
+            // Metrics in a stable order: count, then avg/min/max/sum in flag order.
+            let mut metrics: Vec<axil_ql::AggMetric> = Vec::new();
+            if count {
+                metrics.push(axil_ql::AggMetric::Count);
+            }
+            metrics.extend(avg.iter().map(|f| axil_ql::AggMetric::Avg(f.clone())));
+            metrics.extend(min.iter().map(|f| axil_ql::AggMetric::Min(f.clone())));
+            metrics.extend(max.iter().map(|f| axil_ql::AggMetric::Max(f.clone())));
+            metrics.extend(sum.iter().map(|f| axil_ql::AggMetric::Sum(f.clone())));
+
+            // Parse --where into core WhereClauses via the Phase-1 parser.
+            let mut wheres: Vec<axil_core::query::WhereClause> = Vec::new();
+            for clause in &where_clauses {
+                for (field, op, value) in parse_where_clause(clause)? {
+                    wheres.push(axil_core::query::WhereClause { field, op, value });
+                }
+            }
+
+            let req = axil_ql::AggRequest {
+                table: &table,
+                metrics: &metrics,
+                group_by: group_by.as_deref(),
+                where_clauses: &wheres,
+                include_archived,
+            };
+            let value = axil_ql::aggregate(&db, &req).map_err(|e| anyhow::anyhow!("{e}"))?;
+            out.print(&value);
+            Ok(EXIT_OK)
         }
 
         // ── Since ───────────────────────────────────────────────────
