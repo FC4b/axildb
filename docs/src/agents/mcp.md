@@ -127,6 +127,7 @@ an error, or a preference: they auto-embed, auto-supersede, and dedupe.
 | `query_history` | `after?` ISO-8601, `before?` ISO-8601, `table?`, `limit?` int (default 50) | Time-based query of past records by date range and table. |
 | `get` | `id` string (req) | Fetch a single record by ID. |
 | `list` | `table` string (req), `limit?` int (default 50) | List records in a table. |
+| `query` | `table` string (req), `where?` string, `order_by?`, `direction?` (`asc`/`desc`), `limit?` int, `offset?` int | Query a table with typed field predicates, ordering, and pagination. The `where` string mirrors the CLI `--where` syntax: conditions joined by `AND` (case-insensitive), operators `= != > < >= <= contains`, quoted values forced to strings, unquoted numbers compared numerically. Flat top-level fields only — no OR, parentheses, or nested dot-paths. |
 | `delete` | `id` string (req) | Delete a record by ID. |
 | `link` | `from` string (req), `edge_type` string (req), `to` string (req), `props?` object | Create a graph edge between two records. |
 
@@ -150,6 +151,7 @@ an error, or a preference: they auto-embed, auto-supersede, and dedupe.
 |------|--------|-------------|
 | `cache_put` | `question` string (req), `answer` string (req), `code_refs?` string[], `ttl?` int, `valid_until?` string | Cache a question/answer pair so a future semantically similar question returns the stored answer instead of re-deriving it. `code_refs` (proxy_id \| canonical_id \| path[:line]) pin the answer to code; the entry is invalidated when that code changes. |
 | `cache_get` | `question` string (req), `threshold?` number (default 0.92), `top_k?` int (default 1) | Return a cached answer for a semantically similar question, or a miss. A hit re-checks TTL and code-ref fingerprints first, so a returned answer is neither expired nor invalidated by a code change. Miss reasons distinguish `no_match` / `below_threshold` / `stale_code` / `expired`. |
+| `cache_stats` | (none) | Cumulative semantic-cache statistics: live entry count, lifetime hits/misses, hit rate, and how many entries were evicted for stale code or expiry. |
 
 ### Cross-agent delta — `recall_delta` (`event-log` feature, off by default)
 

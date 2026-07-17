@@ -187,6 +187,41 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
                 "required": ["id"]
             }),
         },
+        ToolDefinition {
+            name: "query".into(),
+            description: "Query a table with typed field predicates, ordering, and pagination. The `where` string mirrors the CLI `--where` syntax: conditions joined by AND (case-insensitive), operators `= != > < >= <= contains`, quoted values ('x' or \"x\") forced to strings, unquoted numbers compared numerically. Flat top-level fields only — no OR, parentheses, or nested dot-paths.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "table": {
+                        "type": "string",
+                        "description": "Table name"
+                    },
+                    "where": {
+                        "type": "string",
+                        "description": "Filter expression, e.g. \"oos_sharpe > 0.3 AND family = 'meanrev'\""
+                    },
+                    "order_by": {
+                        "type": "string",
+                        "description": "Sort field"
+                    },
+                    "direction": {
+                        "type": "string",
+                        "description": "Sort direction: asc (default) or desc",
+                        "default": "asc"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of results"
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "description": "Offset for pagination"
+                    }
+                },
+                "required": ["table"]
+            }),
+        },
 
         // ─── Intent-native writes (Track B) ─────────────────────────
         ToolDefinition {
@@ -348,6 +383,7 @@ pub fn dispatch(db: &Axil, tool_name: &str, args: &Value) -> ToolCallResult {
         "query_history" => handle_query_history(db, args),
         "get" => handle_get(db, args),
         "list" => handle_list(db, args),
+        "query" => handle_query(db, args),
         "delete" => handle_delete(db, args),
         "remember_decision" => handle_remember_decision(db, args),
         "remember_error" => handle_remember_error(db, args),
@@ -882,6 +918,227 @@ fn handle_list(db: &Axil, args: &Value) -> ToolCallResult {
     }
 }
 
+fn handle_query(db: &Axil, args: &Value) -> ToolCallResult {
+    let table = match args.get("table").and_then(|v| v.as_str()) {
+        Some(t) => t,
+        None => return ToolCallResult::error("missing required parameter: table"),
+    };
+    let mut qb = db.query().table(table);
+
+    if let Some(where_str) = args.get("where").and_then(|v| v.as_str()) {
+        match parse_where_expr(where_str) {
+            Ok(conds) => {
+                for (field, op, value) in conds {
+                    qb = qb.where_field(&field, op, value);
+                }
+            }
+            Err(e) => return ToolCallResult::error(format!("invalid where: {e}")),
+        }
+    }
+
+    if let Some(field) = args.get("order_by").and_then(|v| v.as_str()) {
+        let dir = match args.get("direction").and_then(|v| v.as_str()) {
+            Some(d) if d.eq_ignore_ascii_case("desc") => axil_core::SortDirection::Desc,
+            _ => axil_core::SortDirection::Asc,
+        };
+        qb = qb.order_by(field, dir);
+    }
+    if let Some(n) = args.get("limit").and_then(|v| v.as_u64()) {
+        qb = qb.limit(n as usize);
+    }
+    if let Some(n) = args.get("offset").and_then(|v| v.as_u64()) {
+        qb = qb.offset(n as usize);
+    }
+
+    match qb.exec() {
+        Ok(results) => {
+            let records: Vec<Value> = results.iter().map(record_to_json).collect();
+            ToolCallResult::json(&json!(records))
+        }
+        Err(e) => ToolCallResult::error(format!("query failed: {e}")),
+    }
+}
+
+/// Parse a `--where`-style expression into one or more `(field, op, value)`
+/// conditions, mirroring the CLI `parse_where_clause` grammar.
+///
+/// A single expression may hold several conditions joined by `AND`
+/// (case-insensitive, whole word); the split is quote-aware. Supported
+/// operators: `>= <= != = > <` and the word operator `contains`. Quoted values
+/// (single or double) are always strings; unquoted values are typed by
+/// `serde_json`, falling back to a bare string.
+///
+/// Kept adapter-local (a small twin of the CLI helper) rather than shared
+/// through `axil-core`, which is off-limits for this work.
+fn parse_where_expr(input: &str) -> Result<Vec<(String, axil_core::Op, Value)>, String> {
+    let mut out = Vec::new();
+    for cond in split_where_conditions(input) {
+        let cond = cond.trim();
+        if cond.is_empty() {
+            continue;
+        }
+        out.push(parse_single_condition(cond)?);
+    }
+    if out.is_empty() {
+        return Err(format!("invalid where clause: {input}"));
+    }
+    Ok(out)
+}
+
+/// Split on the `AND` keyword (case-insensitive, whole word) outside quotes.
+fn split_where_conditions(clause: &str) -> Vec<&str> {
+    let bytes = clause.as_bytes();
+    let mut parts = Vec::new();
+    let mut start = 0usize;
+    let mut i = 0usize;
+    let mut in_quote: Option<u8> = None;
+    while i < bytes.len() {
+        let c = bytes[i];
+        match in_quote {
+            Some(q) => {
+                if c == q {
+                    in_quote = None;
+                }
+                i += 1;
+            }
+            None => {
+                if c == b'"' || c == b'\'' {
+                    in_quote = Some(c);
+                    i += 1;
+                } else if (c == b'a' || c == b'A') && matches_keyword(bytes, i, b"and") {
+                    parts.push(&clause[start..i]);
+                    i += 3;
+                    start = i;
+                } else {
+                    i += 1;
+                }
+            }
+        }
+    }
+    parts.push(&clause[start..]);
+    parts
+}
+
+/// True when `kw` (ASCII, lowercase) occurs at `bytes[i..]` case-insensitively
+/// as a whole word.
+fn matches_keyword(bytes: &[u8], i: usize, kw: &[u8]) -> bool {
+    let end = i + kw.len();
+    if end > bytes.len() {
+        return false;
+    }
+    if !bytes[i..end].iter().zip(kw).all(|(b, k)| b.eq_ignore_ascii_case(k)) {
+        return false;
+    }
+    let is_ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    let before_ok = i == 0 || !is_ident(bytes[i - 1]);
+    let after_ok = end >= bytes.len() || !is_ident(bytes[end]);
+    before_ok && after_ok
+}
+
+/// Parse a single `field op value` condition.
+fn parse_single_condition(cond: &str) -> Result<(String, axil_core::Op, Value), String> {
+    let bytes = cond.as_bytes();
+    let mut i = 0usize;
+    let mut in_quote: Option<u8> = None;
+    while i < bytes.len() {
+        let c = bytes[i];
+        match in_quote {
+            Some(q) => {
+                if c == q {
+                    in_quote = None;
+                }
+                i += 1;
+            }
+            None => {
+                if c == b'"' || c == b'\'' {
+                    in_quote = Some(c);
+                    i += 1;
+                    continue;
+                }
+                if matches!(c, b'>' | b'<' | b'!' | b'=') {
+                    let rest = &cond[i..];
+                    let (op_str, op_len): (&str, usize) = if rest.starts_with(">=") {
+                        (">=", 2)
+                    } else if rest.starts_with("<=") {
+                        ("<=", 2)
+                    } else if rest.starts_with("!=") {
+                        ("!=", 2)
+                    } else if c == b'=' {
+                        ("=", 1)
+                    } else if c == b'>' {
+                        (">", 1)
+                    } else if c == b'<' {
+                        ("<", 1)
+                    } else {
+                        return Err(format!("'{cond}': '!' must be part of the '!=' operator"));
+                    };
+                    let field = cond[..i].trim().to_string();
+                    if field.is_empty() {
+                        return Err(format!("field name must not be empty in '{cond}'"));
+                    }
+                    let op: axil_core::Op =
+                        op_str.parse().map_err(|e| format!("{e}"))?;
+                    let value = parse_where_value(cond[i + op_len..].trim());
+                    return Ok((field, op, value));
+                }
+                i += 1;
+            }
+        }
+    }
+    if let Some(pos) = find_keyword_outside_quotes(cond, b"contains") {
+        let field = cond[..pos].trim().to_string();
+        if field.is_empty() {
+            return Err(format!("field name must not be empty in '{cond}'"));
+        }
+        let value = parse_where_value(cond[pos + "contains".len()..].trim());
+        return Ok((field, axil_core::Op::Contains, value));
+    }
+    Err(format!(
+        "invalid where clause: {cond} (expected field=value, field>value, field contains value)"
+    ))
+}
+
+/// Find the byte offset of `kw` as a whole word outside any quoted region.
+fn find_keyword_outside_quotes(s: &str, kw: &[u8]) -> Option<usize> {
+    let bytes = s.as_bytes();
+    let mut i = 0usize;
+    let mut in_quote: Option<u8> = None;
+    while i < bytes.len() {
+        let c = bytes[i];
+        match in_quote {
+            Some(q) => {
+                if c == q {
+                    in_quote = None;
+                }
+                i += 1;
+            }
+            None => {
+                if c == b'"' || c == b'\'' {
+                    in_quote = Some(c);
+                    i += 1;
+                } else if c.eq_ignore_ascii_case(&kw[0]) && matches_keyword(bytes, i, kw) {
+                    return Some(i);
+                } else {
+                    i += 1;
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Type a where-clause value: quoted → string; otherwise `serde_json` types it.
+fn parse_where_value(val_str: &str) -> Value {
+    let b = val_str.as_bytes();
+    if val_str.len() >= 2
+        && ((b[0] == b'\'' && b[val_str.len() - 1] == b'\'')
+            || (b[0] == b'"' && b[val_str.len() - 1] == b'"'))
+    {
+        return Value::String(val_str[1..val_str.len() - 1].to_string());
+    }
+    serde_json::from_str(val_str).unwrap_or_else(|_| Value::String(val_str.to_string()))
+}
+
 fn handle_delete(db: &Axil, args: &Value) -> ToolCallResult {
     let id_str = match args.get("id").and_then(|v| v.as_str()) {
         Some(s) => s,
@@ -1328,6 +1585,75 @@ mod tests {
     fn inspect_tool_is_advertised() {
         let names: Vec<String> = tool_definitions().into_iter().map(|d| d.name).collect();
         assert!(names.iter().any(|n| n == "inspect"));
+    }
+
+    #[test]
+    fn query_tool_is_advertised() {
+        let names: Vec<String> = tool_definitions().into_iter().map(|d| d.name).collect();
+        assert!(names.iter().any(|n| n == "query"));
+    }
+
+    #[test]
+    fn query_tool_numeric_and_string_predicates() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Axil::open(dir.path().join("q.axil")).build().unwrap();
+        db.insert(
+            "autopsies",
+            json!({"family":"meanrev","oos_sharpe":0.5,"trades":5}),
+        )
+        .unwrap();
+        db.insert(
+            "autopsies",
+            json!({"family":"meanrev","oos_sharpe":0.1,"trades":100}),
+        )
+        .unwrap();
+        db.insert(
+            "autopsies",
+            json!({"family":"momentum","oos_sharpe":0.9,"trades":20}),
+        )
+        .unwrap();
+
+        // One --where string, AND across a numeric and a quoted-string predicate.
+        let result = dispatch(
+            &db,
+            "query",
+            &json!({
+                "table": "autopsies",
+                "where": "oos_sharpe > 0.3 AND family = 'meanrev'"
+            }),
+        );
+        assert!(result.is_error.is_none(), "query errored: {result:?}");
+        let body = parse_json_payload(&result);
+        let arr = body.as_array().expect("expected JSON array");
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["data"]["family"], "meanrev");
+        assert_eq!(arr[0]["data"]["trades"], 5);
+    }
+
+    #[test]
+    fn query_tool_numeric_comparison_not_lexicographic() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Axil::open(dir.path().join("q2.axil")).build().unwrap();
+        db.insert("autopsies", json!({"trades":5})).unwrap();
+        db.insert("autopsies", json!({"trades":100})).unwrap();
+
+        let result = dispatch(
+            &db,
+            "query",
+            &json!({"table":"autopsies","where":"trades < 30"}),
+        );
+        let body = parse_json_payload(&result);
+        let arr = body.as_array().expect("expected JSON array");
+        assert_eq!(arr.len(), 1, "trades<30 must match 5 numerically, not 100");
+        assert_eq!(arr[0]["data"]["trades"], 5);
+    }
+
+    #[test]
+    fn query_tool_invalid_where_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Axil::open(dir.path().join("q3.axil")).build().unwrap();
+        let result = dispatch(&db, "query", &json!({"table":"t","where":"nonsense"}));
+        assert_eq!(result.is_error, Some(true));
     }
 
     #[cfg(feature = "event-log")]

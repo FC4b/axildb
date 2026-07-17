@@ -562,6 +562,106 @@ fn test_query_multiple_where() {
     assert_eq!(results[0]["data"]["a"], 2);
 }
 
+#[test]
+fn test_query_where_and_in_one_string() {
+    let (_dir, db) = temp_db();
+    let db_str = db.to_str().unwrap();
+
+    run_axil(&["init", db_str]);
+    let (out_a, _, _) = run_axil(&[
+        "--db",
+        db_str,
+        "store",
+        "autopsies",
+        r#"{"family":"meanrev","oos_sharpe":0.5,"trades":5}"#,
+    ]);
+    let id_a = parse_json(&out_a)["id"].as_str().unwrap().to_string();
+    run_axil(&[
+        "--db",
+        db_str,
+        "store",
+        "autopsies",
+        r#"{"family":"meanrev","oos_sharpe":0.1,"trades":100}"#,
+    ]);
+    run_axil(&[
+        "--db",
+        db_str,
+        "store",
+        "autopsies",
+        r#"{"family":"momentum","oos_sharpe":0.9,"trades":20}"#,
+    ]);
+
+    // One --where string carrying an AND, mixing a numeric predicate and a
+    // single-quoted string predicate.
+    let (stdout, _, code) = run_axil(&[
+        "--db",
+        db_str,
+        "query",
+        "autopsies",
+        "--where",
+        "oos_sharpe > 0.3 AND family = 'meanrev'",
+    ]);
+    assert_eq!(code, 0);
+    let results: Vec<Value> = serde_json::from_str(stdout.trim()).unwrap();
+    let ids: Vec<&str> = results.iter().map(|r| r["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, vec![id_a.as_str()], "exact id set must be [meanrev, sharpe 0.5]");
+}
+
+#[test]
+fn test_query_where_numeric_not_lexicographic() {
+    let (_dir, db) = temp_db();
+    let db_str = db.to_str().unwrap();
+
+    run_axil(&["init", db_str]);
+    run_axil(&["--db", db_str, "store", "autopsies", r#"{"trades":5}"#]);
+    run_axil(&["--db", db_str, "store", "autopsies", r#"{"trades":100}"#]);
+
+    // trades < 30 must compare numerically (5 matches, 100 does not) — a
+    // lexicographic string compare would wrongly match "100" < "30".
+    let (stdout, _, code) = run_axil(&[
+        "--db", db_str, "query", "autopsies", "--where", "trades < 30",
+    ]);
+    assert_eq!(code, 0);
+    let results: Vec<Value> = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(results.len(), 1, "trades<30 must match 5, not 100");
+    assert_eq!(results[0]["data"]["trades"], 5);
+}
+
+#[test]
+fn test_query_where_contains() {
+    let (_dir, db) = temp_db();
+    let db_str = db.to_str().unwrap();
+
+    run_axil(&["init", db_str]);
+    run_axil(&[
+        "--db",
+        db_str,
+        "store",
+        "notes",
+        r#"{"summary":"auth timeout bug"}"#,
+    ]);
+    run_axil(&[
+        "--db",
+        db_str,
+        "store",
+        "notes",
+        r#"{"summary":"deploy pipeline"}"#,
+    ]);
+
+    let (stdout, _, code) = run_axil(&[
+        "--db",
+        db_str,
+        "query",
+        "notes",
+        "--where",
+        "summary contains 'timeout'",
+    ]);
+    assert_eq!(code, 0);
+    let results: Vec<Value> = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0]["data"]["summary"], "auth timeout bug");
+}
+
 // ─── Link + Neighbors + Traverse (graph) ───────────────────────────────────
 
 #[test]

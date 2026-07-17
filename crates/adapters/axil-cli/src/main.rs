@@ -1453,10 +1453,19 @@ enum Command {
 
     // ── Enhanced query (4b.7) ───────────────────────────────────────
     /// Query records with filters, ordering, and limits.
+    ///
+    /// A single --where string may hold several conditions joined by AND
+    /// (case-insensitive), e.g. --where "oos_sharpe > 0.3 AND family = 'meanrev'".
+    /// Values are typed automatically: numbers compare numerically, and quoted
+    /// values ('x' or "x") are always strings. Supported operators:
+    /// = != > < >= <= and `contains`. Repeatable --where flags AND-compose with
+    /// in-string ANDs. NON-GOALS: OR, parentheses, and nested dot-paths are not
+    /// supported (AND-only, flat top-level fields — matching core WHERE
+    /// semantics).
     Query {
         /// Table name.
         table: String,
-        /// Filter: field=value, field>value, etc. Repeatable.
+        /// Filter: "field>value", "a>1 AND b<2", "family = 'x'", "note contains 'y'". Repeatable.
         #[arg(long = "where")]
         where_clauses: Vec<String>,
         /// Sort field.
@@ -5559,23 +5568,207 @@ fn read_json_input(data: &str) -> Result<Value> {
     }
 }
 
-/// Parse a where clause like "field=value", "field>value", "field>=value".
-fn parse_where_clause(clause: &str) -> Result<(String, Op, Value)> {
-    // Two-char operators must be checked before single-char to avoid partial matches.
-    for op_str in &[">=", "<=", "!=", "=", ">", "<"] {
-        if let Some(pos) = clause.find(op_str) {
-            let field = clause[..pos].to_string();
-            if field.is_empty() {
-                anyhow::bail!("invalid where clause: field name must not be empty in '{clause}'");
+/// Parse a `--where` expression into one or more `(field, op, value)` conditions.
+///
+/// A single expression may hold multiple conditions joined by `AND`
+/// (case-insensitive, whole word); the split is quote-aware, so an `AND` — or
+/// an operator character — inside a single- or double-quoted string value is not
+/// treated as a separator. Conditions AND-compose, matching core WHERE
+/// semantics. Repeatable `--where` flags compose the same way, so
+/// `--where "a>1 AND b<2"` and `--where a>1 --where b<2` are equivalent.
+///
+/// Supported operators: `>= <= != = > <` and the word operator `contains`.
+/// Quoted values are always typed as strings (quotes force string typing);
+/// unquoted values are typed by `serde_json` (numbers, `true`/`false`/`null`),
+/// falling back to a bare string. Only flat top-level fields are supported —
+/// OR, parentheses, and nested dot-paths are non-goals.
+fn parse_where_clause(clause: &str) -> Result<Vec<(String, Op, Value)>> {
+    let mut out = Vec::new();
+    for cond in split_where_conditions(clause) {
+        let cond = cond.trim();
+        if cond.is_empty() {
+            continue;
+        }
+        out.push(parse_single_condition(cond)?);
+    }
+    if out.is_empty() {
+        anyhow::bail!("invalid where clause: {clause} (expected field=value, field>value, etc.)");
+    }
+    Ok(out)
+}
+
+/// Split a where expression on the `AND` keyword (case-insensitive, whole word),
+/// ignoring any `AND` that appears inside a single- or double-quoted string.
+///
+/// Split points are always ASCII (`AND` and quote characters), so slicing the
+/// original `&str` at those byte offsets never lands inside a multi-byte
+/// character in a UTF-8 value.
+fn split_where_conditions(clause: &str) -> Vec<&str> {
+    let bytes = clause.as_bytes();
+    let mut parts = Vec::new();
+    let mut start = 0usize;
+    let mut i = 0usize;
+    let mut in_quote: Option<u8> = None;
+    while i < bytes.len() {
+        let c = bytes[i];
+        match in_quote {
+            Some(q) => {
+                if c == q {
+                    in_quote = None;
+                }
+                i += 1;
             }
-            let op: Op = op_str.parse().map_err(|e| anyhow::anyhow!("{e}"))?;
-            let val_str = &clause[pos + op_str.len()..];
-            let value = serde_json::from_str(val_str)
-                .unwrap_or_else(|_| Value::String(val_str.to_string()));
-            return Ok((field, op, value));
+            None => {
+                if c == b'"' || c == b'\'' {
+                    in_quote = Some(c);
+                    i += 1;
+                } else if (c == b'a' || c == b'A') && matches_keyword(bytes, i, b"and") {
+                    parts.push(&clause[start..i]);
+                    i += 3;
+                    start = i;
+                } else {
+                    i += 1;
+                }
+            }
         }
     }
-    anyhow::bail!("invalid where clause: {clause} (expected field=value, field>value, etc.)")
+    parts.push(&clause[start..]);
+    parts
+}
+
+/// True when `kw` (ASCII, lowercase) occurs at `bytes[i..]` case-insensitively
+/// as a whole word — i.e. bounded on both sides by a non-identifier byte or the
+/// ends of the slice.
+fn matches_keyword(bytes: &[u8], i: usize, kw: &[u8]) -> bool {
+    let end = i + kw.len();
+    if end > bytes.len() {
+        return false;
+    }
+    if !bytes[i..end]
+        .iter()
+        .zip(kw)
+        .all(|(b, k)| b.eq_ignore_ascii_case(k))
+    {
+        return false;
+    }
+    let is_ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    let before_ok = i == 0 || !is_ident(bytes[i - 1]);
+    let after_ok = end >= bytes.len() || !is_ident(bytes[end]);
+    before_ok && after_ok
+}
+
+/// Parse a single condition (`field op value`) into `(field, op, value)`.
+///
+/// The operator is located outside any quoted region, so a value like
+/// `'a = b'` (which contains an operator character) is not mis-split.
+fn parse_single_condition(cond: &str) -> Result<(String, Op, Value)> {
+    let bytes = cond.as_bytes();
+    let mut i = 0usize;
+    let mut in_quote: Option<u8> = None;
+    while i < bytes.len() {
+        let c = bytes[i];
+        match in_quote {
+            Some(q) => {
+                if c == q {
+                    in_quote = None;
+                }
+                i += 1;
+            }
+            None => {
+                if c == b'"' || c == b'\'' {
+                    in_quote = Some(c);
+                    i += 1;
+                    continue;
+                }
+                if matches!(c, b'>' | b'<' | b'!' | b'=') {
+                    let rest = &cond[i..];
+                    let (op_str, op_len): (&str, usize) = if rest.starts_with(">=") {
+                        (">=", 2)
+                    } else if rest.starts_with("<=") {
+                        ("<=", 2)
+                    } else if rest.starts_with("!=") {
+                        ("!=", 2)
+                    } else if c == b'=' {
+                        ("=", 1)
+                    } else if c == b'>' {
+                        (">", 1)
+                    } else if c == b'<' {
+                        ("<", 1)
+                    } else {
+                        anyhow::bail!(
+                            "invalid where clause: '{cond}' ('!' must be part of the '!=' operator)"
+                        );
+                    };
+                    let field = cond[..i].trim().to_string();
+                    if field.is_empty() {
+                        anyhow::bail!(
+                            "invalid where clause: field name must not be empty in '{cond}'"
+                        );
+                    }
+                    let op: Op = op_str.parse().map_err(|e| anyhow::anyhow!("{e}"))?;
+                    let value = parse_where_value(cond[i + op_len..].trim());
+                    return Ok((field, op, value));
+                }
+                i += 1;
+            }
+        }
+    }
+    // No symbol operator outside quotes — try the `contains` word operator.
+    if let Some(pos) = find_keyword_outside_quotes(cond, b"contains") {
+        let field = cond[..pos].trim().to_string();
+        if field.is_empty() {
+            anyhow::bail!("invalid where clause: field name must not be empty in '{cond}'");
+        }
+        let value = parse_where_value(cond[pos + "contains".len()..].trim());
+        return Ok((field, Op::Contains, value));
+    }
+    anyhow::bail!(
+        "invalid where clause: {cond} (expected field=value, field>value, field contains value, etc.)"
+    )
+}
+
+/// Find the byte offset of `kw` (ASCII, lowercase) as a whole word outside any
+/// quoted region, or `None`.
+fn find_keyword_outside_quotes(s: &str, kw: &[u8]) -> Option<usize> {
+    let bytes = s.as_bytes();
+    let mut i = 0usize;
+    let mut in_quote: Option<u8> = None;
+    while i < bytes.len() {
+        let c = bytes[i];
+        match in_quote {
+            Some(q) => {
+                if c == q {
+                    in_quote = None;
+                }
+                i += 1;
+            }
+            None => {
+                if c == b'"' || c == b'\'' {
+                    in_quote = Some(c);
+                    i += 1;
+                } else if c.eq_ignore_ascii_case(&kw[0]) && matches_keyword(bytes, i, kw) {
+                    return Some(i);
+                } else {
+                    i += 1;
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Type a where-clause value string. A single- or double-quoted value is always
+/// a string (quotes force string typing); otherwise `serde_json` types it
+/// (number, `true`/`false`/`null`), falling back to a bare string.
+fn parse_where_value(val_str: &str) -> Value {
+    let b = val_str.as_bytes();
+    if val_str.len() >= 2
+        && ((b[0] == b'\'' && b[val_str.len() - 1] == b'\'')
+            || (b[0] == b'"' && b[val_str.len() - 1] == b'"'))
+    {
+        return Value::String(val_str[1..val_str.len() - 1].to_string());
+    }
+    serde_json::from_str(val_str).unwrap_or_else(|_| Value::String(val_str.to_string()))
 }
 
 /// Parse a human-readable duration string (e.g. "3d", "1h", "30m", "90s") into seconds.
@@ -7660,8 +7853,9 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             let mut qb = db.query().table(&table).limit(limit);
 
             for clause in &where_clauses {
-                let (field, op, value) = parse_where_clause(clause)?;
-                qb = qb.where_field(&field, op, value);
+                for (field, op, value) in parse_where_clause(clause)? {
+                    qb = qb.where_field(&field, op, value);
+                }
             }
 
             if let Some(ref text) = similar {
@@ -8263,8 +8457,9 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                 // Use query builder for filtered list.
                 let mut qb = db.query().table(&table);
                 for clause in &where_clauses {
-                    let (field, op, value) = parse_where_clause(clause)?;
-                    qb = qb.where_field(&field, op, value);
+                    for (field, op, value) in parse_where_clause(clause)? {
+                        qb = qb.where_field(&field, op, value);
+                    }
                 }
                 if let Some(ref agent_name) = agent {
                     qb = qb.where_field("_agent", Op::Eq, json!(agent_name));
@@ -9436,8 +9631,9 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             let mut qb = db.query().table(&table);
 
             for clause in &where_clauses {
-                let (field, op, value) = parse_where_clause(clause)?;
-                qb = qb.where_field(&field, op, value);
+                for (field, op, value) in parse_where_clause(clause)? {
+                    qb = qb.where_field(&field, op, value);
+                }
             }
 
             if let Some(ref field) = order_by {
@@ -19470,5 +19666,115 @@ mod scaffold_plugin_tests {
         let dest = dir.path().join("exists");
         std::fs::create_dir_all(&dest).unwrap();
         assert!(scaffold_plugin("exists", Some(&dest), None, &out()).is_err());
+    }
+}
+
+#[cfg(test)]
+mod where_clause_tests {
+    use super::*;
+
+    // `Op` doesn't implement `PartialEq`, so operator checks go through matches!.
+
+    #[test]
+    fn single_numeric_condition() {
+        let conds = parse_where_clause("score>80").unwrap();
+        assert_eq!(conds.len(), 1);
+        assert_eq!(conds[0].0, "score");
+        assert!(matches!(conds[0].1, Op::Gt));
+        // Numeric typing: an unquoted number is a JSON number, not a string.
+        assert_eq!(conds[0].2, json!(80));
+    }
+
+    #[test]
+    fn and_in_one_string() {
+        let conds = parse_where_clause("oos_sharpe > 0.3 AND family = 'meanrev'").unwrap();
+        assert_eq!(conds.len(), 2);
+        assert_eq!(conds[0].0, "oos_sharpe");
+        assert!(matches!(conds[0].1, Op::Gt));
+        assert_eq!(conds[0].2, json!(0.3));
+        assert_eq!(conds[1].0, "family");
+        assert!(matches!(conds[1].1, Op::Eq));
+        // Single-quoted value → string (quotes force string typing).
+        assert_eq!(conds[1].2, json!("meanrev"));
+    }
+
+    #[test]
+    fn and_is_case_insensitive() {
+        let conds = parse_where_clause("a>1 and b<2 And c=3").unwrap();
+        assert_eq!(conds.len(), 3);
+        assert_eq!(conds[0].0, "a");
+        assert_eq!(conds[1].0, "b");
+        assert_eq!(conds[2].0, "c");
+    }
+
+    #[test]
+    fn quoted_value_with_spaces_and_and_word() {
+        // The word AND and an operator char inside quotes must not split.
+        let conds = parse_where_clause("note = 'buy AND hold >= now'").unwrap();
+        assert_eq!(conds.len(), 1);
+        assert_eq!(conds[0].0, "note");
+        assert!(matches!(conds[0].1, Op::Eq));
+        assert_eq!(conds[0].2, json!("buy AND hold >= now"));
+    }
+
+    #[test]
+    fn double_quoted_value() {
+        let conds = parse_where_clause(r#"family = "mean rev""#).unwrap();
+        assert_eq!(conds.len(), 1);
+        assert_eq!(conds[0].2, json!("mean rev"));
+    }
+
+    #[test]
+    fn quotes_force_string_typing() {
+        // A quoted number stays a string, an unquoted one is numeric.
+        let quoted = parse_where_clause("regime = '5'").unwrap();
+        assert_eq!(quoted[0].2, json!("5"));
+        let bare = parse_where_clause("regime = 5").unwrap();
+        assert_eq!(bare[0].2, json!(5));
+    }
+
+    #[test]
+    fn contains_operator() {
+        let conds = parse_where_clause("summary contains 'timeout'").unwrap();
+        assert_eq!(conds.len(), 1);
+        assert_eq!(conds[0].0, "summary");
+        assert!(matches!(conds[0].1, Op::Contains));
+        assert_eq!(conds[0].2, json!("timeout"));
+    }
+
+    #[test]
+    fn contains_composes_with_and() {
+        let conds = parse_where_clause("family = 'meanrev' AND note contains 'stop'").unwrap();
+        assert_eq!(conds.len(), 2);
+        assert!(matches!(conds[1].1, Op::Contains));
+        assert_eq!(conds[1].2, json!("stop"));
+    }
+
+    #[test]
+    fn not_equal_operator() {
+        let conds = parse_where_clause("regime != 'bull'").unwrap();
+        assert!(matches!(conds[0].1, Op::Ne));
+        assert_eq!(conds[0].2, json!("bull"));
+    }
+
+    #[test]
+    fn two_char_ops_beat_one_char() {
+        assert!(matches!(parse_where_clause("x>=1").unwrap()[0].1, Op::Gte));
+        assert!(matches!(parse_where_clause("x<=1").unwrap()[0].1, Op::Lte));
+    }
+
+    #[test]
+    fn empty_field_errors() {
+        assert!(parse_where_clause("=5").is_err());
+    }
+
+    #[test]
+    fn no_operator_errors() {
+        assert!(parse_where_clause("just_a_field").is_err());
+    }
+
+    #[test]
+    fn bare_bang_errors() {
+        assert!(parse_where_clause("x ! 5").is_err());
     }
 }
