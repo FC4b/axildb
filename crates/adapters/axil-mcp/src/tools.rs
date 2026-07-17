@@ -309,6 +309,40 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
                 }
             }),
         },
+        ToolDefinition {
+            name: "lineage".into(),
+            description: "Walk a derivation chain over graph edges (default `derived_from`). `direction` = ancestors (follow OUT edges, root-first: what each node was derived from), descendants (IN edges: what was derived from the node), or both. Returns a hop list with per-hop selected `fields` and numeric `delta` vs the previous hop. Create edges with `link A derived_from B --props '{\"mutation\":\"…\"}'`.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "id": {
+                        "type": "string",
+                        "description": "Root record ID"
+                    },
+                    "edge_type": {
+                        "type": "string",
+                        "description": "Edge type to follow (default: derived_from)",
+                        "default": "derived_from"
+                    },
+                    "direction": {
+                        "type": "string",
+                        "description": "ancestors | descendants | both (default: ancestors)",
+                        "default": "ancestors"
+                    },
+                    "max_depth": {
+                        "type": "integer",
+                        "description": "Maximum hops from the root (default: 20)",
+                        "default": 20
+                    },
+                    "fields": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "record.data keys to include per hop (and to diff for delta); omit for all fields"
+                    }
+                },
+                "required": ["id"]
+            }),
+        },
 
         // ─── Intent-native writes (Track B) ─────────────────────────
         ToolDefinition {
@@ -475,6 +509,7 @@ pub fn dispatch(db: &Axil, tool_name: &str, args: &Value) -> ToolCallResult {
         "aggregate" => handle_aggregate(db, args),
         "add_vector" => handle_add_vector(db, args),
         "similar" => handle_similar(db, args),
+        "lineage" => handle_lineage(db, args),
         "delete" => handle_delete(db, args),
         "remember_decision" => handle_remember_decision(db, args),
         "remember_error" => handle_remember_error(db, args),
@@ -1207,6 +1242,41 @@ fn handle_similar(db: &Axil, args: &Value) -> ToolCallResult {
             ToolCallResult::json(&json!(values))
         }
         Err(e) => ToolCallResult::error(format!("similar failed: {e}")),
+    }
+}
+
+fn handle_lineage(db: &Axil, args: &Value) -> ToolCallResult {
+    let id_str = match args.get("id").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return ToolCallResult::error("missing required parameter: id"),
+    };
+    let rid = match RecordId::from_string(id_str) {
+        Ok(r) => r,
+        Err(e) => return ToolCallResult::error(format!("invalid record ID: {e}")),
+    };
+    let edge_type = args
+        .get("edge_type")
+        .and_then(|v| v.as_str())
+        .unwrap_or(axil_core::util::edge_types::DERIVED_FROM);
+    let direction = match args
+        .get("direction")
+        .and_then(|v| v.as_str())
+        .map(axil_core::lineage::LineageDirection::parse)
+    {
+        None => axil_core::lineage::LineageDirection::Ancestors,
+        Some(Ok(d)) => d,
+        Some(Err(e)) => return ToolCallResult::error(e),
+    };
+    let max_depth = args.get("max_depth").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
+    let fields: Option<Vec<String>> = args.get("fields").and_then(|v| v.as_array()).map(|arr| {
+        arr.iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect()
+    });
+
+    match axil_core::lineage::walk(db, &rid, edge_type, direction, max_depth, fields.as_deref()) {
+        Ok(value) => ToolCallResult::json(&value),
+        Err(e) => ToolCallResult::error(format!("lineage failed: {e}")),
     }
 }
 
@@ -2032,10 +2102,11 @@ mod tests {
     }
 
     #[test]
-    fn vector_tools_advertised() {
+    fn vector_and_lineage_tools_advertised() {
         let names: Vec<String> = tool_definitions().into_iter().map(|d| d.name).collect();
         assert!(names.iter().any(|n| n == "add_vector"));
         assert!(names.iter().any(|n| n == "similar"));
+        assert!(names.iter().any(|n| n == "lineage"));
     }
 
     #[cfg(feature = "vector")]
@@ -2093,5 +2164,30 @@ mod tests {
         let arr = parse_json_payload(&s).as_array().unwrap().to_vec();
         assert_eq!(arr.len(), 1, "threshold 0.9 returns only the twin");
         assert_eq!(arr[0]["id"].as_str().unwrap(), b.id.to_string());
+    }
+
+    #[cfg(feature = "graph")]
+    #[test]
+    fn lineage_tool_walks_chain_with_deltas() {
+        use axil_graph::AxilBuilderGraphExt;
+        let dir = tempfile::tempdir().unwrap();
+        let db = Axil::open(dir.path().join("lin.axil"))
+            .with_graph_engine()
+            .unwrap()
+            .build()
+            .unwrap();
+        let a = db.insert("trials", json!({"n": "A", "sharpe": 1.0})).unwrap();
+        let b = db.insert("trials", json!({"n": "B", "sharpe": 1.5})).unwrap();
+        db.relate(&a.id, "derived_from", &b.id, Some(json!({"mutation": "m1"})))
+            .unwrap();
+
+        let r = dispatch(&db, "lineage", &json!({"id": a.id.to_string(), "fields": ["sharpe"]}));
+        assert!(r.is_error.is_none(), "lineage errored: {r:?}");
+        let body = parse_json_payload(&r);
+        let hops = body["hops"].as_array().unwrap();
+        assert_eq!(hops.len(), 2);
+        assert_eq!(hops[0]["id"].as_str().unwrap(), a.id.to_string());
+        assert_eq!(hops[1]["id"].as_str().unwrap(), b.id.to_string());
+        assert!((hops[1]["delta"]["sharpe"].as_f64().unwrap() - 0.5).abs() < 1e-9);
     }
 }

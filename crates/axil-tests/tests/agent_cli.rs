@@ -1595,6 +1595,125 @@ fn test_add_vector_and_search_vector_named_space() {
     assert_eq!(results[0]["id"].as_str().unwrap(), id_x);
 }
 
+// ─── lineage chains ─────────────────────────────────────────────────────────
+
+/// Store `trials` records and return their ids, then link a linear chain and
+/// walk it: exact hop order + exact per-hop numeric deltas.
+#[test]
+fn test_lineage_chain_exact_hops_and_deltas() {
+    let (_dir, db) = temp_db();
+    let db_str = db.to_str().unwrap();
+    run_axil(&["init", db_str]); // create the graph store that `link` needs
+    let mk = |data: &str| -> String {
+        let (stdout, _, _) = run_axil(&["--db", db_str, "store", "trials", data]);
+        parse_json(&stdout)["id"].as_str().unwrap().to_string()
+    };
+    let a = mk(r#"{"n":"A","sharpe":1.0,"trades":10}"#);
+    let b = mk(r#"{"n":"B","sharpe":1.5,"trades":20}"#);
+    let c = mk(r#"{"n":"C","sharpe":1.2,"trades":35}"#);
+    run_axil(&["--db", db_str, "link", &a, "derived_from", &b, "--props", r#"{"mutation":"m1"}"#]);
+    run_axil(&["--db", db_str, "link", &b, "derived_from", &c, "--props", r#"{"mutation":"m2"}"#]);
+
+    let (stdout, _, code) =
+        run_axil(&["--db", db_str, "lineage", &a, "--fields", "sharpe,trades"]);
+    assert_eq!(code, 0, "lineage failed: {stdout}");
+    let out = parse_json(&stdout);
+    assert_eq!(out["direction"], "ancestors");
+    assert_eq!(out["root"].as_str().unwrap(), a);
+    let hops = out["hops"].as_array().unwrap();
+    assert_eq!(hops.len(), 3);
+
+    // Root-first order A → B → C.
+    assert_eq!(hops[0]["id"].as_str().unwrap(), a);
+    assert_eq!(hops[0]["depth"], 0);
+    assert!(hops[0]["edge"].is_null());
+    assert_eq!(hops[0]["delta"].as_object().unwrap().len(), 0);
+    assert_eq!(hops[1]["id"].as_str().unwrap(), b);
+    assert_eq!(hops[2]["id"].as_str().unwrap(), c);
+
+    // Exact deltas (hop N minus hop N-1).
+    let d1 = &hops[1]["delta"];
+    assert!((d1["sharpe"].as_f64().unwrap() - 0.5).abs() < 1e-9);
+    assert!((d1["trades"].as_f64().unwrap() - 10.0).abs() < 1e-9);
+    let d2 = &hops[2]["delta"];
+    assert!((d2["sharpe"].as_f64().unwrap() - (-0.3)).abs() < 1e-9);
+    assert!((d2["trades"].as_f64().unwrap() - 15.0).abs() < 1e-9);
+
+    // Edge props are threaded onto the hop they lead to.
+    assert_eq!(hops[1]["edge"]["props"]["mutation"], "m1");
+    assert_eq!(hops[2]["edge"]["props"]["mutation"], "m2");
+}
+
+#[test]
+fn test_lineage_branching_descendants_returns_both_children() {
+    let (_dir, db) = temp_db();
+    let db_str = db.to_str().unwrap();
+    run_axil(&["init", db_str]); // create the graph store that `link` needs
+    let mk = |data: &str| -> String {
+        let (stdout, _, _) = run_axil(&["--db", db_str, "store", "trials", data]);
+        parse_json(&stdout)["id"].as_str().unwrap().to_string()
+    };
+    let r = mk(r#"{"n":"R"}"#);
+    let x = mk(r#"{"n":"X"}"#);
+    let y = mk(r#"{"n":"Y"}"#);
+    run_axil(&["--db", db_str, "link", &x, "derived_from", &r]);
+    run_axil(&["--db", db_str, "link", &y, "derived_from", &r]);
+
+    let (stdout, _, code) =
+        run_axil(&["--db", db_str, "lineage", &r, "--direction", "descendants"]);
+    assert_eq!(code, 0);
+    let out = parse_json(&stdout);
+    let hops = out["hops"].as_array().unwrap();
+    let ids: Vec<&str> = hops.iter().map(|h| h["id"].as_str().unwrap()).collect();
+    assert_eq!(ids.len(), 3);
+    assert_eq!(ids[0], r);
+    assert!(ids.contains(&x.as_str()));
+    assert!(ids.contains(&y.as_str()));
+}
+
+#[test]
+fn test_lineage_cycle_terminates_without_duplicates() {
+    let (_dir, db) = temp_db();
+    let db_str = db.to_str().unwrap();
+    run_axil(&["init", db_str]); // create the graph store that `link` needs
+    let mk = |data: &str| -> String {
+        let (stdout, _, _) = run_axil(&["--db", db_str, "store", "trials", data]);
+        parse_json(&stdout)["id"].as_str().unwrap().to_string()
+    };
+    let a = mk(r#"{"n":"A"}"#);
+    let b = mk(r#"{"n":"B"}"#);
+    run_axil(&["--db", db_str, "link", &a, "derived_from", &b]);
+    run_axil(&["--db", db_str, "link", &b, "derived_from", &a]);
+
+    let (stdout, _, code) = run_axil(&["--db", db_str, "lineage", &a]);
+    assert_eq!(code, 0);
+    let hops = parse_json(&stdout)["hops"].as_array().unwrap().len();
+    assert_eq!(hops, 2, "A→B→A cycle must emit each node once");
+}
+
+#[test]
+fn test_lineage_max_depth_truncates() {
+    let (_dir, db) = temp_db();
+    let db_str = db.to_str().unwrap();
+    run_axil(&["init", db_str]); // create the graph store that `link` needs
+    let mk = |data: &str| -> String {
+        let (stdout, _, _) = run_axil(&["--db", db_str, "store", "trials", data]);
+        parse_json(&stdout)["id"].as_str().unwrap().to_string()
+    };
+    let a = mk(r#"{"n":"A"}"#);
+    let b = mk(r#"{"n":"B"}"#);
+    let c = mk(r#"{"n":"C"}"#);
+    run_axil(&["--db", db_str, "link", &a, "derived_from", &b]);
+    run_axil(&["--db", db_str, "link", &b, "derived_from", &c]);
+
+    let (stdout, _, code) = run_axil(&["--db", db_str, "lineage", &a, "--max-depth", "1"]);
+    assert_eq!(code, 0);
+    let hops = parse_json(&stdout)["hops"].as_array().unwrap().to_vec();
+    assert_eq!(hops.len(), 2, "--max-depth 1 keeps depths 0 and 1 only");
+    assert_eq!(hops[0]["id"].as_str().unwrap(), a);
+    assert_eq!(hops[1]["id"].as_str().unwrap(), b);
+}
+
 // ─── Index-text ────────────────────────────────────────────────────────────
 
 #[test]

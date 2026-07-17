@@ -133,6 +133,7 @@ an error, or a preference: they auto-embed, auto-supersede, and dedupe.
 | `link` | `from` string (req), `edge_type` string (req), `to` string (req), `props?` object | Create a graph edge between two records. |
 | `add_vector` | `id` string (req), `vector` number[] (req), `space?` string | Attach a pre-computed raw vector to an existing record. `space` targets a named vector space (`<db>.axil.vec.<name>`, own dimension, created lazily on first write); omit for the default space. |
 | `similar` | `vector?` number[], `id?` string, `space?` string, `top_k?` int (default 5), `threshold?` number | Find records with vectors similar to a query. Pass `vector` or `id` (uses that record's stored vector, excluded from results). `threshold` filters to score ≥ F for near-duplicate detection. `space` targets a named vector space. |
+| `lineage` | `id` string (req), `edge_type?` string (default `derived_from`), `direction?` (`ancestors`/`descendants`/`both`), `max_depth?` int (default 20), `fields?` string[] | Walk a derivation chain over graph edges. Returns hops with per-hop selected `fields` and numeric `delta` vs the previous hop. `ancestors` follows OUT edges (root-first: what each node was derived from); `descendants` follows IN edges. |
 
 ### Extension tools — dependency docs (`deps` feature)
 

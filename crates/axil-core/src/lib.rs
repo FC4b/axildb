@@ -50,6 +50,7 @@ pub mod extension;
 pub mod feedback;
 pub mod importance;
 pub mod inference;
+pub mod lineage;
 pub mod llm;
 #[cfg(feature = "llm-http")]
 pub mod llm_http;

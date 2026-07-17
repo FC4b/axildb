@@ -1736,6 +1736,37 @@ enum Command {
         direction: CliDirection,
     },
 
+    /// Walk a derivation chain (lineage) from a record over `derived_from` edges.
+    ///
+    /// Each hop carries the record fields you select plus the numeric delta of
+    /// those fields against the previous hop, so you can read how a metric
+    /// drifted across a chain of mutations. `ancestors` follows OUT edges
+    /// (root-first: what each node was derived from); `descendants` follows IN
+    /// edges (what was derived from the node). The walk is cycle-safe (a global
+    /// visited set) and depth-bounded. A missing edge endpoint is reported as a
+    /// `"missing": true` hop, not an error.
+    ///
+    /// Create lineage at store time with
+    /// `axil link <child> derived_from <parent> --props '{"mutation":"widened stop"}'`.
+    #[cfg(feature = "graph")]
+    Lineage {
+        /// Root record ID.
+        id: String,
+        /// Edge type to follow.
+        #[arg(long, default_value = "derived_from")]
+        edge_type: String,
+        /// Walk direction: ancestors | descendants | both.
+        #[arg(long, default_value = "ancestors")]
+        direction: String,
+        /// Maximum hops from the root.
+        #[arg(long, default_value = "20")]
+        max_depth: usize,
+        /// Comma-separated `record.data` keys to include per hop (and diff for
+        /// delta). Omit to include all fields.
+        #[arg(long, value_delimiter = ',')]
+        fields: Vec<String>,
+    },
+
     // ── Advanced FTS commands ───────────────────────────────────────
     /// Index a record field for full-text search.
     #[cfg(feature = "fts")]
@@ -10527,6 +10558,33 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                 .collect();
 
             out.print_array(&values);
+            Ok(EXIT_OK)
+        }
+
+        // ── Lineage ─────────────────────────────────────────────────
+        #[cfg(feature = "graph")]
+        Command::Lineage {
+            id,
+            edge_type,
+            direction,
+            max_depth,
+            fields,
+        } => {
+            let db_path = require_db(&db_opt)?;
+            let db = open_with_all_detected(&db_path)?;
+            let rid = RecordId::from_string(&id).context("invalid record ID")?;
+            let dir = axil_core::lineage::LineageDirection::parse(&direction)
+                .map_err(|e| anyhow::anyhow!(e))?;
+            let field_filter = if fields.is_empty() {
+                None
+            } else {
+                Some(fields.as_slice())
+            };
+            let value = axil_core::lineage::walk(
+                &db, &rid, &edge_type, dir, max_depth, field_filter,
+            )
+            .context("lineage walk failed")?;
+            out.print(&value);
             Ok(EXIT_OK)
         }
 
