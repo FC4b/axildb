@@ -1631,7 +1631,7 @@ fn test_lineage_chain_exact_hops_and_deltas() {
     assert_eq!(hops[1]["id"].as_str().unwrap(), b);
     assert_eq!(hops[2]["id"].as_str().unwrap(), c);
 
-    // Exact deltas (hop N minus hop N-1).
+    // Exact deltas (each hop minus its parent hop; identical on a linear chain).
     let d1 = &hops[1]["delta"];
     assert!((d1["sharpe"].as_f64().unwrap() - 0.5).abs() < 1e-9);
     assert!((d1["trades"].as_f64().unwrap() - 10.0).abs() < 1e-9);

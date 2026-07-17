@@ -311,7 +311,7 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "lineage".into(),
-            description: "Walk a derivation chain over graph edges (default `derived_from`). `direction` = ancestors (follow OUT edges, root-first: what each node was derived from), descendants (IN edges: what was derived from the node), or both. Returns a hop list with per-hop selected `fields` and numeric `delta` vs the previous hop. Create edges with `link A derived_from B --props '{\"mutation\":\"…\"}'`.".into(),
+            description: "Walk a derivation chain over graph edges (default `derived_from`). `direction` = ancestors (follow OUT edges, root-first: what each node was derived from), descendants (IN edges: what was derived from the node), or both. Returns a hop list with per-hop selected `fields` and numeric `delta` vs its parent hop (the node on the other end of the discovering edge). Create edges with `link A derived_from B --props '{\"mutation\":\"…\"}'`.".into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -1322,6 +1322,7 @@ fn parse_metric_spec(s: &str) -> Result<axil_ql::AggMetric, String> {
 /// Kept adapter-local (a small twin of the CLI helper) rather than shared
 /// through `axil-core`, which is off-limits for this work.
 fn parse_where_expr(input: &str) -> Result<Vec<(String, axil_core::Op, Value)>, String> {
+    ensure_where_quotes_balanced(input)?;
     let mut out = Vec::new();
     for cond in split_where_conditions(input) {
         let cond = cond.trim();
@@ -1334,6 +1335,27 @@ fn parse_where_expr(input: &str) -> Result<Vec<(String, axil_core::Op, Value)>, 
         return Err(format!("invalid where clause: {input}"));
     }
     Ok(out)
+}
+
+/// Reject a where expression containing an unterminated quote. A dangling
+/// quote would otherwise swallow the rest of the expression into a string
+/// value that can never match — a silent empty result instead of an error.
+fn ensure_where_quotes_balanced(clause: &str) -> Result<(), String> {
+    let mut in_quote: Option<u8> = None;
+    for &c in clause.as_bytes() {
+        match in_quote {
+            Some(q) if c == q => in_quote = None,
+            None if c == b'"' || c == b'\'' => in_quote = Some(c),
+            _ => {}
+        }
+    }
+    if let Some(q) = in_quote {
+        return Err(format!(
+            "invalid where clause: unterminated {} quote in '{clause}'",
+            q as char
+        ));
+    }
+    Ok(())
 }
 
 /// Split on the `AND` keyword (case-insensitive, whole word) outside quotes.
@@ -2005,6 +2027,17 @@ mod tests {
         let db = Axil::open(dir.path().join("q3.axil")).build().unwrap();
         let result = dispatch(&db, "query", &json!({"table":"t","where":"nonsense"}));
         assert_eq!(result.is_error, Some(true));
+    }
+
+    #[test]
+    fn query_tool_unterminated_quote_errors() {
+        // A dangling quote must error, not silently match nothing.
+        let dir = tempfile::tempdir().unwrap();
+        let db = Axil::open(dir.path().join("q4.axil")).build().unwrap();
+        let result = dispatch(&db, "query", &json!({"table":"t","where":"family = 'meanrev"}));
+        assert_eq!(result.is_error, Some(true));
+        assert!(parse_where_expr("family = 'meanrev").is_err());
+        assert!(parse_where_expr("family = 'meanrev'").is_ok());
     }
 
     #[cfg(feature = "ql")]

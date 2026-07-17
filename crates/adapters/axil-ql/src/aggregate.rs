@@ -122,12 +122,14 @@ impl GroupAcc {
 }
 
 /// Render a group-by field value as a stable string key. Missing or JSON-null
-/// values map to `None` (the null group).
+/// values map to `None` (the null group). The key is type-discriminated so a
+/// number and its string rendering (`1` vs `"1"`) stay separate groups — the
+/// key is internal only; output uses the group's original `repr` value.
 fn render_key(v: Option<&Value>) -> Option<String> {
     match v {
         None | Some(Value::Null) => None,
-        Some(Value::String(s)) => Some(s.clone()),
-        Some(other) => Some(other.to_string()),
+        Some(Value::String(s)) => Some(format!("s:{s}")),
+        Some(other) => Some(format!("j:{other}")),
     }
 }
 
@@ -359,6 +361,23 @@ mod tests {
         assert_eq!(groups[0]["count"], 1);
         assert_eq!(groups[1]["group"], "meanrev");
         assert_eq!(groups[1]["count"], 1);
+    }
+
+    #[test]
+    fn group_keys_do_not_collide_across_types() {
+        let (_d, db) = setup_db();
+        // Number 1 and string "1" are different facet values — they must not
+        // merge into one group just because they render to the same text.
+        db.insert("t", json!({"g": 1, "x": 10.0})).unwrap();
+        db.insert("t", json!({"g": "1", "x": 20.0})).unwrap();
+
+        let metrics = [AggMetric::Count];
+        let out = aggregate(&db, &req("t", &metrics, Some("g"), &[])).unwrap();
+        let groups = out["groups"].as_array().unwrap();
+        assert_eq!(groups.len(), 2);
+        for g in groups {
+            assert_eq!(g["count"], 1);
+        }
     }
 
     #[test]

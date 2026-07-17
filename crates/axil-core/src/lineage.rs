@@ -4,7 +4,7 @@
 //! `lineage` tool) implemented as a breadth-first walk over [`Axil::edges`],
 //! deliberately kept out of the recall core. It retains the *path* the standard
 //! traversal API discards: each hop carries the record fields you select plus
-//! the numeric delta against the previous hop, so a strategy-R&D loop can read
+//! the numeric delta against its parent hop, so a strategy-R&D loop can read
 //! how a metric drifted across a chain of mutations.
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -51,12 +51,14 @@ impl LineageDirection {
     }
 }
 
-/// One frontier item: the node to expand, its depth, and the edge that led to
-/// it (`None` for the root).
+/// One frontier item: the node to expand, its depth, the edge that led to it
+/// (`None` for the root), and the numeric fields of the hop that discovered it
+/// (empty for the root) — deltas are computed against that parent hop.
 struct Pending {
     id: RecordId,
     depth: usize,
     edge: Option<Value>,
+    parent_numeric: HashMap<String, f64>,
 }
 
 /// Walk a lineage chain from `root` over `edge_type` edges.
@@ -70,9 +72,11 @@ struct Pending {
 /// The walk is breadth-first with a global visited set (cycle-safe: a node is
 /// emitted at most once). `fields` selects which `record.data` keys appear in
 /// each hop's `fields` (all keys when `None`); `delta` holds, for the selected
-/// keys numeric on both this hop and the previous hop in the list, `hop N minus
-/// hop N-1`. `ancestors` is root-first ordering. A hop whose record is missing
-/// is emitted with `"missing": true` (no fields/delta) rather than erroring.
+/// keys numeric on both hops, `this hop minus its parent hop` — the node on the
+/// other end of the edge that discovered it, so in a branching tree each
+/// sibling's delta is measured against their shared parent, not each other.
+/// `ancestors` is root-first ordering. A hop whose record is missing is emitted
+/// with `"missing": true` (no fields/delta) rather than erroring.
 pub fn walk(
     db: &Axil,
     root: &RecordId,
@@ -84,14 +88,13 @@ pub fn walk(
     let mut visited: HashSet<RecordId> = HashSet::new();
     let mut queue: VecDeque<Pending> = VecDeque::new();
     let mut hops: Vec<Value> = Vec::new();
-    // Numeric fields of the previously-appended hop, for index-based deltas.
-    let mut prev_numeric: HashMap<String, f64> = HashMap::new();
 
     visited.insert(root.clone());
     queue.push_back(Pending {
         id: root.clone(),
         depth: 0,
         edge: None,
+        parent_numeric: HashMap::new(),
     });
 
     while let Some(item) = queue.pop_front() {
@@ -107,7 +110,7 @@ pub fn walk(
             None => (Map::new(), HashMap::new()),
         };
 
-        let delta = compute_delta(&prev_numeric, &numeric);
+        let delta = compute_delta(&item.parent_numeric, &numeric);
 
         let mut hop = Map::new();
         hop.insert("depth".to_string(), json!(item.depth));
@@ -127,7 +130,6 @@ pub fn walk(
         );
         hop.insert("delta".to_string(), Value::Object(delta));
         hops.push(Value::Object(hop));
-        prev_numeric = numeric;
 
         // Don't expand past the depth cap or through a missing record.
         if item.depth >= max_depth || record.is_none() {
@@ -150,6 +152,7 @@ pub fn walk(
                     id: next,
                     depth: item.depth + 1,
                     edge: Some(edge_json),
+                    parent_numeric: numeric.clone(),
                 });
             }
         }

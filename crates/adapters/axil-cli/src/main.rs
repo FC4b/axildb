@@ -1739,8 +1739,10 @@ enum Command {
     /// Walk a derivation chain (lineage) from a record over `derived_from` edges.
     ///
     /// Each hop carries the record fields you select plus the numeric delta of
-    /// those fields against the previous hop, so you can read how a metric
-    /// drifted across a chain of mutations. `ancestors` follows OUT edges
+    /// those fields against its parent hop (the node on the other end of the
+    /// discovering edge), so you can read how a metric drifted across a chain
+    /// of mutations — in a branching tree each sibling's delta is measured
+    /// against their shared parent. `ancestors` follows OUT edges
     /// (root-first: what each node was derived from); `descendants` follows IN
     /// edges (what was derived from the node). The walk is cycle-safe (a global
     /// visited set) and depth-bounded. A missing edge endpoint is reported as a
@@ -5713,6 +5715,7 @@ fn read_json_input(data: &str) -> Result<Value> {
 /// falling back to a bare string. Only flat top-level fields are supported —
 /// OR, parentheses, and nested dot-paths are non-goals.
 fn parse_where_clause(clause: &str) -> Result<Vec<(String, Op, Value)>> {
+    ensure_where_quotes_balanced(clause)?;
     let mut out = Vec::new();
     for cond in split_where_conditions(clause) {
         let cond = cond.trim();
@@ -5725,6 +5728,27 @@ fn parse_where_clause(clause: &str) -> Result<Vec<(String, Op, Value)>> {
         anyhow::bail!("invalid where clause: {clause} (expected field=value, field>value, etc.)");
     }
     Ok(out)
+}
+
+/// Reject a where expression containing an unterminated quote. A dangling
+/// quote would otherwise swallow the rest of the expression into a string
+/// value that can never match — a silent empty result instead of an error.
+fn ensure_where_quotes_balanced(clause: &str) -> Result<()> {
+    let mut in_quote: Option<u8> = None;
+    for &c in clause.as_bytes() {
+        match in_quote {
+            Some(q) if c == q => in_quote = None,
+            None if c == b'"' || c == b'\'' => in_quote = Some(c),
+            _ => {}
+        }
+    }
+    if let Some(q) = in_quote {
+        anyhow::bail!(
+            "invalid where clause: unterminated {} quote in '{clause}'",
+            q as char
+        );
+    }
+    Ok(())
 }
 
 /// Split a where expression on the `AND` keyword (case-insensitive, whole word),
@@ -20172,5 +20196,16 @@ mod where_clause_tests {
     #[test]
     fn bare_bang_errors() {
         assert!(parse_where_clause("x ! 5").is_err());
+    }
+
+    #[test]
+    fn unterminated_quote_errors() {
+        // A dangling quote must error, not silently become a never-matching
+        // string literal.
+        let err = parse_where_clause("family = 'meanrev").unwrap_err();
+        assert!(err.to_string().contains("unterminated"));
+        assert!(parse_where_clause("a = \"x AND b = 2").is_err());
+        // Balanced quotes still parse.
+        assert!(parse_where_clause("family = 'meanrev'").is_ok());
     }
 }

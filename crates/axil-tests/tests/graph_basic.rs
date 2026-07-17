@@ -350,6 +350,40 @@ fn lineage_ancestors_walks_derived_from_chain() {
     assert_eq!(hops[1]["edge"]["props"]["mutation"], "widen");
 }
 
+/// In a branching tree, each sibling's delta is measured against the shared
+/// parent (the node on the other end of the discovering edge), not against
+/// the sibling that happened to be emitted just before it in BFS order.
+#[test]
+fn lineage_branching_deltas_are_parent_relative() {
+    let (db, _dir) = temp_graph_db();
+    let parent = db.insert("trials", json!({"n": "P", "sharpe": 1.0})).unwrap();
+    let c1 = db.insert("trials", json!({"n": "C1", "sharpe": 3.0})).unwrap();
+    let c2 = db.insert("trials", json!({"n": "C2", "sharpe": 0.5})).unwrap();
+    db.relate(&c1.id, "derived_from", &parent.id, None).unwrap();
+    db.relate(&c2.id, "derived_from", &parent.id, None).unwrap();
+
+    let out = lineage::walk(
+        &db,
+        &parent.id,
+        "derived_from",
+        LineageDirection::Descendants,
+        20,
+        None,
+    )
+    .unwrap();
+    let hops = out["hops"].as_array().unwrap();
+    assert_eq!(hops.len(), 3);
+    // Both children measure against P (sharpe 1.0): +2.0 and -0.5 — the
+    // second child must NOT be measured against the first (0.5 - 3.0).
+    let mut deltas: Vec<f64> = hops[1..]
+        .iter()
+        .map(|h| h["delta"]["sharpe"].as_f64().unwrap())
+        .collect();
+    deltas.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    assert!((deltas[0] - (-0.5)).abs() < 1e-9);
+    assert!((deltas[1] - 2.0).abs() < 1e-9);
+}
+
 /// A lineage edge whose endpoint record was deleted (without the graph engine
 /// attached, so the edge survives) is reported as a `missing: true` hop rather
 /// than erroring the whole walk.
