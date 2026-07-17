@@ -1479,6 +1479,122 @@ fn test_add_vector_and_search_vector() {
     assert!(results[0]["id"].is_string());
 }
 
+// ─── store --vector + similar (raw vectors first-class) ─────────────────────
+
+#[test]
+fn test_store_vector_roundtrip_and_similar_default_space() {
+    let (_dir, db) = temp_db();
+    let db_str = db.to_str().unwrap();
+
+    // The default space coexists with the bundled 384-dim embedder, so a raw
+    // vector attached there must be 384-dim (arbitrary dims → use `--space`).
+    run_axil(&["init", db_str]);
+    let v0 = unit_vec_384(0);
+    let v1 = unit_vec_384(1);
+
+    let (stdout, _, code) =
+        run_axil(&["--db", db_str, "store", "v", r#"{"n":"a"}"#, "--vector", &v0]);
+    assert_eq!(code, 0, "store --vector failed: {stdout}");
+    let a = parse_json(&stdout);
+    assert_eq!(a["vector_dims"], 384);
+    assert!(a.get("space").is_none(), "default space must not label a space");
+
+    let (_, _, code) =
+        run_axil(&["--db", db_str, "store", "v", r#"{"n":"b"}"#, "--vector", &v1]);
+    assert_eq!(code, 0);
+
+    // `similar --vector` searches the default space; the exact match ranks first.
+    let (stdout, _, code) =
+        run_axil(&["--db", db_str, "similar", "--vector", &v0, "--top-k", "2"]);
+    assert_eq!(code, 0);
+    let results: Vec<Value> = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(results.len(), 2);
+    assert!(results[0]["score"].as_f64().unwrap() > 0.99);
+    assert_eq!(results[0]["id"].as_str().unwrap(), a["id"].as_str().unwrap());
+}
+
+#[test]
+fn test_store_vector_conflicts_with_embed() {
+    let (_dir, db) = temp_db();
+    let db_str = db.to_str().unwrap();
+    let (_, stderr, code) = run_axil(&[
+        "--db", db_str, "store", "v", r#"{"n":"a"}"#, "--vector", "[1,0,0]", "--embed", "n",
+    ]);
+    assert_eq!(code, 2, "clap conflict must exit 2");
+    assert!(
+        stderr.contains("cannot be used with"),
+        "unexpected stderr: {stderr}"
+    );
+}
+
+#[test]
+fn test_similar_id_threshold_named_space_returns_exact_twin() {
+    let (_dir, db) = temp_db();
+    let db_str = db.to_str().unwrap();
+
+    // A near-duplicate pair (cosine ≈ 0.97) + an orthogonal decoy, all in the
+    // 8-dim `fp` space (no collision with any text-embedding space).
+    let (stdout, _, code) = run_axil(&[
+        "--db", db_str, "store", "fp", r#"{"n":"a"}"#,
+        "--vector", "[1.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0]", "--space", "fp",
+    ]);
+    assert_eq!(code, 0, "store --vector --space failed: {stdout}");
+    let out_a = parse_json(&stdout);
+    assert_eq!(out_a["space"], "fp");
+    assert_eq!(out_a["vector_dims"], 8);
+    let id_a = out_a["id"].as_str().unwrap().to_string();
+
+    let (stdout, _, _) = run_axil(&[
+        "--db", db_str, "store", "fp", r#"{"n":"b"}"#,
+        "--vector", "[1.0,0.25,0.0,0.0,0.0,0.0,0.0,0.0]", "--space", "fp",
+    ]);
+    let id_b = parse_json(&stdout)["id"].as_str().unwrap().to_string();
+
+    run_axil(&[
+        "--db", db_str, "store", "fp", r#"{"n":"c"}"#,
+        "--vector", "[0.0,0.0,1.0,0.0,0.0,0.0,0.0,0.0]", "--space", "fp",
+    ]);
+
+    // similar --id A --threshold 0.9 returns exactly the twin B (self excluded,
+    // decoy below threshold).
+    let (stdout, _, code) = run_axil(&[
+        "--db", db_str, "similar", "--id", &id_a, "--threshold", "0.9", "--space", "fp",
+    ]);
+    assert_eq!(code, 0);
+    let results: Vec<Value> = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(results.len(), 1, "threshold 0.9 should return only the twin");
+    assert_eq!(results[0]["id"].as_str().unwrap(), id_b);
+    assert!(results[0]["score"].as_f64().unwrap() > 0.9);
+}
+
+#[test]
+fn test_add_vector_and_search_vector_named_space() {
+    let (_dir, db) = temp_db();
+    let db_str = db.to_str().unwrap();
+
+    // init makes a 384-dim default store; a 4-dim `fp` space must not collide.
+    run_axil(&["init", db_str]);
+    let (stdout, _, _) = run_axil(&["--db", db_str, "store", "fp", r#"{"n":"x"}"#]);
+    let id_x = parse_json(&stdout)["id"].as_str().unwrap().to_string();
+
+    let (stdout, _, code) = run_axil(&[
+        "--db", db_str, "add-vector", &id_x, "[1.0,0.0,0.0,0.0]", "--space", "fp",
+    ]);
+    assert_eq!(code, 0, "add-vector --space failed: {stdout}");
+    let added = parse_json(&stdout);
+    assert_eq!(added["added"], true);
+    assert_eq!(added["space"], "fp");
+    assert_eq!(added["dimensions"], 4);
+
+    let (stdout, _, code) = run_axil(&[
+        "--db", db_str, "search-vector", "[1.0,0.0,0.0,0.0]", "--space", "fp", "--top-k", "3",
+    ]);
+    assert_eq!(code, 0);
+    let results: Vec<Value> = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0]["id"].as_str().unwrap(), id_x);
+}
+
 // ─── Index-text ────────────────────────────────────────────────────────────
 
 #[test]

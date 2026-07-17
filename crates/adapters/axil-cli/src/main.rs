@@ -1063,6 +1063,24 @@ enum Command {
         #[cfg(feature = "embed")]
         #[arg(long)]
         embed: Option<String>,
+        /// Attach a pre-computed raw vector (JSON array of floats) to the new
+        /// record in one shot. Mutually exclusive with `--embed`. Use `--space`
+        /// to target a named vector space (e.g. a strategy fingerprint index)
+        /// instead of the default text-embedding space.
+        #[cfg(all(feature = "vector", feature = "embed"))]
+        #[arg(long, value_name = "JSON", conflicts_with = "embed")]
+        vector: Option<String>,
+        /// Attach a pre-computed raw vector (JSON array of floats) to the new
+        /// record in one shot. Use `--space` to target a named vector space.
+        #[cfg(all(feature = "vector", not(feature = "embed")))]
+        #[arg(long, value_name = "JSON")]
+        vector: Option<String>,
+        /// Named vector space for `--vector` (`[a-z0-9_-]{1,32}`). Omit for the
+        /// default `<db>.axil.vec` space. Named spaces are stored in
+        /// `<db>.axil.vec.<name>` with their own dimension.
+        #[cfg(feature = "vector")]
+        #[arg(long)]
+        space: Option<String>,
         /// JSON array of entity names to store as metadata.
         #[arg(long)]
         entities: Option<String>,
@@ -1650,9 +1668,14 @@ enum Command {
         /// Vector dimensions (auto-detected if omitted).
         #[arg(long)]
         dimensions: Option<usize>,
+        /// Named vector space (`[a-z0-9_-]{1,32}`). Omit for the default space.
+        #[arg(long)]
+        space: Option<String>,
     },
 
     /// Search for similar records using a raw vector.
+    ///
+    /// Deprecated alias for `axil similar --vector`; kept for compatibility.
     #[cfg(feature = "vector")]
     SearchVector {
         /// Query vector as JSON array of floats.
@@ -1661,6 +1684,43 @@ enum Command {
         #[arg(long, default_value = "5")]
         top_k: usize,
         /// Vector dimensions (auto-detected if omitted).
+        #[arg(long)]
+        dimensions: Option<usize>,
+        /// Named vector space (`[a-z0-9_-]{1,32}`). Omit for the default space.
+        #[arg(long)]
+        space: Option<String>,
+    },
+
+    /// Find records with vectors similar to a query vector or a record's stored
+    /// vector.
+    ///
+    /// Provide either `--vector '<json floats>'` or `--id <record-id>` (which
+    /// looks up that record's stored vector and excludes the record itself from
+    /// results). `--threshold` filters to results scoring >= F — set it to e.g.
+    /// 0.95 for near-duplicate detection. `--space` targets a named vector
+    /// space.
+    ///
+    /// v1 non-goals: named spaces are NOT integrated with
+    /// heal/rebuild/branch/snapshot/doctor, and text-embedding recall never
+    /// consults named spaces.
+    #[cfg(feature = "vector")]
+    Similar {
+        /// Query vector as a JSON array of floats (mutually exclusive with --id).
+        #[arg(long, value_name = "JSON", conflicts_with = "id")]
+        vector: Option<String>,
+        /// Use this record's stored vector as the query (excludes it from results).
+        #[arg(long)]
+        id: Option<String>,
+        /// Named vector space (`[a-z0-9_-]{1,32}`). Omit for the default space.
+        #[arg(long)]
+        space: Option<String>,
+        /// Number of results.
+        #[arg(long, default_value = "5")]
+        top_k: usize,
+        /// Only return results scoring >= this cosine similarity (0.0–1.0).
+        #[arg(long)]
+        threshold: Option<f32>,
+        /// Vector dimensions for the default space (auto-detected if omitted).
         #[arg(long)]
         dimensions: Option<usize>,
     },
@@ -5958,6 +6018,11 @@ fn attach_detected_engines(mut builder: axil_core::AxilBuilder) -> Result<axil_c
 
     #[cfg(feature = "vector")]
     {
+        // Register the named-vector-space factory unconditionally (even when the
+        // default vector store is absent or the engine is disabled): named
+        // spaces are independent companion files, and the factory is a cheap
+        // unit that leaves every existing vector path byte-identical.
+        builder = builder.with_vector_spaces();
         if !config.is_engine_disabled("vec") {
             if let Ok(Some(_)) = axil_vector::read_stored_dimensions(&path) {
                 // Attach vector index + embedder together so auto-embed on insert works.
@@ -6163,7 +6228,7 @@ fn open_for_scip_ingest(path: &Path) -> Result<Axil> {
 /// Open a database with vector support (auto-detecting dimensions).
 #[cfg(feature = "vector")]
 fn open_with_vector(path: &Path, dimensions: Option<usize>) -> Result<Axil> {
-    let builder = Axil::open(path);
+    let builder = Axil::open(path).with_vector_spaces();
     let db = match dimensions {
         Some(dims) => builder
             .with_vector(dims)
@@ -6173,6 +6238,41 @@ fn open_with_vector(path: &Path, dimensions: Option<usize>) -> Result<Axil> {
             .context("failed to auto-detect vector dimensions — use --dimensions")?,
     };
     db.build().context("failed to open database")
+}
+
+/// Open for a `store --vector` in the *default* space: attach all detected
+/// engines and, when the default vector store is missing, create it at the
+/// supplied dimension (a write path may create storage; read paths never do).
+/// Honors `[engines] disabled` like [`open_with_embedder_creating`].
+#[cfg(feature = "vector")]
+fn open_with_vector_creating(path: &Path, dims: usize) -> Result<Axil> {
+    let store_missing = axil_vector::read_stored_dimensions(path)
+        .context("failed to probe vector store")?
+        .is_none();
+    let mut builder = attach_detected_engines(Axil::open(path))?;
+    if store_missing {
+        let config = path
+            .parent()
+            .and_then(|dir| axil_core::load_config_from(dir).ok())
+            .unwrap_or_default();
+        if !config.is_engine_disabled("vec") {
+            builder = builder
+                .with_vector(dims)
+                .context("failed to create vector store")?;
+            eprintln!(
+                "axil: created vector store at {}",
+                axil_vector::vector_db_path(path).display()
+            );
+        }
+    }
+    let db = builder.build().context("failed to open database")?;
+    if !db.has_vector_index() {
+        anyhow::bail!(
+            "the vector engine is disabled in axil.toml ([engines] disabled) — \
+             re-enable it to attach raw vectors"
+        );
+    }
+    Ok(db)
 }
 
 /// Open a database with embedder loaded (for recall/search commands).
@@ -8232,6 +8332,10 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             json_data,
             #[cfg(feature = "embed")]
             embed,
+            #[cfg(feature = "vector")]
+            vector,
+            #[cfg(feature = "vector")]
+            space,
             entities,
             llm,
             agent,
@@ -8239,13 +8343,41 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
         } => {
             let db_path = require_db(&db_opt)?;
 
+            // Parse --vector up front: attaching to the default space needs the
+            // vector's dimension to size a freshly-created store.
+            #[cfg(feature = "vector")]
+            let raw_vector: Option<Vec<f32>> = match vector {
+                Some(ref v) => {
+                    Some(serde_json::from_str(v).context("invalid --vector JSON")?)
+                }
+                None => None,
+            };
+            #[cfg(feature = "vector")]
+            if space.is_some() && raw_vector.is_none() {
+                anyhow::bail!("--space requires --vector");
+            }
+
+            // Open path: a raw --vector attaches to the default space (create it
+            // at the vector's dimension) or a named space (independent companion
+            // file, no default store needed). Otherwise fall back to the
+            // embed/all-detected paths.
             #[cfg(feature = "embed")]
-            let db = if embed.is_some() {
+            let db = if raw_vector.is_some() && space.is_none() {
+                open_with_vector_creating(&db_path, raw_vector.as_ref().unwrap().len())?
+            } else if raw_vector.is_some() {
+                open_with_all_detected(&db_path)?
+            } else if embed.is_some() {
                 open_with_embedder_creating(&db_path)?
             } else {
                 open_with_all_detected(&db_path)?
             };
-            #[cfg(not(feature = "embed"))]
+            #[cfg(all(feature = "vector", not(feature = "embed")))]
+            let db = if raw_vector.is_some() && space.is_none() {
+                open_with_vector_creating(&db_path, raw_vector.as_ref().unwrap().len())?
+            } else {
+                open_with_all_detected(&db_path)?
+            };
+            #[cfg(not(feature = "vector"))]
             let db = open_with_all_detected(&db_path)?;
 
             // Wire up LLM if --llm flag is set and config exists.
@@ -8330,6 +8462,19 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
 
             let record = db.insert(&table, data).context("insert failed")?;
 
+            // Attach a raw --vector to the default or named space.
+            #[cfg(feature = "vector")]
+            if let Some(ref v) = raw_vector {
+                match space {
+                    Some(ref s) => db
+                        .add_vector_in(s, &record.id, v)
+                        .with_context(|| format!("failed to attach vector to space '{s}'"))?,
+                    None => db
+                        .add_vector(&record.id, v)
+                        .context("failed to attach vector")?,
+                }
+            }
+
             // Auto-embed if requested.
             #[cfg(feature = "embed")]
             if let Some(ref fields) = embed {
@@ -8347,6 +8492,16 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                 "table": record.table,
                 "created_at": format_dt(&record.created_at),
             });
+
+            // Surface the attached vector so an agent can confirm the round-trip.
+            #[cfg(feature = "vector")]
+            if let Some(ref v) = raw_vector {
+                let obj = result.as_object_mut().unwrap();
+                obj.insert("vector_dims".to_string(), json!(v.len()));
+                if let Some(ref s) = space {
+                    obj.insert("space".to_string(), json!(s));
+                }
+            }
 
             // Include LLM usage if LLM was used.
             if llm {
@@ -10212,34 +10367,132 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             id,
             vector,
             dimensions,
+            space,
         } => {
             let db_path = require_db(&db_opt)?;
-            let db = open_with_vector(&db_path, dimensions)?;
             let rid = RecordId::from_string(&id).context("invalid record ID")?;
             let vec: Vec<f32> = serde_json::from_str(&vector).context("invalid vector JSON")?;
-            db.add_vector(&rid, &vec).context("add_vector failed")?;
 
-            out.print(&json!({
-                "added": true,
-                "id": id,
-                "dimensions": vec.len(),
-            }));
+            match space {
+                // Named space: independent companion file, no default store needed.
+                Some(ref s) => {
+                    let db = open_with_all_detected(&db_path)?;
+                    db.add_vector_in(s, &rid, &vec)
+                        .with_context(|| format!("add_vector to space '{s}' failed"))?;
+                    out.print(&json!({
+                        "added": true,
+                        "id": id,
+                        "dimensions": vec.len(),
+                        "space": s,
+                    }));
+                }
+                // Default space: unchanged path.
+                None => {
+                    let db = open_with_vector(&db_path, dimensions)?;
+                    db.add_vector(&rid, &vec).context("add_vector failed")?;
+                    out.print(&json!({
+                        "added": true,
+                        "id": id,
+                        "dimensions": vec.len(),
+                    }));
+                }
+            }
             Ok(EXIT_OK)
         }
 
-        // ── SearchVector ────────────────────────────────────────────
+        // ── SearchVector (deprecated alias for `similar --vector`) ───
         #[cfg(feature = "vector")]
         Command::SearchVector {
             vector,
             top_k,
             dimensions,
+            space,
         } => {
             let db_path = require_db(&db_opt)?;
-            let db = open_with_vector(&db_path, dimensions)?;
             let vec: Vec<f32> = serde_json::from_str(&vector).context("invalid vector JSON")?;
-            let results = db
-                .similar_to_vector(&vec, top_k)
-                .context("vector search failed")?;
+
+            let results = match space {
+                Some(ref s) => {
+                    let db = open_with_all_detected(&db_path)?;
+                    db.similar_in(s, &vec, top_k)
+                        .with_context(|| format!("vector search in space '{s}' failed"))?
+                }
+                None => {
+                    let db = open_with_vector(&db_path, dimensions)?;
+                    db.similar_to_vector(&vec, top_k)
+                        .context("vector search failed")?
+                }
+            };
+
+            let values: Vec<Value> = results
+                .iter()
+                .map(|(r, score)| scored_to_json(r, *score))
+                .collect();
+
+            out.print_array(&values);
+            Ok(EXIT_OK)
+        }
+
+        // ── Similar ─────────────────────────────────────────────────
+        #[cfg(feature = "vector")]
+        Command::Similar {
+            vector,
+            id,
+            space,
+            top_k,
+            threshold,
+            dimensions,
+        } => {
+            let db_path = require_db(&db_opt)?;
+            if vector.is_none() && id.is_none() {
+                anyhow::bail!("provide either --vector or --id");
+            }
+
+            // Open once: a named space uses the factory (default store optional);
+            // the default space keeps the existing `open_with_vector` path.
+            let db = match space {
+                Some(_) => open_with_all_detected(&db_path)?,
+                None => open_with_vector(&db_path, dimensions)?,
+            };
+
+            // Resolve the query vector and, for --id, the record to exclude.
+            let (query, exclude): (Vec<f32>, Option<RecordId>) = match (&vector, &id) {
+                (Some(v), _) => (
+                    serde_json::from_str(v).context("invalid --vector JSON")?,
+                    None,
+                ),
+                (None, Some(id_str)) => {
+                    let rid = RecordId::from_string(id_str).context("invalid record ID")?;
+                    let stored = match space {
+                        Some(ref s) => db.get_vector_in(s, &rid)?,
+                        None => db.get_vector(&rid)?,
+                    };
+                    let v = stored.ok_or_else(|| {
+                        anyhow::anyhow!("record {id_str} has no stored vector in this space")
+                    })?;
+                    (v, Some(rid))
+                }
+                (None, None) => unreachable!("guarded above"),
+            };
+
+            // Over-fetch by one so excluding the query record still yields top_k.
+            let fetch = if exclude.is_some() { top_k + 1 } else { top_k };
+            let mut results = match space {
+                Some(ref s) => db
+                    .similar_in(s, &query, fetch)
+                    .with_context(|| format!("vector search in space '{s}' failed"))?,
+                None => db
+                    .similar_to_vector(&query, fetch)
+                    .context("vector search failed")?,
+            };
+
+            if let Some(ref ex) = exclude {
+                results.retain(|(r, _)| &r.id != ex);
+            }
+            if let Some(t) = threshold {
+                results.retain(|(_, score)| *score >= t);
+            }
+            results.truncate(top_k);
 
             let values: Vec<Value> = results
                 .iter()

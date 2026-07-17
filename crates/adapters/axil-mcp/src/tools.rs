@@ -255,6 +255,60 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
                 "required": ["table"]
             }),
         },
+        ToolDefinition {
+            name: "add_vector".into(),
+            description: "Attach a pre-computed raw vector to an existing record. `space` targets a named vector space (`<db>.axil.vec.<name>`, own dimension) — omit for the default space. The space is created lazily on first write, binding the vector's length as its dimension.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "id": {
+                        "type": "string",
+                        "description": "Record ID to attach the vector to"
+                    },
+                    "vector": {
+                        "type": "array",
+                        "items": { "type": "number" },
+                        "description": "Vector as an array of floats"
+                    },
+                    "space": {
+                        "type": "string",
+                        "description": "Named vector space ([a-z0-9_-]{1,32}); omit for the default space"
+                    }
+                },
+                "required": ["id", "vector"]
+            }),
+        },
+        ToolDefinition {
+            name: "similar".into(),
+            description: "Find records with vectors similar to a query. Provide `vector` (array of floats) or `id` (uses that record's stored vector, excluding it from results). `threshold` filters to score >= F (near-dup detection). `space` targets a named vector space.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "vector": {
+                        "type": "array",
+                        "items": { "type": "number" },
+                        "description": "Query vector (mutually exclusive with id)"
+                    },
+                    "id": {
+                        "type": "string",
+                        "description": "Use this record's stored vector as the query (excluded from results)"
+                    },
+                    "space": {
+                        "type": "string",
+                        "description": "Named vector space ([a-z0-9_-]{1,32}); omit for the default space"
+                    },
+                    "top_k": {
+                        "type": "integer",
+                        "description": "Number of results (default: 5)",
+                        "default": 5
+                    },
+                    "threshold": {
+                        "type": "number",
+                        "description": "Only return results scoring >= this cosine similarity"
+                    }
+                }
+            }),
+        },
 
         // ─── Intent-native writes (Track B) ─────────────────────────
         ToolDefinition {
@@ -419,6 +473,8 @@ pub fn dispatch(db: &Axil, tool_name: &str, args: &Value) -> ToolCallResult {
         "query" => handle_query(db, args),
         #[cfg(feature = "ql")]
         "aggregate" => handle_aggregate(db, args),
+        "add_vector" => handle_add_vector(db, args),
+        "similar" => handle_similar(db, args),
         "delete" => handle_delete(db, args),
         "remember_decision" => handle_remember_decision(db, args),
         "remember_error" => handle_remember_error(db, args),
@@ -1042,6 +1098,115 @@ fn handle_aggregate(db: &Axil, args: &Value) -> ToolCallResult {
     match axil_ql::aggregate(db, &req) {
         Ok(value) => ToolCallResult::json(&value),
         Err(e) => ToolCallResult::error(format!("aggregate failed: {e}")),
+    }
+}
+
+/// Parse a JSON array of numbers into an `f32` vector.
+fn parse_vector_arg(arr: &[Value]) -> Result<Vec<f32>, String> {
+    arr.iter()
+        .map(|v| v.as_f64().map(|f| f as f32).ok_or_else(|| "vector elements must be numbers".to_string()))
+        .collect()
+}
+
+/// Render a scored record hit as JSON.
+fn scored_to_json(record: &axil_core::Record, score: f32) -> Value {
+    let mut json = record_to_json(record);
+    json.as_object_mut()
+        .unwrap()
+        .insert("score".to_string(), json!(score));
+    json
+}
+
+fn handle_add_vector(db: &Axil, args: &Value) -> ToolCallResult {
+    let id_str = match args.get("id").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return ToolCallResult::error("missing required parameter: id"),
+    };
+    let rid = match RecordId::from_string(id_str) {
+        Ok(r) => r,
+        Err(e) => return ToolCallResult::error(format!("invalid record ID: {e}")),
+    };
+    let vector = match args.get("vector").and_then(|v| v.as_array()) {
+        Some(arr) => match parse_vector_arg(arr) {
+            Ok(v) => v,
+            Err(e) => return ToolCallResult::error(e),
+        },
+        None => return ToolCallResult::error("missing required parameter: vector (array of numbers)"),
+    };
+    let space = args.get("space").and_then(|v| v.as_str());
+    let result = match space {
+        Some(s) => db.add_vector_in(s, &rid, &vector),
+        None => db.add_vector(&rid, &vector),
+    };
+    match result {
+        Ok(()) => {
+            let mut out = json!({
+                "added": true,
+                "id": id_str,
+                "dimensions": vector.len(),
+            });
+            if let Some(s) = space {
+                out.as_object_mut().unwrap().insert("space".to_string(), json!(s));
+            }
+            ToolCallResult::json(&out)
+        }
+        Err(e) => ToolCallResult::error(format!("add_vector failed: {e}")),
+    }
+}
+
+fn handle_similar(db: &Axil, args: &Value) -> ToolCallResult {
+    let space = args.get("space").and_then(|v| v.as_str());
+    let top_k = args.get("top_k").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
+    let threshold = args.get("threshold").and_then(|v| v.as_f64()).map(|f| f as f32);
+
+    // Resolve the query vector and the record (if any) to exclude.
+    let (query, exclude): (Vec<f32>, Option<RecordId>) =
+        if let Some(arr) = args.get("vector").and_then(|v| v.as_array()) {
+            match parse_vector_arg(arr) {
+                Ok(v) => (v, None),
+                Err(e) => return ToolCallResult::error(e),
+            }
+        } else if let Some(id_str) = args.get("id").and_then(|v| v.as_str()) {
+            let rid = match RecordId::from_string(id_str) {
+                Ok(r) => r,
+                Err(e) => return ToolCallResult::error(format!("invalid record ID: {e}")),
+            };
+            let stored = match space {
+                Some(s) => db.get_vector_in(s, &rid),
+                None => db.get_vector(&rid),
+            };
+            match stored {
+                Ok(Some(v)) => (v, Some(rid)),
+                Ok(None) => {
+                    return ToolCallResult::error(format!(
+                        "record {id_str} has no stored vector in this space"
+                    ))
+                }
+                Err(e) => return ToolCallResult::error(format!("similar failed: {e}")),
+            }
+        } else {
+            return ToolCallResult::error("provide either `vector` or `id`");
+        };
+
+    let fetch = if exclude.is_some() { top_k + 1 } else { top_k };
+    let search = match space {
+        Some(s) => db.similar_in(s, &query, fetch),
+        None => db.similar_to_vector(&query, fetch),
+    };
+    match search {
+        Ok(mut results) => {
+            if let Some(ref ex) = exclude {
+                results.retain(|(r, _)| &r.id != ex);
+            }
+            if let Some(t) = threshold {
+                results.retain(|(_, score)| *score >= t);
+            }
+            results.truncate(top_k);
+            let values: Vec<Value> =
+                results.iter().map(|(r, s)| scored_to_json(r, *s)).collect();
+            ToolCallResult::json(&json!(values))
+        }
+        Err(e) => ToolCallResult::error(format!("similar failed: {e}")),
     }
 }
 
@@ -1864,5 +2029,69 @@ mod tests {
             Some("agent-b"),
             "exclude_agent must drop agent-a's event"
         );
+    }
+
+    #[test]
+    fn vector_tools_advertised() {
+        let names: Vec<String> = tool_definitions().into_iter().map(|d| d.name).collect();
+        assert!(names.iter().any(|n| n == "add_vector"));
+        assert!(names.iter().any(|n| n == "similar"));
+    }
+
+    #[cfg(feature = "vector")]
+    #[test]
+    fn add_vector_and_similar_tools_default_space() {
+        use axil_vector::AxilBuilderVectorExt;
+        let dir = tempfile::tempdir().unwrap();
+        let db = Axil::open(dir.path().join("vec.axil"))
+            .with_vector(3)
+            .unwrap()
+            .with_vector_spaces()
+            .build()
+            .unwrap();
+        let a = db.insert("v", json!({"n": "a"})).unwrap();
+        let b = db.insert("v", json!({"n": "b"})).unwrap();
+
+        let r = dispatch(&db, "add_vector", &json!({"id": a.id.to_string(), "vector": [1.0, 0.0, 0.0]}));
+        assert!(r.is_error.is_none(), "add_vector errored: {r:?}");
+        assert_eq!(parse_json_payload(&r)["dimensions"], 3);
+        dispatch(&db, "add_vector", &json!({"id": b.id.to_string(), "vector": [0.9, 0.1, 0.0]}));
+
+        let s = dispatch(&db, "similar", &json!({"vector": [1.0, 0.0, 0.0], "top_k": 2}));
+        assert!(s.is_error.is_none(), "similar errored: {s:?}");
+        let arr = parse_json_payload(&s).as_array().unwrap().to_vec();
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["id"].as_str().unwrap(), a.id.to_string());
+        assert!(arr[0]["score"].as_f64().unwrap() > 0.99);
+    }
+
+    #[cfg(feature = "vector")]
+    #[test]
+    fn similar_tool_id_threshold_named_space() {
+        use axil_vector::AxilBuilderVectorExt;
+        let dir = tempfile::tempdir().unwrap();
+        let db = Axil::open(dir.path().join("fp.axil"))
+            .with_vector(3)
+            .unwrap()
+            .with_vector_spaces()
+            .build()
+            .unwrap();
+        let a = db.insert("fp", json!({"n": "a"})).unwrap();
+        let b = db.insert("fp", json!({"n": "b"})).unwrap();
+        let c = db.insert("fp", json!({"n": "c"})).unwrap();
+        // 3-dim fp space: a & b near-duplicate (cos ≈ 0.97), c orthogonal.
+        dispatch(&db, "add_vector", &json!({"id": a.id.to_string(), "vector": [1.0, 0.0, 0.0], "space": "fp"}));
+        dispatch(&db, "add_vector", &json!({"id": b.id.to_string(), "vector": [1.0, 0.25, 0.0], "space": "fp"}));
+        dispatch(&db, "add_vector", &json!({"id": c.id.to_string(), "vector": [0.0, 0.0, 1.0], "space": "fp"}));
+
+        let s = dispatch(
+            &db,
+            "similar",
+            &json!({"id": a.id.to_string(), "threshold": 0.9, "space": "fp"}),
+        );
+        assert!(s.is_error.is_none(), "similar errored: {s:?}");
+        let arr = parse_json_payload(&s).as_array().unwrap().to_vec();
+        assert_eq!(arr.len(), 1, "threshold 0.9 returns only the twin");
+        assert_eq!(arr[0]["id"].as_str().unwrap(), b.id.to_string());
     }
 }

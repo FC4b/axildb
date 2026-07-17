@@ -115,6 +115,79 @@ impl VectorEngine {
         })
     }
 
+    /// Open (or create) a named vector space at exactly `vec_path`.
+    ///
+    /// Unlike [`VectorEngine::open`], the caller supplies the full companion
+    /// path (`<db>.axil.vec.<name>`) rather than the base db path — named
+    /// spaces derive their own file names. When the store already exists its
+    /// persisted dimension governs; `dim = Some(d)` creates/validates a store
+    /// with dimension `d`, while `dim = None` requires an existing store (a
+    /// read path never conjures storage) and errors otherwise.
+    pub fn open_space_at(vec_path: &Path, dim: Option<usize>) -> axil_core::Result<Self> {
+        let existed = vec_path.exists();
+        if !existed && dim.is_none() {
+            return Err(AxilError::plugin(format!(
+                "vector space {} does not exist",
+                vec_path.display()
+            )));
+        }
+        let vector_db = Database::create(vec_path).map_err(plugin_err)?;
+
+        // Resolve the effective dimension against any stored value in one write
+        // txn: reconcile a requested dim with the stored dim, adopt the stored
+        // dim on a read, and persist the resolved dim for a fresh store.
+        let dimensions;
+        {
+            let txn = vector_db.begin_write().map_err(plugin_err)?;
+            {
+                let _ = txn.open_table(VECTORS_TABLE).map_err(plugin_err)?;
+                let meta = txn.open_table(META_TABLE).map_err(plugin_err)?;
+                let stored = match meta.get("dimensions").map_err(plugin_err)? {
+                    Some(guard) => {
+                        let s = std::str::from_utf8(guard.value()).map_err(plugin_err)?;
+                        Some(s.parse::<usize>().map_err(plugin_err)?)
+                    }
+                    None => None,
+                };
+                drop(meta);
+
+                dimensions = match (dim, stored) {
+                    (Some(requested), Some(stored)) if requested != stored => {
+                        return Err(AxilError::plugin(format!(
+                            "dimension mismatch: vector space was created with {stored} \
+                             dimensions, but {requested} requested"
+                        )));
+                    }
+                    (Some(requested), _) => requested,
+                    (None, Some(stored)) => stored,
+                    (None, None) => {
+                        return Err(AxilError::plugin(
+                            "vector space has no stored dimension — file may be corrupt",
+                        ));
+                    }
+                };
+
+                let mut meta_w = txn.open_table(META_TABLE).map_err(plugin_err)?;
+                meta_w
+                    .insert("dimensions", dimensions.to_string().as_bytes())
+                    .map_err(plugin_err)?;
+            }
+            txn.commit().map_err(plugin_err)?;
+        }
+
+        let vectors = load_all_vectors(&vector_db, dimensions)?;
+        let index = HnswIndex::from_vectors(dimensions, vectors);
+        Ok(Self {
+            config: VectorConfig {
+                dimensions,
+                auto_embed_fields: Vec::new(),
+            },
+            index: RwLock::new(index),
+            vector_db,
+            embedder: None,
+        })
+    }
+
     /// Attach an embedder for text-to-vector conversion.
     pub fn with_embedder(mut self, embedder: Embedder) -> Self {
         self.embedder = Some(embedder);
@@ -307,6 +380,89 @@ pub fn vector_db_path(main_path: &Path) -> PathBuf {
     PathBuf::from(p)
 }
 
+/// Derive a named vector-space companion path: `<main_path>.vec.<space>`.
+///
+/// The default/unnamed space keeps the plain `<main_path>.vec` file from
+/// [`vector_db_path`]; a named space appends `.<space>` so the two never
+/// collide.
+pub fn vector_space_db_path(main_path: &Path, space: &str) -> PathBuf {
+    let mut p = main_path.as_os_str().to_owned();
+    p.push(".vec.");
+    p.push(space);
+    PathBuf::from(p)
+}
+
+/// True if `name` is a valid space name (`[a-z0-9_-]{1,32}`).
+fn is_valid_space_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 32
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+}
+
+/// List persisted named-space names for the database at `main_path`.
+///
+/// Scans the database's directory for companion files of the form
+/// `<file_name>.vec.<name>` where `<name>` matches `[a-z0-9_-]{1,32}`, without
+/// opening any of them. The default `<file_name>.vec` store is excluded (no
+/// trailing `.<name>`), as are unrelated companions (`.graph`, `.fts`, …).
+pub fn list_vector_space_names(main_path: &Path) -> axil_core::Result<Vec<String>> {
+    let Some(dir) = main_path.parent() else {
+        return Ok(Vec::new());
+    };
+    let Some(base) = main_path.file_name().and_then(|n| n.to_str()) else {
+        return Ok(Vec::new());
+    };
+    let prefix = format!("{base}.vec.");
+    let mut names = Vec::new();
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        // A missing directory just means no spaces yet.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(plugin_err(e)),
+    };
+    for entry in entries.flatten() {
+        let file_name = entry.file_name();
+        let Some(name) = file_name.to_str() else {
+            continue;
+        };
+        if let Some(space) = name.strip_prefix(&prefix) {
+            if is_valid_space_name(space) {
+                names.push(space.to_string());
+            }
+        }
+    }
+    names.sort();
+    names.dedup();
+    Ok(names)
+}
+
+/// Opens named vector spaces backed by [`VectorEngine`] companion files.
+///
+/// Register it on a builder via [`AxilBuilderVectorExt::with_vector_spaces`]
+/// so `add_vector_in` / `similar_in` / `get_vector_in` / `vector_spaces` on the
+/// resulting [`axil_core::Axil`] handle can open per-space storage on demand.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct VectorSpaceFactory;
+
+impl axil_core::VectorSpaceFactory for VectorSpaceFactory {
+    fn open_space(
+        &self,
+        main_path: &Path,
+        space: &str,
+        dim: Option<usize>,
+    ) -> axil_core::Result<std::sync::Arc<dyn VectorIndex>> {
+        let vec_path = vector_space_db_path(main_path, space);
+        let engine = VectorEngine::open_space_at(&vec_path, dim)?;
+        Ok(std::sync::Arc::new(engine))
+    }
+
+    fn space_names(&self, main_path: &Path) -> axil_core::Result<Vec<String>> {
+        list_vector_space_names(main_path)
+    }
+}
+
 /// Serialize a vector as raw little-endian f32 bytes.
 fn vector_to_bytes(v: &[f32]) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(v.len() * 4);
@@ -436,6 +592,16 @@ pub trait AxilBuilderVectorExt {
     fn with_embedder_model(self, model: EmbeddingModel) -> axil_core::Result<Self>
     where
         Self: Sized;
+
+    /// Register the named-vector-space factory on this builder.
+    ///
+    /// Additive and independent of the default vector index: it only enables
+    /// `add_vector_in` / `similar_in` / `get_vector_in` / `vector_spaces` on the
+    /// built handle. Cheap (a unit factory), so it is safe to call on every
+    /// write-path open.
+    fn with_vector_spaces(self) -> Self
+    where
+        Self: Sized;
 }
 
 impl AxilBuilderVectorExt for AxilBuilder {
@@ -462,6 +628,10 @@ impl AxilBuilderVectorExt for AxilBuilder {
         let plugin = VectorEngine::open(&path, dims)?;
         let plugin = plugin.with_model(model).map_err(AxilError::plugin)?;
         Ok(self.with_vector_and_embedder(plugin))
+    }
+
+    fn with_vector_spaces(self) -> Self {
+        self.with_vector_space_factory(std::sync::Arc::new(VectorSpaceFactory))
     }
 }
 

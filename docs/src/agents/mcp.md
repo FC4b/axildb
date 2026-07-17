@@ -131,6 +131,8 @@ an error, or a preference: they auto-embed, auto-supersede, and dedupe.
 | `aggregate` (`ql` feature) | `table` string (req), `metrics?` string[] (`count`/`avg(f)`/`min(f)`/`max(f)`/`sum(f)`), `group_by?`, `where?` string, `include_archived?` bool | Aggregate a table into per-group `count`/`avg`/`min`/`max`/`sum`. Non-numeric or missing values are skipped for the numeric metrics and reported per group as `skipped`. Returns `{table, group_by, groups:[{group, count, …}], total_rows}`. |
 | `delete` | `id` string (req) | Delete a record by ID. |
 | `link` | `from` string (req), `edge_type` string (req), `to` string (req), `props?` object | Create a graph edge between two records. |
+| `add_vector` | `id` string (req), `vector` number[] (req), `space?` string | Attach a pre-computed raw vector to an existing record. `space` targets a named vector space (`<db>.axil.vec.<name>`, own dimension, created lazily on first write); omit for the default space. |
+| `similar` | `vector?` number[], `id?` string, `space?` string, `top_k?` int (default 5), `threshold?` number | Find records with vectors similar to a query. Pass `vector` or `id` (uses that record's stored vector, excluded from results). `threshold` filters to score ≥ F for near-duplicate detection. `space` targets a named vector space. |
 
 ### Extension tools — dependency docs (`deps` feature)
 
