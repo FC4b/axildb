@@ -5860,7 +5860,7 @@ fn parse_single_condition(cond: &str) -> Result<(String, Op, Value)> {
                         );
                     }
                     let op: Op = op_str.parse().map_err(|e| anyhow::anyhow!("{e}"))?;
-                    let value = parse_where_value(cond[i + op_len..].trim());
+                    let value = parse_where_value(cond[i + op_len..].trim())?;
                     return Ok((field, op, value));
                 }
                 i += 1;
@@ -5873,7 +5873,7 @@ fn parse_single_condition(cond: &str) -> Result<(String, Op, Value)> {
         if field.is_empty() {
             anyhow::bail!("invalid where clause: field name must not be empty in '{cond}'");
         }
-        let value = parse_where_value(cond[pos + "contains".len()..].trim());
+        let value = parse_where_value(cond[pos + "contains".len()..].trim())?;
         return Ok((field, Op::Contains, value));
     }
     anyhow::bail!(
@@ -5914,15 +5914,38 @@ fn find_keyword_outside_quotes(s: &str, kw: &[u8]) -> Option<usize> {
 /// Type a where-clause value string. A single- or double-quoted value is always
 /// a string (quotes force string typing); otherwise `serde_json` types it
 /// (number, `true`/`false`/`null`), falling back to a bare string.
-fn parse_where_value(val_str: &str) -> Value {
+///
+/// Backslash escapes are not interpreted inside quotes — a quote character of
+/// the same kind cannot appear inside a quoted value (use the other quote
+/// kind around it instead).
+fn parse_where_value(val_str: &str) -> Result<Value> {
     let b = val_str.as_bytes();
     if val_str.len() >= 2
         && ((b[0] == b'\'' && b[val_str.len() - 1] == b'\'')
             || (b[0] == b'"' && b[val_str.len() - 1] == b'"'))
     {
-        return Value::String(val_str[1..val_str.len() - 1].to_string());
+        return Ok(Value::String(val_str[1..val_str.len() - 1].to_string()));
     }
-    serde_json::from_str(val_str).unwrap_or_else(|_| Value::String(val_str.to_string()))
+    if let Ok(v) = serde_json::from_str(val_str) {
+        return Ok(v);
+    }
+    // A leading number/bool/null followed by trailing text ("5 oops") is
+    // almost certainly a typo'd expression (a missing AND) — error rather
+    // than silently matching a garbage string literal. Plain multi-word
+    // strings ("mean rev") still fall through to the bare-string case.
+    if let Some(first) = val_str.split_whitespace().next() {
+        if first.len() < val_str.trim().len()
+            && serde_json::from_str::<Value>(first)
+                .map(|v| !v.is_string())
+                .unwrap_or(false)
+        {
+            anyhow::bail!(
+                "ambiguous where value '{val_str}': quote it ('{val_str}') if you \
+                 meant a string, or join conditions with AND if it is two conditions"
+            );
+        }
+    }
+    Ok(Value::String(val_str.to_string()))
 }
 
 /// Parse a human-readable duration string (e.g. "3d", "1h", "30m", "90s") into seconds.
@@ -20196,6 +20219,17 @@ mod where_clause_tests {
     #[test]
     fn bare_bang_errors() {
         assert!(parse_where_clause("x ! 5").is_err());
+    }
+
+    #[test]
+    fn trailing_garbage_after_scalar_errors() {
+        // "5 oops" is almost certainly a typo'd expression (missing AND) —
+        // it must error, not silently become the string "5 oops".
+        assert!(parse_where_clause("trades = 5 oops").is_err());
+        assert!(parse_where_clause("live = true x").is_err());
+        // Plain multi-word bare strings stay accepted.
+        let conds = parse_where_clause("family = mean rev").unwrap();
+        assert_eq!(conds[0].2, json!("mean rev"));
     }
 
     #[test]

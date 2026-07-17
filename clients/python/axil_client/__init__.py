@@ -181,8 +181,10 @@ class Axil:
         """Recency-weighted semantic search (requires an embedding model).
 
         Returns a list of compact hits ``{"id", "score", "summary", "table"}``.
+        Flags go before the ``--`` separator so free-text queries that start
+        with ``-`` (e.g. ``"-1.5% drawdown"``) are not parsed as flags.
         """
-        return self._run(["recall", query, "--top-k", str(top_k)])
+        return self._run(["recall", "--top-k", str(top_k), "--", query])
 
     def query(
         self,

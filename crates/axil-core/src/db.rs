@@ -1768,6 +1768,16 @@ impl Axil {
         top_k: usize,
     ) -> Result<Vec<(Record, f32)>> {
         let vi = self.open_or_create_space(space, None)?;
+        // Name the space in the error instead of letting the engine's
+        // lower-level dimension check fire with less context.
+        if vi.dimensions() != vector.len() {
+            return Err(AxilError::plugin(format!(
+                "dimension mismatch: vector space '{space}' holds {}-dimensional \
+                 vectors, but the query has {}",
+                vi.dimensions(),
+                vector.len()
+            )));
+        }
         let results = vi.search(vector, top_k)?;
         let mut records = Vec::with_capacity(results.len());
         for (id, score) in results {
@@ -1789,23 +1799,23 @@ impl Axil {
     ///
     /// Returns an empty list when no space factory is registered. Spaces opened
     /// this session are read from the live cache; the rest are opened
-    /// transiently (and dropped) to read their metadata.
+    /// transiently (and dropped) to read their metadata. The cache write lock
+    /// is held across the transient opens so a concurrent `add_vector_in`
+    /// cannot open a second writable handle to the same companion file (redb
+    /// allows only one per process).
     pub fn vector_spaces(&self) -> Result<Vec<VectorSpaceInfo>> {
         let Some(factory) = self.vector_space_factory.as_ref() else {
             return Ok(Vec::new());
         };
         let names = factory.space_names(&self.path)?;
+        let cache = self
+            .vector_space_cache
+            .write()
+            .map_err(|_| AxilError::plugin("vector space cache lock poisoned"))?;
         let mut out = Vec::with_capacity(names.len());
         for name in names {
-            let cached = {
-                let cache = self
-                    .vector_space_cache
-                    .read()
-                    .map_err(|_| AxilError::plugin("vector space cache lock poisoned"))?;
-                cache.get(&name).cloned()
-            };
-            let vi = match cached {
-                Some(vi) => vi,
+            let vi = match cache.get(&name) {
+                Some(vi) => vi.clone(),
                 None => factory.open_space(&self.path, &name, None)?,
             };
             out.push(VectorSpaceInfo {

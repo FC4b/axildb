@@ -1451,7 +1451,7 @@ fn parse_single_condition(cond: &str) -> Result<(String, axil_core::Op, Value), 
                     }
                     let op: axil_core::Op =
                         op_str.parse().map_err(|e| format!("{e}"))?;
-                    let value = parse_where_value(cond[i + op_len..].trim());
+                    let value = parse_where_value(cond[i + op_len..].trim())?;
                     return Ok((field, op, value));
                 }
                 i += 1;
@@ -1463,7 +1463,7 @@ fn parse_single_condition(cond: &str) -> Result<(String, axil_core::Op, Value), 
         if field.is_empty() {
             return Err(format!("field name must not be empty in '{cond}'"));
         }
-        let value = parse_where_value(cond[pos + "contains".len()..].trim());
+        let value = parse_where_value(cond[pos + "contains".len()..].trim())?;
         return Ok((field, axil_core::Op::Contains, value));
     }
     Err(format!(
@@ -1501,15 +1501,38 @@ fn find_keyword_outside_quotes(s: &str, kw: &[u8]) -> Option<usize> {
 }
 
 /// Type a where-clause value: quoted → string; otherwise `serde_json` types it.
-fn parse_where_value(val_str: &str) -> Value {
+///
+/// Backslash escapes are not interpreted inside quotes — a quote character of
+/// the same kind cannot appear inside a quoted value (use the other quote
+/// kind around it instead).
+fn parse_where_value(val_str: &str) -> Result<Value, String> {
     let b = val_str.as_bytes();
     if val_str.len() >= 2
         && ((b[0] == b'\'' && b[val_str.len() - 1] == b'\'')
             || (b[0] == b'"' && b[val_str.len() - 1] == b'"'))
     {
-        return Value::String(val_str[1..val_str.len() - 1].to_string());
+        return Ok(Value::String(val_str[1..val_str.len() - 1].to_string()));
     }
-    serde_json::from_str(val_str).unwrap_or_else(|_| Value::String(val_str.to_string()))
+    if let Ok(v) = serde_json::from_str(val_str) {
+        return Ok(v);
+    }
+    // A leading number/bool/null followed by trailing text ("5 oops") is
+    // almost certainly a typo'd expression (a missing AND) — error rather
+    // than silently matching a garbage string literal. Plain multi-word
+    // strings ("mean rev") still fall through to the bare-string case.
+    if let Some(first) = val_str.split_whitespace().next() {
+        if first.len() < val_str.trim().len()
+            && serde_json::from_str::<Value>(first)
+                .map(|v| !v.is_string())
+                .unwrap_or(false)
+        {
+            return Err(format!(
+                "ambiguous where value '{val_str}': quote it ('{val_str}') if you \
+                 meant a string, or join conditions with AND if it is two conditions"
+            ));
+        }
+    }
+    Ok(Value::String(val_str.to_string()))
 }
 
 fn handle_delete(db: &Axil, args: &Value) -> ToolCallResult {
@@ -2027,6 +2050,16 @@ mod tests {
         let db = Axil::open(dir.path().join("q3.axil")).build().unwrap();
         let result = dispatch(&db, "query", &json!({"table":"t","where":"nonsense"}));
         assert_eq!(result.is_error, Some(true));
+    }
+
+    #[test]
+    fn where_expr_trailing_garbage_after_scalar_errors() {
+        // Twin of the CLI parser's guard: "5 oops" errors, bare words pass.
+        assert!(parse_where_expr("trades = 5 oops").is_err());
+        assert_eq!(
+            parse_where_expr("family = mean rev").unwrap()[0].2,
+            json!("mean rev")
+        );
     }
 
     #[test]
