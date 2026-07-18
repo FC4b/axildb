@@ -3,7 +3,14 @@
 use serde::{Deserialize, Serialize};
 
 /// A parsed AxilQL query.
+///
+/// The AST is an **unstable compilation surface**: it grows a variant (or a
+/// variant grows a field) whenever the language gains a verb or clause, and
+/// that growth is not treated as a breaking change. Downstream code should
+/// feed query *strings* to [`crate::run`] rather than matching this enum;
+/// matches must include a wildcard arm.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum Query {
     /// Semantic vector search: `RECALL "text" TOP k`
     Recall {
@@ -44,6 +51,7 @@ pub enum Query {
 
 /// A single aggregation spec in an `AGG` statement.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum AggSpec {
     /// `count`
     Count,

@@ -450,7 +450,7 @@ pub fn list_vector_space_names(main_path: &Path) -> axil_core::Result<Vec<String
 
 /// Opens named vector spaces backed by [`VectorEngine`] companion files.
 ///
-/// Register it on a builder via [`AxilBuilderVectorExt::with_vector_spaces`]
+/// Register it on a builder via [`with_vector_spaces`]
 /// so `add_vector_in` / `similar_in` / `get_vector_in` / `vector_spaces` on the
 /// resulting [`axil_core::Axil`] handle can open per-space storage on demand.
 #[derive(Debug, Clone, Copy, Default)]
@@ -642,15 +642,20 @@ pub trait AxilBuilderVectorExt {
     where
         Self: Sized;
 
-    /// Register the named-vector-space factory on this builder.
-    ///
-    /// Additive and independent of the default vector index: it only enables
-    /// `add_vector_in` / `similar_in` / `get_vector_in` / `vector_spaces` on the
-    /// built handle. Cheap (a unit factory), so it is safe to call on every
-    /// write-path open.
-    fn with_vector_spaces(self) -> Self
-    where
-        Self: Sized;
+}
+
+/// Register the named-vector-space factory on a builder.
+///
+/// Additive and independent of the default vector index: it only enables
+/// `add_vector_in` / `similar_in` / `get_vector_in` / `vector_spaces` on the
+/// built handle. Cheap (a unit factory), so it is safe to call on every
+/// write-path open.
+///
+/// A free function rather than an [`AxilBuilderVectorExt`] method so adding
+/// it did not grow the published trait (a breaking change for external
+/// implementors).
+pub fn with_vector_spaces(builder: AxilBuilder) -> AxilBuilder {
+    builder.with_vector_space_factory(std::sync::Arc::new(VectorSpaceFactory))
 }
 
 impl AxilBuilderVectorExt for AxilBuilder {
@@ -679,9 +684,6 @@ impl AxilBuilderVectorExt for AxilBuilder {
         Ok(self.with_vector_and_embedder(plugin))
     }
 
-    fn with_vector_spaces(self) -> Self {
-        self.with_vector_space_factory(std::sync::Arc::new(VectorSpaceFactory))
-    }
 }
 
 /// Load all persisted vectors into a HashMap.

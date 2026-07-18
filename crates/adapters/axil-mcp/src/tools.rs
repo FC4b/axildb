@@ -2152,10 +2152,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db = Axil::open(dir.path().join("vec.axil"))
             .with_vector(3)
-            .unwrap()
-            .with_vector_spaces()
-            .build()
             .unwrap();
+        let db = axil_vector::with_vector_spaces(db).build().unwrap();
         let a = db.insert("v", json!({"n": "a"})).unwrap();
         let b = db.insert("v", json!({"n": "b"})).unwrap();
 
@@ -2179,10 +2177,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db = Axil::open(dir.path().join("fp.axil"))
             .with_vector(3)
-            .unwrap()
-            .with_vector_spaces()
-            .build()
             .unwrap();
+        let db = axil_vector::with_vector_spaces(db).build().unwrap();
         let a = db.insert("fp", json!({"n": "a"})).unwrap();
         let b = db.insert("fp", json!({"n": "b"})).unwrap();
         let c = db.insert("fp", json!({"n": "c"})).unwrap();

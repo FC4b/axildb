@@ -84,7 +84,7 @@ pub(crate) fn attach_detected_engines(
         // Register the named-vector-space factory unconditionally so the
         // `add_vector` / `similar` tools can target named spaces even when the
         // default store is absent. Additive — existing vector paths unchanged.
-        builder = builder.with_vector_spaces();
+        builder = axil_vector::with_vector_spaces(builder);
         if !config.is_engine_disabled("vec") {
             if let Ok(Some(_)) = axil_vector::read_stored_dimensions(&path) {
                 // When `embed` is on, load the embedder so `db.recall()` and

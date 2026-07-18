@@ -29,7 +29,12 @@ impl fmt::Display for Span {
 }
 
 /// Token types.
+///
+/// Like [`crate::ast::Query`], this is an unstable compilation surface — it
+/// grows whenever the language gains a keyword. Matches outside this crate
+/// must include a wildcard arm.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum TokenKind {
     // Keywords
     Recall,

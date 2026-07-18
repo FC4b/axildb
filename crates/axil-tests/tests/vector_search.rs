@@ -341,10 +341,8 @@ fn named_space_isolation_and_persistence() {
     {
         let db = Axil::open(&path)
             .with_vector(384)
-            .unwrap()
-            .with_vector_spaces()
-            .build()
             .unwrap();
+        let db = axil_vector::with_vector_spaces(db).build().unwrap();
 
         let d = db.insert("docs", json!({"summary": "text embedding record"})).unwrap();
         let f = db.insert("strats", json!({"summary": "strategy fingerprint"})).unwrap();
@@ -373,10 +371,8 @@ fn named_space_isolation_and_persistence() {
     {
         let db = Axil::open(&path)
             .with_vector_auto()
-            .unwrap()
-            .with_vector_spaces()
-            .build()
             .unwrap();
+        let db = axil_vector::with_vector_spaces(db).build().unwrap();
 
         let mut dv = vec![0.0_f32; 384];
         dv[0] = 1.0;
@@ -408,10 +404,8 @@ fn named_space_dimension_mismatch_errors() {
     let path = dir.path().join("mismatch.axil");
     let db = Axil::open(&path)
         .with_vector(3)
-        .unwrap()
-        .with_vector_spaces()
-        .build()
         .unwrap();
+    let db = axil_vector::with_vector_spaces(db).build().unwrap();
 
     let a = db.insert("s", json!({})).unwrap();
     let b = db.insert("s", json!({})).unwrap();
@@ -432,10 +426,8 @@ fn named_space_invalid_name_errors() {
     let path = dir.path().join("badname.axil");
     let db = Axil::open(&path)
         .with_vector(3)
-        .unwrap()
-        .with_vector_spaces()
-        .build()
         .unwrap();
+    let db = axil_vector::with_vector_spaces(db).build().unwrap();
     let r = db.insert("s", json!({})).unwrap();
     assert!(db.add_vector_in("Bad Name", &r.id, &[1.0, 0.0, 0.0]).is_err());
     assert!(db.add_vector_in("", &r.id, &[1.0, 0.0, 0.0]).is_err());
@@ -453,10 +445,8 @@ fn named_space_near_duplicate_ranks_first() {
     let path = dir.path().join("neardup.axil");
     let db = Axil::open(&path)
         .with_vector(8)
-        .unwrap()
-        .with_vector_spaces()
-        .build()
         .unwrap();
+    let db = axil_vector::with_vector_spaces(db).build().unwrap();
 
     let a = db.insert("fp", json!({"name": "a"})).unwrap();
     let b = db.insert("fp", json!({"name": "b"})).unwrap();

@@ -16,6 +16,7 @@ use serde_json::{json, Value};
 
 /// A single aggregation metric requested over a table.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum AggMetric {
     /// Row count for the group (always emitted regardless, but requesting it
     /// documents intent — e.g. a kill-reason histogram).

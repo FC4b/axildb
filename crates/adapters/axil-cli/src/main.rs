@@ -6096,7 +6096,7 @@ fn attach_detected_engines(mut builder: axil_core::AxilBuilder) -> Result<axil_c
         // default vector store is absent or the engine is disabled): named
         // spaces are independent companion files, and the factory is a cheap
         // unit that leaves every existing vector path byte-identical.
-        builder = builder.with_vector_spaces();
+        builder = axil_vector::with_vector_spaces(builder);
         if !config.is_engine_disabled("vec") {
             if let Ok(Some(_)) = axil_vector::read_stored_dimensions(&path) {
                 // Attach vector index + embedder together so auto-embed on insert works.
@@ -6302,7 +6302,7 @@ fn open_for_scip_ingest(path: &Path) -> Result<Axil> {
 /// Open a database with vector support (auto-detecting dimensions).
 #[cfg(feature = "vector")]
 fn open_with_vector(path: &Path, dimensions: Option<usize>) -> Result<Axil> {
-    let builder = Axil::open(path).with_vector_spaces();
+    let builder = axil_vector::with_vector_spaces(Axil::open(path));
     let db = match dimensions {
         Some(dims) => builder
             .with_vector(dims)
@@ -6368,9 +6368,7 @@ fn open_for_store(path: &Path, raw_vector: Option<&[f32]>, named_space: bool) ->
 /// one-subprocess-per-call clients.
 #[cfg(feature = "vector")]
 fn open_for_space_ops(path: &Path) -> Result<Axil> {
-    use axil_vector::AxilBuilderVectorExt;
-    Axil::open(path)
-        .with_vector_spaces()
+    axil_vector::with_vector_spaces(Axil::open(path))
         .build()
         .context("failed to open database")
 }
