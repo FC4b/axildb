@@ -217,17 +217,31 @@ pub trait VectorSpaceFactory: Send + Sync {
     /// Names of persisted named spaces for the database at `main_path`, without
     /// opening them (a cheap directory scan of `<main_path>.vec.<name>`).
     fn space_names(&self, main_path: &Path) -> Result<Vec<String>>;
+
+    /// Cheap metadata probe for one named space: `(dimensions, vector count)`.
+    ///
+    /// Must not take a writable handle, load vectors, or build a search
+    /// index — listings call this per space, so it has to stay proportional
+    /// to metadata, not store size. Errors if the space does not exist.
+    fn space_meta(&self, main_path: &Path, space: &str) -> Result<(usize, usize)>;
 }
 
-/// Validate a vector-space name. Names become file-name suffixes, so they are
-/// restricted to `[a-z0-9_-]{1,32}`.
-fn validate_space_name(space: &str) -> Result<()> {
-    let ok = !space.is_empty()
-        && space.len() <= 32
-        && space
+/// True if `name` is a valid vector-space name (`[a-z0-9_-]{1,32}`).
+///
+/// Names become companion-file suffixes, so the rule is shared by the API
+/// validator here and the engine's directory-scan filter — keep them one
+/// implementation.
+pub fn is_valid_space_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 32
+        && name
             .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-');
-    if ok {
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+}
+
+/// Validate a vector-space name, with the failure as an [`AxilError`].
+fn validate_space_name(space: &str) -> Result<()> {
+    if is_valid_space_name(space) {
         Ok(())
     } else {
         Err(AxilError::InvalidQuery(format!(
@@ -1798,30 +1812,31 @@ impl Axil {
     /// vector count, sorted by name.
     ///
     /// Returns an empty list when no space factory is registered. Spaces opened
-    /// this session are read from the live cache; the rest are opened
-    /// transiently (and dropped) to read their metadata. The cache write lock
-    /// is held across the transient opens so a concurrent `add_vector_in`
-    /// cannot open a second writable handle to the same companion file (redb
-    /// allows only one per process).
+    /// this session answer from the live engine; the rest are probed read-only
+    /// via [`VectorSpaceFactory::space_meta`] — no writable handle is taken, so
+    /// a listing never contends with concurrent vector writes.
     pub fn vector_spaces(&self) -> Result<Vec<VectorSpaceInfo>> {
         let Some(factory) = self.vector_space_factory.as_ref() else {
             return Ok(Vec::new());
         };
         let names = factory.space_names(&self.path)?;
-        let cache = self
-            .vector_space_cache
-            .write()
-            .map_err(|_| AxilError::plugin("vector space cache lock poisoned"))?;
         let mut out = Vec::with_capacity(names.len());
         for name in names {
-            let vi = match cache.get(&name) {
-                Some(vi) => vi.clone(),
-                None => factory.open_space(&self.path, &name, None)?,
+            let cached = {
+                let cache = self
+                    .vector_space_cache
+                    .read()
+                    .map_err(|_| AxilError::plugin("vector space cache lock poisoned"))?;
+                cache.get(&name).cloned()
+            };
+            let (dimensions, count) = match cached {
+                Some(vi) => (vi.dimensions(), vi.count()),
+                None => factory.space_meta(&self.path, &name)?,
             };
             out.push(VectorSpaceInfo {
                 name,
-                dimensions: vi.dimensions(),
-                count: vi.count(),
+                dimensions,
+                count,
             });
         }
         out.sort_by(|a, b| a.name.cmp(&b.name));

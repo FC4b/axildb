@@ -87,8 +87,9 @@ pub use config::{
     MetricsHealingConfig, OptimizeConfig, PluginConfig, RuntimeConfig, TimeseriesConfig,
 };
 pub use db::{
-    companion_path, drop_engine_companion, AutoLinkReport, Axil, AxilBuilder, CanonicalPublisher,
-    DatabaseInfo, HealReport, VectorSpaceFactory, VectorSpaceInfo, WarmUpReport, SCIP_ALIAS_TABLE,
+    companion_path, drop_engine_companion, is_valid_space_name, AutoLinkReport, Axil, AxilBuilder,
+    CanonicalPublisher, DatabaseInfo, HealReport, VectorSpaceFactory, VectorSpaceInfo, WarmUpReport,
+    SCIP_ALIAS_TABLE,
 };
 pub use diagnostics::{
     human_bytes, BenchReport, BenchResult, CheckResult, CompactReport, DataQualitySection,

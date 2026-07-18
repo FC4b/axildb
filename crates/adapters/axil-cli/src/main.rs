@@ -1067,13 +1067,9 @@ enum Command {
         /// record in one shot. Mutually exclusive with `--embed`. Use `--space`
         /// to target a named vector space (e.g. a strategy fingerprint index)
         /// instead of the default text-embedding space.
-        #[cfg(all(feature = "vector", feature = "embed"))]
-        #[arg(long, value_name = "JSON", conflicts_with = "embed")]
-        vector: Option<String>,
-        /// Attach a pre-computed raw vector (JSON array of floats) to the new
-        /// record in one shot. Use `--space` to target a named vector space.
-        #[cfg(all(feature = "vector", not(feature = "embed")))]
+        #[cfg(feature = "vector")]
         #[arg(long, value_name = "JSON")]
+        #[cfg_attr(feature = "embed", arg(conflicts_with = "embed"))]
         vector: Option<String>,
         /// Named vector space for `--vector` (`[a-z0-9_-]{1,32}`). Omit for the
         /// default `<db>.axil.vec` space. Named spaces are stored in
@@ -6353,6 +6349,102 @@ fn open_with_vector_creating(path: &Path, dims: usize) -> Result<Axil> {
     Ok(db)
 }
 
+/// Open-path policy for `store`, shared by the `embed`/`not(embed)` feature
+/// ladders: a raw `--vector` bound for the *default* space creates that store
+/// at the vector's dimension; a named space (or no vector) opens all detected
+/// engines — the insert path needs them for index hooks.
+#[cfg(feature = "vector")]
+fn open_for_store(path: &Path, raw_vector: Option<&[f32]>, named_space: bool) -> Result<Axil> {
+    match raw_vector {
+        Some(v) if !named_space => open_with_vector_creating(path, v.len()),
+        _ => open_with_all_detected(path),
+    }
+}
+
+/// Minimal open for named-space vector commands (`similar --space`,
+/// `add-vector --space`): core storage plus the space factory only. Loading
+/// the default vector engine and the ONNX embedder here would be pure waste —
+/// named spaces never consult either, and this path is multiplied by
+/// one-subprocess-per-call clients.
+#[cfg(feature = "vector")]
+fn open_for_space_ops(path: &Path) -> Result<Axil> {
+    use axil_vector::AxilBuilderVectorExt;
+    Axil::open(path)
+        .with_vector_spaces()
+        .build()
+        .context("failed to open database")
+}
+
+/// Shared body of `similar` and its deprecated alias `search-vector`.
+///
+/// Resolves the query vector (raw JSON, or a record's stored vector for
+/// `--id`), searches the named or default space, then applies self-exclusion,
+/// `--threshold`, and `top_k`. Named spaces open minimally via
+/// [`open_for_space_ops`]; the default space keeps the `open_with_vector`
+/// path.
+#[cfg(feature = "vector")]
+fn run_similar(
+    db_path: &Path,
+    vector: Option<&str>,
+    id: Option<&str>,
+    space: Option<&str>,
+    top_k: usize,
+    threshold: Option<f32>,
+    dimensions: Option<usize>,
+) -> Result<Vec<Value>> {
+    if vector.is_none() && id.is_none() {
+        anyhow::bail!("provide either --vector or --id");
+    }
+    let db = match space {
+        Some(_) => open_for_space_ops(db_path)?,
+        None => open_with_vector(db_path, dimensions)?,
+    };
+
+    // Resolve the query vector and, for --id, the record to exclude.
+    let (query, exclude): (Vec<f32>, Option<RecordId>) = match (vector, id) {
+        (Some(v), _) => (
+            serde_json::from_str(v).context("invalid --vector JSON")?,
+            None,
+        ),
+        (None, Some(id_str)) => {
+            let rid = RecordId::from_string(id_str).context("invalid record ID")?;
+            let stored = match space {
+                Some(s) => db.get_vector_in(s, &rid)?,
+                None => db.get_vector(&rid)?,
+            };
+            let v = stored.ok_or_else(|| {
+                anyhow::anyhow!("record {id_str} has no stored vector in this space")
+            })?;
+            (v, Some(rid))
+        }
+        (None, None) => unreachable!("guarded above"),
+    };
+
+    // Over-fetch by one so excluding the query record still yields top_k.
+    let fetch = if exclude.is_some() { top_k + 1 } else { top_k };
+    let mut results = match space {
+        Some(s) => db
+            .similar_in(s, &query, fetch)
+            .with_context(|| format!("vector search in space '{s}' failed"))?,
+        None => db
+            .similar_to_vector(&query, fetch)
+            .context("vector search failed")?,
+    };
+
+    if let Some(ref ex) = exclude {
+        results.retain(|(r, _)| &r.id != ex);
+    }
+    if let Some(t) = threshold {
+        results.retain(|(_, score)| *score >= t);
+    }
+    results.truncate(top_k);
+
+    Ok(results
+        .iter()
+        .map(|(r, score)| scored_to_json(r, *score))
+        .collect())
+}
+
 /// Open a database with embedder loaded (for recall/search commands).
 #[cfg(feature = "embed")]
 fn open_with_embedder(path: &Path) -> Result<Axil> {
@@ -8435,26 +8527,18 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                 anyhow::bail!("--space requires --vector");
             }
 
-            // Open path: a raw --vector attaches to the default space (create it
-            // at the vector's dimension) or a named space (independent companion
-            // file, no default store needed). Otherwise fall back to the
-            // embed/all-detected paths.
+            // Open path: `--embed` needs the embedder; otherwise the raw-vector
+            // policy is shared across feature ladders by `open_for_store` (a
+            // default-space vector creates the store at the vector's dimension;
+            // a named space or no vector opens all detected engines).
             #[cfg(feature = "embed")]
-            let db = if raw_vector.is_some() && space.is_none() {
-                open_with_vector_creating(&db_path, raw_vector.as_ref().unwrap().len())?
-            } else if raw_vector.is_some() {
-                open_with_all_detected(&db_path)?
-            } else if embed.is_some() {
+            let db = if embed.is_some() {
                 open_with_embedder_creating(&db_path)?
             } else {
-                open_with_all_detected(&db_path)?
+                open_for_store(&db_path, raw_vector.as_deref(), space.is_some())?
             };
             #[cfg(all(feature = "vector", not(feature = "embed")))]
-            let db = if raw_vector.is_some() && space.is_none() {
-                open_with_vector_creating(&db_path, raw_vector.as_ref().unwrap().len())?
-            } else {
-                open_with_all_detected(&db_path)?
-            };
+            let db = open_for_store(&db_path, raw_vector.as_deref(), space.is_some())?;
             #[cfg(not(feature = "vector"))]
             let db = open_with_all_detected(&db_path)?;
 
@@ -10452,9 +10536,10 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             let vec: Vec<f32> = serde_json::from_str(&vector).context("invalid vector JSON")?;
 
             match space {
-                // Named space: independent companion file, no default store needed.
+                // Named space: independent companion file — open minimally,
+                // the default engines are never consulted.
                 Some(ref s) => {
-                    let db = open_with_all_detected(&db_path)?;
+                    let db = open_for_space_ops(&db_path)?;
                     db.add_vector_in(s, &rid, &vec)
                         .with_context(|| format!("add_vector to space '{s}' failed"))?;
                     out.print(&json!({
@@ -10487,26 +10572,15 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             space,
         } => {
             let db_path = require_db(&db_opt)?;
-            let vec: Vec<f32> = serde_json::from_str(&vector).context("invalid vector JSON")?;
-
-            let results = match space {
-                Some(ref s) => {
-                    let db = open_with_all_detected(&db_path)?;
-                    db.similar_in(s, &vec, top_k)
-                        .with_context(|| format!("vector search in space '{s}' failed"))?
-                }
-                None => {
-                    let db = open_with_vector(&db_path, dimensions)?;
-                    db.similar_to_vector(&vec, top_k)
-                        .context("vector search failed")?
-                }
-            };
-
-            let values: Vec<Value> = results
-                .iter()
-                .map(|(r, score)| scored_to_json(r, *score))
-                .collect();
-
+            let values = run_similar(
+                &db_path,
+                Some(&vector),
+                None,
+                space.as_deref(),
+                top_k,
+                None,
+                dimensions,
+            )?;
             out.print_array(&values);
             Ok(EXIT_OK)
         }
@@ -10522,61 +10596,15 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             dimensions,
         } => {
             let db_path = require_db(&db_opt)?;
-            if vector.is_none() && id.is_none() {
-                anyhow::bail!("provide either --vector or --id");
-            }
-
-            // Open once: a named space uses the factory (default store optional);
-            // the default space keeps the existing `open_with_vector` path.
-            let db = match space {
-                Some(_) => open_with_all_detected(&db_path)?,
-                None => open_with_vector(&db_path, dimensions)?,
-            };
-
-            // Resolve the query vector and, for --id, the record to exclude.
-            let (query, exclude): (Vec<f32>, Option<RecordId>) = match (&vector, &id) {
-                (Some(v), _) => (
-                    serde_json::from_str(v).context("invalid --vector JSON")?,
-                    None,
-                ),
-                (None, Some(id_str)) => {
-                    let rid = RecordId::from_string(id_str).context("invalid record ID")?;
-                    let stored = match space {
-                        Some(ref s) => db.get_vector_in(s, &rid)?,
-                        None => db.get_vector(&rid)?,
-                    };
-                    let v = stored.ok_or_else(|| {
-                        anyhow::anyhow!("record {id_str} has no stored vector in this space")
-                    })?;
-                    (v, Some(rid))
-                }
-                (None, None) => unreachable!("guarded above"),
-            };
-
-            // Over-fetch by one so excluding the query record still yields top_k.
-            let fetch = if exclude.is_some() { top_k + 1 } else { top_k };
-            let mut results = match space {
-                Some(ref s) => db
-                    .similar_in(s, &query, fetch)
-                    .with_context(|| format!("vector search in space '{s}' failed"))?,
-                None => db
-                    .similar_to_vector(&query, fetch)
-                    .context("vector search failed")?,
-            };
-
-            if let Some(ref ex) = exclude {
-                results.retain(|(r, _)| &r.id != ex);
-            }
-            if let Some(t) = threshold {
-                results.retain(|(_, score)| *score >= t);
-            }
-            results.truncate(top_k);
-
-            let values: Vec<Value> = results
-                .iter()
-                .map(|(r, score)| scored_to_json(r, *score))
-                .collect();
-
+            let values = run_similar(
+                &db_path,
+                vector.as_deref(),
+                id.as_deref(),
+                space.as_deref(),
+                top_k,
+                threshold,
+                dimensions,
+            )?;
             out.print_array(&values);
             Ok(EXIT_OK)
         }

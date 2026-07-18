@@ -20,6 +20,7 @@ See ``README.md`` for the full trading-R&D-loop walkthrough.
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 from typing import Any, Dict, List, Optional, Sequence, Union
@@ -28,7 +29,7 @@ __all__ = ["Axil", "AxilError"]
 __version__ = "0.1.0"
 
 JsonValue = Any
-PathLike = Union[str, "os.PathLike[str]"]  # noqa: F821 - runtime-only annotation
+PathLike = Union[str, "os.PathLike[str]"]
 
 
 class AxilError(RuntimeError):
@@ -233,7 +234,7 @@ class Axil:
         metrics:
             A sequence of metric specs. Each is either ``"count"`` or a
             function form ``"avg(field)"``, ``"min(field)"``, ``"max(field)"``,
-            ``"sum(field)"`` (``"avg:field"`` is also accepted). Repeated
+            ``"sum(field)"``. Repeated
             metrics combine.
         group_by:
             Field whose value keys the groups (missing field → ``null`` group).
@@ -383,19 +384,10 @@ class Axil:
 def _metric_to_flags(spec: str) -> List[str]:
     """Translate one aggregation metric spec into CLI flags.
 
-    Accepts ``"count"``, ``"avg(field)"`` / ``"avg:field"``, and likewise for
-    ``min``/``max``/``sum``.
+    Accepts ``"count"`` and ``"avg(field)"`` / ``"min(field)"`` /
+    ``"max(field)"`` / ``"sum(field)"`` — the same spelling every other Axil
+    surface (CLI, MCP, AxilQL) uses.
     """
-    # Allow the "avg:field" shorthand alongside "avg(field)".
-    if ":" in spec and "(" not in spec:
-        func, _, field = spec.partition(":")
-        func, field = func.strip().lower(), field.strip()
-        if func == "count":
-            return ["--count"]
-        if func in ("avg", "min", "max", "sum") and field:
-            return [f"--{func}", field]
-        raise ValueError(f"invalid metric spec: {spec!r}")
-
     m = _METRIC_RE.match(spec)
     if not m:
         raise ValueError(f"invalid metric spec: {spec!r}")

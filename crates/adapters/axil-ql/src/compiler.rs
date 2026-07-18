@@ -192,32 +192,19 @@ pub fn execute(db: &Axil, query: &Query) -> Result<QueryResult, CompileError> {
             table,
             where_conditions,
         } => {
-            let count = if where_conditions.is_empty() {
-                match table {
-                    Some(t) => db.count(t)?,
-                    None => {
-                        let tables = db.tables()?;
-                        let mut total = 0usize;
-                        for t in &tables {
-                            total += db.count(t)?;
-                        }
-                        total
-                    }
-                }
-            } else {
-                let wheres = conditions_to_where(where_conditions);
-                match table {
-                    Some(t) => filtered_count(db, t, &wheres)?,
-                    None => {
-                        let tables = db.tables()?;
-                        let mut total = 0usize;
-                        for t in &tables {
-                            total += filtered_count(db, t, &wheres)?;
-                        }
-                        total
-                    }
-                }
+            let tables = match table {
+                Some(t) => vec![t.clone()],
+                None => db.tables()?,
             };
+            let wheres = conditions_to_where(where_conditions);
+            let mut count = 0usize;
+            for t in &tables {
+                count += if wheres.is_empty() {
+                    db.count(t)?
+                } else {
+                    filtered_count(db, t, &wheres)?
+                };
+            }
             Ok(QueryResult {
                 count,
                 results: vec![serde_json::json!({"count": count})],
@@ -243,8 +230,9 @@ pub fn execute(db: &Axil, query: &Query) -> Result<QueryResult, CompileError> {
                 where_clauses: &wheres,
                 include_archived: false,
             };
-            let value = crate::aggregate::aggregate(db, &req)
-                .map_err(|e| CompileError { message: e.message })?;
+            let value = crate::aggregate::aggregate(db, &req).map_err(|e| CompileError {
+                message: e.to_string(),
+            })?;
             Ok(QueryResult {
                 results: vec![value],
                 count: 1,

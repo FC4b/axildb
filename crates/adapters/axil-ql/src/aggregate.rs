@@ -30,6 +30,38 @@ pub enum AggMetric {
     Sum(String),
 }
 
+impl AggMetric {
+    /// Parse a metric spec string: `count` | `avg(field)` | `min(field)` |
+    /// `max(field)` | `sum(field)` (function names case-insensitive).
+    ///
+    /// This is the one string form of the metric micro-grammar, shared by
+    /// every surface that accepts specs as text (the MCP `aggregate` tool,
+    /// clients); AxilQL parses the same grammar from its own token stream.
+    pub fn parse_spec(spec: &str) -> Result<Self, String> {
+        let s = spec.trim();
+        if s.eq_ignore_ascii_case("count") || s.eq_ignore_ascii_case("count()") {
+            return Ok(AggMetric::Count);
+        }
+        let (func, rest) = match s.find('(') {
+            Some(open) if s.ends_with(')') => (&s[..open], &s[open + 1..s.len() - 1]),
+            _ => return Err(format!("expected `count` or `func(field)`, got '{spec}'")),
+        };
+        let field = rest.trim();
+        if field.is_empty() {
+            return Err(format!("field name must not be empty in '{spec}'"));
+        }
+        match func.trim().to_ascii_lowercase().as_str() {
+            "avg" => Ok(AggMetric::Avg(field.to_string())),
+            "min" => Ok(AggMetric::Min(field.to_string())),
+            "max" => Ok(AggMetric::Max(field.to_string())),
+            "sum" => Ok(AggMetric::Sum(field.to_string())),
+            other => Err(format!(
+                "unknown function '{other}' (valid: count, avg, min, max, sum)"
+            )),
+        }
+    }
+}
+
 /// A fully-specified aggregation request.
 #[derive(Debug, Clone)]
 pub struct AggRequest<'a> {
@@ -43,29 +75,6 @@ pub struct AggRequest<'a> {
     pub where_clauses: &'a [WhereClause],
     /// Include `_archived` records (excluded by default, mirroring `list`).
     pub include_archived: bool,
-}
-
-/// Aggregation failure — a thin wrapper carrying a message.
-#[derive(Debug, Clone)]
-pub struct AggError {
-    /// Human-readable failure detail.
-    pub message: String,
-}
-
-impl std::fmt::Display for AggError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "aggregate error: {}", self.message)
-    }
-}
-
-impl std::error::Error for AggError {}
-
-impl From<axil_core::AxilError> for AggError {
-    fn from(e: axil_core::AxilError) -> Self {
-        AggError {
-            message: e.to_string(),
-        }
-    }
 }
 
 /// Running numeric accumulator for one field-bearing metric.
@@ -111,9 +120,9 @@ struct GroupAcc {
 }
 
 impl GroupAcc {
-    fn new(n_metrics: usize) -> Self {
+    fn new(n_metrics: usize, repr: Value) -> Self {
         GroupAcc {
-            repr: Value::Null,
+            repr,
             count: 0,
             skipped: 0,
             nums: vec![NumAcc::new(); n_metrics],
@@ -148,7 +157,7 @@ fn render_key(v: Option<&Value>) -> Option<String> {
 ///
 /// Groups are ordered by key (the `null` group first). A field-bearing metric
 /// with no numeric samples in a group renders as JSON `null`.
-pub fn aggregate(db: &Axil, req: &AggRequest) -> Result<Value, AggError> {
+pub fn aggregate(db: &Axil, req: &AggRequest) -> axil_core::Result<Value> {
     let mut qb = db.query().table(req.table);
     for wc in req.where_clauses {
         qb = qb.where_field(&wc.field, wc.op.clone(), wc.value.clone());
@@ -172,18 +181,11 @@ pub fn aggregate(db: &Axil, req: &AggRequest) -> Result<Value, AggError> {
         total_rows += 1;
 
         let field_val = req.group_by.and_then(|f| rec.data.get(f));
-        let key = match req.group_by {
-            Some(_) => render_key(field_val),
-            None => None,
-        };
-        let repr = field_val.cloned().unwrap_or(Value::Null);
+        let key = render_key(field_val);
 
-        let acc = groups
-            .entry(key)
-            .or_insert_with(|| GroupAcc::new(n_metrics));
-        if acc.count == 0 {
-            acc.repr = repr;
-        }
+        let acc = groups.entry(key).or_insert_with(|| {
+            GroupAcc::new(n_metrics, field_val.cloned().unwrap_or(Value::Null))
+        });
         acc.count += 1;
 
         let mut row_had_skip = false;
@@ -361,6 +363,23 @@ mod tests {
         assert_eq!(groups[0]["count"], 1);
         assert_eq!(groups[1]["group"], "meanrev");
         assert_eq!(groups[1]["count"], 1);
+    }
+
+    #[test]
+    fn parse_spec_accepts_every_surface_form() {
+        assert_eq!(AggMetric::parse_spec("count").unwrap(), AggMetric::Count);
+        assert_eq!(AggMetric::parse_spec("COUNT()").unwrap(), AggMetric::Count);
+        assert_eq!(
+            AggMetric::parse_spec("avg(oos_sharpe)").unwrap(),
+            AggMetric::Avg("oos_sharpe".into())
+        );
+        assert_eq!(
+            AggMetric::parse_spec(" SUM( fees ) ").unwrap(),
+            AggMetric::Sum("fees".into())
+        );
+        assert!(AggMetric::parse_spec("median(x)").is_err());
+        assert!(AggMetric::parse_spec("avg()").is_err());
+        assert!(AggMetric::parse_spec("avg").is_err());
     }
 
     #[test]

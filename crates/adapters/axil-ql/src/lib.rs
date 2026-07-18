@@ -27,7 +27,7 @@ pub mod lexer;
 pub mod parser;
 
 // Re-export primary API.
-pub use aggregate::{aggregate, AggError, AggMetric, AggRequest};
+pub use aggregate::{aggregate, AggMetric, AggRequest};
 pub use ast::Query;
 pub use compiler::{execute, CompileError, QueryResult};
 pub use parser::{parse, ParseError};

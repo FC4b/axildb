@@ -175,14 +175,16 @@ def test_agg_include_archived_changes_count(db):
     assert with_arch["total_rows"] == 2
 
 
-def test_agg_metric_shorthand_forms(db):
+def test_agg_metric_spec_forms(db):
     db.store("t", {"v": 2})
     db.store("t", {"v": 4})
-    out = db.agg("t", ["min(v)", "max:v", "sum(v)"])
+    out = db.agg("t", ["min(v)", "max(v)", "sum(v)"])
     g = out["groups"][0]
     assert g["min_v"] == 2
     assert g["max_v"] == 4
     assert g["sum_v"] == 6
+    with pytest.raises(ValueError):
+        db.agg("t", ["max:v"])
 
 
 # ── raw vectors (named space, lazily created) ───────────────────────────────

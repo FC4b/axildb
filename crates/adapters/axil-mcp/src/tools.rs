@@ -1098,7 +1098,7 @@ fn handle_aggregate(db: &Axil, args: &Value) -> ToolCallResult {
             let Some(spec) = m.as_str() else {
                 return ToolCallResult::error("each metric must be a string");
             };
-            match parse_metric_spec(spec) {
+            match axil_ql::AggMetric::parse_spec(spec) {
                 Ok(metric) => metrics.push(metric),
                 Err(e) => return ToolCallResult::error(format!("invalid metric '{spec}': {e}")),
             }
@@ -1277,36 +1277,6 @@ fn handle_lineage(db: &Axil, args: &Value) -> ToolCallResult {
     match axil_core::lineage::walk(db, &rid, edge_type, direction, max_depth, fields.as_deref()) {
         Ok(value) => ToolCallResult::json(&value),
         Err(e) => ToolCallResult::error(format!("lineage failed: {e}")),
-    }
-}
-
-/// Parse a metric spec string (`count` | `avg(field)` | `min(field)` |
-/// `max(field)` | `sum(field)`).
-#[cfg(feature = "ql")]
-fn parse_metric_spec(s: &str) -> Result<axil_ql::AggMetric, String> {
-    let s = s.trim();
-    if s.eq_ignore_ascii_case("count") || s.eq_ignore_ascii_case("count()") {
-        return Ok(axil_ql::AggMetric::Count);
-    }
-    let open = s
-        .find('(')
-        .ok_or_else(|| "expected `count` or `func(field)`".to_string())?;
-    if !s.ends_with(')') {
-        return Err("expected a closing ')'".to_string());
-    }
-    let func = s[..open].trim().to_ascii_lowercase();
-    let field = s[open + 1..s.len() - 1].trim().to_string();
-    if field.is_empty() {
-        return Err("field name must not be empty".to_string());
-    }
-    match func.as_str() {
-        "avg" => Ok(axil_ql::AggMetric::Avg(field)),
-        "min" => Ok(axil_ql::AggMetric::Min(field)),
-        "max" => Ok(axil_ql::AggMetric::Max(field)),
-        "sum" => Ok(axil_ql::AggMetric::Sum(field)),
-        other => Err(format!(
-            "unknown function '{other}' (valid: count, avg, min, max, sum)"
-        )),
     }
 }
 

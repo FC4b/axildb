@@ -10,7 +10,10 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use parking_lot::RwLock;
-use redb::{Database, ReadOnlyDatabase, ReadableDatabase, ReadableTable, TableDefinition};
+use redb::{
+    Database, ReadOnlyDatabase, ReadableDatabase, ReadableTable, ReadableTableMetadata,
+    TableDefinition,
+};
 
 use axil_core::error::AxilError;
 use axil_core::plugin::{Capability, Engine, TextEmbedder, VectorIndex};
@@ -133,47 +136,48 @@ impl VectorEngine {
         }
         let vector_db = Database::create(vec_path).map_err(plugin_err)?;
 
-        // Resolve the effective dimension against any stored value in one write
-        // txn: reconcile a requested dim with the stored dim, adopt the stored
-        // dim on a read, and persist the resolved dim for a fresh store.
-        let dimensions;
-        {
-            let txn = vector_db.begin_write().map_err(plugin_err)?;
-            {
-                let _ = txn.open_table(VECTORS_TABLE).map_err(plugin_err)?;
-                let meta = txn.open_table(META_TABLE).map_err(plugin_err)?;
-                let stored = match meta.get("dimensions").map_err(plugin_err)? {
+        // An existing store's persisted dimension governs; probing it takes a
+        // read txn only, so pure-read opens (similar/get_vector/listings) pay
+        // no durable write commit. Only a fresh store writes: one txn creates
+        // the tables and persists the requested dimension.
+        let dimensions = if existed {
+            let txn = vector_db.begin_read().map_err(plugin_err)?;
+            let stored = match txn.open_table(META_TABLE) {
+                Ok(meta) => match meta.get("dimensions").map_err(plugin_err)? {
                     Some(guard) => {
                         let s = std::str::from_utf8(guard.value()).map_err(plugin_err)?;
                         Some(s.parse::<usize>().map_err(plugin_err)?)
                     }
                     None => None,
-                };
-                drop(meta);
-
-                dimensions = match (dim, stored) {
-                    (Some(requested), Some(stored)) if requested != stored => {
-                        return Err(AxilError::plugin(format!(
-                            "dimension mismatch: vector space was created with {stored} \
-                             dimensions, but {requested} requested"
-                        )));
-                    }
-                    (Some(requested), _) => requested,
-                    (None, Some(stored)) => stored,
-                    (None, None) => {
-                        return Err(AxilError::plugin(
-                            "vector space has no stored dimension — file may be corrupt",
-                        ));
-                    }
-                };
-
-                let mut meta_w = txn.open_table(META_TABLE).map_err(plugin_err)?;
-                meta_w
-                    .insert("dimensions", dimensions.to_string().as_bytes())
-                    .map_err(plugin_err)?;
+                },
+                Err(redb::TableError::TableDoesNotExist(_)) => None,
+                Err(e) => return Err(plugin_err(e)),
+            };
+            match (dim, stored) {
+                (Some(requested), Some(stored)) if requested != stored => {
+                    return Err(AxilError::plugin(format!(
+                        "dimension mismatch: vector space was created with {stored} \
+                         dimensions, but {requested} requested"
+                    )));
+                }
+                (_, Some(stored)) => stored,
+                // File exists but carries no dimension (e.g. an interrupted
+                // create): a write path may (re)initialize it, a read may not.
+                (Some(requested), None) => {
+                    Self::write_space_meta_txn(&vector_db, requested)?;
+                    requested
+                }
+                (None, None) => {
+                    return Err(AxilError::plugin(
+                        "vector space has no stored dimension — file may be corrupt",
+                    ));
+                }
             }
-            txn.commit().map_err(plugin_err)?;
-        }
+        } else {
+            let requested = dim.expect("checked above: fresh store requires a dimension");
+            Self::write_space_meta_txn(&vector_db, requested)?;
+            requested
+        };
 
         let vectors = load_all_vectors(&vector_db, dimensions)?;
         let index = HnswIndex::from_vectors(dimensions, vectors);
@@ -186,6 +190,19 @@ impl VectorEngine {
             vector_db,
             embedder: None,
         })
+    }
+
+    /// One write txn that ensures a space's tables exist and persists its
+    /// dimension — the only durable write an `open_space_at` ever performs.
+    fn write_space_meta_txn(vector_db: &Database, dimensions: usize) -> axil_core::Result<()> {
+        let txn = vector_db.begin_write().map_err(plugin_err)?;
+        {
+            let _ = txn.open_table(VECTORS_TABLE).map_err(plugin_err)?;
+            let mut meta = txn.open_table(META_TABLE).map_err(plugin_err)?;
+            meta.insert("dimensions", dimensions.to_string().as_bytes())
+                .map_err(plugin_err)?;
+        }
+        txn.commit().map_err(plugin_err)
     }
 
     /// Attach an embedder for text-to-vector conversion.
@@ -392,14 +409,7 @@ pub fn vector_space_db_path(main_path: &Path, space: &str) -> PathBuf {
     PathBuf::from(p)
 }
 
-/// True if `name` is a valid space name (`[a-z0-9_-]{1,32}`).
-fn is_valid_space_name(name: &str) -> bool {
-    !name.is_empty()
-        && name.len() <= 32
-        && name
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
-}
+use axil_core::is_valid_space_name;
 
 /// List persisted named-space names for the database at `main_path`.
 ///
@@ -460,6 +470,45 @@ impl axil_core::VectorSpaceFactory for VectorSpaceFactory {
 
     fn space_names(&self, main_path: &Path) -> axil_core::Result<Vec<String>> {
         list_vector_space_names(main_path)
+    }
+
+    fn space_meta(&self, main_path: &Path, space: &str) -> axil_core::Result<(usize, usize)> {
+        let vec_path = vector_space_db_path(main_path, space);
+        if !vec_path.exists() {
+            return Err(AxilError::plugin(format!(
+                "vector space {} does not exist",
+                vec_path.display()
+            )));
+        }
+        // Read-only probe: no writable handle, no vector load, no index build —
+        // listings stay proportional to metadata, not store size.
+        let db = ReadOnlyDatabase::open(&vec_path).map_err(plugin_err)?;
+        let txn = db.begin_read().map_err(plugin_err)?;
+        let dimensions = match txn.open_table(META_TABLE) {
+            Ok(meta) => match meta.get("dimensions").map_err(plugin_err)? {
+                Some(guard) => {
+                    let s = std::str::from_utf8(guard.value()).map_err(plugin_err)?;
+                    s.parse::<usize>().map_err(plugin_err)?
+                }
+                None => {
+                    return Err(AxilError::plugin(
+                        "vector space has no stored dimension — file may be corrupt",
+                    ))
+                }
+            },
+            Err(redb::TableError::TableDoesNotExist(_)) => {
+                return Err(AxilError::plugin(
+                    "vector space has no metadata table — file may be corrupt",
+                ))
+            }
+            Err(e) => return Err(plugin_err(e)),
+        };
+        let count = match txn.open_table(VECTORS_TABLE) {
+            Ok(t) => t.len().map_err(plugin_err)? as usize,
+            Err(redb::TableError::TableDoesNotExist(_)) => 0,
+            Err(e) => return Err(plugin_err(e)),
+        };
+        Ok((dimensions, count))
     }
 }
 

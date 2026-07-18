@@ -124,10 +124,7 @@ pub fn walk(
                 hop.insert("missing".to_string(), json!(true));
             }
         }
-        hop.insert(
-            "edge".to_string(),
-            item.edge.clone().unwrap_or(Value::Null),
-        );
+        hop.insert("edge".to_string(), item.edge.unwrap_or(Value::Null));
         hop.insert("delta".to_string(), Value::Object(delta));
         hops.push(Value::Object(hop));
 
@@ -191,14 +188,10 @@ fn select_fields(data: &Value, fields: Option<&[String]>) -> Map<String, Value> 
                     out.insert(k.clone(), v.clone());
                 }
             }
+            out
         }
-        None => {
-            for (k, v) in obj {
-                out.insert(k.clone(), v.clone());
-            }
-        }
+        None => obj.clone(),
     }
-    out
 }
 
 /// Extract the numeric subset of a selected-fields map.

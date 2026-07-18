@@ -123,8 +123,8 @@ for hop in chain["hops"]:
 ### `agg` metric specs
 
 `metrics` is a list. Each item is `"count"` or a function form
-`"avg(field)"`, `"min(field)"`, `"max(field)"`, `"sum(field)"` (the shorthand
-`"avg:field"` also works). Metrics combine; grouped results carry a
+`"avg(field)"`, `"min(field)"`, `"max(field)"`, `"sum(field)"` — the same
+spelling as the CLI, MCP, and AxilQL. Metrics combine; grouped results carry a
 `skipped` count of non-numeric/missing values per group.
 
 ### `where` predicates
