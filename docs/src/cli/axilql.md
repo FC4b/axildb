@@ -43,8 +43,26 @@ GET <record-id>
 
 ```sql
 COUNT FROM sessions
+COUNT FROM autopsies WHERE family = "meanrev"
 COUNT
 ```
+
+Without `FROM`, all tables (including internal `_`-prefixed ones) are
+counted; adding `WHERE` filters each table's records before counting.
+
+### AGG — aggregations
+
+```sql
+AGG count FROM autopsies GROUP BY kill_reason
+AGG avg(sharpe_decay), count FROM autopsies WHERE oos_sharpe > 0 GROUP BY family
+AGG min(fees), max(fees), sum(fees) FROM trades
+```
+
+Metric functions: `count`, `avg(field)`, `min(field)`, `max(field)`,
+`sum(field)` (names case-insensitive). Returns one row per group with
+`count`, one `<func>_<field>` key per metric, and a `skipped` counter for
+rows whose field was missing or non-numeric. The CLI `axil agg` command and
+the MCP `aggregate` tool run the same executor.
 
 ### EXPLAIN — show query plan
 
