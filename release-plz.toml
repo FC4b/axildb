@@ -12,10 +12,18 @@
 # skipped automatically.
 
 [workspace]
-# Create a GitHub Release for each published tag.
-git_release_enable = true
+# GitHub Releases are the product's changelog page, not a per-crate ledger:
+# only the flagship `axildb` crate (below) gets a Releases entry per cycle.
+# Every crate still publishes to crates.io and still gets its git tag — this
+# only keeps the Releases page readable (one entry per release, not ~18).
+git_release_enable = false
 # Bump intra-workspace dependency requirements when a dependency is released.
 dependencies_update = true
+
+[[package]]
+name = "axildb"
+# The product: the one Releases-page entry per cycle.
+git_release_enable = true
 
 [[package]]
 name = "axil-ql"
