@@ -107,24 +107,24 @@ repository = "https://github.com/FC4b/axildb"
 # fields, but each carries its own explicit `version` (independent versioning).
 # release-plz rewrites the version pins below as crates drift, so a released
 # crate's dependents pick up the new requirement automatically.
-axil-core = { path = "crates/axil-core", version = "2.1.2" }
-axil-bundle = { path = "crates/axil-bundle", version = "2.1.2" }
-axil-vector = { path = "crates/engines/axil-vector", version = "2.1.2" }
-axil-graph = { path = "crates/engines/axil-graph", version = "2.1.2" }
-axil-fts = { path = "crates/engines/axil-fts", version = "2.1.2" }
-axil-timeseries = { path = "crates/engines/axil-timeseries", version = "2.1.2" }
-axil-memory = { path = "crates/extensions/axil-memory", version = "2.1.2" }
-axil-indexer = { path = "crates/extensions/axil-indexer", version = "2.2.0" }
-axil-scip = { path = "crates/extensions/axil-scip", version = "2.1.2" }
-axil-docs = { path = "crates/extensions/axil-docs", version = "2.1.2" }
-axil-checkpoint = { path = "crates/extensions/axil-checkpoint", version = "2.1.2" }
-axil-cache = { path = "crates/extensions/axil-cache", version = "2.1.2" }
-axil-workspace = { path = "crates/extensions/axil-workspace", version = "2.1.2" }
-axil-sync = { path = "crates/extensions/axil-sync", version = "2.1.2" }
+axil-core = { path = "crates/axil-core", version = "2.2.0" }
+axil-bundle = { path = "crates/axil-bundle", version = "2.1.3" }
+axil-vector = { path = "crates/engines/axil-vector", version = "2.2.0" }
+axil-graph = { path = "crates/engines/axil-graph", version = "2.1.3" }
+axil-fts = { path = "crates/engines/axil-fts", version = "2.1.3" }
+axil-timeseries = { path = "crates/engines/axil-timeseries", version = "2.1.3" }
+axil-memory = { path = "crates/extensions/axil-memory", version = "2.1.3" }
+axil-indexer = { path = "crates/extensions/axil-indexer", version = "2.2.1" }
+axil-scip = { path = "crates/extensions/axil-scip", version = "2.1.3" }
+axil-docs = { path = "crates/extensions/axil-docs", version = "2.1.3" }
+axil-checkpoint = { path = "crates/extensions/axil-checkpoint", version = "2.1.3" }
+axil-cache = { path = "crates/extensions/axil-cache", version = "2.1.3" }
+axil-workspace = { path = "crates/extensions/axil-workspace", version = "2.1.3" }
+axil-sync = { path = "crates/extensions/axil-sync", version = "2.1.3" }
 axil-atlas-proto = { path = "crates/proto/axil-atlas-proto", version = "2.1.1" }
-axil-runtime = { path = "crates/adapters/axil-runtime", version = "2.1.2" }
-axil-mcp = { path = "crates/adapters/axil-mcp", version = "2.1.2" }
-axil-ql = { path = "crates/adapters/axil-ql", version = "2.1.2" }
+axil-runtime = { path = "crates/adapters/axil-runtime", version = "2.1.3" }
+axil-mcp = { path = "crates/adapters/axil-mcp", version = "2.2.0" }
+axil-ql = { path = "crates/adapters/axil-ql", version = "2.2.0" }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
