@@ -327,3 +327,157 @@ fn path_getter_returns_correct_path() {
     let db = Axil::open(&path).build().unwrap();
     assert_eq!(db.path(), path);
 }
+
+// ── Named vector spaces ───────────────────────────────────────────
+
+/// A DB holding a 384-dim default space + a 5-dim `fp` space must keep them
+/// isolated (writes/searches never cross) and persist both across reopen.
+#[test]
+fn named_space_isolation_and_persistence() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("spaces.axil");
+
+    let (def_id, fp_id);
+    {
+        let db = Axil::open(&path)
+            .with_vector(384)
+            .unwrap();
+        let db = axil_vector::with_vector_spaces(db).build().unwrap();
+
+        let d = db.insert("docs", json!({"summary": "text embedding record"})).unwrap();
+        let f = db.insert("strats", json!({"summary": "strategy fingerprint"})).unwrap();
+        def_id = d.id.clone();
+        fp_id = f.id.clone();
+
+        // Default space: 384-dim.
+        let mut dv = vec![0.0_f32; 384];
+        dv[0] = 1.0;
+        db.add_vector(&def_id, &dv).unwrap();
+
+        // Named `fp` space: 5-dim. Independent dimension, no collision.
+        db.add_vector_in("fp", &fp_id, &[1.0, 0.0, 0.0, 0.0, 0.0]).unwrap();
+
+        // Search does not cross spaces.
+        let def_hits = db.similar_to_vector(&dv, 5).unwrap();
+        assert_eq!(def_hits.len(), 1);
+        assert_eq!(def_hits[0].0.id, def_id);
+
+        let fp_hits = db.similar_in("fp", &[1.0, 0.0, 0.0, 0.0, 0.0], 5).unwrap();
+        assert_eq!(fp_hits.len(), 1);
+        assert_eq!(fp_hits[0].0.id, fp_id);
+    }
+
+    // Reopen: both spaces persist with their own dimensions.
+    {
+        let db = Axil::open(&path)
+            .with_vector_auto()
+            .unwrap();
+        let db = axil_vector::with_vector_spaces(db).build().unwrap();
+
+        let mut dv = vec![0.0_f32; 384];
+        dv[0] = 1.0;
+        let def_hits = db.similar_to_vector(&dv, 5).unwrap();
+        assert_eq!(def_hits.len(), 1);
+        assert_eq!(def_hits[0].0.id, def_id);
+
+        let fp_hits = db.similar_in("fp", &[1.0, 0.0, 0.0, 0.0, 0.0], 5).unwrap();
+        assert_eq!(fp_hits.len(), 1);
+        assert_eq!(fp_hits[0].0.id, fp_id);
+
+        // Round-trip the stored fingerprint.
+        let stored = db.get_vector_in("fp", &fp_id).unwrap().unwrap();
+        assert_eq!(stored, vec![1.0, 0.0, 0.0, 0.0, 0.0]);
+
+        // vector_spaces() reports the named space (default is not "named").
+        let spaces = db.vector_spaces().unwrap();
+        assert_eq!(spaces.len(), 1);
+        assert_eq!(spaces[0].name, "fp");
+        assert_eq!(spaces[0].dimensions, 5);
+        assert_eq!(spaces[0].count, 1);
+    }
+}
+
+/// A second write to a space with a different dimension errors.
+#[test]
+fn named_space_dimension_mismatch_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("mismatch.axil");
+    let db = Axil::open(&path)
+        .with_vector(3)
+        .unwrap();
+    let db = axil_vector::with_vector_spaces(db).build().unwrap();
+
+    let a = db.insert("s", json!({})).unwrap();
+    let b = db.insert("s", json!({})).unwrap();
+
+    db.add_vector_in("fp", &a.id, &[1.0, 0.0, 0.0, 0.0]).unwrap();
+    // Wrong length for the same (cached) space.
+    let err = db.add_vector_in("fp", &b.id, &[1.0, 0.0]).unwrap_err();
+    assert!(
+        err.to_string().contains("dimension mismatch"),
+        "unexpected error: {err}"
+    );
+}
+
+/// Space names must match `[a-z0-9_-]{1,32}`.
+#[test]
+fn named_space_invalid_name_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("badname.axil");
+    let db = Axil::open(&path)
+        .with_vector(3)
+        .unwrap();
+    let db = axil_vector::with_vector_spaces(db).build().unwrap();
+    let r = db.insert("s", json!({})).unwrap();
+    assert!(db.add_vector_in("Bad Name", &r.id, &[1.0, 0.0, 0.0]).is_err());
+    assert!(db.add_vector_in("", &r.id, &[1.0, 0.0, 0.0]).is_err());
+    assert!(db
+        .add_vector_in(&"x".repeat(33), &r.id, &[1.0, 0.0, 0.0])
+        .is_err());
+}
+
+/// A ~0.97-cosine twin ranks just below the exact self-match and well above an
+/// orthogonal decoy — the near-duplicate detection the CLI `similar --threshold`
+/// flag is built on.
+#[test]
+fn named_space_near_duplicate_ranks_first() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("neardup.axil");
+    let db = Axil::open(&path)
+        .with_vector(8)
+        .unwrap();
+    let db = axil_vector::with_vector_spaces(db).build().unwrap();
+
+    let a = db.insert("fp", json!({"name": "a"})).unwrap();
+    let b = db.insert("fp", json!({"name": "b"})).unwrap();
+    let c = db.insert("fp", json!({"name": "c"})).unwrap();
+
+    let va = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+    // cos(va, vb) = 1/sqrt(1.0625) ≈ 0.970.
+    let vb = [1.0, 0.25, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+    let vc = [0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+    db.add_vector_in("fp", &a.id, &va).unwrap();
+    db.add_vector_in("fp", &b.id, &vb).unwrap();
+    db.add_vector_in("fp", &c.id, &vc).unwrap();
+
+    let hits = db.similar_in("fp", &va, 3).unwrap();
+    assert_eq!(hits.len(), 3);
+    assert_eq!(hits[0].0.id, a.id);
+    assert!((hits[0].1 - 1.0).abs() < 0.01);
+    assert_eq!(hits[1].0.id, b.id);
+    assert!(hits[1].1 > 0.9, "twin score {} should exceed 0.9", hits[1].1);
+    assert_eq!(hits[2].0.id, c.id);
+    assert!(hits[2].1 < 0.5, "decoy score {} should be low", hits[2].1);
+}
+
+/// Named-space operations error clearly when no factory is registered.
+#[test]
+fn named_space_without_factory_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("nofactory.axil");
+    let db = Axil::open(&path).with_vector(3).unwrap().build().unwrap();
+    let r = db.insert("s", json!({})).unwrap();
+    assert!(db.add_vector_in("fp", &r.id, &[1.0, 0.0, 0.0]).is_err());
+    // With no factory, listing is simply empty (not an error).
+    assert!(db.vector_spaces().unwrap().is_empty());
+}

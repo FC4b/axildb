@@ -562,6 +562,205 @@ fn test_query_multiple_where() {
     assert_eq!(results[0]["data"]["a"], 2);
 }
 
+#[test]
+fn test_query_where_and_in_one_string() {
+    let (_dir, db) = temp_db();
+    let db_str = db.to_str().unwrap();
+
+    run_axil(&["init", db_str]);
+    let (out_a, _, _) = run_axil(&[
+        "--db",
+        db_str,
+        "store",
+        "autopsies",
+        r#"{"family":"meanrev","oos_sharpe":0.5,"trades":5}"#,
+    ]);
+    let id_a = parse_json(&out_a)["id"].as_str().unwrap().to_string();
+    run_axil(&[
+        "--db",
+        db_str,
+        "store",
+        "autopsies",
+        r#"{"family":"meanrev","oos_sharpe":0.1,"trades":100}"#,
+    ]);
+    run_axil(&[
+        "--db",
+        db_str,
+        "store",
+        "autopsies",
+        r#"{"family":"momentum","oos_sharpe":0.9,"trades":20}"#,
+    ]);
+
+    // One --where string carrying an AND, mixing a numeric predicate and a
+    // single-quoted string predicate.
+    let (stdout, _, code) = run_axil(&[
+        "--db",
+        db_str,
+        "query",
+        "autopsies",
+        "--where",
+        "oos_sharpe > 0.3 AND family = 'meanrev'",
+    ]);
+    assert_eq!(code, 0);
+    let results: Vec<Value> = serde_json::from_str(stdout.trim()).unwrap();
+    let ids: Vec<&str> = results.iter().map(|r| r["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, vec![id_a.as_str()], "exact id set must be [meanrev, sharpe 0.5]");
+}
+
+#[test]
+fn test_query_where_numeric_not_lexicographic() {
+    let (_dir, db) = temp_db();
+    let db_str = db.to_str().unwrap();
+
+    run_axil(&["init", db_str]);
+    run_axil(&["--db", db_str, "store", "autopsies", r#"{"trades":5}"#]);
+    run_axil(&["--db", db_str, "store", "autopsies", r#"{"trades":100}"#]);
+
+    // trades < 30 must compare numerically (5 matches, 100 does not) — a
+    // lexicographic string compare would wrongly match "100" < "30".
+    let (stdout, _, code) = run_axil(&[
+        "--db", db_str, "query", "autopsies", "--where", "trades < 30",
+    ]);
+    assert_eq!(code, 0);
+    let results: Vec<Value> = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(results.len(), 1, "trades<30 must match 5, not 100");
+    assert_eq!(results[0]["data"]["trades"], 5);
+}
+
+#[test]
+fn test_query_where_contains() {
+    let (_dir, db) = temp_db();
+    let db_str = db.to_str().unwrap();
+
+    run_axil(&["init", db_str]);
+    run_axil(&[
+        "--db",
+        db_str,
+        "store",
+        "notes",
+        r#"{"summary":"auth timeout bug"}"#,
+    ]);
+    run_axil(&[
+        "--db",
+        db_str,
+        "store",
+        "notes",
+        r#"{"summary":"deploy pipeline"}"#,
+    ]);
+
+    let (stdout, _, code) = run_axil(&[
+        "--db",
+        db_str,
+        "query",
+        "notes",
+        "--where",
+        "summary contains 'timeout'",
+    ]);
+    assert_eq!(code, 0);
+    let results: Vec<Value> = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0]["data"]["summary"], "auth timeout bug");
+}
+
+// ─── Aggregations (agg) ─────────────────────────────────────────────────────
+
+#[test]
+fn test_agg_count_group_by_kill_reason() {
+    let (_dir, db) = temp_db();
+    let db_str = db.to_str().unwrap();
+
+    run_axil(&["init", db_str]);
+    run_axil(&[
+        "--db", db_str, "store", "autopsies", r#"{"kill_reason":"drawdown"}"#,
+    ]);
+    run_axil(&[
+        "--db", db_str, "store", "autopsies", r#"{"kill_reason":"drawdown"}"#,
+    ]);
+    run_axil(&[
+        "--db", db_str, "store", "autopsies", r#"{"kill_reason":"fees"}"#,
+    ]);
+
+    let (stdout, _, code) = run_axil(&[
+        "--db",
+        db_str,
+        "agg",
+        "autopsies",
+        "--count",
+        "--group-by",
+        "kill_reason",
+    ]);
+    assert_eq!(code, 0, "agg should succeed; stderr may explain");
+    let env = parse_json(&stdout);
+    assert_eq!(env["table"], "autopsies");
+    assert_eq!(env["group_by"], "kill_reason");
+    assert_eq!(env["total_rows"], 3);
+    let groups = env["groups"].as_array().unwrap();
+    // Sorted by group key: "drawdown" (2) before "fees" (1).
+    assert_eq!(groups.len(), 2);
+    assert_eq!(groups[0]["group"], "drawdown");
+    assert_eq!(groups[0]["count"], 2);
+    assert_eq!(groups[1]["group"], "fees");
+    assert_eq!(groups[1]["count"], 1);
+}
+
+#[test]
+fn test_agg_avg_decay_per_family() {
+    let (_dir, db) = temp_db();
+    let db_str = db.to_str().unwrap();
+
+    run_axil(&["init", db_str]);
+    run_axil(&[
+        "--db", db_str, "store", "autopsies", r#"{"family":"meanrev","decay":2.0}"#,
+    ]);
+    run_axil(&[
+        "--db", db_str, "store", "autopsies", r#"{"family":"meanrev","decay":4.0}"#,
+    ]);
+    run_axil(&[
+        "--db", db_str, "store", "autopsies", r#"{"family":"momentum","decay":9.0}"#,
+    ]);
+
+    let (stdout, _, code) = run_axil(&[
+        "--db", db_str, "agg", "autopsies", "--avg", "decay", "--group-by", "family",
+    ]);
+    assert_eq!(code, 0);
+    let env = parse_json(&stdout);
+    let groups = env["groups"].as_array().unwrap();
+    assert_eq!(groups.len(), 2);
+    assert_eq!(groups[0]["group"], "meanrev");
+    assert_eq!(groups[0]["avg_decay"], 3.0);
+    assert_eq!(groups[0]["skipped"], 0);
+    assert_eq!(groups[1]["group"], "momentum");
+    assert_eq!(groups[1]["avg_decay"], 9.0);
+}
+
+#[test]
+fn test_agg_include_archived_changes_count() {
+    let (_dir, db) = temp_db();
+    let db_str = db.to_str().unwrap();
+
+    run_axil(&["init", db_str]);
+    run_axil(&["--db", db_str, "store", "autopsies", r#"{"family":"meanrev"}"#]);
+    run_axil(&[
+        "--db",
+        db_str,
+        "store",
+        "autopsies",
+        r#"{"family":"meanrev","_archived":true}"#,
+    ]);
+
+    // Default excludes archived.
+    let (stdout, _, _) = run_axil(&["--db", db_str, "agg", "autopsies", "--count"]);
+    let env = parse_json(&stdout);
+    assert_eq!(env["total_rows"], 1);
+
+    // --include-archived counts the discarded trial too (deflated-Sharpe math).
+    let (stdout, _, _) = run_axil(&[
+        "--db", db_str, "agg", "autopsies", "--count", "--include-archived",
+    ]);
+    let env = parse_json(&stdout);
+    assert_eq!(env["total_rows"], 2);
+}
+
 // ─── Link + Neighbors + Traverse (graph) ───────────────────────────────────
 
 #[test]
@@ -1278,6 +1477,241 @@ fn test_add_vector_and_search_vector() {
     assert_eq!(results.len(), 2);
     assert!(results[0]["score"].as_f64().unwrap() > 0.0);
     assert!(results[0]["id"].is_string());
+}
+
+// ─── store --vector + similar (raw vectors first-class) ─────────────────────
+
+#[test]
+fn test_store_vector_roundtrip_and_similar_default_space() {
+    let (_dir, db) = temp_db();
+    let db_str = db.to_str().unwrap();
+
+    // The default space coexists with the bundled 384-dim embedder, so a raw
+    // vector attached there must be 384-dim (arbitrary dims → use `--space`).
+    run_axil(&["init", db_str]);
+    let v0 = unit_vec_384(0);
+    let v1 = unit_vec_384(1);
+
+    let (stdout, _, code) =
+        run_axil(&["--db", db_str, "store", "v", r#"{"n":"a"}"#, "--vector", &v0]);
+    assert_eq!(code, 0, "store --vector failed: {stdout}");
+    let a = parse_json(&stdout);
+    assert_eq!(a["vector_dims"], 384);
+    assert!(a.get("space").is_none(), "default space must not label a space");
+
+    let (_, _, code) =
+        run_axil(&["--db", db_str, "store", "v", r#"{"n":"b"}"#, "--vector", &v1]);
+    assert_eq!(code, 0);
+
+    // `similar --vector` searches the default space; the exact match ranks first.
+    let (stdout, _, code) =
+        run_axil(&["--db", db_str, "similar", "--vector", &v0, "--top-k", "2"]);
+    assert_eq!(code, 0);
+    let results: Vec<Value> = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(results.len(), 2);
+    assert!(results[0]["score"].as_f64().unwrap() > 0.99);
+    assert_eq!(results[0]["id"].as_str().unwrap(), a["id"].as_str().unwrap());
+}
+
+#[test]
+fn test_store_vector_conflicts_with_embed() {
+    let (_dir, db) = temp_db();
+    let db_str = db.to_str().unwrap();
+    let (_, stderr, code) = run_axil(&[
+        "--db", db_str, "store", "v", r#"{"n":"a"}"#, "--vector", "[1,0,0]", "--embed", "n",
+    ]);
+    assert_eq!(code, 2, "clap conflict must exit 2");
+    assert!(
+        stderr.contains("cannot be used with"),
+        "unexpected stderr: {stderr}"
+    );
+}
+
+#[test]
+fn test_similar_id_threshold_named_space_returns_exact_twin() {
+    let (_dir, db) = temp_db();
+    let db_str = db.to_str().unwrap();
+
+    // A near-duplicate pair (cosine ≈ 0.97) + an orthogonal decoy, all in the
+    // 8-dim `fp` space (no collision with any text-embedding space).
+    let (stdout, _, code) = run_axil(&[
+        "--db", db_str, "store", "fp", r#"{"n":"a"}"#,
+        "--vector", "[1.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0]", "--space", "fp",
+    ]);
+    assert_eq!(code, 0, "store --vector --space failed: {stdout}");
+    let out_a = parse_json(&stdout);
+    assert_eq!(out_a["space"], "fp");
+    assert_eq!(out_a["vector_dims"], 8);
+    let id_a = out_a["id"].as_str().unwrap().to_string();
+
+    let (stdout, _, _) = run_axil(&[
+        "--db", db_str, "store", "fp", r#"{"n":"b"}"#,
+        "--vector", "[1.0,0.25,0.0,0.0,0.0,0.0,0.0,0.0]", "--space", "fp",
+    ]);
+    let id_b = parse_json(&stdout)["id"].as_str().unwrap().to_string();
+
+    run_axil(&[
+        "--db", db_str, "store", "fp", r#"{"n":"c"}"#,
+        "--vector", "[0.0,0.0,1.0,0.0,0.0,0.0,0.0,0.0]", "--space", "fp",
+    ]);
+
+    // similar --id A --threshold 0.9 returns exactly the twin B (self excluded,
+    // decoy below threshold).
+    let (stdout, _, code) = run_axil(&[
+        "--db", db_str, "similar", "--id", &id_a, "--threshold", "0.9", "--space", "fp",
+    ]);
+    assert_eq!(code, 0);
+    let results: Vec<Value> = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(results.len(), 1, "threshold 0.9 should return only the twin");
+    assert_eq!(results[0]["id"].as_str().unwrap(), id_b);
+    assert!(results[0]["score"].as_f64().unwrap() > 0.9);
+}
+
+#[test]
+fn test_add_vector_and_search_vector_named_space() {
+    let (_dir, db) = temp_db();
+    let db_str = db.to_str().unwrap();
+
+    // init makes a 384-dim default store; a 4-dim `fp` space must not collide.
+    run_axil(&["init", db_str]);
+    let (stdout, _, _) = run_axil(&["--db", db_str, "store", "fp", r#"{"n":"x"}"#]);
+    let id_x = parse_json(&stdout)["id"].as_str().unwrap().to_string();
+
+    let (stdout, _, code) = run_axil(&[
+        "--db", db_str, "add-vector", &id_x, "[1.0,0.0,0.0,0.0]", "--space", "fp",
+    ]);
+    assert_eq!(code, 0, "add-vector --space failed: {stdout}");
+    let added = parse_json(&stdout);
+    assert_eq!(added["added"], true);
+    assert_eq!(added["space"], "fp");
+    assert_eq!(added["dimensions"], 4);
+
+    let (stdout, _, code) = run_axil(&[
+        "--db", db_str, "search-vector", "[1.0,0.0,0.0,0.0]", "--space", "fp", "--top-k", "3",
+    ]);
+    assert_eq!(code, 0);
+    let results: Vec<Value> = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0]["id"].as_str().unwrap(), id_x);
+}
+
+// ─── lineage chains ─────────────────────────────────────────────────────────
+
+/// Store `trials` records and return their ids, then link a linear chain and
+/// walk it: exact hop order + exact per-hop numeric deltas.
+#[test]
+fn test_lineage_chain_exact_hops_and_deltas() {
+    let (_dir, db) = temp_db();
+    let db_str = db.to_str().unwrap();
+    run_axil(&["init", db_str]); // create the graph store that `link` needs
+    let mk = |data: &str| -> String {
+        let (stdout, _, _) = run_axil(&["--db", db_str, "store", "trials", data]);
+        parse_json(&stdout)["id"].as_str().unwrap().to_string()
+    };
+    let a = mk(r#"{"n":"A","sharpe":1.0,"trades":10}"#);
+    let b = mk(r#"{"n":"B","sharpe":1.5,"trades":20}"#);
+    let c = mk(r#"{"n":"C","sharpe":1.2,"trades":35}"#);
+    run_axil(&["--db", db_str, "link", &a, "derived_from", &b, "--props", r#"{"mutation":"m1"}"#]);
+    run_axil(&["--db", db_str, "link", &b, "derived_from", &c, "--props", r#"{"mutation":"m2"}"#]);
+
+    let (stdout, _, code) =
+        run_axil(&["--db", db_str, "lineage", &a, "--fields", "sharpe,trades"]);
+    assert_eq!(code, 0, "lineage failed: {stdout}");
+    let out = parse_json(&stdout);
+    assert_eq!(out["direction"], "ancestors");
+    assert_eq!(out["root"].as_str().unwrap(), a);
+    let hops = out["hops"].as_array().unwrap();
+    assert_eq!(hops.len(), 3);
+
+    // Root-first order A → B → C.
+    assert_eq!(hops[0]["id"].as_str().unwrap(), a);
+    assert_eq!(hops[0]["depth"], 0);
+    assert!(hops[0]["edge"].is_null());
+    assert_eq!(hops[0]["delta"].as_object().unwrap().len(), 0);
+    assert_eq!(hops[1]["id"].as_str().unwrap(), b);
+    assert_eq!(hops[2]["id"].as_str().unwrap(), c);
+
+    // Exact deltas (each hop minus its parent hop; identical on a linear chain).
+    let d1 = &hops[1]["delta"];
+    assert!((d1["sharpe"].as_f64().unwrap() - 0.5).abs() < 1e-9);
+    assert!((d1["trades"].as_f64().unwrap() - 10.0).abs() < 1e-9);
+    let d2 = &hops[2]["delta"];
+    assert!((d2["sharpe"].as_f64().unwrap() - (-0.3)).abs() < 1e-9);
+    assert!((d2["trades"].as_f64().unwrap() - 15.0).abs() < 1e-9);
+
+    // Edge props are threaded onto the hop they lead to.
+    assert_eq!(hops[1]["edge"]["props"]["mutation"], "m1");
+    assert_eq!(hops[2]["edge"]["props"]["mutation"], "m2");
+}
+
+#[test]
+fn test_lineage_branching_descendants_returns_both_children() {
+    let (_dir, db) = temp_db();
+    let db_str = db.to_str().unwrap();
+    run_axil(&["init", db_str]); // create the graph store that `link` needs
+    let mk = |data: &str| -> String {
+        let (stdout, _, _) = run_axil(&["--db", db_str, "store", "trials", data]);
+        parse_json(&stdout)["id"].as_str().unwrap().to_string()
+    };
+    let r = mk(r#"{"n":"R"}"#);
+    let x = mk(r#"{"n":"X"}"#);
+    let y = mk(r#"{"n":"Y"}"#);
+    run_axil(&["--db", db_str, "link", &x, "derived_from", &r]);
+    run_axil(&["--db", db_str, "link", &y, "derived_from", &r]);
+
+    let (stdout, _, code) =
+        run_axil(&["--db", db_str, "lineage", &r, "--direction", "descendants"]);
+    assert_eq!(code, 0);
+    let out = parse_json(&stdout);
+    let hops = out["hops"].as_array().unwrap();
+    let ids: Vec<&str> = hops.iter().map(|h| h["id"].as_str().unwrap()).collect();
+    assert_eq!(ids.len(), 3);
+    assert_eq!(ids[0], r);
+    assert!(ids.contains(&x.as_str()));
+    assert!(ids.contains(&y.as_str()));
+}
+
+#[test]
+fn test_lineage_cycle_terminates_without_duplicates() {
+    let (_dir, db) = temp_db();
+    let db_str = db.to_str().unwrap();
+    run_axil(&["init", db_str]); // create the graph store that `link` needs
+    let mk = |data: &str| -> String {
+        let (stdout, _, _) = run_axil(&["--db", db_str, "store", "trials", data]);
+        parse_json(&stdout)["id"].as_str().unwrap().to_string()
+    };
+    let a = mk(r#"{"n":"A"}"#);
+    let b = mk(r#"{"n":"B"}"#);
+    run_axil(&["--db", db_str, "link", &a, "derived_from", &b]);
+    run_axil(&["--db", db_str, "link", &b, "derived_from", &a]);
+
+    let (stdout, _, code) = run_axil(&["--db", db_str, "lineage", &a]);
+    assert_eq!(code, 0);
+    let hops = parse_json(&stdout)["hops"].as_array().unwrap().len();
+    assert_eq!(hops, 2, "A→B→A cycle must emit each node once");
+}
+
+#[test]
+fn test_lineage_max_depth_truncates() {
+    let (_dir, db) = temp_db();
+    let db_str = db.to_str().unwrap();
+    run_axil(&["init", db_str]); // create the graph store that `link` needs
+    let mk = |data: &str| -> String {
+        let (stdout, _, _) = run_axil(&["--db", db_str, "store", "trials", data]);
+        parse_json(&stdout)["id"].as_str().unwrap().to_string()
+    };
+    let a = mk(r#"{"n":"A"}"#);
+    let b = mk(r#"{"n":"B"}"#);
+    let c = mk(r#"{"n":"C"}"#);
+    run_axil(&["--db", db_str, "link", &a, "derived_from", &b]);
+    run_axil(&["--db", db_str, "link", &b, "derived_from", &c]);
+
+    let (stdout, _, code) = run_axil(&["--db", db_str, "lineage", &a, "--max-depth", "1"]);
+    assert_eq!(code, 0);
+    let hops = parse_json(&stdout)["hops"].as_array().unwrap().to_vec();
+    assert_eq!(hops.len(), 2, "--max-depth 1 keeps depths 0 and 1 only");
+    assert_eq!(hops[0]["id"].as_str().unwrap(), a);
+    assert_eq!(hops[1]["id"].as_str().unwrap(), b);
 }
 
 // ─── Index-text ────────────────────────────────────────────────────────────

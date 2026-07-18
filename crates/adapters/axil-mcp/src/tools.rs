@@ -187,6 +187,162 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
                 "required": ["id"]
             }),
         },
+        ToolDefinition {
+            name: "query".into(),
+            description: "Query a table with typed field predicates, ordering, and pagination. The `where` string mirrors the CLI `--where` syntax: conditions joined by AND (case-insensitive), operators `= != > < >= <= contains`, quoted values ('x' or \"x\") forced to strings, unquoted numbers compared numerically. Flat top-level fields only — no OR, parentheses, or nested dot-paths.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "table": {
+                        "type": "string",
+                        "description": "Table name"
+                    },
+                    "where": {
+                        "type": "string",
+                        "description": "Filter expression, e.g. \"oos_sharpe > 0.3 AND family = 'meanrev'\""
+                    },
+                    "order_by": {
+                        "type": "string",
+                        "description": "Sort field"
+                    },
+                    "direction": {
+                        "type": "string",
+                        "description": "Sort direction: asc (default) or desc",
+                        "default": "asc"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of results"
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "description": "Offset for pagination"
+                    }
+                },
+                "required": ["table"]
+            }),
+        },
+        #[cfg(feature = "ql")]
+        ToolDefinition {
+            name: "aggregate".into(),
+            description: "Aggregate a table: count / avg / min / max / sum, optionally grouped. `metrics` is an array of specs — \"count\", \"avg(field)\", \"min(field)\", \"max(field)\", \"sum(field)\". `where` uses the same syntax as the `query` tool. Non-numeric or missing values are skipped for avg/min/max/sum and reported per group as `skipped`. Returns {table, group_by, groups:[{group, count, ...}], total_rows}.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "table": {
+                        "type": "string",
+                        "description": "Table name"
+                    },
+                    "metrics": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Metric specs: count, avg(field), min(field), max(field), sum(field)"
+                    },
+                    "group_by": {
+                        "type": "string",
+                        "description": "Group results by this field's value (missing → null group)"
+                    },
+                    "where": {
+                        "type": "string",
+                        "description": "Filter expression, e.g. \"oos_sharpe > 0.3 AND family = 'meanrev'\""
+                    },
+                    "include_archived": {
+                        "type": "boolean",
+                        "description": "Include archived records (excluded by default)",
+                        "default": false
+                    }
+                },
+                "required": ["table"]
+            }),
+        },
+        ToolDefinition {
+            name: "add_vector".into(),
+            description: "Attach a pre-computed raw vector to an existing record. `space` targets a named vector space (`<db>.axil.vec.<name>`, own dimension) — omit for the default space. The space is created lazily on first write, binding the vector's length as its dimension.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "id": {
+                        "type": "string",
+                        "description": "Record ID to attach the vector to"
+                    },
+                    "vector": {
+                        "type": "array",
+                        "items": { "type": "number" },
+                        "description": "Vector as an array of floats"
+                    },
+                    "space": {
+                        "type": "string",
+                        "description": "Named vector space ([a-z0-9_-]{1,32}); omit for the default space"
+                    }
+                },
+                "required": ["id", "vector"]
+            }),
+        },
+        ToolDefinition {
+            name: "similar".into(),
+            description: "Find records with vectors similar to a query. Provide `vector` (array of floats) or `id` (uses that record's stored vector, excluding it from results). `threshold` filters to score >= F (near-dup detection). `space` targets a named vector space.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "vector": {
+                        "type": "array",
+                        "items": { "type": "number" },
+                        "description": "Query vector (mutually exclusive with id)"
+                    },
+                    "id": {
+                        "type": "string",
+                        "description": "Use this record's stored vector as the query (excluded from results)"
+                    },
+                    "space": {
+                        "type": "string",
+                        "description": "Named vector space ([a-z0-9_-]{1,32}); omit for the default space"
+                    },
+                    "top_k": {
+                        "type": "integer",
+                        "description": "Number of results (default: 5)",
+                        "default": 5
+                    },
+                    "threshold": {
+                        "type": "number",
+                        "description": "Only return results scoring >= this cosine similarity"
+                    }
+                }
+            }),
+        },
+        ToolDefinition {
+            name: "lineage".into(),
+            description: "Walk a derivation chain over graph edges (default `derived_from`). `direction` = ancestors (follow OUT edges, root-first: what each node was derived from), descendants (IN edges: what was derived from the node), or both. Returns a hop list with per-hop selected `fields` and numeric `delta` vs its parent hop (the node on the other end of the discovering edge). Create edges with `link A derived_from B --props '{\"mutation\":\"…\"}'`.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "id": {
+                        "type": "string",
+                        "description": "Root record ID"
+                    },
+                    "edge_type": {
+                        "type": "string",
+                        "description": "Edge type to follow (default: derived_from)",
+                        "default": "derived_from"
+                    },
+                    "direction": {
+                        "type": "string",
+                        "description": "ancestors | descendants | both (default: ancestors)",
+                        "default": "ancestors"
+                    },
+                    "max_depth": {
+                        "type": "integer",
+                        "description": "Maximum hops from the root (default: 20)",
+                        "default": 20
+                    },
+                    "fields": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "record.data keys to include per hop (and to diff for delta); omit for all fields"
+                    }
+                },
+                "required": ["id"]
+            }),
+        },
 
         // ─── Intent-native writes (Track B) ─────────────────────────
         ToolDefinition {
@@ -348,6 +504,12 @@ pub fn dispatch(db: &Axil, tool_name: &str, args: &Value) -> ToolCallResult {
         "query_history" => handle_query_history(db, args),
         "get" => handle_get(db, args),
         "list" => handle_list(db, args),
+        "query" => handle_query(db, args),
+        #[cfg(feature = "ql")]
+        "aggregate" => handle_aggregate(db, args),
+        "add_vector" => handle_add_vector(db, args),
+        "similar" => handle_similar(db, args),
+        "lineage" => handle_lineage(db, args),
         "delete" => handle_delete(db, args),
         "remember_decision" => handle_remember_decision(db, args),
         "remember_error" => handle_remember_error(db, args),
@@ -882,6 +1044,467 @@ fn handle_list(db: &Axil, args: &Value) -> ToolCallResult {
     }
 }
 
+fn handle_query(db: &Axil, args: &Value) -> ToolCallResult {
+    let table = match args.get("table").and_then(|v| v.as_str()) {
+        Some(t) => t,
+        None => return ToolCallResult::error("missing required parameter: table"),
+    };
+    let mut qb = db.query().table(table);
+
+    if let Some(where_str) = args.get("where").and_then(|v| v.as_str()) {
+        match parse_where_expr(where_str) {
+            Ok(conds) => {
+                for (field, op, value) in conds {
+                    qb = qb.where_field(&field, op, value);
+                }
+            }
+            Err(e) => return ToolCallResult::error(format!("invalid where: {e}")),
+        }
+    }
+
+    if let Some(field) = args.get("order_by").and_then(|v| v.as_str()) {
+        let dir = match args.get("direction").and_then(|v| v.as_str()) {
+            Some(d) if d.eq_ignore_ascii_case("desc") => axil_core::SortDirection::Desc,
+            _ => axil_core::SortDirection::Asc,
+        };
+        qb = qb.order_by(field, dir);
+    }
+    if let Some(n) = args.get("limit").and_then(|v| v.as_u64()) {
+        qb = qb.limit(n as usize);
+    }
+    if let Some(n) = args.get("offset").and_then(|v| v.as_u64()) {
+        qb = qb.offset(n as usize);
+    }
+
+    match qb.exec() {
+        Ok(results) => {
+            let records: Vec<Value> = results.iter().map(record_to_json).collect();
+            ToolCallResult::json(&json!(records))
+        }
+        Err(e) => ToolCallResult::error(format!("query failed: {e}")),
+    }
+}
+
+#[cfg(feature = "ql")]
+fn handle_aggregate(db: &Axil, args: &Value) -> ToolCallResult {
+    let table = match args.get("table").and_then(|v| v.as_str()) {
+        Some(t) => t,
+        None => return ToolCallResult::error("missing required parameter: table"),
+    };
+
+    let mut metrics: Vec<axil_ql::AggMetric> = Vec::new();
+    if let Some(arr) = args.get("metrics").and_then(|v| v.as_array()) {
+        for m in arr {
+            let Some(spec) = m.as_str() else {
+                return ToolCallResult::error("each metric must be a string");
+            };
+            match axil_ql::AggMetric::parse_spec(spec) {
+                Ok(metric) => metrics.push(metric),
+                Err(e) => return ToolCallResult::error(format!("invalid metric '{spec}': {e}")),
+            }
+        }
+    }
+
+    let group_by = args.get("group_by").and_then(|v| v.as_str());
+    let include_archived = args
+        .get("include_archived")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    let mut wheres: Vec<axil_core::query::WhereClause> = Vec::new();
+    if let Some(where_str) = args.get("where").and_then(|v| v.as_str()) {
+        match parse_where_expr(where_str) {
+            Ok(conds) => {
+                for (field, op, value) in conds {
+                    wheres.push(axil_core::query::WhereClause { field, op, value });
+                }
+            }
+            Err(e) => return ToolCallResult::error(format!("invalid where: {e}")),
+        }
+    }
+
+    let req = axil_ql::AggRequest {
+        table,
+        metrics: &metrics,
+        group_by,
+        where_clauses: &wheres,
+        include_archived,
+    };
+    match axil_ql::aggregate(db, &req) {
+        Ok(value) => ToolCallResult::json(&value),
+        Err(e) => ToolCallResult::error(format!("aggregate failed: {e}")),
+    }
+}
+
+/// Parse a JSON array of numbers into an `f32` vector.
+fn parse_vector_arg(arr: &[Value]) -> Result<Vec<f32>, String> {
+    arr.iter()
+        .map(|v| v.as_f64().map(|f| f as f32).ok_or_else(|| "vector elements must be numbers".to_string()))
+        .collect()
+}
+
+/// Render a scored record hit as JSON.
+fn scored_to_json(record: &axil_core::Record, score: f32) -> Value {
+    let mut json = record_to_json(record);
+    json.as_object_mut()
+        .unwrap()
+        .insert("score".to_string(), json!(score));
+    json
+}
+
+fn handle_add_vector(db: &Axil, args: &Value) -> ToolCallResult {
+    let id_str = match args.get("id").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return ToolCallResult::error("missing required parameter: id"),
+    };
+    let rid = match RecordId::from_string(id_str) {
+        Ok(r) => r,
+        Err(e) => return ToolCallResult::error(format!("invalid record ID: {e}")),
+    };
+    let vector = match args.get("vector").and_then(|v| v.as_array()) {
+        Some(arr) => match parse_vector_arg(arr) {
+            Ok(v) => v,
+            Err(e) => return ToolCallResult::error(e),
+        },
+        None => return ToolCallResult::error("missing required parameter: vector (array of numbers)"),
+    };
+    let space = args.get("space").and_then(|v| v.as_str());
+    let result = match space {
+        Some(s) => db.add_vector_in(s, &rid, &vector),
+        None => db.add_vector(&rid, &vector),
+    };
+    match result {
+        Ok(()) => {
+            let mut out = json!({
+                "added": true,
+                "id": id_str,
+                "dimensions": vector.len(),
+            });
+            if let Some(s) = space {
+                out.as_object_mut().unwrap().insert("space".to_string(), json!(s));
+            }
+            ToolCallResult::json(&out)
+        }
+        Err(e) => ToolCallResult::error(format!("add_vector failed: {e}")),
+    }
+}
+
+fn handle_similar(db: &Axil, args: &Value) -> ToolCallResult {
+    let space = args.get("space").and_then(|v| v.as_str());
+    let top_k = args.get("top_k").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
+    let threshold = args.get("threshold").and_then(|v| v.as_f64()).map(|f| f as f32);
+
+    // Resolve the query vector and the record (if any) to exclude.
+    let (query, exclude): (Vec<f32>, Option<RecordId>) =
+        if let Some(arr) = args.get("vector").and_then(|v| v.as_array()) {
+            match parse_vector_arg(arr) {
+                Ok(v) => (v, None),
+                Err(e) => return ToolCallResult::error(e),
+            }
+        } else if let Some(id_str) = args.get("id").and_then(|v| v.as_str()) {
+            let rid = match RecordId::from_string(id_str) {
+                Ok(r) => r,
+                Err(e) => return ToolCallResult::error(format!("invalid record ID: {e}")),
+            };
+            let stored = match space {
+                Some(s) => db.get_vector_in(s, &rid),
+                None => db.get_vector(&rid),
+            };
+            match stored {
+                Ok(Some(v)) => (v, Some(rid)),
+                Ok(None) => {
+                    return ToolCallResult::error(format!(
+                        "record {id_str} has no stored vector in this space"
+                    ))
+                }
+                Err(e) => return ToolCallResult::error(format!("similar failed: {e}")),
+            }
+        } else {
+            return ToolCallResult::error("provide either `vector` or `id`");
+        };
+
+    let fetch = if exclude.is_some() { top_k + 1 } else { top_k };
+    let search = match space {
+        Some(s) => db.similar_in(s, &query, fetch),
+        None => db.similar_to_vector(&query, fetch),
+    };
+    match search {
+        Ok(mut results) => {
+            if let Some(ref ex) = exclude {
+                results.retain(|(r, _)| &r.id != ex);
+            }
+            if let Some(t) = threshold {
+                results.retain(|(_, score)| *score >= t);
+            }
+            results.truncate(top_k);
+            let values: Vec<Value> =
+                results.iter().map(|(r, s)| scored_to_json(r, *s)).collect();
+            ToolCallResult::json(&json!(values))
+        }
+        Err(e) => ToolCallResult::error(format!("similar failed: {e}")),
+    }
+}
+
+fn handle_lineage(db: &Axil, args: &Value) -> ToolCallResult {
+    let id_str = match args.get("id").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return ToolCallResult::error("missing required parameter: id"),
+    };
+    let rid = match RecordId::from_string(id_str) {
+        Ok(r) => r,
+        Err(e) => return ToolCallResult::error(format!("invalid record ID: {e}")),
+    };
+    let edge_type = args
+        .get("edge_type")
+        .and_then(|v| v.as_str())
+        .unwrap_or(axil_core::util::edge_types::DERIVED_FROM);
+    let direction = match args
+        .get("direction")
+        .and_then(|v| v.as_str())
+        .map(axil_core::lineage::LineageDirection::parse)
+    {
+        None => axil_core::lineage::LineageDirection::Ancestors,
+        Some(Ok(d)) => d,
+        Some(Err(e)) => return ToolCallResult::error(e),
+    };
+    let max_depth = args.get("max_depth").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
+    let fields: Option<Vec<String>> = args.get("fields").and_then(|v| v.as_array()).map(|arr| {
+        arr.iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect()
+    });
+
+    match axil_core::lineage::walk(db, &rid, edge_type, direction, max_depth, fields.as_deref()) {
+        Ok(value) => ToolCallResult::json(&value),
+        Err(e) => ToolCallResult::error(format!("lineage failed: {e}")),
+    }
+}
+
+/// Parse a `--where`-style expression into one or more `(field, op, value)`
+/// conditions, mirroring the CLI `parse_where_clause` grammar.
+///
+/// A single expression may hold several conditions joined by `AND`
+/// (case-insensitive, whole word); the split is quote-aware. Supported
+/// operators: `>= <= != = > <` and the word operator `contains`. Quoted values
+/// (single or double) are always strings; unquoted values are typed by
+/// `serde_json`, falling back to a bare string.
+///
+/// Kept adapter-local (a small twin of the CLI helper) rather than shared
+/// through `axil-core`, which is off-limits for this work.
+fn parse_where_expr(input: &str) -> Result<Vec<(String, axil_core::Op, Value)>, String> {
+    ensure_where_quotes_balanced(input)?;
+    let mut out = Vec::new();
+    for cond in split_where_conditions(input) {
+        let cond = cond.trim();
+        if cond.is_empty() {
+            continue;
+        }
+        out.push(parse_single_condition(cond)?);
+    }
+    if out.is_empty() {
+        return Err(format!("invalid where clause: {input}"));
+    }
+    Ok(out)
+}
+
+/// Reject a where expression containing an unterminated quote. A dangling
+/// quote would otherwise swallow the rest of the expression into a string
+/// value that can never match — a silent empty result instead of an error.
+fn ensure_where_quotes_balanced(clause: &str) -> Result<(), String> {
+    let mut in_quote: Option<u8> = None;
+    for &c in clause.as_bytes() {
+        match in_quote {
+            Some(q) if c == q => in_quote = None,
+            None if c == b'"' || c == b'\'' => in_quote = Some(c),
+            _ => {}
+        }
+    }
+    if let Some(q) = in_quote {
+        return Err(format!(
+            "invalid where clause: unterminated {} quote in '{clause}'",
+            q as char
+        ));
+    }
+    Ok(())
+}
+
+/// Split on the `AND` keyword (case-insensitive, whole word) outside quotes.
+fn split_where_conditions(clause: &str) -> Vec<&str> {
+    let bytes = clause.as_bytes();
+    let mut parts = Vec::new();
+    let mut start = 0usize;
+    let mut i = 0usize;
+    let mut in_quote: Option<u8> = None;
+    while i < bytes.len() {
+        let c = bytes[i];
+        match in_quote {
+            Some(q) => {
+                if c == q {
+                    in_quote = None;
+                }
+                i += 1;
+            }
+            None => {
+                if c == b'"' || c == b'\'' {
+                    in_quote = Some(c);
+                    i += 1;
+                } else if (c == b'a' || c == b'A') && matches_keyword(bytes, i, b"and") {
+                    parts.push(&clause[start..i]);
+                    i += 3;
+                    start = i;
+                } else {
+                    i += 1;
+                }
+            }
+        }
+    }
+    parts.push(&clause[start..]);
+    parts
+}
+
+/// True when `kw` (ASCII, lowercase) occurs at `bytes[i..]` case-insensitively
+/// as a whole word.
+fn matches_keyword(bytes: &[u8], i: usize, kw: &[u8]) -> bool {
+    let end = i + kw.len();
+    if end > bytes.len() {
+        return false;
+    }
+    if !bytes[i..end].iter().zip(kw).all(|(b, k)| b.eq_ignore_ascii_case(k)) {
+        return false;
+    }
+    let is_ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    let before_ok = i == 0 || !is_ident(bytes[i - 1]);
+    let after_ok = end >= bytes.len() || !is_ident(bytes[end]);
+    before_ok && after_ok
+}
+
+/// Parse a single `field op value` condition.
+fn parse_single_condition(cond: &str) -> Result<(String, axil_core::Op, Value), String> {
+    let bytes = cond.as_bytes();
+    let mut i = 0usize;
+    let mut in_quote: Option<u8> = None;
+    while i < bytes.len() {
+        let c = bytes[i];
+        match in_quote {
+            Some(q) => {
+                if c == q {
+                    in_quote = None;
+                }
+                i += 1;
+            }
+            None => {
+                if c == b'"' || c == b'\'' {
+                    in_quote = Some(c);
+                    i += 1;
+                    continue;
+                }
+                if matches!(c, b'>' | b'<' | b'!' | b'=') {
+                    let rest = &cond[i..];
+                    let (op_str, op_len): (&str, usize) = if rest.starts_with(">=") {
+                        (">=", 2)
+                    } else if rest.starts_with("<=") {
+                        ("<=", 2)
+                    } else if rest.starts_with("!=") {
+                        ("!=", 2)
+                    } else if c == b'=' {
+                        ("=", 1)
+                    } else if c == b'>' {
+                        (">", 1)
+                    } else if c == b'<' {
+                        ("<", 1)
+                    } else {
+                        return Err(format!("'{cond}': '!' must be part of the '!=' operator"));
+                    };
+                    let field = cond[..i].trim().to_string();
+                    if field.is_empty() {
+                        return Err(format!("field name must not be empty in '{cond}'"));
+                    }
+                    let op: axil_core::Op =
+                        op_str.parse().map_err(|e| format!("{e}"))?;
+                    let value = parse_where_value(cond[i + op_len..].trim())?;
+                    return Ok((field, op, value));
+                }
+                i += 1;
+            }
+        }
+    }
+    if let Some(pos) = find_keyword_outside_quotes(cond, b"contains") {
+        let field = cond[..pos].trim().to_string();
+        if field.is_empty() {
+            return Err(format!("field name must not be empty in '{cond}'"));
+        }
+        let value = parse_where_value(cond[pos + "contains".len()..].trim())?;
+        return Ok((field, axil_core::Op::Contains, value));
+    }
+    Err(format!(
+        "invalid where clause: {cond} (expected field=value, field>value, field contains value)"
+    ))
+}
+
+/// Find the byte offset of `kw` as a whole word outside any quoted region.
+fn find_keyword_outside_quotes(s: &str, kw: &[u8]) -> Option<usize> {
+    let bytes = s.as_bytes();
+    let mut i = 0usize;
+    let mut in_quote: Option<u8> = None;
+    while i < bytes.len() {
+        let c = bytes[i];
+        match in_quote {
+            Some(q) => {
+                if c == q {
+                    in_quote = None;
+                }
+                i += 1;
+            }
+            None => {
+                if c == b'"' || c == b'\'' {
+                    in_quote = Some(c);
+                    i += 1;
+                } else if c.eq_ignore_ascii_case(&kw[0]) && matches_keyword(bytes, i, kw) {
+                    return Some(i);
+                } else {
+                    i += 1;
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Type a where-clause value: quoted → string; otherwise `serde_json` types it.
+///
+/// Backslash escapes are not interpreted inside quotes — a quote character of
+/// the same kind cannot appear inside a quoted value (use the other quote
+/// kind around it instead).
+fn parse_where_value(val_str: &str) -> Result<Value, String> {
+    let b = val_str.as_bytes();
+    if val_str.len() >= 2
+        && ((b[0] == b'\'' && b[val_str.len() - 1] == b'\'')
+            || (b[0] == b'"' && b[val_str.len() - 1] == b'"'))
+    {
+        return Ok(Value::String(val_str[1..val_str.len() - 1].to_string()));
+    }
+    if let Ok(v) = serde_json::from_str(val_str) {
+        return Ok(v);
+    }
+    // A leading number/bool/null followed by trailing text ("5 oops") is
+    // almost certainly a typo'd expression (a missing AND) — error rather
+    // than silently matching a garbage string literal. Plain multi-word
+    // strings ("mean rev") still fall through to the bare-string case.
+    if let Some(first) = val_str.split_whitespace().next() {
+        if first.len() < val_str.trim().len()
+            && serde_json::from_str::<Value>(first)
+                .map(|v| !v.is_string())
+                .unwrap_or(false)
+        {
+            return Err(format!(
+                "ambiguous where value '{val_str}': quote it ('{val_str}') if you \
+                 meant a string, or join conditions with AND if it is two conditions"
+            ));
+        }
+    }
+    Ok(Value::String(val_str.to_string()))
+}
+
 fn handle_delete(db: &Axil, args: &Value) -> ToolCallResult {
     let id_str = match args.get("id").and_then(|v| v.as_str()) {
         Some(s) => s,
@@ -1330,6 +1953,149 @@ mod tests {
         assert!(names.iter().any(|n| n == "inspect"));
     }
 
+    #[test]
+    fn query_tool_is_advertised() {
+        let names: Vec<String> = tool_definitions().into_iter().map(|d| d.name).collect();
+        assert!(names.iter().any(|n| n == "query"));
+    }
+
+    #[test]
+    fn query_tool_numeric_and_string_predicates() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Axil::open(dir.path().join("q.axil")).build().unwrap();
+        db.insert(
+            "autopsies",
+            json!({"family":"meanrev","oos_sharpe":0.5,"trades":5}),
+        )
+        .unwrap();
+        db.insert(
+            "autopsies",
+            json!({"family":"meanrev","oos_sharpe":0.1,"trades":100}),
+        )
+        .unwrap();
+        db.insert(
+            "autopsies",
+            json!({"family":"momentum","oos_sharpe":0.9,"trades":20}),
+        )
+        .unwrap();
+
+        // One --where string, AND across a numeric and a quoted-string predicate.
+        let result = dispatch(
+            &db,
+            "query",
+            &json!({
+                "table": "autopsies",
+                "where": "oos_sharpe > 0.3 AND family = 'meanrev'"
+            }),
+        );
+        assert!(result.is_error.is_none(), "query errored: {result:?}");
+        let body = parse_json_payload(&result);
+        let arr = body.as_array().expect("expected JSON array");
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["data"]["family"], "meanrev");
+        assert_eq!(arr[0]["data"]["trades"], 5);
+    }
+
+    #[test]
+    fn query_tool_numeric_comparison_not_lexicographic() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Axil::open(dir.path().join("q2.axil")).build().unwrap();
+        db.insert("autopsies", json!({"trades":5})).unwrap();
+        db.insert("autopsies", json!({"trades":100})).unwrap();
+
+        let result = dispatch(
+            &db,
+            "query",
+            &json!({"table":"autopsies","where":"trades < 30"}),
+        );
+        let body = parse_json_payload(&result);
+        let arr = body.as_array().expect("expected JSON array");
+        assert_eq!(arr.len(), 1, "trades<30 must match 5 numerically, not 100");
+        assert_eq!(arr[0]["data"]["trades"], 5);
+    }
+
+    #[test]
+    fn query_tool_invalid_where_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Axil::open(dir.path().join("q3.axil")).build().unwrap();
+        let result = dispatch(&db, "query", &json!({"table":"t","where":"nonsense"}));
+        assert_eq!(result.is_error, Some(true));
+    }
+
+    #[test]
+    fn where_expr_trailing_garbage_after_scalar_errors() {
+        // Twin of the CLI parser's guard: "5 oops" errors, bare words pass.
+        assert!(parse_where_expr("trades = 5 oops").is_err());
+        assert_eq!(
+            parse_where_expr("family = mean rev").unwrap()[0].2,
+            json!("mean rev")
+        );
+    }
+
+    #[test]
+    fn query_tool_unterminated_quote_errors() {
+        // A dangling quote must error, not silently match nothing.
+        let dir = tempfile::tempdir().unwrap();
+        let db = Axil::open(dir.path().join("q4.axil")).build().unwrap();
+        let result = dispatch(&db, "query", &json!({"table":"t","where":"family = 'meanrev"}));
+        assert_eq!(result.is_error, Some(true));
+        assert!(parse_where_expr("family = 'meanrev").is_err());
+        assert!(parse_where_expr("family = 'meanrev'").is_ok());
+    }
+
+    #[cfg(feature = "ql")]
+    #[test]
+    fn aggregate_tool_is_advertised() {
+        let names: Vec<String> = tool_definitions().into_iter().map(|d| d.name).collect();
+        assert!(names.iter().any(|n| n == "aggregate"));
+    }
+
+    #[cfg(feature = "ql")]
+    #[test]
+    fn aggregate_tool_histogram_and_avg() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Axil::open(dir.path().join("agg.axil")).build().unwrap();
+        db.insert("autopsies", json!({"kill_reason":"drawdown","decay":2.0}))
+            .unwrap();
+        db.insert("autopsies", json!({"kill_reason":"drawdown","decay":4.0}))
+            .unwrap();
+        db.insert("autopsies", json!({"kill_reason":"fees","decay":9.0}))
+            .unwrap();
+
+        let result = dispatch(
+            &db,
+            "aggregate",
+            &json!({
+                "table": "autopsies",
+                "metrics": ["count", "avg(decay)"],
+                "group_by": "kill_reason"
+            }),
+        );
+        assert!(result.is_error.is_none(), "aggregate errored: {result:?}");
+        let body = parse_json_payload(&result);
+        assert_eq!(body["total_rows"], 3);
+        let groups = body["groups"].as_array().unwrap();
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0]["group"], "drawdown");
+        assert_eq!(groups[0]["count"], 2);
+        assert_eq!(groups[0]["avg_decay"], 3.0);
+        assert_eq!(groups[1]["group"], "fees");
+        assert_eq!(groups[1]["count"], 1);
+    }
+
+    #[cfg(feature = "ql")]
+    #[test]
+    fn aggregate_tool_invalid_metric_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Axil::open(dir.path().join("agg2.axil")).build().unwrap();
+        let result = dispatch(
+            &db,
+            "aggregate",
+            &json!({"table":"t","metrics":["median(x)"]}),
+        );
+        assert_eq!(result.is_error, Some(true));
+    }
+
     #[cfg(feature = "event-log")]
     #[test]
     fn recall_delta_tool_is_advertised_and_filters() {
@@ -1369,5 +2135,91 @@ mod tests {
             Some("agent-b"),
             "exclude_agent must drop agent-a's event"
         );
+    }
+
+    #[test]
+    fn vector_and_lineage_tools_advertised() {
+        let names: Vec<String> = tool_definitions().into_iter().map(|d| d.name).collect();
+        assert!(names.iter().any(|n| n == "add_vector"));
+        assert!(names.iter().any(|n| n == "similar"));
+        assert!(names.iter().any(|n| n == "lineage"));
+    }
+
+    #[cfg(feature = "vector")]
+    #[test]
+    fn add_vector_and_similar_tools_default_space() {
+        use axil_vector::AxilBuilderVectorExt;
+        let dir = tempfile::tempdir().unwrap();
+        let db = Axil::open(dir.path().join("vec.axil"))
+            .with_vector(3)
+            .unwrap();
+        let db = axil_vector::with_vector_spaces(db).build().unwrap();
+        let a = db.insert("v", json!({"n": "a"})).unwrap();
+        let b = db.insert("v", json!({"n": "b"})).unwrap();
+
+        let r = dispatch(&db, "add_vector", &json!({"id": a.id.to_string(), "vector": [1.0, 0.0, 0.0]}));
+        assert!(r.is_error.is_none(), "add_vector errored: {r:?}");
+        assert_eq!(parse_json_payload(&r)["dimensions"], 3);
+        dispatch(&db, "add_vector", &json!({"id": b.id.to_string(), "vector": [0.9, 0.1, 0.0]}));
+
+        let s = dispatch(&db, "similar", &json!({"vector": [1.0, 0.0, 0.0], "top_k": 2}));
+        assert!(s.is_error.is_none(), "similar errored: {s:?}");
+        let arr = parse_json_payload(&s).as_array().unwrap().to_vec();
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["id"].as_str().unwrap(), a.id.to_string());
+        assert!(arr[0]["score"].as_f64().unwrap() > 0.99);
+    }
+
+    #[cfg(feature = "vector")]
+    #[test]
+    fn similar_tool_id_threshold_named_space() {
+        use axil_vector::AxilBuilderVectorExt;
+        let dir = tempfile::tempdir().unwrap();
+        let db = Axil::open(dir.path().join("fp.axil"))
+            .with_vector(3)
+            .unwrap();
+        let db = axil_vector::with_vector_spaces(db).build().unwrap();
+        let a = db.insert("fp", json!({"n": "a"})).unwrap();
+        let b = db.insert("fp", json!({"n": "b"})).unwrap();
+        let c = db.insert("fp", json!({"n": "c"})).unwrap();
+        // 3-dim fp space: a & b near-duplicate (cos ≈ 0.97), c orthogonal.
+        dispatch(&db, "add_vector", &json!({"id": a.id.to_string(), "vector": [1.0, 0.0, 0.0], "space": "fp"}));
+        dispatch(&db, "add_vector", &json!({"id": b.id.to_string(), "vector": [1.0, 0.25, 0.0], "space": "fp"}));
+        dispatch(&db, "add_vector", &json!({"id": c.id.to_string(), "vector": [0.0, 0.0, 1.0], "space": "fp"}));
+
+        let s = dispatch(
+            &db,
+            "similar",
+            &json!({"id": a.id.to_string(), "threshold": 0.9, "space": "fp"}),
+        );
+        assert!(s.is_error.is_none(), "similar errored: {s:?}");
+        let arr = parse_json_payload(&s).as_array().unwrap().to_vec();
+        assert_eq!(arr.len(), 1, "threshold 0.9 returns only the twin");
+        assert_eq!(arr[0]["id"].as_str().unwrap(), b.id.to_string());
+    }
+
+    #[cfg(feature = "graph")]
+    #[test]
+    fn lineage_tool_walks_chain_with_deltas() {
+        use axil_graph::AxilBuilderGraphExt;
+        let dir = tempfile::tempdir().unwrap();
+        let db = Axil::open(dir.path().join("lin.axil"))
+            .with_graph_engine()
+            .unwrap()
+            .build()
+            .unwrap();
+        let a = db.insert("trials", json!({"n": "A", "sharpe": 1.0})).unwrap();
+        let b = db.insert("trials", json!({"n": "B", "sharpe": 1.5})).unwrap();
+        db.relate(&a.id, "derived_from", &b.id, Some(json!({"mutation": "m1"})))
+            .unwrap();
+
+        let r = dispatch(&db, "lineage", &json!({"id": a.id.to_string(), "fields": ["sharpe"]}));
+        assert!(r.is_error.is_none(), "lineage errored: {r:?}");
+        let body = parse_json_payload(&r);
+        let hops = body["hops"].as_array().unwrap();
+        assert_eq!(hops.len(), 2);
+        assert_eq!(hops[0]["id"].as_str().unwrap(), a.id.to_string());
+        assert_eq!(hops[1]["id"].as_str().unwrap(), b.id.to_string());
+        assert!((hops[1]["delta"]["sharpe"].as_f64().unwrap() - 0.5).abs() < 1e-9);
     }
 }

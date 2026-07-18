@@ -150,6 +150,10 @@ pub struct AxilBuilder {
     llm_provider: Option<Arc<dyn crate::llm::LlmProvider>>,
     llm_config: crate::llm::LlmConfig,
     canonical_publisher: Option<Arc<dyn CanonicalPublisher>>,
+    /// Factory for opening named vector spaces (additive; see
+    /// [`VectorSpaceFactory`]). `None` leaves named-space operations unavailable
+    /// while the default vector index behaves exactly as before.
+    vector_space_factory: Option<Arc<dyn VectorSpaceFactory>>,
     /// registered Tier-2 Extensions.
     extensions: Vec<Arc<dyn Extension>>,
     /// Set by FTS plugin when schema migration required a rebuild.
@@ -174,6 +178,78 @@ pub trait CanonicalPublisher: Send + Sync {
     fn publish(&self, canonical_id: &str);
 }
 
+/// Descriptor for one named vector space (see [`Axil::vector_spaces`]).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct VectorSpaceInfo {
+    /// Space name (validated `[a-z0-9_-]{1,32}`).
+    pub name: String,
+    /// Vector dimension bound to this space on first write.
+    pub dimensions: usize,
+    /// Number of vectors currently stored in the space.
+    pub count: usize,
+}
+
+/// Opener for named vector spaces backed by companion files
+/// (`<db>.axil.vec.<name>`).
+///
+/// `axil-core` cannot construct a concrete [`VectorIndex`] itself (the HNSW
+/// engine lives in a downstream crate), so the adapter that knows how to build
+/// one registers a factory via
+/// [`AxilBuilder::with_vector_space_factory`]. Named spaces are additive: the
+/// default/unnamed vector index ([`Axil::add_vector`], [`Axil::similar_to_vector`])
+/// never consults a factory and is unaffected when one is absent.
+pub trait VectorSpaceFactory: Send + Sync {
+    /// Open — creating when `dim` is `Some` — the named space for the database
+    /// at `main_path`.
+    ///
+    /// `dim = Some(d)` binds/validates dimension `d` (first write path);
+    /// `dim = None` opens an existing space for reading (its stored dimension
+    /// governs) and errors if the space does not exist. Each opened space owns
+    /// an independent companion file, so a caller must not open the same space
+    /// twice concurrently — [`Axil`] caches opened spaces to honor this.
+    fn open_space(
+        &self,
+        main_path: &Path,
+        space: &str,
+        dim: Option<usize>,
+    ) -> Result<Arc<dyn VectorIndex>>;
+
+    /// Names of persisted named spaces for the database at `main_path`, without
+    /// opening them (a cheap directory scan of `<main_path>.vec.<name>`).
+    fn space_names(&self, main_path: &Path) -> Result<Vec<String>>;
+
+    /// Cheap metadata probe for one named space: `(dimensions, vector count)`.
+    ///
+    /// Must not take a writable handle, load vectors, or build a search
+    /// index — listings call this per space, so it has to stay proportional
+    /// to metadata, not store size. Errors if the space does not exist.
+    fn space_meta(&self, main_path: &Path, space: &str) -> Result<(usize, usize)>;
+}
+
+/// True if `name` is a valid vector-space name (`[a-z0-9_-]{1,32}`).
+///
+/// Names become companion-file suffixes, so the rule is shared by the API
+/// validator here and the engine's directory-scan filter — keep them one
+/// implementation.
+pub fn is_valid_space_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 32
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+}
+
+/// Validate a vector-space name, with the failure as an [`AxilError`].
+fn validate_space_name(space: &str) -> Result<()> {
+    if is_valid_space_name(space) {
+        Ok(())
+    } else {
+        Err(AxilError::InvalidQuery(format!(
+            "invalid vector space name '{space}': must match [a-z0-9_-]{{1,32}}"
+        )))
+    }
+}
+
 impl AxilBuilder {
     /// Get the database path this builder was configured with.
     pub fn path(&self) -> &Path {
@@ -192,6 +268,16 @@ impl AxilBuilder {
     /// Not needed for raw vector operations (`add_vector`, `similar_to_vector`).
     pub fn with_embedder(mut self, embedder: Box<dyn TextEmbedder>) -> Self {
         self.embedder = Some(Arc::from(embedder));
+        self
+    }
+
+    /// Register a factory for named vector spaces (`<db>.axil.vec.<name>`).
+    ///
+    /// Additive: the default/unnamed vector index is unaffected. Once set,
+    /// [`Axil::add_vector_in`], [`Axil::similar_in`], [`Axil::get_vector_in`],
+    /// and [`Axil::vector_spaces`] can open per-space companion files on demand.
+    pub fn with_vector_space_factory(mut self, factory: Arc<dyn VectorSpaceFactory>) -> Self {
+        self.vector_space_factory = Some(factory);
         self
     }
 
@@ -397,6 +483,8 @@ impl AxilBuilder {
             llm_usage,
             llm_rate_limiter,
             metrics: Arc::new(Metrics::new()),
+            vector_space_factory: self.vector_space_factory,
+            vector_space_cache: std::sync::RwLock::new(std::collections::HashMap::new()),
             slow_query_threshold_ms: 100.0,
             audit_enabled: std::sync::atomic::AtomicBool::new(false),
             log_counter: std::sync::atomic::AtomicU64::new(0),
@@ -483,6 +571,14 @@ pub struct Axil {
     /// Rate limiter for LLM calls.
     llm_rate_limiter: Arc<crate::llm::LlmRateLimiter>,
     metrics: Arc<Metrics>,
+    /// Factory for opening named vector spaces on demand (additive, see
+    /// [`VectorSpaceFactory`]).
+    vector_space_factory: Option<Arc<dyn VectorSpaceFactory>>,
+    /// Named vector spaces opened this session, keyed by name. Cached so a
+    /// space's companion file is opened at most once per handle (redb allows a
+    /// single writable handle per file per process) and repeated writes/reads
+    /// reuse the live index.
+    vector_space_cache: std::sync::RwLock<std::collections::HashMap<String, Arc<dyn VectorIndex>>>,
     slow_query_threshold_ms: f64,
     audit_enabled: std::sync::atomic::AtomicBool,
     /// Monotonic counter for generating unique log keys within a session.
@@ -520,6 +616,7 @@ impl Axil {
             llm_provider: None,
             llm_config: crate::llm::LlmConfig::default(),
             canonical_publisher: None,
+            vector_space_factory: None,
             extensions: Vec::new(),
             needs_fts_reindex: false,
             read_only: false,
@@ -1591,6 +1688,159 @@ impl Axil {
     /// Check whether a vector index is configured.
     pub fn has_vector_index(&self) -> bool {
         self.vector_index.is_some()
+    }
+
+    /// Fetch a record's stored vector from the default vector index, if present.
+    ///
+    /// Returns `Ok(None)` when no vector index is configured or the record has
+    /// no stored vector. Used by `similar --id` to search with a record's own
+    /// fingerprint.
+    pub fn get_vector(&self, id: &RecordId) -> Result<Option<Vec<f32>>> {
+        match self.vector_index.as_ref() {
+            Some(vi) => vi.get_vector(id),
+            None => Ok(None),
+        }
+    }
+
+    // ── Named vector spaces (additive) ──────────────────────────────
+    //
+    // A named space is an independent HNSW index in a companion file
+    // (`<db>.axil.vec.<name>`) with its own stored dimension, so a raw
+    // strategy fingerprint never collides with the 384-dim text-embedding
+    // index in the default space. These methods are entirely additive: they
+    // are the *only* callers of the space factory + cache, and the default
+    // vector path ([`Axil::add_vector`] / [`Axil::similar_to_vector`]) is
+    // untouched.
+
+    /// Open (or create when `dim` is `Some`) a named vector space, caching the
+    /// live index so the companion file is opened at most once per handle.
+    fn open_or_create_space(&self, space: &str, dim: Option<usize>) -> Result<Arc<dyn VectorIndex>> {
+        validate_space_name(space)?;
+        {
+            let cache = self
+                .vector_space_cache
+                .read()
+                .map_err(|_| AxilError::plugin("vector space cache lock poisoned"))?;
+            if let Some(vi) = cache.get(space) {
+                return Ok(vi.clone());
+            }
+        }
+        let factory = self.vector_space_factory.as_ref().ok_or_else(|| {
+            AxilError::plugin(
+                "no vector-space factory registered — named spaces require the vector engine",
+            )
+        })?;
+        // Hold the write lock across the open so two callers can't both create
+        // the same companion file (redb allows one writable handle per file).
+        let mut cache = self
+            .vector_space_cache
+            .write()
+            .map_err(|_| AxilError::plugin("vector space cache lock poisoned"))?;
+        if let Some(vi) = cache.get(space) {
+            return Ok(vi.clone());
+        }
+        let vi = factory.open_space(&self.path, space, dim)?;
+        cache.insert(space.to_string(), vi.clone());
+        Ok(vi)
+    }
+
+    /// Add a pre-computed vector for a record into a named vector space.
+    ///
+    /// The space is created lazily on first write, binding the supplied
+    /// vector's length as its dimension; later writes with a different length
+    /// error with the store's dimension-mismatch message. Verifies the record
+    /// exists before persisting to avoid orphaned index entries. Space names
+    /// are validated `[a-z0-9_-]{1,32}`.
+    pub fn add_vector_in(&self, space: &str, id: &RecordId, vector: &[f32]) -> Result<()> {
+        if self.storage.get(id)?.is_none() {
+            return Err(AxilError::NotFound(format!("record {id}")));
+        }
+        let vi = self.open_or_create_space(space, Some(vector.len()))?;
+        // Guard the cached-engine path: `open_or_create_space` only validates
+        // dimension when it opens the file, so a space already open this session
+        // is checked here before we persist a wrong-length vector.
+        if vi.dimensions() != vector.len() {
+            return Err(AxilError::plugin(format!(
+                "dimension mismatch: vector space '{space}' was created with {} dimensions, \
+                 but {} supplied",
+                vi.dimensions(),
+                vector.len()
+            )));
+        }
+        vi.add(id.clone(), vector)
+    }
+
+    /// Search a named vector space for records with similar vectors.
+    ///
+    /// Errors if the space does not exist. Results are resolved to records
+    /// directly by id (no recall-core chunk-proxy rewriting), so raw
+    /// fingerprints round-trip predictably.
+    pub fn similar_in(
+        &self,
+        space: &str,
+        vector: &[f32],
+        top_k: usize,
+    ) -> Result<Vec<(Record, f32)>> {
+        let vi = self.open_or_create_space(space, None)?;
+        // Name the space in the error instead of letting the engine's
+        // lower-level dimension check fire with less context.
+        if vi.dimensions() != vector.len() {
+            return Err(AxilError::plugin(format!(
+                "dimension mismatch: vector space '{space}' holds {}-dimensional \
+                 vectors, but the query has {}",
+                vi.dimensions(),
+                vector.len()
+            )));
+        }
+        let results = vi.search(vector, top_k)?;
+        let mut records = Vec::with_capacity(results.len());
+        for (id, score) in results {
+            if let Some(record) = self.storage.get(&id)? {
+                records.push((record, score));
+            }
+        }
+        Ok(records)
+    }
+
+    /// Fetch a record's stored vector from a named vector space, if present.
+    pub fn get_vector_in(&self, space: &str, id: &RecordId) -> Result<Option<Vec<f32>>> {
+        let vi = self.open_or_create_space(space, None)?;
+        vi.get_vector(id)
+    }
+
+    /// List the named vector spaces on disk with each space's dimension and
+    /// vector count, sorted by name.
+    ///
+    /// Returns an empty list when no space factory is registered. Spaces opened
+    /// this session answer from the live engine; the rest are probed read-only
+    /// via [`VectorSpaceFactory::space_meta`] — no writable handle is taken, so
+    /// a listing never contends with concurrent vector writes.
+    pub fn vector_spaces(&self) -> Result<Vec<VectorSpaceInfo>> {
+        let Some(factory) = self.vector_space_factory.as_ref() else {
+            return Ok(Vec::new());
+        };
+        let names = factory.space_names(&self.path)?;
+        let mut out = Vec::with_capacity(names.len());
+        for name in names {
+            let cached = {
+                let cache = self
+                    .vector_space_cache
+                    .read()
+                    .map_err(|_| AxilError::plugin("vector space cache lock poisoned"))?;
+                cache.get(&name).cloned()
+            };
+            let (dimensions, count) = match cached {
+                Some(vi) => (vi.dimensions(), vi.count()),
+                None => factory.space_meta(&self.path, &name)?,
+            };
+            out.push(VectorSpaceInfo {
+                name,
+                dimensions,
+                count,
+            });
+        }
+        out.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(out)
     }
 
     /// Check whether an embedder (text-to-vector) is configured.

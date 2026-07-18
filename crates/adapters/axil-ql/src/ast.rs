@@ -3,7 +3,14 @@
 use serde::{Deserialize, Serialize};
 
 /// A parsed AxilQL query.
+///
+/// The AST is an **unstable compilation surface**: it grows a variant (or a
+/// variant grows a field) whenever the language gains a verb or clause, and
+/// that growth is not treated as a breaking change. Downstream code should
+/// feed query *strings* to [`crate::run`] rather than matching this enum;
+/// matches must include a wildcard arm.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum Query {
     /// Semantic vector search: `RECALL "text" TOP k`
     Recall {
@@ -25,10 +32,37 @@ pub enum Query {
     },
     /// Fetch by ID: `GET id`
     Get { id: String },
-    /// Count records: `COUNT [FROM table]`
-    Count { table: Option<String> },
+    /// Count records: `COUNT [FROM table] [WHERE ...]`
+    Count {
+        table: Option<String>,
+        /// Optional predicates; empty means count every record.
+        where_conditions: Vec<Condition>,
+    },
+    /// Aggregate: `AGG <spec>[, ...] FROM <table> [WHERE ...] [GROUP BY <field>]`
+    Agg {
+        table: String,
+        metrics: Vec<AggSpec>,
+        where_conditions: Vec<Condition>,
+        group_by: Option<String>,
+    },
     /// Show query plan: `EXPLAIN <query>`
     Explain { inner: Box<Query> },
+}
+
+/// A single aggregation spec in an `AGG` statement.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum AggSpec {
+    /// `count`
+    Count,
+    /// `avg(field)`
+    Avg(String),
+    /// `min(field)`
+    Min(String),
+    /// `max(field)`
+    Max(String),
+    /// `sum(field)`
+    Sum(String),
 }
 
 /// A clause that modifies the primary operation.
@@ -104,7 +138,10 @@ impl Query {
             Query::Recall { clauses, .. }
             | Query::Find { clauses, .. }
             | Query::Traverse { clauses, .. } => clauses,
-            Query::Get { .. } | Query::Count { .. } | Query::Explain { .. } => &[],
+            Query::Get { .. }
+            | Query::Count { .. }
+            | Query::Agg { .. }
+            | Query::Explain { .. } => &[],
         }
     }
 

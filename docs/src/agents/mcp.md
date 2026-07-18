@@ -127,8 +127,13 @@ an error, or a preference: they auto-embed, auto-supersede, and dedupe.
 | `query_history` | `after?` ISO-8601, `before?` ISO-8601, `table?`, `limit?` int (default 50) | Time-based query of past records by date range and table. |
 | `get` | `id` string (req) | Fetch a single record by ID. |
 | `list` | `table` string (req), `limit?` int (default 50) | List records in a table. |
+| `query` | `table` string (req), `where?` string, `order_by?`, `direction?` (`asc`/`desc`), `limit?` int, `offset?` int | Query a table with typed field predicates, ordering, and pagination. The `where` string mirrors the CLI `--where` syntax: conditions joined by `AND` (case-insensitive), operators `= != > < >= <= contains`, quoted values forced to strings, unquoted numbers compared numerically. Flat top-level fields only — no OR, parentheses, or nested dot-paths. |
+| `aggregate` (`ql` feature) | `table` string (req), `metrics?` string[] (`count`/`avg(f)`/`min(f)`/`max(f)`/`sum(f)`), `group_by?`, `where?` string, `include_archived?` bool | Aggregate a table into per-group `count`/`avg`/`min`/`max`/`sum`. Non-numeric or missing values are skipped for the numeric metrics and reported per group as `skipped`. Returns `{table, group_by, groups:[{group, count, …}], total_rows}`. |
 | `delete` | `id` string (req) | Delete a record by ID. |
 | `link` | `from` string (req), `edge_type` string (req), `to` string (req), `props?` object | Create a graph edge between two records. |
+| `add_vector` | `id` string (req), `vector` number[] (req), `space?` string | Attach a pre-computed raw vector to an existing record. `space` targets a named vector space (`<db>.axil.vec.<name>`, own dimension, created lazily on first write); omit for the default space. |
+| `similar` | `vector?` number[], `id?` string, `space?` string, `top_k?` int (default 5), `threshold?` number | Find records with vectors similar to a query. Pass `vector` or `id` (uses that record's stored vector, excluded from results). `threshold` filters to score ≥ F for near-duplicate detection. `space` targets a named vector space. |
+| `lineage` | `id` string (req), `edge_type?` string (default `derived_from`), `direction?` (`ancestors`/`descendants`/`both`), `max_depth?` int (default 20), `fields?` string[] | Walk a derivation chain over graph edges. Returns hops with per-hop selected `fields` and numeric `delta` vs the previous hop. `ancestors` follows OUT edges (root-first: what each node was derived from); `descendants` follows IN edges. |
 
 ### Extension tools — dependency docs (`deps` feature)
 
@@ -150,6 +155,7 @@ an error, or a preference: they auto-embed, auto-supersede, and dedupe.
 |------|--------|-------------|
 | `cache_put` | `question` string (req), `answer` string (req), `code_refs?` string[], `ttl?` int, `valid_until?` string | Cache a question/answer pair so a future semantically similar question returns the stored answer instead of re-deriving it. `code_refs` (proxy_id \| canonical_id \| path[:line]) pin the answer to code; the entry is invalidated when that code changes. |
 | `cache_get` | `question` string (req), `threshold?` number (default 0.92), `top_k?` int (default 1) | Return a cached answer for a semantically similar question, or a miss. A hit re-checks TTL and code-ref fingerprints first, so a returned answer is neither expired nor invalidated by a code change. Miss reasons distinguish `no_match` / `below_threshold` / `stale_code` / `expired`. |
+| `cache_stats` | (none) | Cumulative semantic-cache statistics: live entry count, lifetime hits/misses, hit rate, and how many entries were evicted for stale code or expiry. |
 
 ### Cross-agent delta — `recall_delta` (`event-log` feature, off by default)
 

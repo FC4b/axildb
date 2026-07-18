@@ -209,6 +209,10 @@ pub mod edge_types {
     pub const CONTRADICTS: &str = "contradicts";
     /// Source facts consolidated into a summary record.
     pub const CONSOLIDATED_INTO: &str = "consolidated_into";
+    /// A record was derived from another (lineage chains). Create with
+    /// `axil link <child> derived_from <parent> --props '{...}'`; walk with
+    /// `axil lineage`.
+    pub const DERIVED_FROM: &str = "derived_from";
 }
 
 #[cfg(test)]

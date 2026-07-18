@@ -208,13 +208,13 @@ fn p18_get_quoted() {
 #[test]
 fn p19_count_from_table() {
     let q = parse("COUNT FROM sessions").unwrap();
-    assert!(matches!(&q, Query::Count { table } if table.as_deref() == Some("sessions")));
+    assert!(matches!(&q, Query::Count { table, .. } if table.as_deref() == Some("sessions")));
 }
 
 #[test]
 fn p20_count_all() {
     let q = parse("COUNT").unwrap();
-    assert!(matches!(&q, Query::Count { table } if table.is_none()));
+    assert!(matches!(&q, Query::Count { table, .. } if table.is_none()));
 }
 
 #[test]

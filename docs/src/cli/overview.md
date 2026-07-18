@@ -19,9 +19,9 @@ axil [OPTIONS] <COMMAND> [ARGS]
 
 | Group | Commands | Description |
 |-------|----------|-------------|
-| **Data** | `insert`, `get`, `list`, `delete`, `update` | CRUD operations |
-| **Search** | `recall`, `search`, `embed` | Vector + FTS search |
-| **Graph** | `relate`, `neighbors`, `traverse`, `edges` | Graph operations |
+| **Data** | `insert`, `get`, `list`, `delete`, `update`, `query`, `agg` | CRUD, predicate filters, aggregations |
+| **Search** | `recall`, `search`, `embed`, `similar`, `add-vector` | Vector + FTS search, raw-vector similarity |
+| **Graph** | `link`, `neighbors`, `traverse`, `edges`, `lineage` | Graph operations, derivation chains |
 | **Memory** | `know`, `about`, `session`, `believe`, `checkpoint` | Agent memory |
 | **Rules** | `rule set/get/list/delete`, `rule extract`, `rule distill` | Agent directives & conventions. `extract` reads them *from* `CLAUDE.md` into memory; `distill` distills recurring failures *back out* into corrective directives (`rules` is an accepted alias) |
 | **Diagnostics** (read-only) | `doctor`, `health-report`, `snapshot`, `trends`, `detect`, `stats` | *Watch* the DB — never change memories |

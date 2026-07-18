@@ -50,6 +50,7 @@ pub mod extension;
 pub mod feedback;
 pub mod importance;
 pub mod inference;
+pub mod lineage;
 pub mod llm;
 #[cfg(feature = "llm-http")]
 pub mod llm_http;
@@ -86,8 +87,9 @@ pub use config::{
     MetricsHealingConfig, OptimizeConfig, PluginConfig, RuntimeConfig, TimeseriesConfig,
 };
 pub use db::{
-    companion_path, drop_engine_companion, AutoLinkReport, Axil, AxilBuilder, CanonicalPublisher,
-    DatabaseInfo, HealReport, WarmUpReport, SCIP_ALIAS_TABLE,
+    companion_path, drop_engine_companion, is_valid_space_name, AutoLinkReport, Axil, AxilBuilder,
+    CanonicalPublisher, DatabaseInfo, HealReport, VectorSpaceFactory, VectorSpaceInfo, WarmUpReport,
+    SCIP_ALIAS_TABLE,
 };
 pub use diagnostics::{
     human_bytes, BenchReport, BenchResult, CheckResult, CompactReport, DataQualitySection,

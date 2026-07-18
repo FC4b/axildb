@@ -81,6 +81,10 @@ pub(crate) fn attach_detected_engines(
     #[cfg(feature = "vector")]
     {
         use axil_vector::AxilBuilderVectorExt;
+        // Register the named-vector-space factory unconditionally so the
+        // `add_vector` / `similar` tools can target named spaces even when the
+        // default store is absent. Additive — existing vector paths unchanged.
+        builder = axil_vector::with_vector_spaces(builder);
         if !config.is_engine_disabled("vec") {
             if let Ok(Some(_)) = axil_vector::read_stored_dimensions(&path) {
                 // When `embed` is on, load the embedder so `db.recall()` and
@@ -203,21 +207,23 @@ impl McpServer {
         /// the typical message is sub-kilobyte.
         const MAX_LINE_BYTES: u64 = 16 * 1024 * 1024;
 
-        let mut stdin = tokio::io::stdin();
+        let stdin = tokio::io::stdin();
         let mut stdout = tokio::io::stdout();
+        // One persistent reader for the whole connection. A client that
+        // pipelines requests (several frames in one pipe chunk) gets them
+        // all buffered here; a per-iteration BufReader would drop the
+        // still-buffered frames on the floor when it goes out of scope,
+        // silently swallowing every request after the first.
+        let mut reader = BufReader::new(stdin);
 
         loop {
-            // Re-wrap `&mut stdin` with `take()` per iteration so each
-            // line read is hard-bounded. BufReader is constructed
-            // fresh — tokio::io::stdin() is already line-buffered at
-            // the OS level for our purposes, so the extra buffering
-            // layer mostly serves `read_until` semantics.
+            // Re-wrap with `take()` per iteration so each line read is
+            // hard-bounded without discarding the shared buffer.
             let mut buf: Vec<u8> = Vec::with_capacity(4096);
-            let n = {
-                let limited = (&mut stdin).take(MAX_LINE_BYTES);
-                let mut br = BufReader::new(limited);
-                br.read_until(b'\n', &mut buf).await?
-            };
+            let n = (&mut reader)
+                .take(MAX_LINE_BYTES)
+                .read_until(b'\n', &mut buf)
+                .await?;
             if n == 0 {
                 break; // EOF
             }

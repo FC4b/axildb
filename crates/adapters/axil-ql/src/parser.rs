@@ -89,13 +89,14 @@ impl Parser {
             TokenKind::Traverse => self.parse_traverse(),
             TokenKind::Get => self.parse_get(),
             TokenKind::Count => self.parse_count(),
+            TokenKind::Agg => self.parse_agg(),
             _ => {
                 // Clone only on error path
                 let tok = self.peek().clone();
                 let suggestion = suggest_keyword(&tok);
                 Err(ParseError {
                     message: format!(
-                        "expected a query keyword (RECALL, FIND, TRAVERSE, GET, COUNT, EXPLAIN), found {}",
+                        "expected a query keyword (RECALL, FIND, TRAVERSE, GET, COUNT, AGG, EXPLAIN), found {}",
                         tok.kind
                     ),
                     span: tok.span,
@@ -183,7 +184,99 @@ impl Parser {
         } else {
             None
         };
-        Ok(Query::Count { table })
+        let where_conditions = if matches!(self.peek().kind, TokenKind::Where) {
+            self.parse_where_conditions()?
+        } else {
+            Vec::new()
+        };
+        Ok(Query::Count {
+            table,
+            where_conditions,
+        })
+    }
+
+    fn parse_agg(&mut self) -> Result<Query, ParseError> {
+        self.advance(); // consume AGG
+        let mut metrics = vec![self.parse_agg_spec()?];
+        while matches!(self.peek().kind, TokenKind::Comma) {
+            self.advance();
+            metrics.push(self.parse_agg_spec()?);
+        }
+
+        // FROM <table> is required.
+        self.expect(&TokenKind::From).map_err(|mut e| {
+            e.suggestion =
+                Some("AGG <spec>[, ...] FROM <table> [WHERE ...] [GROUP BY <field>]".to_string());
+            e
+        })?;
+        let table = self.expect_ident("FROM requires a table name")?;
+
+        let where_conditions = if matches!(self.peek().kind, TokenKind::Where) {
+            self.parse_where_conditions()?
+        } else {
+            Vec::new()
+        };
+
+        let group_by = if matches!(self.peek().kind, TokenKind::Group) {
+            self.advance(); // consume GROUP
+            self.expect(&TokenKind::By).map_err(|mut e| {
+                e.suggestion = Some("GROUP must be followed by BY".to_string());
+                e
+            })?;
+            Some(self.expect_ident("GROUP BY requires a field name")?)
+        } else {
+            None
+        };
+
+        Ok(Query::Agg {
+            table,
+            metrics,
+            where_conditions,
+            group_by,
+        })
+    }
+
+    /// Parse a single aggregate spec: `count` or `avg(field)` / `min(field)` /
+    /// `max(field)` / `sum(field)`.
+    fn parse_agg_spec(&mut self) -> Result<AggSpec, ParseError> {
+        let tok = self.peek().clone();
+        match &tok.kind {
+            TokenKind::Count => {
+                self.advance();
+                Ok(AggSpec::Count)
+            }
+            TokenKind::Ident(name) => {
+                let func = name.to_ascii_lowercase();
+                self.advance();
+                self.expect(&TokenKind::LParen).map_err(|mut e| {
+                    e.suggestion = Some(format!("{func} requires a field, e.g. {func}(oos_sharpe)"));
+                    e
+                })?;
+                let field = self.expect_ident("aggregate function requires a field name")?;
+                self.expect(&TokenKind::RParen)?;
+                match func.as_str() {
+                    "avg" => Ok(AggSpec::Avg(field)),
+                    "min" => Ok(AggSpec::Min(field)),
+                    "max" => Ok(AggSpec::Max(field)),
+                    "sum" => Ok(AggSpec::Sum(field)),
+                    other => Err(ParseError {
+                        message: format!("unknown aggregate function: {other}"),
+                        span: tok.span,
+                        suggestion: Some(
+                            "valid specs: count, avg(f), min(f), max(f), sum(f)".to_string(),
+                        ),
+                    }),
+                }
+            }
+            _ => Err(ParseError {
+                message: format!(
+                    "expected an aggregate spec (count, avg(f), min(f), max(f), sum(f)), found {}",
+                    tok.kind
+                ),
+                span: tok.span,
+                suggestion: None,
+            }),
+        }
     }
 
     /// Parse trailing clauses (WHERE, TRAVERSE, BOOST, FROM, ORDER BY, LIMIT, OFFSET, PROFILE).
@@ -248,13 +341,19 @@ impl Parser {
     }
 
     fn parse_where(&mut self) -> Result<Clause, ParseError> {
+        Ok(Clause::Where(self.parse_where_conditions()?))
+    }
+
+    /// Consume `WHERE` and its AND-composed conditions, returning them directly
+    /// (shared by clause-position WHERE, `COUNT`, and `AGG`).
+    fn parse_where_conditions(&mut self) -> Result<Vec<Condition>, ParseError> {
         self.advance(); // consume WHERE
         let mut conditions = vec![self.parse_condition()?];
         while matches!(self.peek().kind, TokenKind::And) {
             self.advance();
             conditions.push(self.parse_condition()?);
         }
-        Ok(Clause::Where(conditions))
+        Ok(conditions)
     }
 
     fn parse_condition(&mut self) -> Result<Condition, ParseError> {
@@ -680,13 +779,105 @@ mod tests {
     #[test]
     fn parse_count() {
         let q = parse("COUNT FROM sessions").unwrap();
-        assert!(matches!(q, Query::Count { table } if table.as_deref() == Some("sessions")));
+        assert!(matches!(q, Query::Count { table, .. } if table.as_deref() == Some("sessions")));
     }
 
     #[test]
     fn parse_count_no_table() {
         let q = parse("COUNT").unwrap();
-        assert!(matches!(q, Query::Count { table } if table.is_none()));
+        assert!(matches!(q, Query::Count { table, .. } if table.is_none()));
+    }
+
+    #[test]
+    fn parse_count_with_where() {
+        let q = parse(r#"COUNT FROM autopsies WHERE oos_sharpe > 0.3 AND family = "meanrev""#)
+            .unwrap();
+        match q {
+            Query::Count {
+                table,
+                where_conditions,
+            } => {
+                assert_eq!(table.as_deref(), Some("autopsies"));
+                assert_eq!(where_conditions.len(), 2);
+                assert_eq!(where_conditions[0].field, "oos_sharpe");
+                assert_eq!(where_conditions[0].op, CompareOp::Gt);
+                assert_eq!(where_conditions[1].field, "family");
+            }
+            _ => panic!("expected Count"),
+        }
+    }
+
+    #[test]
+    fn parse_agg_basic() {
+        let q = parse("AGG count FROM autopsies").unwrap();
+        match q {
+            Query::Agg {
+                table,
+                metrics,
+                where_conditions,
+                group_by,
+            } => {
+                assert_eq!(table, "autopsies");
+                assert_eq!(metrics, vec![AggSpec::Count]);
+                assert!(where_conditions.is_empty());
+                assert!(group_by.is_none());
+            }
+            _ => panic!("expected Agg"),
+        }
+    }
+
+    #[test]
+    fn parse_agg_multi_spec_with_where_and_group_by() {
+        let q = parse(
+            r#"AGG count, avg(decay), min(trades), max(trades), sum(fees) FROM autopsies WHERE regime = "bull" GROUP BY family"#,
+        )
+        .unwrap();
+        match q {
+            Query::Agg {
+                table,
+                metrics,
+                where_conditions,
+                group_by,
+            } => {
+                assert_eq!(table, "autopsies");
+                assert_eq!(
+                    metrics,
+                    vec![
+                        AggSpec::Count,
+                        AggSpec::Avg("decay".to_string()),
+                        AggSpec::Min("trades".to_string()),
+                        AggSpec::Max("trades".to_string()),
+                        AggSpec::Sum("fees".to_string()),
+                    ]
+                );
+                assert_eq!(where_conditions.len(), 1);
+                assert_eq!(where_conditions[0].field, "regime");
+                assert_eq!(group_by.as_deref(), Some("family"));
+            }
+            _ => panic!("expected Agg"),
+        }
+    }
+
+    #[test]
+    fn parse_agg_case_insensitive_functions() {
+        let q = parse("AGG AVG(x) GROUP BY g FROM t").unwrap_err();
+        // GROUP BY must come after FROM — this ordering is a parse error.
+        assert!(!q.message.is_empty());
+
+        let ok = parse("AGG AVG(x) FROM t GROUP BY g").unwrap();
+        assert!(matches!(ok, Query::Agg { metrics, .. } if metrics == vec![AggSpec::Avg("x".to_string())]));
+    }
+
+    #[test]
+    fn parse_agg_requires_from() {
+        let err = parse("AGG count").unwrap_err();
+        assert!(err.message.contains("FROM") || err.suggestion.is_some());
+    }
+
+    #[test]
+    fn parse_agg_unknown_function_errors() {
+        let err = parse("AGG median(x) FROM t").unwrap_err();
+        assert!(err.message.contains("median") || err.message.contains("aggregate"));
     }
 
     #[test]

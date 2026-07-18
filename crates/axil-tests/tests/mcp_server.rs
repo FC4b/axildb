@@ -326,6 +326,55 @@ fn mcp_full_lifecycle() {
     );
 }
 
+/// A client that pipelines several frames in one write (instead of
+/// ping-ponging request/response) must still get a response for every
+/// request. Regression test: the serve loop used to construct its stdin
+/// reader per iteration, so frames buffered behind the first one were
+/// dropped when the reader went out of scope — the server then blocked
+/// forever waiting for input that had already arrived.
+#[test]
+fn mcp_pipelined_requests_are_not_dropped() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db_path = tmp.path().join("test3.axil");
+
+    let mut child = Command::new(axil_bin())
+        .args(["--db", db_path.to_str().unwrap(), "mcp"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("failed to spawn axil mcp");
+
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+
+    // Three frames in a single write so they land in one pipe chunk:
+    // initialize, the initialized notification, and tools/list.
+    let batch = concat!(
+        r#"{"jsonrpc":"2.0","method":"initialize","id":1,"params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"0.1.0"}}}"#,
+        "\n",
+        r#"{"jsonrpc":"2.0","method":"initialized"}"#,
+        "\n",
+        r#"{"jsonrpc":"2.0","method":"tools/list","id":2}"#,
+        "\n",
+    );
+    stdin.write_all(batch.as_bytes()).unwrap();
+    stdin.flush().unwrap();
+
+    // Both id-carrying requests must be answered, in order.
+    for expected_id in [1i64, 2i64] {
+        let mut resp_line = String::new();
+        stdout.read_line(&mut resp_line).unwrap();
+        let resp: Value = serde_json::from_str(&resp_line).unwrap_or_else(|e| {
+            panic!("bad response for id {expected_id}: {e} (line: {resp_line:?})")
+        });
+        assert_eq!(resp["id"], json!(expected_id));
+    }
+
+    drop(stdin);
+    child.wait().unwrap();
+}
+
 #[test]
 fn mcp_parse_error() {
     let tmp = tempfile::tempdir().unwrap();

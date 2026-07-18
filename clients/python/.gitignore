@@ -1,0 +1,8 @@
+# Python client build/test artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+.venv/

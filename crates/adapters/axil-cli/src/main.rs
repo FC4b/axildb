@@ -1063,6 +1063,20 @@ enum Command {
         #[cfg(feature = "embed")]
         #[arg(long)]
         embed: Option<String>,
+        /// Attach a pre-computed raw vector (JSON array of floats) to the new
+        /// record in one shot. Mutually exclusive with `--embed`. Use `--space`
+        /// to target a named vector space (e.g. a strategy fingerprint index)
+        /// instead of the default text-embedding space.
+        #[cfg(feature = "vector")]
+        #[arg(long, value_name = "JSON")]
+        #[cfg_attr(feature = "embed", arg(conflicts_with = "embed"))]
+        vector: Option<String>,
+        /// Named vector space for `--vector` (`[a-z0-9_-]{1,32}`). Omit for the
+        /// default `<db>.axil.vec` space. Named spaces are stored in
+        /// `<db>.axil.vec.<name>` with their own dimension.
+        #[cfg(feature = "vector")]
+        #[arg(long)]
+        space: Option<String>,
         /// JSON array of entity names to store as metadata.
         #[arg(long)]
         entities: Option<String>,
@@ -1453,10 +1467,19 @@ enum Command {
 
     // ── Enhanced query (4b.7) ───────────────────────────────────────
     /// Query records with filters, ordering, and limits.
+    ///
+    /// A single --where string may hold several conditions joined by AND
+    /// (case-insensitive), e.g. --where "oos_sharpe > 0.3 AND family = 'meanrev'".
+    /// Values are typed automatically: numbers compare numerically, and quoted
+    /// values ('x' or "x") are always strings. Supported operators:
+    /// = != > < >= <= and `contains`. Repeatable --where flags AND-compose with
+    /// in-string ANDs. NON-GOALS: OR, parentheses, and nested dot-paths are not
+    /// supported (AND-only, flat top-level fields — matching core WHERE
+    /// semantics).
     Query {
         /// Table name.
         table: String,
-        /// Filter: field=value, field>value, etc. Repeatable.
+        /// Filter: "field>value", "a>1 AND b<2", "family = 'x'", "note contains 'y'". Repeatable.
         #[arg(long = "where")]
         where_clauses: Vec<String>,
         /// Sort field.
@@ -1491,6 +1514,45 @@ enum Command {
         /// Show per-step timing (PROFILE).
         #[arg(long)]
         profile: bool,
+    },
+
+    // ── Aggregations ────────────────────────────────────────────────
+    /// Aggregate a table: count / avg / min / max / sum, optionally grouped.
+    ///
+    /// Metric flags are repeatable and combine, e.g.
+    /// `axil agg autopsies --count --avg decay --group-by family`.
+    /// `--where` uses the same syntax as `query` (AND-composed, quoted strings,
+    /// `contains`). Non-numeric or missing values are skipped for
+    /// avg/min/max/sum and reported per group as `skipped`. `--include-archived`
+    /// counts archived/discarded records too (excluded by default).
+    #[cfg(feature = "ql")]
+    Agg {
+        /// Table name.
+        table: String,
+        /// Count rows (per group when --group-by is set).
+        #[arg(long)]
+        count: bool,
+        /// Average of a numeric field. Repeatable.
+        #[arg(long = "avg")]
+        avg: Vec<String>,
+        /// Minimum of a numeric field. Repeatable.
+        #[arg(long = "min")]
+        min: Vec<String>,
+        /// Maximum of a numeric field. Repeatable.
+        #[arg(long = "max")]
+        max: Vec<String>,
+        /// Sum of a numeric field. Repeatable.
+        #[arg(long = "sum")]
+        sum: Vec<String>,
+        /// Group results by this field's value (missing → null group).
+        #[arg(long = "group-by")]
+        group_by: Option<String>,
+        /// Filter: "field>value", "a>1 AND b<2", "family = 'x'". Repeatable.
+        #[arg(long = "where")]
+        where_clauses: Vec<String>,
+        /// Include archived records (excluded by default).
+        #[arg(long)]
+        include_archived: bool,
     },
 
     // ── Time-series commands ─────────────────────────────────────────
@@ -1602,9 +1664,14 @@ enum Command {
         /// Vector dimensions (auto-detected if omitted).
         #[arg(long)]
         dimensions: Option<usize>,
+        /// Named vector space (`[a-z0-9_-]{1,32}`). Omit for the default space.
+        #[arg(long)]
+        space: Option<String>,
     },
 
     /// Search for similar records using a raw vector.
+    ///
+    /// Deprecated alias for `axil similar --vector`; kept for compatibility.
     #[cfg(feature = "vector")]
     SearchVector {
         /// Query vector as JSON array of floats.
@@ -1613,6 +1680,43 @@ enum Command {
         #[arg(long, default_value = "5")]
         top_k: usize,
         /// Vector dimensions (auto-detected if omitted).
+        #[arg(long)]
+        dimensions: Option<usize>,
+        /// Named vector space (`[a-z0-9_-]{1,32}`). Omit for the default space.
+        #[arg(long)]
+        space: Option<String>,
+    },
+
+    /// Find records with vectors similar to a query vector or a record's stored
+    /// vector.
+    ///
+    /// Provide either `--vector '<json floats>'` or `--id <record-id>` (which
+    /// looks up that record's stored vector and excludes the record itself from
+    /// results). `--threshold` filters to results scoring >= F — set it to e.g.
+    /// 0.95 for near-duplicate detection. `--space` targets a named vector
+    /// space.
+    ///
+    /// v1 non-goals: named spaces are NOT integrated with
+    /// heal/rebuild/branch/snapshot/doctor, and text-embedding recall never
+    /// consults named spaces.
+    #[cfg(feature = "vector")]
+    Similar {
+        /// Query vector as a JSON array of floats (mutually exclusive with --id).
+        #[arg(long, value_name = "JSON", conflicts_with = "id")]
+        vector: Option<String>,
+        /// Use this record's stored vector as the query (excludes it from results).
+        #[arg(long)]
+        id: Option<String>,
+        /// Named vector space (`[a-z0-9_-]{1,32}`). Omit for the default space.
+        #[arg(long)]
+        space: Option<String>,
+        /// Number of results.
+        #[arg(long, default_value = "5")]
+        top_k: usize,
+        /// Only return results scoring >= this cosine similarity (0.0–1.0).
+        #[arg(long)]
+        threshold: Option<f32>,
+        /// Vector dimensions for the default space (auto-detected if omitted).
         #[arg(long)]
         dimensions: Option<usize>,
     },
@@ -1626,6 +1730,39 @@ enum Command {
         /// Edge direction.
         #[arg(long, default_value = "both")]
         direction: CliDirection,
+    },
+
+    /// Walk a derivation chain (lineage) from a record over `derived_from` edges.
+    ///
+    /// Each hop carries the record fields you select plus the numeric delta of
+    /// those fields against its parent hop (the node on the other end of the
+    /// discovering edge), so you can read how a metric drifted across a chain
+    /// of mutations — in a branching tree each sibling's delta is measured
+    /// against their shared parent. `ancestors` follows OUT edges
+    /// (root-first: what each node was derived from); `descendants` follows IN
+    /// edges (what was derived from the node). The walk is cycle-safe (a global
+    /// visited set) and depth-bounded. A missing edge endpoint is reported as a
+    /// `"missing": true` hop, not an error.
+    ///
+    /// Create lineage at store time with
+    /// `axil link <child> derived_from <parent> --props '{"mutation":"widened stop"}'`.
+    #[cfg(feature = "graph")]
+    Lineage {
+        /// Root record ID.
+        id: String,
+        /// Edge type to follow.
+        #[arg(long, default_value = "derived_from")]
+        edge_type: String,
+        /// Walk direction: ancestors | descendants | both.
+        #[arg(long, default_value = "ancestors")]
+        direction: String,
+        /// Maximum hops from the root.
+        #[arg(long, default_value = "20")]
+        max_depth: usize,
+        /// Comma-separated `record.data` keys to include per hop (and diff for
+        /// delta). Omit to include all fields.
+        #[arg(long, value_delimiter = ',')]
+        fields: Vec<String>,
     },
 
     // ── Advanced FTS commands ───────────────────────────────────────
@@ -5559,23 +5696,252 @@ fn read_json_input(data: &str) -> Result<Value> {
     }
 }
 
-/// Parse a where clause like "field=value", "field>value", "field>=value".
-fn parse_where_clause(clause: &str) -> Result<(String, Op, Value)> {
-    // Two-char operators must be checked before single-char to avoid partial matches.
-    for op_str in &[">=", "<=", "!=", "=", ">", "<"] {
-        if let Some(pos) = clause.find(op_str) {
-            let field = clause[..pos].to_string();
-            if field.is_empty() {
-                anyhow::bail!("invalid where clause: field name must not be empty in '{clause}'");
-            }
-            let op: Op = op_str.parse().map_err(|e| anyhow::anyhow!("{e}"))?;
-            let val_str = &clause[pos + op_str.len()..];
-            let value = serde_json::from_str(val_str)
-                .unwrap_or_else(|_| Value::String(val_str.to_string()));
-            return Ok((field, op, value));
+/// Parse a `--where` expression into one or more `(field, op, value)` conditions.
+///
+/// A single expression may hold multiple conditions joined by `AND`
+/// (case-insensitive, whole word); the split is quote-aware, so an `AND` — or
+/// an operator character — inside a single- or double-quoted string value is not
+/// treated as a separator. Conditions AND-compose, matching core WHERE
+/// semantics. Repeatable `--where` flags compose the same way, so
+/// `--where "a>1 AND b<2"` and `--where a>1 --where b<2` are equivalent.
+///
+/// Supported operators: `>= <= != = > <` and the word operator `contains`.
+/// Quoted values are always typed as strings (quotes force string typing);
+/// unquoted values are typed by `serde_json` (numbers, `true`/`false`/`null`),
+/// falling back to a bare string. Only flat top-level fields are supported —
+/// OR, parentheses, and nested dot-paths are non-goals.
+fn parse_where_clause(clause: &str) -> Result<Vec<(String, Op, Value)>> {
+    ensure_where_quotes_balanced(clause)?;
+    let mut out = Vec::new();
+    for cond in split_where_conditions(clause) {
+        let cond = cond.trim();
+        if cond.is_empty() {
+            continue;
+        }
+        out.push(parse_single_condition(cond)?);
+    }
+    if out.is_empty() {
+        anyhow::bail!("invalid where clause: {clause} (expected field=value, field>value, etc.)");
+    }
+    Ok(out)
+}
+
+/// Reject a where expression containing an unterminated quote. A dangling
+/// quote would otherwise swallow the rest of the expression into a string
+/// value that can never match — a silent empty result instead of an error.
+fn ensure_where_quotes_balanced(clause: &str) -> Result<()> {
+    let mut in_quote: Option<u8> = None;
+    for &c in clause.as_bytes() {
+        match in_quote {
+            Some(q) if c == q => in_quote = None,
+            None if c == b'"' || c == b'\'' => in_quote = Some(c),
+            _ => {}
         }
     }
-    anyhow::bail!("invalid where clause: {clause} (expected field=value, field>value, etc.)")
+    if let Some(q) = in_quote {
+        anyhow::bail!(
+            "invalid where clause: unterminated {} quote in '{clause}'",
+            q as char
+        );
+    }
+    Ok(())
+}
+
+/// Split a where expression on the `AND` keyword (case-insensitive, whole word),
+/// ignoring any `AND` that appears inside a single- or double-quoted string.
+///
+/// Split points are always ASCII (`AND` and quote characters), so slicing the
+/// original `&str` at those byte offsets never lands inside a multi-byte
+/// character in a UTF-8 value.
+fn split_where_conditions(clause: &str) -> Vec<&str> {
+    let bytes = clause.as_bytes();
+    let mut parts = Vec::new();
+    let mut start = 0usize;
+    let mut i = 0usize;
+    let mut in_quote: Option<u8> = None;
+    while i < bytes.len() {
+        let c = bytes[i];
+        match in_quote {
+            Some(q) => {
+                if c == q {
+                    in_quote = None;
+                }
+                i += 1;
+            }
+            None => {
+                if c == b'"' || c == b'\'' {
+                    in_quote = Some(c);
+                    i += 1;
+                } else if (c == b'a' || c == b'A') && matches_keyword(bytes, i, b"and") {
+                    parts.push(&clause[start..i]);
+                    i += 3;
+                    start = i;
+                } else {
+                    i += 1;
+                }
+            }
+        }
+    }
+    parts.push(&clause[start..]);
+    parts
+}
+
+/// True when `kw` (ASCII, lowercase) occurs at `bytes[i..]` case-insensitively
+/// as a whole word — i.e. bounded on both sides by a non-identifier byte or the
+/// ends of the slice.
+fn matches_keyword(bytes: &[u8], i: usize, kw: &[u8]) -> bool {
+    let end = i + kw.len();
+    if end > bytes.len() {
+        return false;
+    }
+    if !bytes[i..end]
+        .iter()
+        .zip(kw)
+        .all(|(b, k)| b.eq_ignore_ascii_case(k))
+    {
+        return false;
+    }
+    let is_ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    let before_ok = i == 0 || !is_ident(bytes[i - 1]);
+    let after_ok = end >= bytes.len() || !is_ident(bytes[end]);
+    before_ok && after_ok
+}
+
+/// Parse a single condition (`field op value`) into `(field, op, value)`.
+///
+/// The operator is located outside any quoted region, so a value like
+/// `'a = b'` (which contains an operator character) is not mis-split.
+fn parse_single_condition(cond: &str) -> Result<(String, Op, Value)> {
+    let bytes = cond.as_bytes();
+    let mut i = 0usize;
+    let mut in_quote: Option<u8> = None;
+    while i < bytes.len() {
+        let c = bytes[i];
+        match in_quote {
+            Some(q) => {
+                if c == q {
+                    in_quote = None;
+                }
+                i += 1;
+            }
+            None => {
+                if c == b'"' || c == b'\'' {
+                    in_quote = Some(c);
+                    i += 1;
+                    continue;
+                }
+                if matches!(c, b'>' | b'<' | b'!' | b'=') {
+                    let rest = &cond[i..];
+                    let (op_str, op_len): (&str, usize) = if rest.starts_with(">=") {
+                        (">=", 2)
+                    } else if rest.starts_with("<=") {
+                        ("<=", 2)
+                    } else if rest.starts_with("!=") {
+                        ("!=", 2)
+                    } else if c == b'=' {
+                        ("=", 1)
+                    } else if c == b'>' {
+                        (">", 1)
+                    } else if c == b'<' {
+                        ("<", 1)
+                    } else {
+                        anyhow::bail!(
+                            "invalid where clause: '{cond}' ('!' must be part of the '!=' operator)"
+                        );
+                    };
+                    let field = cond[..i].trim().to_string();
+                    if field.is_empty() {
+                        anyhow::bail!(
+                            "invalid where clause: field name must not be empty in '{cond}'"
+                        );
+                    }
+                    let op: Op = op_str.parse().map_err(|e| anyhow::anyhow!("{e}"))?;
+                    let value = parse_where_value(cond[i + op_len..].trim())?;
+                    return Ok((field, op, value));
+                }
+                i += 1;
+            }
+        }
+    }
+    // No symbol operator outside quotes — try the `contains` word operator.
+    if let Some(pos) = find_keyword_outside_quotes(cond, b"contains") {
+        let field = cond[..pos].trim().to_string();
+        if field.is_empty() {
+            anyhow::bail!("invalid where clause: field name must not be empty in '{cond}'");
+        }
+        let value = parse_where_value(cond[pos + "contains".len()..].trim())?;
+        return Ok((field, Op::Contains, value));
+    }
+    anyhow::bail!(
+        "invalid where clause: {cond} (expected field=value, field>value, field contains value, etc.)"
+    )
+}
+
+/// Find the byte offset of `kw` (ASCII, lowercase) as a whole word outside any
+/// quoted region, or `None`.
+fn find_keyword_outside_quotes(s: &str, kw: &[u8]) -> Option<usize> {
+    let bytes = s.as_bytes();
+    let mut i = 0usize;
+    let mut in_quote: Option<u8> = None;
+    while i < bytes.len() {
+        let c = bytes[i];
+        match in_quote {
+            Some(q) => {
+                if c == q {
+                    in_quote = None;
+                }
+                i += 1;
+            }
+            None => {
+                if c == b'"' || c == b'\'' {
+                    in_quote = Some(c);
+                    i += 1;
+                } else if c.eq_ignore_ascii_case(&kw[0]) && matches_keyword(bytes, i, kw) {
+                    return Some(i);
+                } else {
+                    i += 1;
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Type a where-clause value string. A single- or double-quoted value is always
+/// a string (quotes force string typing); otherwise `serde_json` types it
+/// (number, `true`/`false`/`null`), falling back to a bare string.
+///
+/// Backslash escapes are not interpreted inside quotes — a quote character of
+/// the same kind cannot appear inside a quoted value (use the other quote
+/// kind around it instead).
+fn parse_where_value(val_str: &str) -> Result<Value> {
+    let b = val_str.as_bytes();
+    if val_str.len() >= 2
+        && ((b[0] == b'\'' && b[val_str.len() - 1] == b'\'')
+            || (b[0] == b'"' && b[val_str.len() - 1] == b'"'))
+    {
+        return Ok(Value::String(val_str[1..val_str.len() - 1].to_string()));
+    }
+    if let Ok(v) = serde_json::from_str(val_str) {
+        return Ok(v);
+    }
+    // A leading number/bool/null followed by trailing text ("5 oops") is
+    // almost certainly a typo'd expression (a missing AND) — error rather
+    // than silently matching a garbage string literal. Plain multi-word
+    // strings ("mean rev") still fall through to the bare-string case.
+    if let Some(first) = val_str.split_whitespace().next() {
+        if first.len() < val_str.trim().len()
+            && serde_json::from_str::<Value>(first)
+                .map(|v| !v.is_string())
+                .unwrap_or(false)
+        {
+            anyhow::bail!(
+                "ambiguous where value '{val_str}': quote it ('{val_str}') if you \
+                 meant a string, or join conditions with AND if it is two conditions"
+            );
+        }
+    }
+    Ok(Value::String(val_str.to_string()))
 }
 
 /// Parse a human-readable duration string (e.g. "3d", "1h", "30m", "90s") into seconds.
@@ -5726,6 +6092,11 @@ fn attach_detected_engines(mut builder: axil_core::AxilBuilder) -> Result<axil_c
 
     #[cfg(feature = "vector")]
     {
+        // Register the named-vector-space factory unconditionally (even when the
+        // default vector store is absent or the engine is disabled): named
+        // spaces are independent companion files, and the factory is a cheap
+        // unit that leaves every existing vector path byte-identical.
+        builder = axil_vector::with_vector_spaces(builder);
         if !config.is_engine_disabled("vec") {
             if let Ok(Some(_)) = axil_vector::read_stored_dimensions(&path) {
                 // Attach vector index + embedder together so auto-embed on insert works.
@@ -5931,7 +6302,7 @@ fn open_for_scip_ingest(path: &Path) -> Result<Axil> {
 /// Open a database with vector support (auto-detecting dimensions).
 #[cfg(feature = "vector")]
 fn open_with_vector(path: &Path, dimensions: Option<usize>) -> Result<Axil> {
-    let builder = Axil::open(path);
+    let builder = axil_vector::with_vector_spaces(Axil::open(path));
     let db = match dimensions {
         Some(dims) => builder
             .with_vector(dims)
@@ -5943,22 +6314,207 @@ fn open_with_vector(path: &Path, dimensions: Option<usize>) -> Result<Axil> {
     db.build().context("failed to open database")
 }
 
+/// Open for a `store --vector` in the *default* space: attach all detected
+/// engines and, when the default vector store is missing, create it at the
+/// supplied dimension (a write path may create storage; read paths never do).
+/// Honors `[engines] disabled` like [`open_with_embedder_creating`].
+#[cfg(feature = "vector")]
+fn open_with_vector_creating(path: &Path, dims: usize) -> Result<Axil> {
+    let store_missing = axil_vector::read_stored_dimensions(path)
+        .context("failed to probe vector store")?
+        .is_none();
+    let mut builder = attach_detected_engines(Axil::open(path))?;
+    if store_missing {
+        let config = path
+            .parent()
+            .and_then(|dir| axil_core::load_config_from(dir).ok())
+            .unwrap_or_default();
+        if !config.is_engine_disabled("vec") {
+            builder = builder
+                .with_vector(dims)
+                .context("failed to create vector store")?;
+            eprintln!(
+                "axil: created vector store at {}",
+                axil_vector::vector_db_path(path).display()
+            );
+        }
+    }
+    let db = builder.build().context("failed to open database")?;
+    if !db.has_vector_index() {
+        anyhow::bail!(
+            "the vector engine is disabled in axil.toml ([engines] disabled) — \
+             re-enable it to attach raw vectors"
+        );
+    }
+    Ok(db)
+}
+
+/// Open-path policy for `store`, shared by the `embed`/`not(embed)` feature
+/// ladders: a raw `--vector` bound for the *default* space creates that store
+/// at the vector's dimension; a named space (or no vector) opens all detected
+/// engines — the insert path needs them for index hooks.
+#[cfg(feature = "vector")]
+fn open_for_store(path: &Path, raw_vector: Option<&[f32]>, named_space: bool) -> Result<Axil> {
+    match raw_vector {
+        Some(v) if !named_space => open_with_vector_creating(path, v.len()),
+        _ => open_with_all_detected(path),
+    }
+}
+
+/// Minimal open for named-space vector commands (`similar --space`,
+/// `add-vector --space`): core storage plus the space factory only. Loading
+/// the default vector engine and the ONNX embedder here would be pure waste —
+/// named spaces never consult either, and this path is multiplied by
+/// one-subprocess-per-call clients.
+#[cfg(feature = "vector")]
+fn open_for_space_ops(path: &Path) -> Result<Axil> {
+    axil_vector::with_vector_spaces(Axil::open(path))
+        .build()
+        .context("failed to open database")
+}
+
+/// Shared body of `similar` and its deprecated alias `search-vector`.
+///
+/// Resolves the query vector (raw JSON, or a record's stored vector for
+/// `--id`), searches the named or default space, then applies self-exclusion,
+/// `--threshold`, and `top_k`. Named spaces open minimally via
+/// [`open_for_space_ops`]; the default space keeps the `open_with_vector`
+/// path.
+#[cfg(feature = "vector")]
+fn run_similar(
+    db_path: &Path,
+    vector: Option<&str>,
+    id: Option<&str>,
+    space: Option<&str>,
+    top_k: usize,
+    threshold: Option<f32>,
+    dimensions: Option<usize>,
+) -> Result<Vec<Value>> {
+    if vector.is_none() && id.is_none() {
+        anyhow::bail!("provide either --vector or --id");
+    }
+    let db = match space {
+        Some(_) => open_for_space_ops(db_path)?,
+        None => open_with_vector(db_path, dimensions)?,
+    };
+
+    // Resolve the query vector and, for --id, the record to exclude.
+    let (query, exclude): (Vec<f32>, Option<RecordId>) = match (vector, id) {
+        (Some(v), _) => (
+            serde_json::from_str(v).context("invalid --vector JSON")?,
+            None,
+        ),
+        (None, Some(id_str)) => {
+            let rid = RecordId::from_string(id_str).context("invalid record ID")?;
+            let stored = match space {
+                Some(s) => db.get_vector_in(s, &rid)?,
+                None => db.get_vector(&rid)?,
+            };
+            let v = stored.ok_or_else(|| {
+                anyhow::anyhow!("record {id_str} has no stored vector in this space")
+            })?;
+            (v, Some(rid))
+        }
+        (None, None) => unreachable!("guarded above"),
+    };
+
+    // Over-fetch by one so excluding the query record still yields top_k.
+    let fetch = if exclude.is_some() { top_k + 1 } else { top_k };
+    let mut results = match space {
+        Some(s) => db
+            .similar_in(s, &query, fetch)
+            .with_context(|| format!("vector search in space '{s}' failed"))?,
+        None => db
+            .similar_to_vector(&query, fetch)
+            .context("vector search failed")?,
+    };
+
+    if let Some(ref ex) = exclude {
+        results.retain(|(r, _)| &r.id != ex);
+    }
+    if let Some(t) = threshold {
+        results.retain(|(_, score)| *score >= t);
+    }
+    results.truncate(top_k);
+
+    Ok(results
+        .iter()
+        .map(|(r, score)| scored_to_json(r, *score))
+        .collect())
+}
+
 /// Open a database with embedder loaded (for recall/search commands).
 #[cfg(feature = "embed")]
 fn open_with_embedder(path: &Path) -> Result<Axil> {
-    let mut builder = attach_detected_engines(Axil::open(path))?;
-    // Require an existing vector store — don't silently create one on read operations.
+    // Probe BEFORE attaching engines. `attach_detected_engines` opens the
+    // vector store's redb file and holds it for the life of the builder, so a
+    // probe placed after it collides with its own process's lock and reads a
+    // healthy store as missing. Probe errors (lock held by another process,
+    // corrupt metadata) propagate as-is instead of collapsing into "not found".
     if axil_vector::read_stored_dimensions(path)
-        .ok()
-        .flatten()
+        .context("failed to probe vector store")?
         .is_none()
     {
-        anyhow::bail!("no vector store found — run `axil init` first or use `axil store --embed` to create one");
+        // Require an existing vector store — don't silently create one on read operations.
+        anyhow::bail!(
+            "no vector store found — run `axil init <path>` or store with \
+             `--embed <field>` to create one"
+        );
     }
-    builder = builder
-        .with_embedder_model(resolve_embedding_model(path))
-        .context("failed to load embedder model")?;
-    builder.build().context("failed to open database")
+    // The store exists, so `attach_detected_engines` attaches the vector index
+    // + embedder itself (unless the operator disabled the engine in axil.toml).
+    // Attaching a second embedder here would re-open the redb file this
+    // process already holds and fail.
+    let db = attach_detected_engines(Axil::open(path))?
+        .build()
+        .context("failed to open database")?;
+    if !db.has_embedder() {
+        anyhow::bail!(
+            "the vector engine is disabled in axil.toml ([engines] disabled) — \
+             re-enable it to run embedding commands"
+        );
+    }
+    Ok(db)
+}
+
+/// Like [`open_with_embedder`], but for write commands with an explicit
+/// `--embed`: a missing vector store is created (with the configured model's
+/// dimensions) instead of an error. Read commands keep the strict probe —
+/// they must never create storage as a side effect.
+#[cfg(feature = "embed")]
+fn open_with_embedder_creating(path: &Path) -> Result<Axil> {
+    let store_missing = axil_vector::read_stored_dimensions(path)
+        .context("failed to probe vector store")?
+        .is_none();
+    let mut builder = attach_detected_engines(Axil::open(path))?;
+    if store_missing {
+        // Honor `[engines] disabled` — creating storage the operator turned
+        // off would resurrect the engine behind their back. The has_embedder
+        // check below turns that case into a clear error instead.
+        let config = path
+            .parent()
+            .and_then(|dir| axil_core::load_config_from(dir).ok())
+            .unwrap_or_default();
+        if !config.is_engine_disabled("vec") {
+            // attach_detected_engines only attaches when the store exists;
+            // create it now so `--embed` works on a fresh database.
+            builder = builder
+                .with_embedder_model(resolve_embedding_model(path))
+                .context("failed to create vector store")?;
+            eprintln!(
+                "axil: created vector store at {}",
+                axil_vector::vector_db_path(path).display()
+            );
+        }
+    }
+    let db = builder.build().context("failed to open database")?;
+    if !db.has_embedder() {
+        anyhow::bail!(
+            "the vector engine is disabled in axil.toml ([engines] disabled) — \
+             re-enable it to run embedding commands"
+        );
+    }
+    Ok(db)
 }
 
 /// Open with embedder if available, otherwise fall back to `open_with_all_detected`.
@@ -6086,21 +6642,12 @@ fn wire_llm(db: Axil, db_path: &Path) -> Result<Axil> {
     #[cfg(feature = "llm-http")]
     {
         if let Some(http_llm) = axil_core::HttpLlm::from_config(&config.llm) {
-            let mut builder = attach_detected_engines(Axil::open(db_path))?;
-            // Restore embedder so --embed still works alongside --llm.
-            #[cfg(feature = "embed")]
-            {
-                if axil_vector::read_stored_dimensions(db_path)
-                    .ok()
-                    .flatten()
-                    .is_some()
-                {
-                    builder = builder
-                        .with_embedder_model(axil_vector::models::EmbeddingModel::BgeSmall)
-                        .context("failed to load embedder model in wire_llm")?;
-                }
-            }
-            builder = builder
+            // `attach_detected_engines` already attaches the vector index +
+            // embedder (with the configured model) when the store exists, so
+            // --embed keeps working alongside --llm. Attaching a second
+            // embedder here would re-open the redb file this process already
+            // holds and fail.
+            let builder = attach_detected_engines(Axil::open(db_path))?
                 .with_llm(std::sync::Arc::new(http_llm))
                 .with_llm_config(config.llm);
             return builder.build().context("failed to open database with LLM");
@@ -7613,8 +8160,9 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             let mut qb = db.query().table(&table).limit(limit);
 
             for clause in &where_clauses {
-                let (field, op, value) = parse_where_clause(clause)?;
-                qb = qb.where_field(&field, op, value);
+                for (field, op, value) in parse_where_clause(clause)? {
+                    qb = qb.where_field(&field, op, value);
+                }
             }
 
             if let Some(ref text) = similar {
@@ -7952,6 +8500,10 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             json_data,
             #[cfg(feature = "embed")]
             embed,
+            #[cfg(feature = "vector")]
+            vector,
+            #[cfg(feature = "vector")]
+            space,
             entities,
             llm,
             agent,
@@ -7959,13 +8511,33 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
         } => {
             let db_path = require_db(&db_opt)?;
 
+            // Parse --vector up front: attaching to the default space needs the
+            // vector's dimension to size a freshly-created store.
+            #[cfg(feature = "vector")]
+            let raw_vector: Option<Vec<f32>> = match vector {
+                Some(ref v) => {
+                    Some(serde_json::from_str(v).context("invalid --vector JSON")?)
+                }
+                None => None,
+            };
+            #[cfg(feature = "vector")]
+            if space.is_some() && raw_vector.is_none() {
+                anyhow::bail!("--space requires --vector");
+            }
+
+            // Open path: `--embed` needs the embedder; otherwise the raw-vector
+            // policy is shared across feature ladders by `open_for_store` (a
+            // default-space vector creates the store at the vector's dimension;
+            // a named space or no vector opens all detected engines).
             #[cfg(feature = "embed")]
             let db = if embed.is_some() {
-                open_with_embedder(&db_path)?
+                open_with_embedder_creating(&db_path)?
             } else {
-                open_with_all_detected(&db_path)?
+                open_for_store(&db_path, raw_vector.as_deref(), space.is_some())?
             };
-            #[cfg(not(feature = "embed"))]
+            #[cfg(all(feature = "vector", not(feature = "embed")))]
+            let db = open_for_store(&db_path, raw_vector.as_deref(), space.is_some())?;
+            #[cfg(not(feature = "vector"))]
             let db = open_with_all_detected(&db_path)?;
 
             // Wire up LLM if --llm flag is set and config exists.
@@ -8050,6 +8622,19 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
 
             let record = db.insert(&table, data).context("insert failed")?;
 
+            // Attach a raw --vector to the default or named space.
+            #[cfg(feature = "vector")]
+            if let Some(ref v) = raw_vector {
+                match space {
+                    Some(ref s) => db
+                        .add_vector_in(s, &record.id, v)
+                        .with_context(|| format!("failed to attach vector to space '{s}'"))?,
+                    None => db
+                        .add_vector(&record.id, v)
+                        .context("failed to attach vector")?,
+                }
+            }
+
             // Auto-embed if requested.
             #[cfg(feature = "embed")]
             if let Some(ref fields) = embed {
@@ -8067,6 +8652,16 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                 "table": record.table,
                 "created_at": format_dt(&record.created_at),
             });
+
+            // Surface the attached vector so an agent can confirm the round-trip.
+            #[cfg(feature = "vector")]
+            if let Some(ref v) = raw_vector {
+                let obj = result.as_object_mut().unwrap();
+                obj.insert("vector_dims".to_string(), json!(v.len()));
+                if let Some(ref s) = space {
+                    obj.insert("space".to_string(), json!(s));
+                }
+            }
 
             // Include LLM usage if LLM was used.
             if llm {
@@ -8216,8 +8811,9 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                 // Use query builder for filtered list.
                 let mut qb = db.query().table(&table);
                 for clause in &where_clauses {
-                    let (field, op, value) = parse_where_clause(clause)?;
-                    qb = qb.where_field(&field, op, value);
+                    for (field, op, value) in parse_where_clause(clause)? {
+                        qb = qb.where_field(&field, op, value);
+                    }
                 }
                 if let Some(ref agent_name) = agent {
                     qb = qb.where_field("_agent", Op::Eq, json!(agent_name));
@@ -9389,8 +9985,9 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             let mut qb = db.query().table(&table);
 
             for clause in &where_clauses {
-                let (field, op, value) = parse_where_clause(clause)?;
-                qb = qb.where_field(&field, op, value);
+                for (field, op, value) in parse_where_clause(clause)? {
+                    qb = qb.where_field(&field, op, value);
+                }
             }
 
             if let Some(ref field) = order_by {
@@ -9529,6 +10126,52 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                     Ok(EXIT_ERROR)
                 }
             }
+        }
+
+        // ── Aggregations ────────────────────────────────────────────
+        #[cfg(feature = "ql")]
+        Command::Agg {
+            table,
+            count,
+            avg,
+            min,
+            max,
+            sum,
+            group_by,
+            where_clauses,
+            include_archived,
+        } => {
+            let db_path = require_db(&db_opt)?;
+            let db = open_read_command(&db_path)?;
+
+            // Metrics in a stable order: count, then avg/min/max/sum in flag order.
+            let mut metrics: Vec<axil_ql::AggMetric> = Vec::new();
+            if count {
+                metrics.push(axil_ql::AggMetric::Count);
+            }
+            metrics.extend(avg.iter().map(|f| axil_ql::AggMetric::Avg(f.clone())));
+            metrics.extend(min.iter().map(|f| axil_ql::AggMetric::Min(f.clone())));
+            metrics.extend(max.iter().map(|f| axil_ql::AggMetric::Max(f.clone())));
+            metrics.extend(sum.iter().map(|f| axil_ql::AggMetric::Sum(f.clone())));
+
+            // Parse --where into core WhereClauses via the Phase-1 parser.
+            let mut wheres: Vec<axil_core::query::WhereClause> = Vec::new();
+            for clause in &where_clauses {
+                for (field, op, value) in parse_where_clause(clause)? {
+                    wheres.push(axil_core::query::WhereClause { field, op, value });
+                }
+            }
+
+            let req = axil_ql::AggRequest {
+                table: &table,
+                metrics: &metrics,
+                group_by: group_by.as_deref(),
+                where_clauses: &wheres,
+                include_archived,
+            };
+            let value = axil_ql::aggregate(&db, &req).map_err(|e| anyhow::anyhow!("{e}"))?;
+            out.print(&value);
+            Ok(EXIT_OK)
         }
 
         // ── Since ───────────────────────────────────────────────────
@@ -9884,40 +10527,82 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             id,
             vector,
             dimensions,
+            space,
         } => {
             let db_path = require_db(&db_opt)?;
-            let db = open_with_vector(&db_path, dimensions)?;
             let rid = RecordId::from_string(&id).context("invalid record ID")?;
             let vec: Vec<f32> = serde_json::from_str(&vector).context("invalid vector JSON")?;
-            db.add_vector(&rid, &vec).context("add_vector failed")?;
 
-            out.print(&json!({
-                "added": true,
-                "id": id,
-                "dimensions": vec.len(),
-            }));
+            match space {
+                // Named space: independent companion file — open minimally,
+                // the default engines are never consulted.
+                Some(ref s) => {
+                    let db = open_for_space_ops(&db_path)?;
+                    db.add_vector_in(s, &rid, &vec)
+                        .with_context(|| format!("add_vector to space '{s}' failed"))?;
+                    out.print(&json!({
+                        "added": true,
+                        "id": id,
+                        "dimensions": vec.len(),
+                        "space": s,
+                    }));
+                }
+                // Default space: unchanged path.
+                None => {
+                    let db = open_with_vector(&db_path, dimensions)?;
+                    db.add_vector(&rid, &vec).context("add_vector failed")?;
+                    out.print(&json!({
+                        "added": true,
+                        "id": id,
+                        "dimensions": vec.len(),
+                    }));
+                }
+            }
             Ok(EXIT_OK)
         }
 
-        // ── SearchVector ────────────────────────────────────────────
+        // ── SearchVector (deprecated alias for `similar --vector`) ───
         #[cfg(feature = "vector")]
         Command::SearchVector {
             vector,
             top_k,
             dimensions,
+            space,
         } => {
             let db_path = require_db(&db_opt)?;
-            let db = open_with_vector(&db_path, dimensions)?;
-            let vec: Vec<f32> = serde_json::from_str(&vector).context("invalid vector JSON")?;
-            let results = db
-                .similar_to_vector(&vec, top_k)
-                .context("vector search failed")?;
+            let values = run_similar(
+                &db_path,
+                Some(&vector),
+                None,
+                space.as_deref(),
+                top_k,
+                None,
+                dimensions,
+            )?;
+            out.print_array(&values);
+            Ok(EXIT_OK)
+        }
 
-            let values: Vec<Value> = results
-                .iter()
-                .map(|(r, score)| scored_to_json(r, *score))
-                .collect();
-
+        // ── Similar ─────────────────────────────────────────────────
+        #[cfg(feature = "vector")]
+        Command::Similar {
+            vector,
+            id,
+            space,
+            top_k,
+            threshold,
+            dimensions,
+        } => {
+            let db_path = require_db(&db_opt)?;
+            let values = run_similar(
+                &db_path,
+                vector.as_deref(),
+                id.as_deref(),
+                space.as_deref(),
+                top_k,
+                threshold,
+                dimensions,
+            )?;
             out.print_array(&values);
             Ok(EXIT_OK)
         }
@@ -9946,6 +10631,33 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                 .collect();
 
             out.print_array(&values);
+            Ok(EXIT_OK)
+        }
+
+        // ── Lineage ─────────────────────────────────────────────────
+        #[cfg(feature = "graph")]
+        Command::Lineage {
+            id,
+            edge_type,
+            direction,
+            max_depth,
+            fields,
+        } => {
+            let db_path = require_db(&db_opt)?;
+            let db = open_with_all_detected(&db_path)?;
+            let rid = RecordId::from_string(&id).context("invalid record ID")?;
+            let dir = axil_core::lineage::LineageDirection::parse(&direction)
+                .map_err(|e| anyhow::anyhow!(e))?;
+            let field_filter = if fields.is_empty() {
+                None
+            } else {
+                Some(fields.as_slice())
+            };
+            let value = axil_core::lineage::walk(
+                &db, &rid, &edge_type, dir, max_depth, field_filter,
+            )
+            .context("lineage walk failed")?;
+            out.print(&value);
             Ok(EXIT_OK)
         }
 
@@ -15466,7 +16178,7 @@ fn run_session(cmd: SessionCommand, db_path: &Path, out: &Output) -> Result<i32>
         } => {
             #[cfg(feature = "embed")]
             let db = if embed.is_some() {
-                open_with_embedder(db_path)?
+                open_with_embedder_creating(db_path)?
             } else {
                 open_with_all_detected(db_path)?
             };
@@ -19423,5 +20135,137 @@ mod scaffold_plugin_tests {
         let dest = dir.path().join("exists");
         std::fs::create_dir_all(&dest).unwrap();
         assert!(scaffold_plugin("exists", Some(&dest), None, &out()).is_err());
+    }
+}
+
+#[cfg(test)]
+mod where_clause_tests {
+    use super::*;
+
+    // `Op` doesn't implement `PartialEq`, so operator checks go through matches!.
+
+    #[test]
+    fn single_numeric_condition() {
+        let conds = parse_where_clause("score>80").unwrap();
+        assert_eq!(conds.len(), 1);
+        assert_eq!(conds[0].0, "score");
+        assert!(matches!(conds[0].1, Op::Gt));
+        // Numeric typing: an unquoted number is a JSON number, not a string.
+        assert_eq!(conds[0].2, json!(80));
+    }
+
+    #[test]
+    fn and_in_one_string() {
+        let conds = parse_where_clause("oos_sharpe > 0.3 AND family = 'meanrev'").unwrap();
+        assert_eq!(conds.len(), 2);
+        assert_eq!(conds[0].0, "oos_sharpe");
+        assert!(matches!(conds[0].1, Op::Gt));
+        assert_eq!(conds[0].2, json!(0.3));
+        assert_eq!(conds[1].0, "family");
+        assert!(matches!(conds[1].1, Op::Eq));
+        // Single-quoted value → string (quotes force string typing).
+        assert_eq!(conds[1].2, json!("meanrev"));
+    }
+
+    #[test]
+    fn and_is_case_insensitive() {
+        let conds = parse_where_clause("a>1 and b<2 And c=3").unwrap();
+        assert_eq!(conds.len(), 3);
+        assert_eq!(conds[0].0, "a");
+        assert_eq!(conds[1].0, "b");
+        assert_eq!(conds[2].0, "c");
+    }
+
+    #[test]
+    fn quoted_value_with_spaces_and_and_word() {
+        // The word AND and an operator char inside quotes must not split.
+        let conds = parse_where_clause("note = 'buy AND hold >= now'").unwrap();
+        assert_eq!(conds.len(), 1);
+        assert_eq!(conds[0].0, "note");
+        assert!(matches!(conds[0].1, Op::Eq));
+        assert_eq!(conds[0].2, json!("buy AND hold >= now"));
+    }
+
+    #[test]
+    fn double_quoted_value() {
+        let conds = parse_where_clause(r#"family = "mean rev""#).unwrap();
+        assert_eq!(conds.len(), 1);
+        assert_eq!(conds[0].2, json!("mean rev"));
+    }
+
+    #[test]
+    fn quotes_force_string_typing() {
+        // A quoted number stays a string, an unquoted one is numeric.
+        let quoted = parse_where_clause("regime = '5'").unwrap();
+        assert_eq!(quoted[0].2, json!("5"));
+        let bare = parse_where_clause("regime = 5").unwrap();
+        assert_eq!(bare[0].2, json!(5));
+    }
+
+    #[test]
+    fn contains_operator() {
+        let conds = parse_where_clause("summary contains 'timeout'").unwrap();
+        assert_eq!(conds.len(), 1);
+        assert_eq!(conds[0].0, "summary");
+        assert!(matches!(conds[0].1, Op::Contains));
+        assert_eq!(conds[0].2, json!("timeout"));
+    }
+
+    #[test]
+    fn contains_composes_with_and() {
+        let conds = parse_where_clause("family = 'meanrev' AND note contains 'stop'").unwrap();
+        assert_eq!(conds.len(), 2);
+        assert!(matches!(conds[1].1, Op::Contains));
+        assert_eq!(conds[1].2, json!("stop"));
+    }
+
+    #[test]
+    fn not_equal_operator() {
+        let conds = parse_where_clause("regime != 'bull'").unwrap();
+        assert!(matches!(conds[0].1, Op::Ne));
+        assert_eq!(conds[0].2, json!("bull"));
+    }
+
+    #[test]
+    fn two_char_ops_beat_one_char() {
+        assert!(matches!(parse_where_clause("x>=1").unwrap()[0].1, Op::Gte));
+        assert!(matches!(parse_where_clause("x<=1").unwrap()[0].1, Op::Lte));
+    }
+
+    #[test]
+    fn empty_field_errors() {
+        assert!(parse_where_clause("=5").is_err());
+    }
+
+    #[test]
+    fn no_operator_errors() {
+        assert!(parse_where_clause("just_a_field").is_err());
+    }
+
+    #[test]
+    fn bare_bang_errors() {
+        assert!(parse_where_clause("x ! 5").is_err());
+    }
+
+    #[test]
+    fn trailing_garbage_after_scalar_errors() {
+        // "5 oops" is almost certainly a typo'd expression (missing AND) —
+        // it must error, not silently become the string "5 oops".
+        assert!(parse_where_clause("trades = 5 oops").is_err());
+        assert!(parse_where_clause("live = true x").is_err());
+        // Plain multi-word bare strings stay accepted.
+        let conds = parse_where_clause("family = mean rev").unwrap();
+        assert_eq!(conds[0].2, json!("mean rev"));
+    }
+
+    #[test]
+    fn unterminated_quote_errors() {
+        // A dangling quote must error, not silently become a never-matching
+        // string literal.
+        let err = parse_where_clause("family = 'meanrev").unwrap_err();
+        assert!(err.to_string().contains("unterminated"));
+        assert!(parse_where_clause("a = \"x AND b = 2").is_err());
+        // Balanced quotes still parse.
+        assert!(parse_where_clause("family = 'meanrev'").is_ok());
     }
 }

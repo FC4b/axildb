@@ -29,6 +29,8 @@
 
 - [Overview](./cli/overview.md)
 - [Data Commands](./cli/data.md)
+- [Vectors & Similarity](./cli/vectors.md)
+- [Graph Commands](./cli/graph.md)
 - [Export & Import](./cli/export-import.md)
 - [Memory Commands](./cli/memory.md)
 - [Diagnostics](./cli/diagnostics.md)
@@ -42,6 +44,7 @@
 - [Embedded Usage](./api/embedded.md)
 - [Query Builder](./api/query-builder.md)
 - [Plugin Traits](./api/plugin-traits.md)
+- [Python Client](./api/python-client.md)
 
 # Agent Integration
 

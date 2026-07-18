@@ -160,6 +160,16 @@ jobs:
             echo "::warning::No pre-26 Xcode found; using default $(xcode-select -p)"
           fi
           cc --version || true
+      # The first embed auto-downloads bge-small from HuggingFace, and HF
+      # 504s / rate-limits shared runner IPs often enough that an every-run
+      # download is a standing flake source (observed live on PR #29: a
+      # CloudFront 504 failed both OS jobs). With the cache warm, only a
+      # cold-cache run ever touches the network.
+      - name: cache embedding model (HF flake resilience)
+        uses: actions/cache@v4
+        with:
+          path: ~/.axil/models
+          key: embed-model-${{ runner.os }}-bge-small-en-v1.5
       - name: build axil (default features, incl. embed)
         run: cargo build -p axildb
       - name: real embed + recall smoke (fail on ORT init failure)
@@ -169,15 +179,69 @@ jobs:
           BIN="target/debug/axil"
           if [ -f "$BIN.exe" ]; then BIN="$BIN.exe"; fi
           DB="$RUNNER_TEMP/smoke.axil"
+          # Run a CLI invocation, echoing its combined output even on failure.
+          # A bare out=$(...) under `set -e` dies silently on a nonzero exit,
+          # eating the very diagnostics this job exists to surface (learned
+          # live: an HF 504 during the model auto-download failed both OS
+          # jobs with nothing in the log past the init line).
+          run_cli() {
+            local rc=0
+            LAST_OUT=$("$@" 2>&1) || rc=$?
+            echo "$LAST_OUT"
+            if [ "$rc" -ne 0 ]; then
+              echo "::error::command failed (exit $rc): $*"
+              return 1
+            fi
+          }
           "$BIN" init "$DB"
           # Store with auto-embed (a >5-char, non-internal table triggers the
           # embedder); capture combined output so we can scan for the failure.
-          out=$("$BIN" --db "$DB" store notes '{"summary":"auth timeout bug fixed in the login handler"}' 2>&1)
-          echo "$out"
-          out2=$("$BIN" --db "$DB" recall "auth timeout" --top-k 5 2>&1)
-          echo "$out2"
+          run_cli "$BIN" --db "$DB" store notes '{"summary":"auth timeout bug fixed in the login handler"}'
+          out="$LAST_OUT"
+          run_cli "$BIN" --db "$DB" recall "auth timeout" --top-k 5
+          out2="$LAST_OUT"
           if printf '%s\n%s\n' "$out" "$out2" | grep -qi "Failed to initialize ORT API"; then
             echo "::error::ONNX Runtime failed to initialize — the embedder is broken on ${{ matrix.os }}"
+            exit 1
+          fi
+          # Regression gate for the open_with_embedder ordering bug: the probe
+          # used to run AFTER attach_detected_engines had opened the vector
+          # store, so redb rejected the second open of the file this process
+          # already held and the swallowed error surfaced as a bogus
+          # "no vector store found" on every healthy database. `store --embed`
+          # and `search` are the exact hard-failing surfaces from the field
+          # report; plain `store`/`recall` above never caught it because they
+          # ride auto-embed and the best-effort fallback.
+          run_cli "$BIN" --db "$DB" store notes '{"summary":"explicit embed path check"}' --embed summary
+          out3="$LAST_OUT"
+          run_cli "$BIN" --db "$DB" search "explicit embed path"
+          out4="$LAST_OUT"
+          if printf '%s\n%s\n' "$out3" "$out4" | grep -qi "no vector store found"; then
+            echo "::error::open_with_embedder regression — healthy vector store reported as missing"
+            exit 1
+          fi
+          if ! printf '%s\n' "$out3" | grep -q '"id"'; then
+            echo "::error::store --embed did not return a record id"
+            exit 1
+          fi
+          # Auto-create: `store --embed` on a database with no vector store
+          # must create one (an agent's first write is often a store --embed)
+          # rather than bail.
+          DB2="$RUNNER_TEMP/smoke-autocreate.axil"
+          "$BIN" init "$DB2"
+          rm "$DB2.vec"
+          run_cli "$BIN" --db "$DB2" store notes '{"summary":"first embed auto-creates the vector store"}' --embed summary
+          out5="$LAST_OUT"
+          if printf '%s\n' "$out5" | grep -qi "no vector store found"; then
+            echo "::error::store --embed failed to auto-create a missing vector store"
+            exit 1
+          fi
+          if ! printf '%s\n' "$out5" | grep -q '"id"'; then
+            echo "::error::store --embed on a store-less database did not return a record id"
+            exit 1
+          fi
+          if [ ! -f "$DB2.vec" ]; then
+            echo "::error::store --embed did not create the .vec companion file"
             exit 1
           fi
 
@@ -220,8 +284,16 @@ jobs:
       # version in the SAME PR. cargo-semver-checks then sees the new major and
       # accepts the break (a major bump is the sanctioned way to ship an
       # incompatible API). With independent versioning only the broken crate needs it.
+      # axil-ql is TEMPORARILY excluded: the next minor release grows the QL
+      # grammar (AGG, COUNT WHERE), which necessarily grows the public
+      # AST/token enums — now documented as an unstable compilation surface
+      # and marked #[non_exhaustive] so this release is the last time grammar
+      # growth reads as a break. Re-include the crate once that release is on
+      # crates.io (the non_exhaustive baseline makes future variant growth
+      # minor).
       - name: cargo-semver-checks (all publishable crates vs crates.io)
         run: |
           cargo semver-checks check-release --workspace \
             --exclude axildb-umbrella --exclude axil-tests \
+            --exclude axil-ql \
             --default-features

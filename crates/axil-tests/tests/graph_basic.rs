@@ -326,3 +326,98 @@ fn no_graph_index_returns_error() {
     assert!(db.neighbors(&a.id, None, Direction::Out).is_err());
     assert!(db.traverse(&a.id, "->knows").is_err());
 }
+
+// ─── lineage walk ────────────────────────────────────────────────────────────
+
+use axil_core::lineage::{self, LineageDirection};
+
+#[test]
+fn lineage_ancestors_walks_derived_from_chain() {
+    let (db, _dir) = temp_graph_db();
+    let a = db.insert("trials", json!({"n": "A", "sharpe": 1.0})).unwrap();
+    let b = db.insert("trials", json!({"n": "B", "sharpe": 1.5})).unwrap();
+    db.relate(&a.id, "derived_from", &b.id, Some(json!({"mutation": "widen"})))
+        .unwrap();
+
+    let out = lineage::walk(&db, &a.id, "derived_from", LineageDirection::Ancestors, 20, None)
+        .unwrap();
+    let hops = out["hops"].as_array().unwrap();
+    assert_eq!(hops.len(), 2);
+    assert_eq!(hops[0]["id"].as_str().unwrap(), a.id.to_string());
+    assert_eq!(hops[1]["id"].as_str().unwrap(), b.id.to_string());
+    // delta sharpe = 1.5 - 1.0 = 0.5
+    assert!((hops[1]["delta"]["sharpe"].as_f64().unwrap() - 0.5).abs() < 1e-9);
+    assert_eq!(hops[1]["edge"]["props"]["mutation"], "widen");
+}
+
+/// In a branching tree, each sibling's delta is measured against the shared
+/// parent (the node on the other end of the discovering edge), not against
+/// the sibling that happened to be emitted just before it in BFS order.
+#[test]
+fn lineage_branching_deltas_are_parent_relative() {
+    let (db, _dir) = temp_graph_db();
+    let parent = db.insert("trials", json!({"n": "P", "sharpe": 1.0})).unwrap();
+    let c1 = db.insert("trials", json!({"n": "C1", "sharpe": 3.0})).unwrap();
+    let c2 = db.insert("trials", json!({"n": "C2", "sharpe": 0.5})).unwrap();
+    db.relate(&c1.id, "derived_from", &parent.id, None).unwrap();
+    db.relate(&c2.id, "derived_from", &parent.id, None).unwrap();
+
+    let out = lineage::walk(
+        &db,
+        &parent.id,
+        "derived_from",
+        LineageDirection::Descendants,
+        20,
+        None,
+    )
+    .unwrap();
+    let hops = out["hops"].as_array().unwrap();
+    assert_eq!(hops.len(), 3);
+    // Both children measure against P (sharpe 1.0): +2.0 and -0.5 — the
+    // second child must NOT be measured against the first (0.5 - 3.0).
+    let mut deltas: Vec<f64> = hops[1..]
+        .iter()
+        .map(|h| h["delta"]["sharpe"].as_f64().unwrap())
+        .collect();
+    deltas.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    assert!((deltas[0] - (-0.5)).abs() < 1e-9);
+    assert!((deltas[1] - 2.0).abs() < 1e-9);
+}
+
+/// A lineage edge whose endpoint record was deleted (without the graph engine
+/// attached, so the edge survives) is reported as a `missing: true` hop rather
+/// than erroring the whole walk.
+#[test]
+fn lineage_missing_endpoint_is_reported_not_fatal() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("dangling.axil");
+
+    let (a_id, b_id);
+    {
+        let db = Axil::open(&path).with_graph_engine().unwrap().build().unwrap();
+        let a = db.insert("trials", json!({"n": "A"})).unwrap();
+        let b = db.insert("trials", json!({"n": "B"})).unwrap();
+        a_id = a.id.clone();
+        b_id = b.id.clone();
+        db.relate(&a.id, "derived_from", &b.id, None).unwrap();
+    }
+
+    // Delete B with NO graph engine attached, so the A→B edge is not cascaded —
+    // it now dangles at a record that no longer exists.
+    {
+        let db = Axil::open(&path).build().unwrap();
+        assert!(db.delete(&b_id).unwrap());
+    }
+
+    // Reopen with graph: the edge persists but B's record is gone.
+    {
+        let db = Axil::open(&path).with_graph_engine().unwrap().build().unwrap();
+        let out = lineage::walk(&db, &a_id, "derived_from", LineageDirection::Ancestors, 20, None)
+            .unwrap();
+        let hops = out["hops"].as_array().unwrap();
+        assert_eq!(hops.len(), 2);
+        assert_eq!(hops[1]["id"].as_str().unwrap(), b_id.to_string());
+        assert_eq!(hops[1]["missing"], true);
+        assert!(hops[1].get("fields").is_none());
+    }
+}
