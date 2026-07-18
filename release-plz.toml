@@ -16,3 +16,16 @@
 git_release_enable = true
 # Bump intra-workspace dependency requirements when a dependency is released.
 dependencies_update = true
+
+[[package]]
+name = "axil-ql"
+# The QL AST/token enums (Query, TokenKind, AggSpec, AggMetric) are a
+# documented-unstable compilation surface — #[non_exhaustive], "feed strings
+# to run(), don't match the AST" — so grammar growth is deliberately NOT
+# treated as a breaking change. Without this override release-plz's own
+# cargo-semver-checks run classifies enum growth as major and stamps a 3.x;
+# with it, the bump follows conventional commits (feat → minor). This crate
+# is versioned by its *language* surface (query strings in, results out),
+# which only grows additively. Mirrors the axil-ql exclusion in ci.yml's
+# semver gate.
+semver_check = false
