@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.0](https://github.com/FC4b/axildb/compare/axildb-v2.1.2...axildb-v2.2.0) - 2026-07-18
+
+### Added
+
+- *(graph,cli,mcp)* lineage chains with per-hop metric deltas
+- *(vector,cli,mcp)* user-supplied vectors — store --vector, similar, named spaces
+- *(ql,cli,mcp)* AGG aggregations with group-by
+- *(cli,mcp)* where-clause AND expressions + contains + query tool
+- *(cli)* store --embed auto-creates a missing vector store
+
+### Fixed
+
+- *(vector,ql,ci)* keep the R&D-loop release a minor bump
+- *(core,cli,mcp,clients)* second review round — Opencode + Codex findings
+- *(cli,mcp,ql,core)* review fixes — quote guard, parent deltas, typed group keys
+- *(cli)* probe vector store before attaching engines in open_with_embedder
+
+### Other
+
+- *(cli,mcp,ql,core,vector,clients)* simplify pass over the R&D-loop features
+
 ## [2.1.2](https://github.com/FC4b/axildb/compare/axildb-v2.1.1...axildb-v2.1.2) - 2026-07-14
 
 ### Fixed
