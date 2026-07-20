@@ -80,8 +80,11 @@ axil stats
 ### compact
 
 Hard-delete expired/superseded records and clean orphaned edges/vectors/FTS,
-reclaiming space. Does **not** downsample. Runs automatically when the delete
-count crosses `auto_compact_threshold` (default 1000).
+reclaiming space. Does **not** downsample. Also runs automatically as part of
+the end-of-session heal pass and bare `axil heal` — set
+`[healing] auto_compact = false` to keep compaction manual-only, and
+`[lifecycle.tables.<t>] compact = "never"` to exempt an append-only table
+entirely (see [Memory Hygiene](../advanced/memory-hygiene.md)).
 
 ```bash
 axil compact

@@ -156,6 +156,13 @@ pub struct AxilBuilder {
     vector_space_factory: Option<Arc<dyn VectorSpaceFactory>>,
     /// registered Tier-2 Extensions.
     extensions: Vec<Arc<dyn Extension>>,
+    /// Per-table lifecycle policy override. `None` = load from the nearest
+    /// `axil.toml` at build time.
+    lifecycle: Option<crate::config::LifecycleConfig>,
+    /// Auto-supersede similarity threshold override. `None` = load
+    /// `healing.supersede_similarity_threshold` from the nearest `axil.toml`
+    /// at build time (default 0.92).
+    supersede_threshold: Option<f32>,
     /// Set by FTS plugin when schema migration required a rebuild.
     pub needs_fts_reindex: bool,
     /// Open the core store read-only (no single-writer lock), serving committed
@@ -335,6 +342,27 @@ impl AxilBuilder {
         self
     }
 
+    /// Set the per-table lifecycle policy explicitly.
+    ///
+    /// When not called, [`AxilBuilder::build`] loads `[lifecycle]` from the
+    /// `axil.toml` nearest the database file, so CLI/MCP/library opens all
+    /// honor the same policy without extra wiring.
+    pub fn with_lifecycle(mut self, lifecycle: crate::config::LifecycleConfig) -> Self {
+        self.lifecycle = Some(lifecycle);
+        self
+    }
+
+    /// Set the auto-supersede similarity threshold explicitly (0.0–1.0;
+    /// values above 1.0 effectively disable auto-supersede).
+    ///
+    /// When not called, [`AxilBuilder::build`] loads
+    /// `healing.supersede_similarity_threshold` from the `axil.toml` nearest
+    /// the database file (default 0.92).
+    pub fn with_supersede_threshold(mut self, threshold: f32) -> Self {
+        self.supersede_threshold = Some(threshold);
+        self
+    }
+
     /// Register a custom plugin.
     pub fn with_engine(mut self, plugin: Box<dyn Engine>) -> Self {
         self.plugins.push(plugin);
@@ -470,6 +498,21 @@ impl AxilBuilder {
         let llm_rate_limiter = Arc::new(crate::llm::LlmRateLimiter::new(
             self.llm_config.limits.clone(),
         ));
+        // Resolve lifecycle policy + supersede threshold: an explicit builder
+        // value wins; otherwise the `axil.toml` nearest the database governs
+        // (same walk-up search the CLI uses), so every open path — CLI, MCP,
+        // embedded — enforces the same policy.
+        let config_dir = self.path.parent().unwrap_or_else(|| Path::new("."));
+        let lifecycle = self
+            .lifecycle
+            .unwrap_or_else(|| crate::config::load_lifecycle_from(config_dir));
+        let supersede_threshold = self.supersede_threshold.unwrap_or_else(|| {
+            crate::config::load_config_from(config_dir)
+                .map(|c| c.healing.supersede_similarity_threshold as f32)
+                .unwrap_or_else(|_| {
+                    crate::config::HealingConfig::default().supersede_similarity_threshold as f32
+                })
+        });
         let db = Axil {
             path: self.path,
             storage,
@@ -491,6 +534,8 @@ impl AxilBuilder {
             feedback_store: crate::feedback::FeedbackStore::new(),
             canonical_publisher: self.canonical_publisher,
             extensions: std::sync::RwLock::new(self.extensions),
+            lifecycle,
+            supersede_threshold,
             #[cfg(feature = "event-log")]
             event_log_enabled: std::sync::atomic::AtomicBool::new(false),
             #[cfg(feature = "event-log")]
@@ -591,6 +636,12 @@ pub struct Axil {
     /// `Axil` handle (WASM plugins) can register *after* the database is open,
     /// not only at builder time.
     extensions: std::sync::RwLock<Vec<Arc<dyn Extension>>>,
+    /// Per-table lifecycle policy (auto-supersede / decay / compaction
+    /// opt-outs), resolved at build time.
+    lifecycle: crate::config::LifecycleConfig,
+    /// Auto-supersede similarity threshold, resolved at build time from
+    /// `healing.supersede_similarity_threshold` (default 0.92).
+    supersede_threshold: f32,
     /// Runtime gate for the durable semantic event log. Off by default even when
     /// the `event-log` feature is compiled in — it is a write-amplifier, so the
     /// caller opts in explicitly via [`Axil::set_event_log_enabled`].
@@ -618,6 +669,8 @@ impl Axil {
             canonical_publisher: None,
             vector_space_factory: None,
             extensions: Vec::new(),
+            lifecycle: None,
+            supersede_threshold: None,
             needs_fts_reindex: false,
             read_only: false,
             #[cfg(feature = "encryption")]
@@ -2058,6 +2111,13 @@ impl Axil {
                 if record.table == SUMMARIES_TABLE {
                     continue;
                 }
+                // Append-only tables are excluded from downsampling entirely:
+                // originals are kept, never summarized-and-purged.
+                if self.lifecycle.policy_for(&record.table).compact
+                    == crate::config::CompactMode::Never
+                {
+                    continue;
+                }
                 let day = record.created_at.format("%Y-%m-%d").to_string();
                 groups
                     .entry((record.table.clone(), day))
@@ -2711,6 +2771,13 @@ impl Axil {
         let all_ids = self.storage.all_record_ids()?;
         for id in &all_ids {
             if let Some(record) = self.storage.get(id)? {
+                // Append-only tables (`[lifecycle.tables.<t>] compact = "never"`)
+                // are never purged — audit-log semantics.
+                if self.lifecycle.policy_for(&record.table).compact
+                    == crate::config::CompactMode::Never
+                {
+                    continue;
+                }
                 // Protect high-importance records from compaction
                 if crate::importance::is_pinned(&record.data)
                     || crate::importance::get_importance(&record.data) >= 0.8
@@ -2836,8 +2903,16 @@ impl Axil {
         let mut expired = 0usize;
         let mut superseded = 0usize;
         // Scan all records directly (single pass) instead of IDs + N gets.
+        // Records in `compact = "never"` tables are not "dead" — they will
+        // never be purged, so counting them would make doctor/session-heal
+        // nag (and trigger auto-heal) about records that are kept by design.
         if let Ok(records) = self.storage.scan_all_records() {
             for record in &records {
+                if self.lifecycle.policy_for(&record.table).compact
+                    == crate::config::CompactMode::Never
+                {
+                    continue;
+                }
                 if is_expired_record(record, &now) {
                     expired += 1;
                 } else if is_superseded_record(record) {
@@ -3262,6 +3337,22 @@ impl Axil {
             let problems = self.detect_problems();
             for p in &problems {
                 if p.auto_fixable {
+                    // Purge-type fixes are gated on auto_compact below — keep
+                    // the dry-run preview consistent with the real run.
+                    let purge_type = matches!(
+                        p.detector.as_str(),
+                        "expired_records" | "superseded_records" | "storage_bloat"
+                    );
+                    if purge_type && !config.auto_compact {
+                        actions.push(crate::diagnostics::HealAction {
+                            action: p.detector.clone(),
+                            result: format!(
+                                "[dry-run] skipped (healing.auto_compact = false): {}",
+                                p.message
+                            ),
+                        });
+                        continue;
+                    }
                     actions.push(crate::diagnostics::HealAction {
                         action: p.detector.clone(),
                         result: format!("[dry-run] would fix: {}", p.message),
@@ -3275,19 +3366,51 @@ impl Axil {
             });
         }
 
-        // 1. Compact (expired + superseded + orphans)
-        let compact_report = self.compact()?;
-        if compact_report.compacted {
-            actions.push(crate::diagnostics::HealAction {
-                action: "compact".to_string(),
-                result: format!(
-                    "purged {} expired, {} superseded, {} orphaned edges, {} orphaned vectors",
-                    compact_report.purged_expired,
-                    compact_report.purged_superseded,
-                    compact_report.cleaned_orphaned_edges,
-                    compact_report.cleaned_orphaned_vectors,
-                ),
-            });
+        // 1. Compact (expired + superseded + orphans). `auto_compact = false`
+        // makes compaction manual-only (`axil heal --compact` / `axil compact`)
+        // — heal_all is what the session-close hook runs, so this knob is the
+        // operator's way to keep automatic healing from ever hard-deleting.
+        if config.auto_compact {
+            let compact_report = self.compact()?;
+            if compact_report.compacted {
+                actions.push(crate::diagnostics::HealAction {
+                    action: "compact".to_string(),
+                    result: format!(
+                        "purged {} expired, {} superseded, {} orphaned edges, {} orphaned vectors",
+                        compact_report.purged_expired,
+                        compact_report.purged_superseded,
+                        compact_report.cleaned_orphaned_edges,
+                        compact_report.cleaned_orphaned_vectors,
+                    ),
+                });
+            }
+        } else {
+            // Orphan cleanup is referential-integrity repair, not record
+            // deletion — it stays on even when purging is manual-only.
+            // Otherwise a dangling edge/vector would be redetected as
+            // auto-fixable forever with nothing ever fixing it.
+            let cleaned_edges = self.clean_orphaned_edges();
+            let cleaned_vectors = self.clean_orphaned_vectors();
+            let cleaned_fts = self.clean_orphaned_fts();
+            if cleaned_edges + cleaned_vectors + cleaned_fts > 0 {
+                actions.push(crate::diagnostics::HealAction {
+                    action: "clean_orphans".to_string(),
+                    result: format!(
+                        "removed {cleaned_edges} orphaned edges, {cleaned_vectors} orphaned \
+                         vectors, {cleaned_fts} orphaned FTS entries",
+                    ),
+                });
+            }
+            let (expired, superseded) = self.count_dead_records();
+            if expired + superseded > 0 {
+                actions.push(crate::diagnostics::HealAction {
+                    action: "compact_skipped".to_string(),
+                    result: format!(
+                        "{expired} expired + {superseded} superseded records pending; \
+                         healing.auto_compact = false — run 'axil heal --compact' to purge",
+                    ),
+                });
+            }
         }
 
         // 2. Rebuild vector index if needed
@@ -3324,8 +3447,13 @@ impl Axil {
             });
         }
 
+        // The `compact_skipped` entry is informational (nothing changed), so
+        // it must not report the database as healed — session-heal logs would
+        // otherwise claim a successful repair every session while the same
+        // records stay pending.
+        let healed = actions.iter().any(|a| a.action != "compact_skipped");
         Ok(crate::diagnostics::SelfHealReport {
-            healed: !actions.is_empty(),
+            healed,
             actions,
             duration_ms: start.elapsed().as_secs_f64() * 1000.0,
         })
@@ -4530,13 +4658,30 @@ impl Axil {
         &self.feedback_store
     }
 
+    /// Lifecycle policy for a table (default policy when not configured).
+    ///
+    /// Resolved at build time from `[lifecycle.tables.<table>]` in the
+    /// nearest `axil.toml`, or from [`AxilBuilder::with_lifecycle`].
+    pub fn lifecycle_policy(&self, table: &str) -> crate::config::TableLifecycle {
+        self.lifecycle.policy_for(table)
+    }
+
+    /// The auto-supersede similarity threshold in effect for this handle.
+    pub fn supersede_threshold(&self) -> f32 {
+        self.supersede_threshold
+    }
+
     /// Auto-supersede using a pre-computed embedding vector.
     ///
     /// Returns the number of existing records marked superseded. A normal
     /// insert discards this; [`crate::portable`] import uses it to report how
     /// many local records an import demoted.
     fn auto_supersede_with_vector(&self, new_record: &Record, vector: &[f32]) -> Result<usize> {
-        const SUPERSEDE_THRESHOLD: f32 = 0.92;
+        // Append-only tables (experiment logs, audit trails) opt out entirely:
+        // near-duplicate records there are distinct events, not revisions.
+        if !self.lifecycle.policy_for(&new_record.table).supersede {
+            return Ok(0);
+        }
 
         let mut superseded = 0usize;
         let candidates = self.similar_to_vector(vector, 10)?;
@@ -4547,7 +4692,7 @@ impl Axil {
             if candidate.table != new_record.table {
                 continue;
             }
-            if *score < SUPERSEDE_THRESHOLD {
+            if *score < self.supersede_threshold {
                 continue;
             }
             if crate::importance::is_pinned(&candidate.data) {

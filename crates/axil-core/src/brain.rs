@@ -613,12 +613,18 @@ pub fn remember(db: &Axil, observation: Observation) -> Result<PipelineOutcome> 
     }
 
     // Check for duplicates/superseding via vector similarity (if available).
-    let resolve_result =
-        if text.len() >= MIN_TEXT_FOR_VECTOR && db.has_vector_index() && db.has_embedder() {
-            resolve_against_existing(db, &text, table)
-        } else {
-            ResolveResult::Novel
-        };
+    // Append-only tables (`[lifecycle.tables.<t>] supersede = false`) skip
+    // resolution entirely: near-identical observations there are distinct
+    // events that must all be stored, never deduped or demoted.
+    let resolve_result = if text.len() >= MIN_TEXT_FOR_VECTOR
+        && db.has_vector_index()
+        && db.has_embedder()
+        && db.lifecycle_policy(table).supersede
+    {
+        resolve_against_existing(db, &text, table)
+    } else {
+        ResolveResult::Novel
+    };
 
     // ── Stage 5: Score — compute confidence ──
     let confidence = match &resolve_result {
@@ -732,6 +738,10 @@ fn resolve_against_existing(db: &Axil, text: &str, table: &str) -> ResolveResult
         Err(_) => return ResolveResult::Novel,
     };
 
+    // Same knob as the core insert path (`healing.supersede_similarity_threshold`,
+    // default 0.92); values above 1.0 disable superseding here too.
+    let supersede_threshold = db.supersede_threshold();
+
     for (record, similarity) in &similar {
         // Only consider records in the same table.
         if record.table != table {
@@ -762,7 +772,7 @@ fn resolve_against_existing(db: &Axil, text: &str, table: &str) -> ResolveResult
         }
 
         // Check for superseding/contradicting via conflict detection.
-        if *similarity >= 0.92 {
+        if *similarity >= supersede_threshold {
             let temp_record = Record::new(table, json!({ "summary": text }));
             match check_conflict(&temp_record, record, *similarity) {
                 ConflictResult::Supersedes {

@@ -138,6 +138,11 @@ pub struct DecayConfig {
 impl DecayConfig {
     /// Resolve the half-life (in days) for a given table, falling back to
     /// `importance::DEFAULT_HALF_LIFE_DAYS` when no override is set.
+    ///
+    /// Arbitrarily large overrides (up to `f64::MAX`, the "never decays"
+    /// sentinel that materializes `[lifecycle.tables.<t>] decay = false` in
+    /// [`load_config_from`]) are valid: `0.5^(age/f64::MAX)` rounds to `1.0`,
+    /// so importance holds.
     pub fn half_life_for(&self, table: &str) -> f64 {
         self.tables
             .get(table)
@@ -145,6 +150,100 @@ impl DecayConfig {
             .filter(|v| *v > 0.0 && v.is_finite())
             .unwrap_or(crate::importance::DEFAULT_HALF_LIFE_DAYS)
     }
+}
+
+/// Per-table lifecycle policy (`[lifecycle.tables.<table>]`).
+///
+/// Lets a table opt out of the automatic memory-hygiene machinery — for
+/// append-only data (experiment logs, audit trails) where near-duplicate
+/// records are *distinct events*, not revisions of one fact:
+///
+/// ```toml
+/// [lifecycle.tables.autopsies]
+/// supersede = false   # similar new records never demote existing ones
+/// decay = false       # importance never decays
+/// compact = "never"   # compaction never purges this table's records
+/// ```
+///
+/// Deliberately **not** a field on [`AxilConfig`] (that struct is publicly
+/// constructible, so growing it is a semver break); it is parsed from the same
+/// `axil.toml` by [`load_lifecycle_from`], and `AxilBuilder::build` picks it up
+/// automatically for the config file nearest the database.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LifecycleConfig {
+    /// Map of table-name → lifecycle policy. Missing tables get the default
+    /// policy (everything enabled).
+    pub tables: std::collections::BTreeMap<String, TableLifecycle>,
+}
+
+impl LifecycleConfig {
+    /// Resolve the policy for a table (default policy when not configured).
+    pub fn policy_for(&self, table: &str) -> TableLifecycle {
+        self.tables.get(table).cloned().unwrap_or_default()
+    }
+}
+
+/// Lifecycle policy for one table. All knobs default to the current behavior
+/// (supersede on, decay on, compaction allowed).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TableLifecycle {
+    /// Allow auto-supersede to demote existing records in this table when a
+    /// similar new record is inserted. `false` = every record is kept live.
+    pub supersede: bool,
+    /// Allow importance decay for this table's records. `false` = importance
+    /// holds indefinitely (half-life becomes infinite).
+    pub decay: bool,
+    /// Whether `compact()` may purge this table's expired/superseded records.
+    pub compact: CompactMode,
+}
+
+impl Default for TableLifecycle {
+    fn default() -> Self {
+        Self {
+            supersede: true,
+            decay: true,
+            compact: CompactMode::Auto,
+        }
+    }
+}
+
+/// Compaction policy for a table (`compact = "auto" | "never"`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CompactMode {
+    /// Normal behavior: expired/superseded records are purged by `compact()`.
+    Auto,
+    /// Append-only / audit-log semantics: `compact()` never deletes records
+    /// from this table (orphan cleanup of dangling edges/vectors still runs).
+    Never,
+}
+
+/// Load the `[lifecycle]` section from the nearest `axil.toml` (same search
+/// order as [`load_config_from`]: walk up from `start_dir`, then the global
+/// `~/.config/axil/config.toml`, then defaults).
+///
+/// Best-effort: an unreadable or invalid file yields the default (empty)
+/// policy rather than an error, matching how optional tuning config is treated
+/// elsewhere.
+pub fn load_lifecycle_from(start_dir: &Path) -> LifecycleConfig {
+    let Some(path) = find_config_file(start_dir) else {
+        return LifecycleConfig::default();
+    };
+    let Ok(contents) = std::fs::read_to_string(&path) else {
+        return LifecycleConfig::default();
+    };
+    lifecycle_from_toml(&contents)
+}
+
+/// Parse the `[lifecycle]` section out of a raw `axil.toml` document.
+fn lifecycle_from_toml(contents: &str) -> LifecycleConfig {
+    toml::from_str::<toml::Value>(contents)
+        .ok()
+        .and_then(|v| v.get("lifecycle").cloned())
+        .and_then(|v| v.try_into().ok())
+        .unwrap_or_default()
 }
 
 /// Brain configuration.
@@ -587,6 +686,14 @@ pub fn default_config_toml() -> String {
 # snapshot_interval = "daily"              # how often to snapshot for trends
 # max_audit_log_entries = 10000            # auto-rotate audit log
 
+# Per-table lifecycle policy — append-only / audit-log semantics for tables
+# whose similar-sounding records are distinct events, not revisions (e.g. an
+# experiment log). All knobs default to normal behavior.
+# [lifecycle.tables.autopsies]
+# supersede = false                        # never auto-demote records in this table
+# decay = false                            # importance never decays
+# compact = "never"                        # "auto" | "never" — never purge this table
+
 [llm]
 # endpoint = "https://api.openai.com/v1/chat/completions"  # LLM API endpoint
 # model = "gpt-4o-mini"                   # model name
@@ -635,8 +742,9 @@ pub fn load_config_from(start_dir: &Path) -> Result<AxilConfig, String> {
         if candidate.exists() {
             let contents = std::fs::read_to_string(&candidate)
                 .map_err(|e| format!("failed to read {}: {e}", candidate.display()))?;
-            let config: AxilConfig = toml::from_str(&contents)
+            let mut config: AxilConfig = toml::from_str(&contents)
                 .map_err(|e| format!("invalid config in {}: {e}", candidate.display()))?;
+            apply_lifecycle_decay_overrides(&mut config, &contents);
             return Ok(config);
         }
         if !dir.pop() {
@@ -650,13 +758,34 @@ pub fn load_config_from(start_dir: &Path) -> Result<AxilConfig, String> {
         if global.exists() {
             let contents = std::fs::read_to_string(&global)
                 .map_err(|e| format!("failed to read {}: {e}", global.display()))?;
-            let config: AxilConfig = toml::from_str(&contents)
+            let mut config: AxilConfig = toml::from_str(&contents)
                 .map_err(|e| format!("invalid config in {}: {e}", global.display()))?;
+            apply_lifecycle_decay_overrides(&mut config, &contents);
             return Ok(config);
         }
     }
 
     Ok(AxilConfig::default())
+}
+
+/// Materialize `[lifecycle.tables.<t>] decay = false` as an effectively
+/// infinite half-life in `[decay]`, so every consumer of
+/// [`DecayConfig::half_life_for`] (tiering, boot recency, `axil decay`) honors
+/// the opt-out without knowing about lifecycle policy. An explicit
+/// `[decay] tables.<t>` entry is overridden — `decay = false` is the stronger,
+/// more specific statement.
+///
+/// The sentinel is `f64::MAX`, not `f64::INFINITY`: serde_json renders
+/// non-finite floats as `null`, which would make `axil config show` and saved
+/// reports lie about the configured value. `0.5^(age/f64::MAX)` still rounds
+/// to exactly `1.0` for any real age, so importance holds either way.
+fn apply_lifecycle_decay_overrides(config: &mut AxilConfig, contents: &str) {
+    let lifecycle = lifecycle_from_toml(contents);
+    for (table, policy) in &lifecycle.tables {
+        if !policy.decay {
+            config.decay.tables.insert(table.clone(), f64::MAX);
+        }
+    }
 }
 
 /// Get a config value by dotted key (e.g. "dev.source_repo").
@@ -884,6 +1013,69 @@ mod tests {
         let cfg: AxilConfig = toml::from_str(src).expect("parse");
         assert_eq!(cfg.decay.half_life_for("errors"), 7.0);
         assert_eq!(cfg.decay.half_life_for("preferences"), 365.0);
+    }
+
+    #[test]
+    fn lifecycle_parses_from_toml() {
+        let src = r#"
+            [lifecycle.tables.autopsies]
+            supersede = false
+            decay = false
+            compact = "never"
+
+            [lifecycle.tables.notes]
+            supersede = false
+        "#;
+        let cfg = lifecycle_from_toml(src);
+
+        let autopsies = cfg.policy_for("autopsies");
+        assert!(!autopsies.supersede);
+        assert!(!autopsies.decay);
+        assert_eq!(autopsies.compact, CompactMode::Never);
+
+        // Partial policy: unspecified knobs keep their defaults.
+        let notes = cfg.policy_for("notes");
+        assert!(!notes.supersede);
+        assert!(notes.decay);
+        assert_eq!(notes.compact, CompactMode::Auto);
+
+        // Unconfigured table gets the do-everything default.
+        let other = cfg.policy_for("decisions");
+        assert!(other.supersede);
+        assert!(other.decay);
+        assert_eq!(other.compact, CompactMode::Auto);
+    }
+
+    #[test]
+    fn lifecycle_absent_or_invalid_yields_default() {
+        assert!(lifecycle_from_toml("").tables.is_empty());
+        assert!(lifecycle_from_toml("[healing]\nauto_compact = false")
+            .tables
+            .is_empty());
+        // Invalid TOML degrades to the default policy, never an error.
+        assert!(lifecycle_from_toml("not [ valid").tables.is_empty());
+    }
+
+    #[test]
+    fn lifecycle_decay_false_materializes_never_decay_half_life() {
+        let src = r#"
+            [decay]
+            tables.autopsies = 7
+
+            [lifecycle.tables.autopsies]
+            decay = false
+        "#;
+        let mut cfg: AxilConfig = toml::from_str(src).expect("parse");
+        apply_lifecycle_decay_overrides(&mut cfg, src);
+        // lifecycle wins over the explicit [decay] entry. The sentinel must be
+        // finite: serde_json renders non-finite floats as null, which would
+        // corrupt `axil config show` output.
+        assert_eq!(cfg.decay.half_life_for("autopsies"), f64::MAX);
+        assert!(serde_json::to_value(&cfg.decay).unwrap()["tables"]["autopsies"].is_f64());
+        // The sentinel half-life means no decay at any age.
+        let mut data = serde_json::json!({"_importance": 0.6});
+        let after = crate::importance::apply_decay(&mut data, 365.0, f64::MAX);
+        assert_eq!(after, Some(0.6));
     }
 
     #[test]

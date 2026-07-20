@@ -81,10 +81,10 @@ pub use boot::{
 };
 pub use config::{
     default_config_toml, find_config_file, get_config_value, home_dir, load_config_from,
-    set_config_string_array, set_config_value, AxilConfig, DatabaseConfig, DebugConfig, DecayConfig,
-    DevConfig,
-    DiagnoseConfig, EnginesConfig, ExtensionsConfig, FtsConfig, HealingConfig, IndexConfig,
-    MetricsHealingConfig, OptimizeConfig, PluginConfig, RuntimeConfig, TimeseriesConfig,
+    load_lifecycle_from, set_config_string_array, set_config_value, AxilConfig, CompactMode,
+    DatabaseConfig, DebugConfig, DecayConfig, DevConfig, DiagnoseConfig, EnginesConfig,
+    ExtensionsConfig, FtsConfig, HealingConfig, IndexConfig, LifecycleConfig, MetricsHealingConfig,
+    OptimizeConfig, PluginConfig, RuntimeConfig, TableLifecycle, TimeseriesConfig,
 };
 pub use db::{
     companion_path, drop_engine_companion, is_valid_space_name, AutoLinkReport, Axil, AxilBuilder,

@@ -40,17 +40,48 @@ you which heavier tool to reach for next.
 `db.compact()` does three things:
 
 1. Purges records with expired `valid_until` timestamps
-2. Hard-deletes records marked `superseded` past the retention window
+2. Hard-deletes records marked `superseded`
 3. Cleans orphaned edges, vectors, and FTS entries (those pointing at
    record IDs that no longer exist)
 
-Returns a `CompactReport` showing counts cleaned. Cheap to run on a
-healthy DB — most cleanup paths short-circuit when there's nothing to
-do.
+Skipped: pinned records, records with importance ≥ 0.8, and every record
+in a table configured `compact = "never"` (see below). Returns a
+`CompactReport` showing counts cleaned. Cheap to run on a healthy DB —
+most cleanup paths short-circuit when there's nothing to do.
 
-Auto-compact runs automatically when delete count crosses
-`auto_compact_threshold` in `axil.toml` (default `1000`). Set lower
-for high-churn workloads, higher to reduce auto-compact frequency.
+Compaction also runs *automatically*: the end-of-session heal pass
+(`axil session-heal`, run by the Stop hook) and bare `axil heal` both
+compact whenever any expired or superseded records exist. Set
+`[healing] auto_compact = false` to make compaction strictly manual —
+automatic healing then reports what is pending instead of purging, and
+only an explicit `axil compact` / `axil heal --compact` deletes.
+Orphan cleanup (dangling edges/vectors/FTS entries) still runs either
+way — it repairs referential integrity and never deletes records.
+
+## Append-only tables — `[lifecycle.tables.<t>]`
+
+Auto-supersede assumes similar text means *a newer revision of the same
+fact*. That is wrong for experiment logs, trade autopsies, and audit
+trails, where hundreds of similar-sounding records are **distinct events
+that must all survive** (counting every trial, keeping lineage parents
+resolvable). Give those tables append-only semantics:
+
+```toml
+[lifecycle.tables.autopsies]
+supersede = false   # never demote records in this table
+decay = false       # importance never decays
+compact = "never"   # compact()/heal never delete from this table
+```
+
+`compact = "never"` also covers time-series downsampling (the bare
+`axil heal` retention purge): protected tables are neither summarized
+nor deleted when records age past `full_retention_days`. Protected
+records are likewise excluded from the "pending cleanup" counts, so
+`doctor` and `session-heal` don't nag (or auto-heal) about records that
+are kept by design. The policy is enforced inside the core
+insert/compact/downsample paths, so CLI, MCP, and embedded use all
+honor it. To scope it to a single database in a multi-DB project, put
+the `axil.toml` next to that `.axil` file — the nearest config wins.
 
 ## `axil heal` — compact + rebuild
 
@@ -195,9 +226,15 @@ For a working agent memory DB:
   --reindex` only when doctor flags drift
 
 For a heavy-churn DB (lots of inserts/deletes):
-- Lower `auto_compact_threshold` to ~200
+- Lower `[healing] compact_expired_threshold` / `compact_superseded_threshold`
+  so `doctor` flags cleanup pressure earlier
 - Add `axil compact` to a daily cron
 - Snapshot to a branch before bulk imports
+
+For an append-only DB (experiment logs, audit trails):
+- Set `[lifecycle.tables.<t>] supersede = false` + `compact = "never"`
+  for the append-only tables, or `[healing] auto_compact = false` to make
+  all compaction manual
 
 ## See also
 

@@ -6625,6 +6625,27 @@ fn load_config(db_path: &Path) -> Result<axil_core::AxilConfig> {
     axil_core::load_config_from(dir).map_err(|e| anyhow::anyhow!("{e}"))
 }
 
+/// Resolve a dotted key against the raw `axil.toml` document. Covers sections
+/// that are not `AxilConfig` fields (e.g. `lifecycle.tables.<t>.supersede`),
+/// which `get_config_value` cannot see.
+fn raw_config_value(start_dir: &Path, key: &str) -> Option<String> {
+    let path = axil_core::find_config_file(start_dir)?;
+    let contents = std::fs::read_to_string(&path).ok()?;
+    let doc: toml::Value = toml::from_str(&contents).ok()?;
+    let mut current = &doc;
+    for part in key.split('.') {
+        current = current.get(part)?;
+    }
+    match current {
+        toml::Value::String(s) => Some(s.clone()),
+        toml::Value::Integer(n) => Some(n.to_string()),
+        toml::Value::Float(f) => Some(f.to_string()),
+        toml::Value::Boolean(b) => Some(b.to_string()),
+        toml::Value::Datetime(d) => Some(d.to_string()),
+        toml::Value::Table(_) | toml::Value::Array(_) => None,
+    }
+}
+
 /// Wire up an LLM provider to an existing Axil database based on config.
 ///
 /// This re-opens the database with LLM support. If no LLM config is found,
@@ -7826,11 +7847,12 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             let now = chrono::Utc::now();
             let tier_config = axil_core::tiering::TierConfig::default();
 
-            // Load project config so per-table decay half-lives (e.g. faster
-            // decay for `errors`, slower for `preferences`) apply to tiering.
-            let decay_cfg = detect_project_root(&db_path)
-                .and_then(|r| axil_core::load_config_from(&r).ok())
-                .map(|c| c.decay);
+            // Load config so per-table decay half-lives (e.g. faster decay for
+            // `errors`, slower for `preferences`) apply to tiering. Resolved
+            // from the DB's own directory upward so a database-local
+            // `axil.toml` (and its `[lifecycle] decay = false` opt-outs) wins
+            // over the project root.
+            let decay_cfg = load_config(&db_path).ok().map(|c| c.decay);
 
             // Collect all records and classify tiers
             let tables = db.tables().context("failed to list tables")?;
@@ -7912,10 +7934,10 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             let default_half_life = axil_core::importance::DEFAULT_HALF_LIFE_DAYS;
             let threshold = axil_core::importance::ARCHIVE_THRESHOLD;
 
-            // Per-table half-life overrides from axil.toml `[decay.tables]`.
-            let decay_cfg = detect_project_root(&db_path)
-                .and_then(|r| axil_core::load_config_from(&r).ok())
-                .map(|c| c.decay);
+            // Per-table half-life overrides from axil.toml `[decay.tables]`,
+            // resolved from the DB's own directory upward so a database-local
+            // config (and its `[lifecycle] decay = false` opt-outs) wins.
+            let decay_cfg = load_config(&db_path).ok().map(|c| c.decay);
 
             let tables = db.tables().context("failed to list tables")?;
             let mut results = Vec::new();
@@ -17142,12 +17164,29 @@ fn run_config(cmd: ConfigCommand, out: &Output) -> Result<i32> {
 
         ConfigCommand::Show => {
             let config = axil_core::load_config_from(&cwd).map_err(|e| anyhow::anyhow!("{e}"))?;
-            out.print(&json!({
-                "config": serde_json::to_value(&config).unwrap_or(json!(null)),
-            }));
+            let mut config_json = serde_json::to_value(&config).unwrap_or(json!(null));
+            // `[lifecycle]` is parsed separately from AxilConfig (it is not a
+            // field there); merge it into the display so `show` is complete.
+            let lifecycle = axil_core::load_lifecycle_from(&cwd);
+            if !lifecycle.tables.is_empty() {
+                if let Some(obj) = config_json.as_object_mut() {
+                    obj.insert(
+                        "lifecycle".to_string(),
+                        serde_json::to_value(&lifecycle).unwrap_or(json!(null)),
+                    );
+                }
+            }
+            out.print(&json!({ "config": config_json }));
             if !out.quiet {
                 if let Ok(toml_str) = toml::to_string_pretty(&config) {
                     out.status(&toml_str);
+                }
+                if !lifecycle.tables.is_empty() {
+                    if let Ok(toml_str) =
+                        toml::to_string_pretty(&json!({ "lifecycle": lifecycle }))
+                    {
+                        out.status(&toml_str);
+                    }
                 }
             }
             Ok(EXIT_OK)
@@ -17155,7 +17194,9 @@ fn run_config(cmd: ConfigCommand, out: &Output) -> Result<i32> {
 
         ConfigCommand::Get { key } => {
             let config = axil_core::load_config_from(&cwd).map_err(|e| anyhow::anyhow!("{e}"))?;
-            match axil_core::get_config_value(&config, &key) {
+            let value = axil_core::get_config_value(&config, &key)
+                .or_else(|| raw_config_value(&cwd, &key));
+            match value {
                 Some(value) => {
                     out.print(&json!({"key": key, "value": value}));
                     Ok(EXIT_OK)

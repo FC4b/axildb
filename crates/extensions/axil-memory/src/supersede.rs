@@ -27,10 +27,13 @@ pub struct SupersedeEngine<'a> {
 }
 
 impl<'a> SupersedeEngine<'a> {
+    /// The threshold defaults to the handle's configured
+    /// `healing.supersede_similarity_threshold` (0.92 when unset); override
+    /// with [`SupersedeEngine::with_threshold`].
     pub fn new(db: &'a Axil) -> Self {
         Self {
             db,
-            threshold: DEFAULT_SUPERSEDE_THRESHOLD,
+            threshold: db.supersede_threshold(),
         }
     }
 
@@ -48,6 +51,11 @@ impl<'a> SupersedeEngine<'a> {
     /// Returns the IDs of superseded records.
     pub fn check_and_supersede(&self, new_record: &Record) -> Result<Vec<RecordId>> {
         if !self.db.has_vector_index() {
+            return Ok(Vec::new());
+        }
+
+        // Append-only tables opt out of superseding entirely.
+        if !self.db.lifecycle_policy(&new_record.table).supersede {
             return Ok(Vec::new());
         }
 
