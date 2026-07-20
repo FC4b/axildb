@@ -426,7 +426,12 @@ When to use which:
 #[command(
     name = "axil",
     about = "One file. One binary. Built for agents.",
-    version,
+    // Crate semver plus the git state of the source tree, e.g.
+    // `axil 2.2.0 (e4b647d-dirty)`. The describe suffix distinguishes two
+    // builds of the same unreleased version, and `-dirty` flags
+    // uncommitted-source builds (see build.rs). Empty suffix (crates.io
+    // builds, tarballs) degrades to the plain semver.
+    version = concat!(env!("CARGO_PKG_VERSION"), env!("AXIL_VERSION_SUFFIX")),
     after_help = COMMANDS_OVERVIEW
 )]
 struct Cli {
@@ -17232,8 +17237,11 @@ fn run_report(cmd: ReportCommand, db_opt: &Option<PathBuf>, out: &Output) -> Res
             let reports_dir = cwd.join(&config.dev.reports_dir);
             std::fs::create_dir_all(&reports_dir).context("failed to create reports directory")?;
 
-            // Collect environment info
-            let axil_version = env!("CARGO_PKG_VERSION").to_string();
+            // Collect environment info. Include the git-describe suffix: a
+            // field report from a stale or uncommitted-source build should
+            // say so (two builds can share one crate version).
+            let axil_version =
+                concat!(env!("CARGO_PKG_VERSION"), env!("AXIL_VERSION_SUFFIX")).to_string();
             let os = std::env::consts::OS;
             let arch = std::env::consts::ARCH;
 
