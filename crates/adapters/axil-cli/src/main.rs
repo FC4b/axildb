@@ -1569,6 +1569,9 @@ enum Command {
         /// Filter by table name.
         #[arg(long)]
         table: Option<String>,
+        /// Cap the result to the N most recent records.
+        #[arg(long)]
+        limit: Option<usize>,
     },
 
     /// Show a timeline of records (newest first).
@@ -10203,12 +10206,23 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
 
         // ── Since ───────────────────────────────────────────────────
         #[cfg(feature = "timeseries")]
-        Command::Since { duration, table } => {
+        Command::Since {
+            duration,
+            table,
+            limit,
+        } => {
             let db_path = require_db(&db_opt)?;
             let secs = parse_duration(&duration)?;
             let db = open_with_timeseries(&db_path)?;
 
-            let records = db.since(table.as_deref(), secs)?;
+            let mut records = db.since(table.as_deref(), secs)?;
+            // `since` yields oldest-first; a limit should keep the *newest* N,
+            // so drop from the front rather than truncating the tail.
+            if let Some(n) = limit {
+                if records.len() > n {
+                    records.drain(..records.len() - n);
+                }
+            }
 
             let values: Vec<Value> = records.iter().map(record_to_json).collect();
             out.print_array(&values);
