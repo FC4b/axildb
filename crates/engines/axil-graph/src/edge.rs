@@ -48,6 +48,8 @@ impl Edge {
     }
 
     /// Check if this edge is temporally valid at a given point in time.
+    ///
+    /// First axis: event time (was the fact true at `at`?).
     pub fn is_valid_at(&self, at: &DateTime<Utc>) -> bool {
         if let Some(ref vf) = self.valid_from {
             if at < vf {
@@ -60,6 +62,22 @@ impl Edge {
             }
         }
         true
+    }
+
+    /// Check if this edge was knowable at a point in knowledge time —
+    /// the second temporal axis. `is_valid_at` answers "was the fact true at
+    /// event time T?"; this answers "had we recorded it by time T?". An edge
+    /// created after `at` was not yet part of the agent's world view.
+    pub fn known_at(&self, at: &DateTime<Utc>) -> bool {
+        self.created_at <= *at
+    }
+
+    /// Both temporal axes at once: the fact was valid at `event_time` AND
+    /// recorded by `knowledge_time`. This is the predicate for bi-temporal
+    /// queries like "review the dependency edges as we knew them before the
+    /// correction landed".
+    pub fn visible_at(&self, event_time: &DateTime<Utc>, knowledge_time: &DateTime<Utc>) -> bool {
+        self.is_valid_at(event_time) && self.known_at(knowledge_time)
     }
 
     pub fn to_bytes(&self) -> Result<Vec<u8>, serde_json::Error> {

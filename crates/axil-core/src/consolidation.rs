@@ -155,9 +155,11 @@ pub fn check_conflict(
     // Determine confidence level
     let confidence = detect_conflict_confidence(&new_lower, &existing_lower, &shared, similarity);
 
-    // Only auto-supersede on High confidence (explicit negation detected).
-    // Medium/Low are treated as Novel — callers can inspect confidence
-    // separately via detect_conflict_confidence() if they want to surface them.
+    // Only High confidence (explicit negation detected) auto-supersedes.
+    // Medium — near-identical framing about a shared entity whose value
+    // changed ("deploys at 5pm" -> "deploys at 6pm") — is surfaced as a
+    // contradiction for review: an edge the agent can query, never a silent
+    // demotion of the old record. Low stays novel: too noisy to edge.
     match confidence {
         ConflictConfidence::High => {
             if new_record.created_at > existing_record.created_at {
@@ -172,6 +174,10 @@ pub fn check_conflict(
                 }
             }
         }
+        ConflictConfidence::Medium => ConflictResult::Contradicts {
+            existing_record_id: existing_record.id.clone(),
+            similarity,
+        },
         _ => ConflictResult::Novel,
     }
 }
@@ -398,6 +404,47 @@ mod tests {
             }
             _ => panic!("expected Supersedes or Novel"),
         }
+    }
+
+    #[test]
+    fn changed_value_surfaces_contradiction_without_superseding() {
+        // Same entity, same framing, changed value, no negation word — the
+        // "the build command changed" case. Must surface for review
+        // (Contradicts), not silently supersede and not pass as novel.
+        let mut r1 = Record::new(
+            "facts",
+            json!({"summary": "`DeploySvc` deploys at 5pm on weekdays"}),
+        );
+        r1.created_at = Utc::now() - chrono::Duration::days(5);
+        let r2 = Record::new(
+            "facts",
+            json!({"summary": "`DeploySvc` deploys at 6pm on weekdays"}),
+        );
+        let result = check_conflict(&r2, &r1, 0.96);
+        match result {
+            ConflictResult::Contradicts { existing_record_id, .. } => {
+                assert_eq!(existing_record_id, r1.id);
+            }
+            other => panic!("expected Contradicts for a changed value, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn similar_texts_about_different_entities_stay_novel() {
+        // Two different services with similar-looking facts share no entity,
+        // so they are not a conflict — a changed value on one service must
+        // not contradict the other.
+        let mut r1 = Record::new(
+            "facts",
+            json!({"summary": "`AlphaSvc` deploys at 5pm on weekdays"}),
+        );
+        r1.created_at = Utc::now() - chrono::Duration::days(5);
+        let r2 = Record::new(
+            "facts",
+            json!({"summary": "`BetaSvc` deploys at 6pm on weekdays"}),
+        );
+        let result = check_conflict(&r2, &r1, 0.96);
+        assert!(matches!(result, ConflictResult::Novel));
     }
 
     #[test]

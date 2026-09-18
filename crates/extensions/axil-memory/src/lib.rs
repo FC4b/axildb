@@ -64,8 +64,10 @@ impl<'a> AgentMemory<'a> {
 
     /// Create an agent memory scoped to a specific agent.
     ///
-    /// Per-agent isolation applies to working memory and sessions.
-    /// Semantic, procedural, and preference memory remain shared.
+    /// Working memory and sessions are isolated per agent. Semantic,
+    /// procedural, and preference writes are stamped with the agent name,
+    /// and reads see the agent's records plus unscoped (global) ones —
+    /// memory that predates scoping stays visible to everyone.
     pub fn for_agent(db: &'a axil_core::Axil, agent: &str) -> Self {
         Self {
             db,
@@ -94,8 +96,14 @@ impl<'a> AgentMemory<'a> {
     }
 
     /// Semantic memory (knowledge graph).
+    ///
+    /// Per-agent: if `agent` is set, writes are stamped with the agent and
+    /// reads see the agent's facts plus unscoped (global) ones.
     pub fn semantic(&self) -> SemanticMemory<'_> {
-        SemanticMemory::new(self.db)
+        match &self.agent {
+            Some(name) => SemanticMemory::for_agent(self.db, name),
+            None => SemanticMemory::new(self.db),
+        }
     }
 
     /// Episodic memory (past experiences).
@@ -109,13 +117,23 @@ impl<'a> AgentMemory<'a> {
     }
 
     /// Procedural memory (learned patterns).
+    ///
+    /// Per-agent: same stamping/visibility rules as semantic memory.
     pub fn procedural(&self) -> ProceduralMemory<'_> {
-        ProceduralMemory::new(self.db)
+        match &self.agent {
+            Some(name) => ProceduralMemory::for_agent(self.db, name),
+            None => ProceduralMemory::new(self.db),
+        }
     }
 
     /// Preference memory (rules & feedback).
+    ///
+    /// Per-agent: same stamping/visibility rules as semantic memory.
     pub fn preference(&self) -> PreferenceMemory<'_> {
-        PreferenceMemory::new(self.db)
+        match &self.agent {
+            Some(name) => PreferenceMemory::for_agent(self.db, name),
+            None => PreferenceMemory::new(self.db),
+        }
     }
 
     /// TTL / expiry engine.
@@ -129,11 +147,128 @@ impl<'a> AgentMemory<'a> {
     }
 
     /// Cross-memory recall: searches all memory types, returns tagged results.
+    ///
+    /// Agent-scoped memories restrict results to their agent's records plus
+    /// unscoped (global) ones.
     pub fn remember(
         &self,
         query: &str,
-        opts: RecallOptions,
+        mut opts: RecallOptions,
     ) -> axil_core::Result<Vec<RecallResult>> {
+        if opts.agent.is_none() {
+            opts.agent = self.agent.clone();
+        }
         recall::remember(self.db, query, opts)
+    }
+}
+
+/// Visibility of a record under agent scoping: a scoped accessor sees its own
+/// agent's records plus unscoped (global) ones — pre-existing shared memory
+/// stays visible to every agent; an unscoped accessor sees everything.
+pub fn agent_visible(agent: Option<&str>, data: &serde_json::Value) -> bool {
+    match agent {
+        None => true,
+        Some(name) => data
+            .get("_agent")
+            .and_then(|v| v.as_str())
+            .map(|a| a == name)
+            .unwrap_or(true),
+    }
+}
+
+/// Stamp a record's data with the owning agent (no-op for unscoped writers).
+pub fn stamp_agent(data: &mut serde_json::Value, agent: Option<&str>) {
+    if let Some(name) = agent {
+        data["_agent"] = serde_json::json!(name);
+    }
+}
+
+#[cfg(test)]
+mod agent_scope_tests {
+    use super::*;
+    use axil_core::Axil;
+    use serde_json::json;
+
+    fn temp_db() -> (Axil, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("scope.axil");
+        let db = Axil::open(&path).build().unwrap();
+        (db, dir)
+    }
+
+    #[test]
+    fn semantic_facts_are_isolated_per_agent_with_global_fallback() {
+        let (db, _dir) = temp_db();
+
+        let agent_a = AgentMemory::for_agent(&db, "claude");
+        let agent_b = AgentMemory::for_agent(&db, "codex");
+        let unscoped = AgentMemory::new(&db);
+
+        agent_a.semantic().know("svc-a", "listens on 8080", None).unwrap();
+        agent_b.semantic().know("svc-b", "listens on 9090", None).unwrap();
+
+        // Each agent sees its own facts plus unscoped (global) ones.
+        let a_entities = agent_a.semantic().list_entities().unwrap();
+        assert!(a_entities.contains(&"svc-a".to_string()));
+        assert!(!a_entities.contains(&"svc-b".to_string()));
+
+        let b_entities = agent_b.semantic().list_entities().unwrap();
+        assert!(b_entities.contains(&"svc-b".to_string()));
+        assert!(!b_entities.contains(&"svc-a".to_string()));
+
+        // An unscoped accessor sees everything.
+        let all = unscoped.semantic().list_entities().unwrap();
+        assert!(all.contains(&"svc-a".to_string()) && all.contains(&"svc-b".to_string()));
+    }
+
+    #[test]
+    fn global_memory_stays_visible_to_scoped_agents() {
+        let (db, _dir) = temp_db();
+
+        AgentMemory::new(&db).semantic().know("shared", "global fact", None).unwrap();
+        let agent_a = AgentMemory::for_agent(&db, "claude");
+        let facts = agent_a.semantic().list_facts(Some("shared")).unwrap();
+        assert_eq!(facts.len(), 1);
+    }
+
+    #[test]
+    fn preferences_are_scoped_per_agent() {
+        let (db, _dir) = temp_db();
+
+        let agent_a = AgentMemory::for_agent(&db, "claude");
+        let agent_b = AgentMemory::for_agent(&db, "codex");
+
+        agent_a
+            .preference()
+            .set("test-runner", "cargo nextest", crate::preference::PreferenceSource::User)
+            .unwrap();
+
+        // Agent A reads its own rule back.
+        assert!(agent_a.preference().get("test-runner").unwrap().is_some());
+        // Agent B neither sees nor deletes it.
+        assert!(agent_b.preference().get("test-runner").unwrap().is_none());
+        assert!(!agent_b.preference().delete("test-runner").unwrap());
+        // Unscoped sees it.
+        assert!(AgentMemory::new(&db).preference().get("test-runner").unwrap().is_some());
+    }
+
+    #[test]
+    fn remember_respects_agent_scope() {
+        let (db, _dir) = temp_db();
+
+        let agent_a = AgentMemory::for_agent(&db, "claude");
+        let agent_b = AgentMemory::for_agent(&db, "codex");
+        agent_a.semantic().know("deploy", "ship on friday", None).unwrap();
+        agent_b.semantic().know("deploy-b", "ship on monday", None).unwrap();
+
+        let opts = crate::recall::RecallOptions::default();
+        let results = agent_a.remember("deploy", opts).unwrap();
+        assert!(
+            results
+                .iter()
+                .all(|r| r.scored.record.data.get("_agent").and_then(|v| v.as_str())
+                    != Some("codex")),
+            "agent A must never recall agent B's stamped records"
+        );
     }
 }

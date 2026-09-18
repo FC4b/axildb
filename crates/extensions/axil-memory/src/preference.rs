@@ -45,11 +45,20 @@ impl std::str::FromStr for PreferenceSource {
 /// Preference memory — user directives and detected conventions.
 pub struct PreferenceMemory<'a> {
     db: &'a Axil,
+    agent: Option<String>,
 }
 
 impl<'a> PreferenceMemory<'a> {
     pub fn new(db: &'a Axil) -> Self {
-        Self { db }
+        Self { db, agent: None }
+    }
+
+    /// Create a preference memory scoped to a specific agent.
+    pub fn for_agent(db: &'a Axil, agent: &str) -> Self {
+        Self {
+            db,
+            agent: Some(agent.to_string()),
+        }
     }
 
     /// Set a rule. If the key exists and the new source has higher priority,
@@ -87,12 +96,13 @@ impl<'a> PreferenceMemory<'a> {
         }
 
         // Create new rule.
-        let data = json!({
+        let mut data = json!({
             "key": key,
             "value": value,
             "source": source.as_str(),
             "synthetic_doc": build_synthetic_doc(key, value),
         });
+        crate::stamp_agent(&mut data, self.agent.as_deref());
 
         let record = self.db.insert(TABLE_PREFERENCES, data)?;
 
@@ -111,15 +121,21 @@ impl<'a> PreferenceMemory<'a> {
             .query()
             .table(TABLE_PREFERENCES)
             .where_field("key", Op::Eq, json!(key))
-            .limit(1)
             .exec()?;
 
-        Ok(records.into_iter().next())
+        Ok(records
+            .into_iter()
+            .find(|r| crate::agent_visible(self.agent.as_deref(), &r.data)))
     }
 
     /// List all active rules.
     pub fn list(&self) -> Result<Vec<Record>> {
-        let records = self.db.list(TABLE_PREFERENCES)?;
+        let records: Vec<Record> = self
+            .db
+            .list(TABLE_PREFERENCES)?
+            .into_iter()
+            .filter(|r| crate::agent_visible(self.agent.as_deref(), &r.data))
+            .collect();
         Ok(crate::ttl::filter_expired(records))
     }
 
@@ -162,6 +178,7 @@ impl<'a> PreferenceMemory<'a> {
             .filter(|(r, _)| r.table == TABLE_PREFERENCES)
             .filter(|(r, _)| !crate::ttl::is_record_expired(r))
             .filter(|(r, _)| !crate::ttl::is_record_superseded(r))
+            .filter(|(r, _)| crate::agent_visible(self.agent.as_deref(), &r.data))
             .collect();
 
         filtered.truncate(top_k);

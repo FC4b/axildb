@@ -55,9 +55,40 @@ pub struct VectorEngine {
     index: RwLock<HnswIndex>,
     vector_db: Database,
     embedder: Option<Embedder>,
+    /// Entries present in the on-disk store but not loadable into the live
+    /// index at open (unparsable id, wrong dimensions, non-finite values).
+    skipped_at_load: usize,
 }
 
 impl VectorEngine {
+    /// Validate a vector against the configured dimensions before any durable
+    /// write: the on-disk store has no schema gate of its own, and a rejected
+    /// insert must leave any previously stored vector for this id untouched.
+    /// Mirrors exactly what [`HnswIndex::add`] will check, so an insert that
+    /// passes here can never be rejected by the index after persisting.
+    fn validate_vector(&self, id: &RecordId, vector: &[f32]) -> axil_core::Result<()> {
+        if vector.len() != self.config.dimensions {
+            return Err(AxilError::plugin(format!(
+                "dimension mismatch for {id}: expected {}, got {}",
+                self.config.dimensions,
+                vector.len()
+            )));
+        }
+        if vector.iter().any(|v| !v.is_finite()) {
+            return Err(AxilError::plugin(format!(
+                "vector for {id} contains non-finite values (NaN or infinity)"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Entries skipped at the last open because they were unloadable
+    /// (unparsable id, wrong dimensions, or non-finite values). `0` after a
+    /// clean load.
+    pub fn skipped_at_load(&self) -> usize {
+        self.skipped_at_load
+    }
+
     /// Open (or create) a vector store alongside the given database path.
     ///
     /// The vector data is stored at `<db_path>.vec`.
@@ -107,7 +138,16 @@ impl VectorEngine {
         txn.commit().map_err(plugin_err)?;
 
         // Load existing vectors from storage.
-        let vectors = load_all_vectors(&vector_db, config.dimensions)?;
+        let (vectors, skipped_at_load) = load_all_vectors(&vector_db, config.dimensions)?;
+        if skipped_at_load > 0 {
+            eprintln!(
+                "[axil vector] warning: skipped {skipped_at_load} unloadable entr{} in {} \
+                 (unparsable id, wrong dimensions, or non-finite values); \
+                 `axil heal --reindex` can rebuild them",
+                if skipped_at_load == 1 { "y" } else { "ies" },
+                vec_path.display()
+            );
+        }
         let index = HnswIndex::from_vectors(config.dimensions, vectors);
 
         Ok(Self {
@@ -115,6 +155,7 @@ impl VectorEngine {
             index: RwLock::new(index),
             vector_db,
             embedder: None,
+            skipped_at_load,
         })
     }
 
@@ -179,7 +220,16 @@ impl VectorEngine {
             requested
         };
 
-        let vectors = load_all_vectors(&vector_db, dimensions)?;
+        let (vectors, skipped_at_load) = load_all_vectors(&vector_db, dimensions)?;
+        if skipped_at_load > 0 {
+            eprintln!(
+                "[axil vector] warning: skipped {skipped_at_load} unloadable entr{} in {} \
+                 (unparsable id, wrong dimensions, or non-finite values); \
+                 `axil heal --reindex` can rebuild them",
+                if skipped_at_load == 1 { "y" } else { "ies" },
+                vec_path.display()
+            );
+        }
         let index = HnswIndex::from_vectors(dimensions, vectors);
         Ok(Self {
             config: VectorConfig {
@@ -189,6 +239,7 @@ impl VectorEngine {
             index: RwLock::new(index),
             vector_db,
             embedder: None,
+            skipped_at_load,
         })
     }
 
@@ -277,6 +328,7 @@ impl Engine for VectorEngine {
         let vector = embedder
             .embed(&combined)
             .map_err(|e| AxilError::plugin(format!("auto-embed failed: {e}")))?;
+        self.validate_vector(&record.id, &vector)?;
 
         // Persist to disk first so a crash can't leave the in-memory index
         // ahead of storage.
@@ -297,6 +349,9 @@ impl Engine for VectorEngine {
 
 impl VectorIndex for VectorEngine {
     fn add(&self, id: RecordId, vector: &[f32]) -> axil_core::Result<()> {
+        // Validate before touching storage: a rejected write must leave any
+        // previously stored vector for this id intact.
+        self.validate_vector(&id, vector)?;
         // Persist to disk first so a crash can't leave the in-memory
         // index ahead of storage.
         persist_vector(&self.vector_db, &id, vector)?;
@@ -310,6 +365,11 @@ impl VectorIndex for VectorEngine {
     fn add_batch(&self, items: &[(RecordId, &[f32])]) -> axil_core::Result<()> {
         if items.is_empty() {
             return Ok(());
+        }
+        // Validate the whole batch before any durable write so one bad item
+        // can't leave a half-persisted batch behind.
+        for (id, vector) in items {
+            self.validate_vector(id, vector)?;
         }
         // Persist the whole batch to disk first (one fsync) so a crash can't
         // leave the in-memory index ahead of storage, then add to the live index.
@@ -692,11 +752,12 @@ impl AxilBuilderVectorExt for AxilBuilder {
 fn load_all_vectors(
     db: &Database,
     expected_dims: usize,
-) -> axil_core::Result<HashMap<RecordId, Vec<f32>>> {
+) -> axil_core::Result<(HashMap<RecordId, Vec<f32>>, usize)> {
     let txn = db.begin_read().map_err(plugin_err)?;
     let table = txn.open_table(VECTORS_TABLE).map_err(plugin_err)?;
 
     let mut vectors = HashMap::new();
+    let mut skipped = 0usize;
     let iter = table.iter().map_err(plugin_err)?;
 
     for entry in iter {
@@ -707,18 +768,22 @@ fn load_all_vectors(
 
         let id = match RecordId::from_string(id_str) {
             Ok(id) => id,
-            Err(_) => continue,
+            Err(_) => {
+                skipped += 1;
+                continue;
+            }
         };
 
         let vector = bytes_to_vector(bytes);
-        if vector.len() != expected_dims {
+        if vector.len() != expected_dims || vector.iter().any(|v| !v.is_finite()) {
+            skipped += 1;
             continue;
         }
 
         vectors.insert(id, vector);
     }
 
-    Ok(vectors)
+    Ok((vectors, skipped))
 }
 
 #[cfg(test)]
@@ -766,6 +831,102 @@ mod tests {
         let results = plugin.search(&[1.0, 0.0, 0.0], 1).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, id1);
+    }
+
+    #[test]
+    fn rejected_add_wrong_dims_leaves_previous_vector_searchable() {
+        // A wrong-dimension insert must be rejected BEFORE it touches the
+        // durable store — otherwise the error surfaces but the old vector is
+        // already gone (and silently skipped at the next open).
+        let (plugin, dir) = temp_engine(3);
+        let id = RecordId::new();
+        plugin.add(id.clone(), &[1.0, 0.0, 0.0]).unwrap();
+
+        assert!(plugin.add(id.clone(), &[1.0, 0.0]).is_err());
+        let results = plugin.search(&[1.0, 0.0, 0.0], 5).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, id);
+
+        // Durable state, not just the live index.
+        drop(plugin);
+        let path = dir.path().join("test.axil");
+        let reopened = VectorEngine::open(&path, 3).unwrap();
+        assert_eq!(reopened.vector_count(), 1);
+        assert_eq!(reopened.search(&[1.0, 0.0, 0.0], 5).unwrap()[0].0, id);
+    }
+
+    #[test]
+    fn rejected_add_non_finite_leaves_previous_vector_searchable() {
+        let (plugin, _dir) = temp_engine(3);
+        let id = RecordId::new();
+        plugin.add(id.clone(), &[1.0, 0.0, 0.0]).unwrap();
+
+        assert!(plugin.add(id.clone(), &[f32::NAN, 0.0, 0.0]).is_err());
+        assert!(plugin
+            .add(id.clone(), &[f32::INFINITY, 0.0, 0.0])
+            .is_err());
+        let results = plugin.search(&[1.0, 0.0, 0.0], 5).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, id);
+    }
+
+    #[test]
+    fn add_batch_rejects_whole_batch_on_bad_item() {
+        // Batch validation happens before any durable write: one bad item
+        // must not leave a half-persisted batch behind.
+        let (plugin, _dir) = temp_engine(3);
+        let good = RecordId::new();
+        let bad = RecordId::new();
+
+        let err = plugin
+            .add_batch(&[
+                (good.clone(), &[1.0, 0.0, 0.0]),
+                (bad.clone(), &[1.0, 0.0]), // wrong dims
+            ])
+            .unwrap_err();
+        assert!(err.to_string().contains("dimension mismatch"));
+
+        assert_eq!(plugin.vector_count(), 0);
+        assert!(plugin.search(&[1.0, 0.0, 0.0], 5).unwrap().is_empty());
+    }
+
+    #[test]
+    fn unloadable_entries_are_counted_and_skipped_at_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("skip.axil");
+        let vec_path = vector_db_path(&path);
+        let good = RecordId::new();
+        let wrong_dims = RecordId::new();
+
+        {
+            let plugin = VectorEngine::open(&path, 3).unwrap();
+            plugin.add(good.clone(), &[1.0, 0.0, 0.0]).unwrap();
+        }
+
+        // Inject two unloadable rows directly: one unparsable id, one valid
+        // id whose vector has the wrong dimension count.
+        {
+            let db = redb::Database::open(&vec_path).unwrap();
+            let txn = db.begin_write().unwrap();
+            {
+                let mut table = txn.open_table(VECTORS_TABLE).unwrap();
+                table
+                    .insert("not-a-record-id", vector_to_bytes(&[1.0, 0.0, 0.0]).as_slice())
+                    .unwrap();
+                table
+                    .insert(
+                        wrong_dims.to_string().as_str(),
+                        vector_to_bytes(&[1.0, 0.0]).as_slice(),
+                    )
+                    .unwrap();
+            }
+            txn.commit().unwrap();
+        }
+
+        let plugin = VectorEngine::open(&path, 3).unwrap();
+        assert_eq!(plugin.skipped_at_load(), 2);
+        assert_eq!(plugin.vector_count(), 1);
+        assert_eq!(plugin.search(&[1.0, 0.0, 0.0], 5).unwrap()[0].0, good);
     }
 
     #[test]

@@ -10,9 +10,7 @@ use serde_json::json;
 use axil_core::{Axil, Record, RecordId, Result};
 
 use crate::ttl::set_meta_field;
-use crate::types::{
-    EDGE_SUPERSEDES, META_RECORDED_AT, META_SUPERSEDED, META_SUPERSEDED_BY, META_VALID_FROM,
-};
+use crate::types::{EDGE_SUPERSEDES, META_RECORDED_AT, META_VALID_FROM};
 
 /// Default similarity threshold for auto-superseding.
 pub const DEFAULT_SUPERSEDE_THRESHOLD: f32 = 0.92;
@@ -85,25 +83,29 @@ impl<'a> SupersedeEngine<'a> {
             }
 
             // Skip already superseded records.
-            if candidate
-                .data
-                .get("_meta")
-                .and_then(|m| m.get(META_SUPERSEDED))
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false)
-            {
+            if crate::ttl::is_record_superseded(candidate) {
+                continue;
+            }
+
+            // Pinned records are absolute: the core supersede path exempts
+            // them and this pass must not become a side door around that.
+            if axil_core::importance::is_pinned(&candidate.data) {
+                continue;
+            }
+
+            // Recency guard, mirroring core: a new record must never demote
+            // something stored after it (imports preserve source timestamps).
+            if new_record.created_at < candidate.created_at {
                 continue;
             }
 
             if *similarity >= self.threshold {
-                // Mark old record as superseded.
+                // Mark old record as superseded — top-level flags, the same
+                // canonical spelling core's consolidation writes, so every
+                // reader (cleanup, recall filters, event log) agrees.
                 let mut old_data = candidate.data.clone();
-                set_meta_field(&mut old_data, META_SUPERSEDED, json!(true));
-                set_meta_field(
-                    &mut old_data,
-                    META_SUPERSEDED_BY,
-                    json!(new_record.id.to_string()),
-                );
+                old_data["_superseded"] = json!(true);
+                old_data["_superseded_by"] = json!(new_record.id.to_string());
                 self.db.update(&candidate.id, old_data)?;
 
                 // Create graph edge if graph is available.

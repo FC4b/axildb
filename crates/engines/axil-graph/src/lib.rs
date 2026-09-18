@@ -160,10 +160,27 @@ impl AdjacencyIndex {
         direction: Direction,
         as_of: Option<&DateTime<Utc>>,
     ) -> Vec<RecordId> {
+        self.neighbor_ids_bitemporal(id, edge_type, direction, as_of, None)
+    }
+
+    /// Neighbor IDs on both temporal axes: only edges valid at `event_time`
+    /// (when the fact was true) and recorded by `knowledge_time` (what the
+    /// agent had on disk by then) are traversed.
+    fn neighbor_ids_bitemporal(
+        &self,
+        id: &RecordId,
+        edge_type: Option<&str>,
+        direction: Direction,
+        event_time: Option<&DateTime<Utc>>,
+        knowledge_time: Option<&DateTime<Utc>>,
+    ) -> Vec<RecordId> {
         let mut neighbors = Vec::new();
         let mut seen = HashSet::new();
 
-        let is_valid = |edge: &Edge| -> bool { as_of.map_or(true, |t| edge.is_valid_at(t)) };
+        let is_valid = |edge: &Edge| -> bool {
+            event_time.map_or(true, |t| edge.is_valid_at(t))
+                && knowledge_time.map_or(true, |t| edge.known_at(t))
+        };
 
         if matches!(direction, Direction::Out | Direction::Both) {
             for edge in self.get_outgoing(id, edge_type) {
@@ -471,6 +488,54 @@ impl GraphEngine {
     /// number of steps is fixed (bounded by `MAX_DEPTH`).
     pub fn traverse_ids(&self, start: &RecordId, steps: &[TraversalStep]) -> Result<Vec<RecordId>> {
         self.traverse_ids_temporal(start, steps, None)
+    }
+
+    /// Multi-hop traversal on both temporal axes (bi-temporal query).
+    ///
+    /// `event_time` filters edges by when the fact was true (`valid_from` /
+    /// `valid_until`); `knowledge_time` filters by when the edge had been
+    /// recorded (`created_at`). Together they answer "what did the graph look
+    /// like, as we knew it at K, for events at E?" — e.g. reviewing a
+    /// decision made before a correction arrived. `None` on either axis
+    /// disables that axis's filter.
+    pub fn traverse_ids_bitemporal(
+        &self,
+        start: &RecordId,
+        steps: &[TraversalStep],
+        event_time: Option<&DateTime<Utc>>,
+        knowledge_time: Option<&DateTime<Utc>>,
+    ) -> Result<Vec<RecordId>> {
+        if steps.is_empty() {
+            return Ok(vec![start.clone()]);
+        }
+
+        let idx = self.index.read();
+        let mut current: Vec<RecordId> = vec![start.clone()];
+
+        for step in steps {
+            let mut next = Vec::new();
+            let mut seen = HashSet::new();
+            for node in &current {
+                for n in idx.neighbor_ids_bitemporal(
+                    node,
+                    Some(&step.edge_type),
+                    step.direction,
+                    event_time,
+                    knowledge_time,
+                ) {
+                    if seen.insert(n.clone()) {
+                        next.push(n);
+                    }
+                }
+            }
+            current = next;
+
+            if current.is_empty() {
+                break;
+            }
+        }
+
+        Ok(current)
     }
 
     /// Multi-hop traversal with optional temporal filtering.
@@ -924,5 +989,65 @@ mod tests {
             assert_eq!(out[0].to, b);
             assert_eq!(out[0].properties["weight"], 1);
         }
+    }
+}
+
+#[cfg(test)]
+mod bitemporal_tests {
+    use super::*;
+    use crate::edge::Edge;
+    use chrono::{Duration, Utc};
+    use serde_json::json;
+
+    #[test]
+    fn knowledge_time_predicate_excludes_future_created_edges() {
+        let now = Utc::now();
+        let mut edge = Edge::new(RecordId::new(), "depends_on", RecordId::new(), json!({}));
+        edge.created_at = now - Duration::hours(1);
+        assert!(edge.known_at(&now));
+        assert!(!edge.known_at(&(now - Duration::hours(2))));
+
+        // valid window is independent of knowledge time
+        edge.valid_from = Some(now + Duration::hours(5));
+        assert!(edge.known_at(&now));
+        assert!(!edge.visible_at(&now, &now));
+        assert!(edge.visible_at(&(now + Duration::hours(6)), &now));
+    }
+
+    #[test]
+    fn bitemporal_traversal_filters_by_knowledge_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("bt.axil");
+        let engine = GraphEngine::open(&db_path).unwrap();
+        let from = RecordId::new();
+        let to = RecordId::new();
+        engine
+            .create_edge(from.clone(), "depends_on", to.clone(), json!({}))
+            .unwrap();
+        drop(engine);
+
+        let engine = GraphEngine::open(&db_path).unwrap();
+        let steps = vec![TraversalStep {
+            edge_type: "depends_on".to_string(),
+            direction: Direction::Out,
+        }];
+
+        // Knowledge cutoff before the edge existed: not traversable.
+        let before = Utc::now() - Duration::hours(1);
+        let r = engine
+            .traverse_ids_bitemporal(&from, &steps, None, Some(&before))
+            .unwrap();
+        assert!(!r.contains(&to));
+
+        // Cutoff after creation: traversable.
+        let after = Utc::now() + Duration::hours(1);
+        let r = engine
+            .traverse_ids_bitemporal(&from, &steps, None, Some(&after))
+            .unwrap();
+        assert!(r.contains(&to));
+
+        // Single-axis (event-time-only) traversal still works unchanged.
+        let r = engine.traverse_ids_temporal(&from, &steps, None).unwrap();
+        assert!(r.contains(&to));
     }
 }

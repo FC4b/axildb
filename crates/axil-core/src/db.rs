@@ -1419,6 +1419,36 @@ impl Axil {
                 vi.on_record_delete(id)?;
             }
 
+            // Fan the delete out to named vector spaces as well — a vector
+            // added via `add_vector_in` must not outlive its record as an
+            // orphan that can shadow live results in that space. Best-effort:
+            // the record is already gone from storage at this point.
+            if let Some(ref factory) = self.vector_space_factory {
+                match factory.space_names(&self.path) {
+                    Ok(spaces) => {
+                        for space in spaces {
+                            match self.open_or_create_space(&space, None) {
+                                Ok(vi) => {
+                                    if let Err(e) = vi.on_record_delete(id) {
+                                        eprintln!(
+                                            "warning: vector space '{space}' cleanup failed \
+                                             for {id}: {e}"
+                                        );
+                                    }
+                                }
+                                Err(e) => eprintln!(
+                                    "warning: could not open vector space '{space}' \
+                                     for delete cleanup: {e}"
+                                ),
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("warning: named-space delete cleanup skipped: {e}");
+                    }
+                }
+            }
+
             // Cascade-delete graph edges referencing this record.
             if let Some(ref gi) = self.graph_index {
                 gi.on_record_delete(id)?;
@@ -1443,31 +1473,49 @@ impl Axil {
 
             // Doubt beliefs sourced from deleted entity facts.
             if table_name == "_entities" {
-                if let Ok(beliefs) = self.storage.list("_beliefs", usize::MAX, 0) {
-                    let deleted_id_str = id.to_string();
-                    for belief in &beliefs {
-                        // Beliefs auto-generated from entities reference the entity name.
-                        // If the source entity fact is deleted, mark the belief as doubted.
-                        let is_consolidated = belief.data.get("source").and_then(|v| v.as_str())
-                            == Some("consolidated");
-                        let already_doubted = belief
-                            .data
-                            .get("doubted")
-                            .and_then(|v| v.as_bool())
-                            .unwrap_or(false);
-                        if is_consolidated && !already_doubted {
-                            let mut data = belief.data.clone();
-                            if let Some(obj) = data.as_object_mut() {
-                                obj.insert("doubted".to_string(), serde_json::json!(true));
-                                obj.insert("confidence".to_string(), serde_json::json!(0.3));
-                                obj.insert(
-                                    "_doubt_reason".to_string(),
-                                    serde_json::json!(format!(
-                                        "source entity fact {deleted_id_str} deleted"
-                                    )),
-                                );
+                // Only beliefs naming THIS entity lose standing — deleting one
+                // entity fact must never touch unrelated beliefs.
+                let deleted_name = existing_record
+                    .as_ref()
+                    .and_then(|r| r.data.get("entity"))
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
+                if let Some(deleted_name) = deleted_name {
+                    if let Ok(beliefs) = self.storage.list("_beliefs", usize::MAX, 0) {
+                        let deleted_id_str = id.to_string();
+                        for belief in &beliefs {
+                            // Beliefs auto-generated from entities carry the
+                            // source entity's name in `entity`.
+                            let belief_entity =
+                                belief.data.get("entity").and_then(|v| v.as_str());
+                            if belief_entity != Some(deleted_name.as_str()) {
+                                continue;
                             }
-                            let _ = self.storage.update(&belief.id, data);
+                            let already_doubted = belief
+                                .data
+                                .get("doubted")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false);
+                            let is_consolidated =
+                                belief.data.get("source").and_then(|v| v.as_str())
+                                    == Some("consolidated");
+                            if is_consolidated && !already_doubted {
+                                let mut data = belief.data.clone();
+                                if let Some(obj) = data.as_object_mut() {
+                                    obj.insert("doubted".to_string(), serde_json::json!(true));
+                                    obj.insert(
+                                        "confidence".to_string(),
+                                        serde_json::json!(0.3),
+                                    );
+                                    obj.insert(
+                                        "_doubt_reason".to_string(),
+                                        serde_json::json!(format!(
+                                            "source entity fact {deleted_id_str} deleted"
+                                        )),
+                                    );
+                                }
+                                let _ = self.storage.update(&belief.id, data);
+                            }
                         }
                     }
                 }
@@ -1845,13 +1893,25 @@ impl Axil {
                 vector.len()
             )));
         }
-        let results = vi.search(vector, top_k)?;
-        let mut records = Vec::with_capacity(results.len());
-        for (id, score) in results {
-            if let Some(record) = self.storage.get(&id)? {
-                records.push((record, score));
+        // Over-fetch, then filter: a stale vector whose record is gone must
+        // never crowd a live match out of top-k. The window grows until we
+        // have enough live hits or the space is exhausted.
+        let mut fetch_k = top_k.saturating_mul(3).max(20);
+        let mut records = loop {
+            let results = vi.search(vector, fetch_k)?;
+            let raw_len = results.len();
+            let mut live: Vec<(Record, f32)> = Vec::with_capacity(results.len());
+            for (id, score) in results {
+                if let Some(record) = self.storage.get(&id)? {
+                    live.push((record, score));
+                }
             }
-        }
+            if live.len() >= top_k || raw_len < fetch_k || fetch_k >= 4096 {
+                break live;
+            }
+            fetch_k = fetch_k.saturating_mul(4);
+        };
+        records.truncate(top_k);
         Ok(records)
     }
 
@@ -5800,9 +5860,25 @@ fn dir_size(path: &Path) -> u64 {
 }
 
 /// Check if a record is marked as superseded.
-fn is_superseded_record(record: &Record) -> bool {
+///
+/// Canonical marker is the top-level `data._superseded` flag (what
+/// consolidation and the brain pipeline write). Two legacy spellings are
+/// honored on read so records marked by older writers stay dead: the memory
+/// extension's `data._meta.superseded` and the historical
+/// `metadata.superseded`.
+pub fn is_superseded_record(record: &Record) -> bool {
     // Check data field (where detect_conflicts persists it)
     if record.data.get("_superseded").and_then(|v| v.as_bool()) == Some(true) {
+        return true;
+    }
+    // Legacy: the memory extension's `_meta` sub-object.
+    if record
+        .data
+        .get("_meta")
+        .and_then(|m| m.get("superseded"))
+        .and_then(|v| v.as_bool())
+        == Some(true)
+    {
         return true;
     }
     // Also check metadata for backward compatibility
@@ -5813,7 +5889,11 @@ fn is_superseded_record(record: &Record) -> bool {
 }
 
 /// Check if a record is expired (has a valid_until in the past).
-fn is_expired_record(record: &Record, now: &chrono::DateTime<chrono::Utc>) -> bool {
+///
+/// Canonical field is top-level `data.valid_until`; `metadata.valid_until`
+/// and the memory extension's legacy `data._meta.valid_until` are honored
+/// on read.
+pub fn is_expired_record(record: &Record, now: &chrono::DateTime<chrono::Utc>) -> bool {
     // Check metadata.valid_until
     if let Some(ref meta) = record.metadata {
         if let Some(vu) = meta.get("valid_until").and_then(|v| v.as_str()) {
@@ -5826,6 +5906,19 @@ fn is_expired_record(record: &Record, now: &chrono::DateTime<chrono::Utc>) -> bo
     }
     // Check data.valid_until
     if let Some(vu) = record.data.get("valid_until").and_then(|v| v.as_str()) {
+        if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(vu) {
+            if dt < *now {
+                return true;
+            }
+        }
+    }
+    // Legacy: the memory extension's `_meta.valid_until`.
+    if let Some(vu) = record
+        .data
+        .get("_meta")
+        .and_then(|m| m.get("valid_until"))
+        .and_then(|v| v.as_str())
+    {
         if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(vu) {
             if dt < *now {
                 return true;
@@ -6618,6 +6711,90 @@ mod tests {
         let path = dir.path().join("test.axil");
         let db = Axil::open(&path).build().unwrap();
         (db, dir)
+    }
+
+    #[test]
+    fn superseded_predicate_reads_all_schema_spellings() {
+        // Canonical: top-level data field (what consolidation writes).
+        let canonical = Record::new("decisions", json!({"_superseded": true, "summary": "old"}));
+        assert!(is_superseded_record(&canonical));
+
+        // Legacy: the memory extension's `_meta` sub-object.
+        let extension = Record::new(
+            "decisions",
+            json!({"_meta": {"superseded": true}, "summary": "old"}),
+        );
+        assert!(is_superseded_record(&extension));
+
+        // Legacy: historical metadata field.
+        let mut legacy = Record::new("decisions", json!({"summary": "old"}));
+        legacy.metadata = Some(json!({"superseded": true}));
+        assert!(is_superseded_record(&legacy));
+
+        let live = Record::new("decisions", json!({"summary": "current"}));
+        assert!(!is_superseded_record(&live));
+    }
+
+    #[test]
+    fn expired_predicate_reads_all_schema_spellings() {
+        let now = chrono::Utc::now();
+        let past = (now - chrono::Duration::hours(1)).to_rfc3339();
+
+        let mut meta_stamped = Record::new("notes", json!({}));
+        meta_stamped.data["_meta"]["valid_until"] = json!(past);
+        assert!(is_expired_record(&meta_stamped, &now));
+
+        let top = Record::new("notes", json!({"valid_until": past}));
+        assert!(is_expired_record(&top, &now));
+
+        let fresh = Record::new("notes", json!({}));
+        assert!(!is_expired_record(&fresh, &now));
+    }
+
+    #[test]
+    fn deleting_one_entity_doubts_only_its_beliefs() {
+        let (db, _dir) = temp_db();
+
+        let ent1 = db
+            .insert("_entities", json!({"entity": "svc-a", "fact": "port 8080"}))
+            .unwrap();
+        let _ent2 = db
+            .insert("_entities", json!({"entity": "svc-b", "fact": "port 9090"}))
+            .unwrap();
+
+        let b1 = db
+            .insert(
+                "_beliefs",
+                json!({
+                    "statement": "svc-a: runs on port 8080",
+                    "confidence": 0.9,
+                    "source": "consolidated",
+                    "doubted": false,
+                    "entity": "svc-a",
+                }),
+            )
+            .unwrap();
+        let b2 = db
+            .insert(
+                "_beliefs",
+                json!({
+                    "statement": "svc-b: runs on port 9090",
+                    "confidence": 0.9,
+                    "source": "consolidated",
+                    "doubted": false,
+                    "entity": "svc-b",
+                }),
+            )
+            .unwrap();
+
+        db.delete(&ent1.id).unwrap();
+
+        let b1_after = db.get(&b1.id).unwrap().unwrap();
+        assert_eq!(b1_after.data["doubted"], json!(true));
+
+        let b2_after = db.get(&b2.id).unwrap().unwrap();
+        assert_ne!(b2_after.data["doubted"], json!(true));
+        assert_eq!(b2_after.data["confidence"], json!(0.9));
     }
 
     // Build a RecallResult with the given summary text + score.

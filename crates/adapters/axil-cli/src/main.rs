@@ -1,5 +1,6 @@
 use std::io::{self, Read as IoRead, Write as IoWrite};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -9160,10 +9161,12 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             // thread and wait up to the remaining budget on a channel. If it doesn't finish
             // in time we return empty partial results and abandon the thread — the CLI process
             // exits shortly afterward and tears down any lingering work.
-            let mut recall_results = if deadline_exceeded() {
-                Vec::new()
+            // The handle lives in an Arc from here on: the timeout path shares it
+            // with a worker thread, and every later use in this command is by
+            // reference, so the shared form costs nothing.
+            let (db, mut recall_results) = if deadline_exceeded() {
+                (Arc::new(db), Vec::new())
             } else if let Some(d) = deadline {
-                use std::sync::Arc;
                 let db_arc: Arc<axil_core::Axil> = Arc::new(db);
                 let db_handle = db_arc.clone();
                 let q = query.clone();
@@ -9186,20 +9189,16 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                         Vec::new()
                     }
                 };
-                // Reclaim `db` only if the worker already dropped its clone; otherwise we keep
-                // the Arc alive for the rest of the handler by leaving it leaked (the process
-                // is about to exit anyway and the leak is bounded to this invocation).
-                db = Arc::try_unwrap(db_arc).unwrap_or_else(|arc| {
-                    // SAFETY fallback: we can't take Axil out of the Arc when the worker thread
-                    // still holds it. Leak this arc and open a fresh handle for the remainder
-                    // of the pipeline — this path only runs on timeout with a stuck worker, so
-                    // the cost of re-opening the DB is an acceptable worst-case fallback.
-                    std::mem::forget(arc);
-                    open_with_all_detected(&db_path).expect("reopen after timeout fallback")
-                });
-                result
+                // Keep the Arc rather than trying to reclaim the inner value: on
+                // timeout the worker still owns a clone, and that clone holds the
+                // single-writer file lock, so re-opening the database here could
+                // never succeed. One extra live handle for the remainder of this
+                // command is bounded and harmless.
+                (db_arc, result)
             } else {
-                db.recall(&query, top_k, Some(cfg))?
+                let db = Arc::new(db);
+                let r = db.recall(&query, top_k, Some(cfg))?;
+                (db, r)
             };
 
             // Normalize the --type facet filter once (case-insensitive,
@@ -10866,26 +10865,85 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                 new_dims,
             ));
 
-            // Step 2: Close DB, delete old .vec file, re-open with new model.
-            drop(db);
-            let vec_path = axil_vector::vector_db_path(&db_path);
-            match std::fs::remove_file(&vec_path) {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => {
-                    return Err(anyhow::anyhow!(e).context("failed to remove old vector store"))
+            // A table-scoped re-embed must not silently destroy every other
+            // table's vectors. With unchanged dimensions they can be copied
+            // over raw; with a dimension change only a full re-embed can
+            // rebuild them, so scoping is refused outright.
+            let stored_dims = axil_vector::read_stored_dimensions(&db_path).ok().flatten();
+            let mut preserve: Vec<(RecordId, Vec<f32>)> = Vec::new();
+            if table.is_some() {
+                match stored_dims {
+                    Some(old) if old == new_dims => {
+                        let all_tables = db.tables().context("failed to list tables")?;
+                        for tbl in &all_tables {
+                            if tables.contains(tbl) {
+                                continue;
+                            }
+                            for record in db.list(tbl).unwrap_or_default() {
+                                if let Ok(Some(v)) = db.get_vector(&record.id) {
+                                    preserve.push((record.id, v));
+                                }
+                            }
+                        }
+                    }
+                    Some(old) => anyhow::bail!(
+                        "cannot re-embed only one table when dimensions change \
+                         ({old} -> {new_dims}): the other tables' vectors cannot be \
+                         preserved. Run without --table to re-embed every table."
+                    ),
+                    None => {}
                 }
             }
 
-            let db = Axil::open(&db_path)
+            // Step 2: Move the old vector store aside and rebuild from scratch.
+            // The backup is deleted only after every record embeds cleanly —
+            // any failure restores it, so the command is atomic.
+            drop(db);
+            let vec_path = axil_vector::vector_db_path(&db_path);
+            let backup_path = vec_path.with_extension("reembed-bak");
+            let had_old_store = vec_path.exists();
+            if had_old_store {
+                // Drop a stale backup from a previously crashed run first.
+                let _ = std::fs::remove_file(&backup_path);
+                std::fs::rename(&vec_path, &backup_path).map_err(|e| {
+                    anyhow::anyhow!(e).context("failed to back up old vector store")
+                })?;
+            }
+
+            let reopened = Axil::open(&db_path)
                 .with_embedder_model(embedding_model.clone())
-                .context("failed to initialize embedder")?
-                .build()
-                .context("failed to open database with new vector store")?;
+                .context("failed to initialize embedder")
+                .and_then(|b| {
+                    b.build()
+                        .context("failed to open database with new vector store")
+                });
+            let db = match reopened {
+                Ok(db) => db,
+                Err(e) => {
+                    if had_old_store {
+                        let _ = std::fs::remove_file(&vec_path);
+                        std::fs::rename(&backup_path, &vec_path).map_err(|restore_err| {
+                            anyhow::anyhow!(restore_err).context(
+                                "re-embed failed AND restoring the old vector store failed",
+                            )
+                        })?;
+                    }
+                    return Err(e);
+                }
+            };
+
+            // Restore untouched tables' vectors (same-dimensions path only).
+            let mut preserved = 0usize;
+            for (id, vector) in &preserve {
+                if db.add_vector(id, vector).is_ok() {
+                    preserved += 1;
+                }
+            }
 
             // Step 3: Re-embed all collected records.
             let mut success = 0usize;
             let mut errors = 0usize;
+            let mut first_error: Option<String> = None;
             let total = work.len();
             for (i, (rid, text)) in work.iter().enumerate() {
                 match db.embed_text(rid, text) {
@@ -10893,6 +10951,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                     Err(e) => {
                         eprintln!("  [skip] {rid}: {e}");
                         errors += 1;
+                        first_error.get_or_insert_with(|| e.to_string());
                     }
                 }
                 if (i + 1) % 100 == 0 {
@@ -10900,9 +10959,33 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                 }
             }
 
+            if errors > 0 {
+                // Atomic semantics: restore the previous store instead of
+                // leaving a partially-populated index behind.
+                drop(db);
+                if had_old_store {
+                    let _ = std::fs::remove_file(&vec_path);
+                    std::fs::rename(&backup_path, &vec_path).map_err(|restore_err| {
+                        anyhow::anyhow!(restore_err).context(
+                            "re-embed failed AND restoring the old vector store failed",
+                        )
+                    })?;
+                }
+                anyhow::bail!(
+                    "re-embed failed for {errors}/{total} record(s) (first error: {}); \
+                     the previous vector store was restored unchanged",
+                    first_error.unwrap_or_default()
+                );
+            }
+
+            if had_old_store {
+                let _ = std::fs::remove_file(&backup_path);
+            }
+
             out.print(&json!({
                 "reembedded": success,
-                "errors": errors,
+                "errors": 0,
+                "preserved_other_tables": preserved,
                 "model": embedding_model.name(),
                 "dimensions": new_dims,
                 "field": field,
@@ -18323,6 +18406,7 @@ fn run_ingest_pass(
     let started = std::time::Instant::now();
     let mut files_ingested: usize = 0;
     let mut files_skipped: usize = 0;
+    let mut files_failed: usize = 0;
     let mut chunks_written: usize = 0;
 
     for (idx, (path, _size)) in candidates.iter().enumerate() {
@@ -18331,28 +18415,43 @@ fn run_ingest_pass(
 
         // Fast skip: mtime unchanged → trust the prior hash and don't even read the file.
         // Saves one syscall + full file read per unchanged file (10k-file runs feel it).
-        let mtime_now = std::fs::metadata(path)
-            .ok()
-            .and_then(|m| m.modified().ok())
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs());
-        if let (Some(prev), Some(now)) = (
+        let meta_now = std::fs::metadata(path).ok().and_then(|m| {
+            let secs = m
+                .modified()
+                .ok()?
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()?
+                .as_secs();
+            Some((secs, m.len()))
+        });
+        if let (Some(prev), Some((now_secs, now_size))) = (
             prev_entry
                 .and_then(|v| v.get("mtime"))
                 .and_then(|v| v.as_u64()),
-            mtime_now,
+            meta_now,
         ) {
-            if prev == now {
-                files_skipped += 1;
-                if (idx + 1) % 50 == 0 {
-                    out.status(&format!(
-                        "[ingest] {}/{} scanned ({} skipped)",
-                        idx + 1,
-                        total,
-                        files_skipped
-                    ));
+            if prev == now_secs {
+                // Same-second edits are real: mtime alone can't distinguish
+                // "unchanged" from "edited within the same second as the last
+                // ingest". Before trusting the fast skip, compare the file
+                // size captured in the same metadata call — an edit that
+                // changed length falls through to the hash check instead of
+                // being skipped until the next touch.
+                let prev_size = prev_entry
+                    .and_then(|v| v.get("size"))
+                    .and_then(|v| v.as_u64());
+                if prev_size == Some(now_size) {
+                    files_skipped += 1;
+                    if (idx + 1) % 50 == 0 {
+                        out.status(&format!(
+                            "[ingest] {}/{} scanned ({} skipped)",
+                            idx + 1,
+                            total,
+                            files_skipped
+                        ));
+                    }
+                    continue;
                 }
-                continue;
             }
         }
 
@@ -18425,6 +18524,7 @@ fn run_ingest_pass(
         let chunks = chunk_text(&content, chunk_bytes);
         let rel = path.strip_prefix(root_canonical).unwrap_or(path);
         let mut new_ids: Vec<String> = Vec::with_capacity(chunks.len());
+        let mut chunk_errors: Vec<String> = Vec::new();
         for (chunk_idx, chunk) in chunks.iter().enumerate() {
             let data = json!({
                 "path": rel.display().to_string(),
@@ -18435,10 +18535,40 @@ fn run_ingest_pass(
                 "file_hash": hash,
                 "source": "ingest",
             });
-            if let Ok(rec) = db.insert(table, data) {
-                new_ids.push(rec.id.to_string());
-                chunks_written += 1;
+            // One retry: transient backend hiccups (e.g. an auto-embed model
+            // fetch) shouldn't fail a whole file.
+            let rec = match db.insert(table, data.clone()) {
+                Ok(rec) => rec,
+                Err(first_err) => match db.insert(table, data) {
+                    Ok(rec) => rec,
+                    Err(_) => {
+                        chunk_errors.push(format!("chunk {chunk_idx}: {first_err}"));
+                        continue;
+                    }
+                },
+            };
+            new_ids.push(rec.id.to_string());
+            chunks_written += 1;
+        }
+        if !chunk_errors.is_empty() {
+            // Never checkpoint an incomplete replacement: roll back the partial
+            // chunk set and leave the prior state entry untouched, so the old
+            // hash still matches on the next pass and re-ingests (repairing).
+            for id_str in &new_ids {
+                if let Ok(rid) = axil_core::RecordId::from_string(id_str.as_str()) {
+                    let _ = db.delete(&rid);
+                }
             }
+            chunks_written -= new_ids.len();
+            files_failed += 1;
+            out.status(&format!(
+                "[ingest] {} FAILED ({}/{} chunks): {} — will retry on the next pass",
+                rel.display(),
+                new_ids.len(),
+                chunks.len(),
+                chunk_errors[0]
+            ));
+            continue;
         }
         files_ingested += 1;
         if chunks_replaced > 0 {
@@ -18452,7 +18582,8 @@ fn run_ingest_pass(
             key,
             json!({
                 "hash": hash,
-                "mtime": mtime_now,
+                "mtime": meta_now.map(|(s, _)| s),
+                "size": meta_now.map(|(_, s)| s),
                 "chunks": chunks.len(),
                 "record_ids": new_ids,
                 "ingested_at": chrono::Utc::now().to_rfc3339(),
@@ -18485,6 +18616,7 @@ fn run_ingest_pass(
         "files_total": total,
         "files_ingested": files_ingested,
         "files_skipped": files_skipped,
+        "files_failed": files_failed,
         "chunks_written": chunks_written,
         "elapsed_sec": started.elapsed().as_secs_f64(),
         "state_file": state_path.display().to_string(),

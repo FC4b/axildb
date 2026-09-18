@@ -181,7 +181,42 @@ pub fn put(
     // simply won't match this row semantically. The put still succeeds.
     let _ = db.embed_field(&record.id, FIELD_QUESTION);
     let _ = db.index_text(&record.id, FIELD_QUESTION, &req.question);
+    enforce_capacity(db)?;
     Ok(record)
+}
+
+/// Retention bound for the cache table. TTL is optional, so without a cap the
+/// table grows without limit; once it exceeds this many entries, the
+/// lowest-value entries (fewest hits, then oldest) are evicted at put time.
+const MAX_CACHE_ENTRIES: usize = 1024;
+
+fn enforce_capacity(db: &Axil) -> std::result::Result<(), CacheError> {
+    let mut entries = db.list(TABLE_CACHE_ENTRIES)?;
+    if entries.len() <= MAX_CACHE_ENTRIES {
+        return Ok(());
+    }
+    entries.sort_by(|a, b| {
+        let ha = a.data.get("hit_count").and_then(|v| v.as_u64()).unwrap_or(0);
+        let hb = b.data.get("hit_count").and_then(|v| v.as_u64()).unwrap_or(0);
+        ha.cmp(&hb).then_with(|| {
+            let ta = a
+                .data
+                .get("created_at")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let tb = b
+                .data
+                .get("created_at")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            ta.cmp(tb)
+        })
+    });
+    let excess = entries.len() - MAX_CACHE_ENTRIES;
+    for record in &entries[..excess] {
+        let _ = db.delete(&record.id);
+    }
+    Ok(())
 }
 
 /// A cache hit surfaced to the caller.
@@ -345,11 +380,20 @@ fn ranked_candidates(db: &Axil, question: &str) -> Result<Vec<(Record, f32)>> {
                 else {
                     continue;
                 };
-                match db.embed_query(entry_question) {
-                    Ok(entry_vec) => out.push((record, cosine(&query_vec, &entry_vec))),
-                    // Skip an entry we cannot embed rather than fail the read.
-                    Err(_) => continue,
-                }
+                // `put` persists the question embedding — reuse it instead of
+                // re-embedding every stored question on every lookup (that
+                // made each read cost N model calls; a lookup should spend
+                // exactly one, on the query itself).
+                let entry_vec = match db.get_vector(&record.id) {
+                    Ok(Some(v)) if !v.is_empty() && v.iter().all(|f| f.is_finite()) => v,
+                    _ => match db.embed_query(entry_question) {
+                        // Legacy entry stored before embeddings were persisted.
+                        Ok(v) => v,
+                        // Skip an entry we cannot embed rather than fail the read.
+                        Err(_) => continue,
+                    },
+                };
+                out.push((record, cosine(&query_vec, &entry_vec)));
             }
             out.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
             return Ok(out);

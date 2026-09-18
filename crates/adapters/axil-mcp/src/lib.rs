@@ -207,80 +207,138 @@ impl McpServer {
         /// the typical message is sub-kilobyte.
         const MAX_LINE_BYTES: u64 = 16 * 1024 * 1024;
 
-        let stdin = tokio::io::stdin();
+        enum Incoming {
+            Frame(String),
+            TooLarge,
+            Eof,
+        }
+
         let mut stdout = tokio::io::stdout();
-        // One persistent reader for the whole connection. A client that
-        // pipelines requests (several frames in one pipe chunk) gets them
-        // all buffered here; a per-iteration BufReader would drop the
-        // still-buffered frames on the floor when it goes out of scope,
-        // silently swallowing every request after the first.
-        let mut reader = BufReader::new(stdin);
+
+        // A dedicated reader task owns stdin so line reads never interleave
+        // with response writes; frames flow to the loop as messages.
+        let (in_tx, mut in_rx) = tokio::sync::mpsc::unbounded_channel::<Incoming>();
+        tokio::spawn(async move {
+            // One persistent reader for the whole connection. A client that
+            // pipelines requests (several frames in one pipe chunk) gets them
+            // all buffered here; a per-iteration BufReader would drop the
+            // still-buffered frames on the floor when it goes out of scope,
+            // silently swallowing every request after the first.
+            let mut reader = BufReader::new(tokio::io::stdin());
+            loop {
+                // Re-wrap with `take()` per iteration so each line read is
+                // hard-bounded without discarding the shared buffer.
+                let mut buf: Vec<u8> = Vec::with_capacity(4096);
+                let n = match (&mut reader)
+                    .take(MAX_LINE_BYTES)
+                    .read_until(b'\n', &mut buf)
+                    .await
+                {
+                    Ok(n) => n,
+                    Err(_) => break,
+                };
+                if n == 0 {
+                    break; // EOF
+                }
+                // If we read exactly MAX_LINE_BYTES without a trailing
+                // newline, the client is feeding us an unbounded line —
+                // surface a parse error and terminate the connection
+                // (the host should reconnect on the next tool call).
+                if n as u64 == MAX_LINE_BYTES && !buf.ends_with(b"\n") {
+                    let _ = in_tx.send(Incoming::TooLarge);
+                    break;
+                }
+                let line = String::from_utf8_lossy(&buf).to_string();
+                if in_tx.send(Incoming::Frame(line)).is_err() {
+                    break;
+                }
+            }
+        });
+
+        // Completed responses flow back through this channel: dispatch runs
+        // concurrently on the blocking pool, while every write stays
+        // serialized here. A slow tool call therefore no longer blocks the
+        // connection — later requests (and cancellations) are read while it
+        // runs. JSON-RPC responses carry their id, so replying out of order
+        // is well-defined for hosts.
+        let (resp_tx, mut resp_rx) = tokio::sync::mpsc::unbounded_channel::<JsonRpcResponse>();
 
         loop {
-            // Re-wrap with `take()` per iteration so each line read is
-            // hard-bounded without discarding the shared buffer.
-            let mut buf: Vec<u8> = Vec::with_capacity(4096);
-            let n = (&mut reader)
-                .take(MAX_LINE_BYTES)
-                .read_until(b'\n', &mut buf)
-                .await?;
-            if n == 0 {
-                break; // EOF
-            }
-            // If we read exactly MAX_LINE_BYTES without a trailing
-            // newline, the client is feeding us an unbounded line —
-            // surface a parse error and terminate the connection
-            // (the host should reconnect on the next tool call).
-            let truncated = n as u64 == MAX_LINE_BYTES && !buf.ends_with(b"\n");
-            if truncated {
-                let resp = JsonRpcResponse::error(
-                    None,
-                    PARSE_ERROR,
-                    format!("line exceeds {MAX_LINE_BYTES}-byte cap"),
-                );
-                write_response(&mut stdout, &resp).await?;
-                break;
-            }
-            let line = match std::str::from_utf8(&buf) {
-                Ok(s) => s.trim().to_string(),
-                Err(_) => {
-                    let resp =
-                        JsonRpcResponse::error(None, PARSE_ERROR, "Parse error: invalid UTF-8");
-                    write_response(&mut stdout, &resp).await?;
+            tokio::select! {
+                biased;
+                // Prefer draining finished responses over reading new frames
+                // so a pipelining client gets replies as they complete.
+                maybe_resp = resp_rx.recv() => {
+                    if let Some(resp) = maybe_resp {
+                        write_response(&mut stdout, &resp).await?;
+                    }
                     continue;
                 }
-            };
-            if line.is_empty() {
-                continue;
-            }
+                incoming = in_rx.recv() => {
+                    let line = match incoming {
+                        // The reader task ended (stdin closed): stop reading.
+                        None | Some(Incoming::Eof) => break,
+                        Some(Incoming::TooLarge) => {
+                            let resp = JsonRpcResponse::error(
+                                None,
+                                PARSE_ERROR,
+                                format!("line exceeds {MAX_LINE_BYTES}-byte cap"),
+                            );
+                            write_response(&mut stdout, &resp).await?;
+                            break;
+                        }
+                        Some(Incoming::Frame(line)) => line,
+                    };
 
-            // Parse the JSON-RPC message.
-            let request: JsonRpcRequest = match serde_json::from_str(&line) {
-                Ok(req) => req,
-                Err(_) => {
-                    let resp = JsonRpcResponse::error(None, PARSE_ERROR, "Parse error");
-                    write_response(&mut stdout, &resp).await?;
-                    continue;
+                    let line = line.trim().to_string();
+                    if line.is_empty() {
+                        continue;
+                    }
+
+                    // Parse the JSON-RPC message.
+                    let request: JsonRpcRequest = match serde_json::from_str(&line) {
+                        Ok(req) => req,
+                        Err(_) => {
+                            let resp =
+                                JsonRpcResponse::error(None, PARSE_ERROR, "Parse error");
+                            write_response(&mut stdout, &resp).await?;
+                            continue;
+                        }
+                    };
+
+                    // Shutdown exits the loop immediately; the reply is written
+                    // inline so it can never race the process teardown.
+                    if request.method == "shutdown" {
+                        let resp =
+                            JsonRpcResponse::success(request.id.clone(), serde_json::Value::Null);
+                        write_response(&mut stdout, &resp).await?;
+                        break;
+                    }
+
+                    // Notifications (no id) get no response.
+                    if request.id.is_none() {
+                        continue;
+                    }
+
+                    // Dispatch concurrently: the request is answered from the
+                    // blocking pool whenever it finishes.
+                    let db = self.db.clone();
+                    let tx = resp_tx.clone();
+                    tokio::task::spawn_blocking(move || {
+                        let server = McpServer { db };
+                        if let Some(resp) = server.handle_request(&request) {
+                            let _ = tx.send(resp);
+                        }
+                    });
                 }
-            };
-
-            let is_shutdown = request.method == "shutdown";
-
-            // Dispatch based on method.
-            let response = self.handle_request(&request);
-
-            // Notifications (no id) get no response.
-            if request.id.is_none() && !is_shutdown {
-                continue;
             }
+        }
 
-            if let Some(resp) = response {
-                write_response(&mut stdout, &resp).await?;
-            }
-
-            if is_shutdown {
-                break;
-            }
+        // Drain in-flight work before returning: a client that pipelines a
+        // request and closes stdin still gets its answer.
+        drop(resp_tx);
+        while let Some(resp) = resp_rx.recv().await {
+            write_response(&mut stdout, &resp).await?;
         }
 
         Ok(())
@@ -314,6 +372,10 @@ impl McpServer {
         match req.method.as_str() {
             "initialize" => Some(self.handle_initialize(req)),
             "initialized" => None, // Notification, no response.
+            // Client-side cancellation notice: the work is already dispatched
+            // concurrently, so there is nothing to unwind here — the result
+            // for a cancelled id is simply discarded by the host.
+            "notifications/cancelled" => None,
             "shutdown" => Some(JsonRpcResponse::success(req.id.clone(), Value::Null)),
             "tools/list" => Some(self.handle_tools_list(req)),
             "tools/call" => Some(self.handle_tools_call(req)),

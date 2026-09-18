@@ -19,11 +19,20 @@ use crate::types::{
 /// Semantic memory — facts, entities, and their relationships.
 pub struct SemanticMemory<'a> {
     db: &'a Axil,
+    agent: Option<String>,
 }
 
 impl<'a> SemanticMemory<'a> {
     pub fn new(db: &'a Axil) -> Self {
-        Self { db }
+        Self { db, agent: None }
+    }
+
+    /// Create a semantic memory scoped to a specific agent.
+    pub fn for_agent(db: &'a Axil, agent: &str) -> Self {
+        Self {
+            db,
+            agent: Some(agent.to_string()),
+        }
     }
 
     /// Store a fact about an entity.
@@ -48,6 +57,7 @@ impl<'a> SemanticMemory<'a> {
         }
 
         set_bitemporal(&mut data, None);
+        crate::stamp_agent(&mut data, self.agent.as_deref());
 
         let record = self.db.insert(TABLE_ENTITIES, data)?;
 
@@ -85,6 +95,7 @@ impl<'a> SemanticMemory<'a> {
             })
             .filter(|r| !crate::ttl::is_record_superseded(r))
             .filter(|r| !crate::ttl::is_record_expired(r))
+            .filter(|r| crate::agent_visible(self.agent.as_deref(), &r.data))
             .collect();
 
         // Get related entities via graph.
@@ -125,6 +136,7 @@ impl<'a> SemanticMemory<'a> {
         let records = self.db.list(TABLE_ENTITIES)?;
         let mut entities: Vec<String> = records
             .iter()
+            .filter(|r| crate::agent_visible(self.agent.as_deref(), &r.data))
             .filter_map(|r| {
                 r.data
                     .get("entity")
@@ -144,6 +156,7 @@ impl<'a> SemanticMemory<'a> {
             .into_iter()
             .filter(|r| !crate::ttl::is_record_superseded(r))
             .filter(|r| !crate::ttl::is_record_expired(r))
+            .filter(|r| crate::agent_visible(self.agent.as_deref(), &r.data))
             .filter(|r| {
                 if let Some(e) = entity {
                     r.data

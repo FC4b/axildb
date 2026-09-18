@@ -414,7 +414,7 @@ impl<'a> AxilWorker<'a> {
             return 0; // Need at least 3 successful sessions to detect patterns.
         }
 
-        // Extract summaries and look for repeated action words.
+        // Extract summaries and look for repeated action sequences.
         let summaries: Vec<String> = successful
             .iter()
             .filter_map(|s| {
@@ -425,15 +425,27 @@ impl<'a> AxilWorker<'a> {
             })
             .collect();
 
-        // Simple pattern detection: find 3-word sequences that appear in 2+ sessions.
-        let mut ngram_counts: HashMap<String, usize> = HashMap::new();
+        // Sequence-aware mining: 3- and 4-word windows that read as ordered
+        // action steps rather than filler. A phrase qualifies when it is
+        // action-bearing (contains a known action verb, not bracketed by
+        // stopwords); command tokens mark it as likely a literal recipe.
+        let mut ngram_counts: HashMap<String, (usize, usize)> = HashMap::new(); // ngram -> (count, word_len)
         for summary in &summaries {
             let words: Vec<&str> = summary.split_whitespace().collect();
             let mut seen_in_this = std::collections::HashSet::new();
-            for window in words.windows(3) {
-                let ngram = window.join(" ");
-                if seen_in_this.insert(ngram.clone()) {
-                    *ngram_counts.entry(ngram).or_insert(0) += 1;
+            for n in [3usize, 4usize] {
+                if words.len() < n {
+                    continue;
+                }
+                for window in words.windows(n) {
+                    let ngram = window.join(" ");
+                    if !is_action_bearing(&ngram) {
+                        continue;
+                    }
+                    if seen_in_this.insert(ngram.clone()) {
+                        let entry = ngram_counts.entry(ngram).or_insert((0, n));
+                        entry.0 += 1;
+                    }
                 }
             }
         }
@@ -451,13 +463,20 @@ impl<'a> AxilWorker<'a> {
             })
             .collect();
 
-        for (ngram, count) in &ngram_counts {
+        for (ngram, (count, word_len)) in &ngram_counts {
             if *count >= 2 && !existing_patterns.contains(ngram) {
+                let verbs: Vec<&str> = ngram
+                    .split_whitespace()
+                    .filter(|w| ACTION_VERBS.contains(w))
+                    .collect();
                 let _ = self.db.insert(
                     "_candidate_procedures",
                     json!({
                         "pattern": ngram,
                         "occurrences": count,
+                        "word_count": word_len,
+                        "steps": verbs,
+                        "command_signal": has_command_signal(ngram),
                         "source": "worker_brain",
                         "status": "candidate",
                     }),
@@ -758,6 +777,74 @@ impl Drop for MaintenanceThread {
     fn drop(&mut self) {
         self.stop_flag.store(true, Ordering::Relaxed);
         // Don't join on drop — let the thread exit on its own.
+    }
+}
+
+/// Action verbs that mark a word sequence as a plausible procedure step.
+/// Deliberately small and tooling-flavored — this is a precision filter for
+/// candidate mining, not a general verb list.
+const ACTION_VERBS: &[&str] = &[
+    "run", "build", "test", "deploy", "fix", "add", "update", "write", "refactor", "review",
+    "merge", "push", "commit", "install", "configure", "migrate", "restart", "check", "verify",
+    "bump", "release", "extract", "generate", "compile", "lint", "format", "benchmark", "revert",
+    "cherry-pick", "rebase", "seed", "rollback", "provision", "sanitize", "snapshot",
+];
+
+/// Filler words that disqualify a window when they lead or trail it
+/// ("of the build", "and then we").
+const PHRASE_BOUNDARY_STOPWORDS: &[&str] = &[
+    "the", "a", "an", "and", "or", "but", "if", "then", "of", "to", "in", "on", "for", "with",
+    "at", "by", "from", "is", "are", "was", "were", "be", "been", "it", "its", "this", "that",
+    "these", "those", "as", "we", "i", "you", "they", "our", "my", "their", "also", "just",
+    "very", "when", "while", "after", "before",
+];
+
+/// Tool tokens that mark a sequence as likely a literal command recipe.
+const COMMAND_TOKENS: &[&str] = &[
+    "cargo", "npm", "pnpm", "yarn", "git", "make", "docker", "pytest", "python", "pip", "axil",
+    "kubectl", "terraform",
+];
+
+/// A window reads as a procedure step when it contains an action verb and is
+/// not bracketed by filler — this is what separates "run migration seed
+/// script" from "the same as the".
+fn is_action_bearing(ngram: &str) -> bool {
+    let words: Vec<&str> = ngram.split_whitespace().collect();
+    if words.is_empty() {
+        return false;
+    }
+    if PHRASE_BOUNDARY_STOPWORDS.contains(&words[0])
+        || PHRASE_BOUNDARY_STOPWORDS.contains(&words[words.len() - 1])
+    {
+        return false;
+    }
+    words.iter().any(|w| ACTION_VERBS.contains(w))
+}
+
+fn has_command_signal(ngram: &str) -> bool {
+    ngram.contains('`') || COMMAND_TOKENS.iter().any(|c| ngram.contains(c))
+}
+
+#[cfg(test)]
+mod procedure_mining_tests {
+    use super::*;
+
+    #[test]
+    fn action_bearing_accepts_steps_and_rejects_filler() {
+        assert!(is_action_bearing("run migration seed script"));
+        assert!(is_action_bearing("cargo build release binary"));
+        // Leading/trailing filler disqualifies the window.
+        assert!(!is_action_bearing("the run of build"));
+        assert!(!is_action_bearing("and then we run"));
+        // No action verb at all.
+        assert!(!is_action_bearing("same as the previous"));
+    }
+
+    #[test]
+    fn command_signal_detects_tool_tokens() {
+        assert!(has_command_signal("cargo build release binary"));
+        assert!(has_command_signal("run the `make test` target"));
+        assert!(!has_command_signal("verify migration seed output"));
     }
 }
 

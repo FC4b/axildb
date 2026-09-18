@@ -22,11 +22,20 @@ const CONFIDENCE_PENALTY: f64 = 0.15;
 /// Procedural memory — learned patterns and strategies.
 pub struct ProceduralMemory<'a> {
     db: &'a Axil,
+    agent: Option<String>,
 }
 
 impl<'a> ProceduralMemory<'a> {
     pub fn new(db: &'a Axil) -> Self {
-        Self { db }
+        Self { db, agent: None }
+    }
+
+    /// Create a procedural memory scoped to a specific agent.
+    pub fn for_agent(db: &'a Axil, agent: &str) -> Self {
+        Self {
+            db,
+            agent: Some(agent.to_string()),
+        }
     }
 
     /// Store a learned procedure/pattern.
@@ -56,6 +65,7 @@ impl<'a> ProceduralMemory<'a> {
         });
 
         set_bitemporal(&mut data, None);
+        crate::stamp_agent(&mut data, self.agent.as_deref());
 
         let record = self.db.insert(TABLE_PROCEDURES, data)?;
 
@@ -159,10 +169,11 @@ impl<'a> ProceduralMemory<'a> {
             .query()
             .table(TABLE_PROCEDURES)
             .where_field("pattern_name", Op::Eq, json!(name))
-            .limit(1)
             .exec()?;
 
-        Ok(records.into_iter().next())
+        Ok(records
+            .into_iter()
+            .find(|r| crate::agent_visible(self.agent.as_deref(), &r.data)))
     }
 
     /// Find relevant procedures for a task (vector search).
@@ -177,6 +188,7 @@ impl<'a> ProceduralMemory<'a> {
             .filter(|(r, _)| r.table == TABLE_PROCEDURES)
             .filter(|(r, _)| !crate::ttl::is_record_expired(r))
             .filter(|(r, _)| !crate::ttl::is_record_superseded(r))
+            .filter(|(r, _)| crate::agent_visible(self.agent.as_deref(), &r.data))
             .collect();
 
         // Sort by confidence-weighted similarity.
@@ -202,7 +214,12 @@ impl<'a> ProceduralMemory<'a> {
 
     /// List all procedures, sorted by confidence descending.
     pub fn list(&self) -> Result<Vec<Record>> {
-        let mut records = self.db.list(TABLE_PROCEDURES)?;
+        let mut records: Vec<Record> = self
+            .db
+            .list(TABLE_PROCEDURES)?
+            .into_iter()
+            .filter(|r| crate::agent_visible(self.agent.as_deref(), &r.data))
+            .collect();
         records.sort_by(|a, b| {
             let ca = a
                 .data

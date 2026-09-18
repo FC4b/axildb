@@ -30,6 +30,9 @@ pub struct RecallOptions {
     /// Decay window in seconds for recency calculation.
     /// Default: 30 days (2_592_000 seconds).
     pub decay_window_secs: f64,
+    /// Restrict results to this agent's records plus unscoped (global) ones.
+    /// `None` sees everything.
+    pub agent: Option<String>,
 }
 
 impl Default for RecallOptions {
@@ -41,6 +44,7 @@ impl Default for RecallOptions {
             include_expired: false,
             include_superseded: false,
             decay_window_secs: 30.0 * 86400.0, // 30 days
+            agent: None,
         }
     }
 }
@@ -107,29 +111,41 @@ pub fn recall(
         .unwrap_or_else(|| memory_type.default_alpha())
         .clamp(0.0, 1.0);
 
-    // Fetch extra candidates for re-ranking.
-    let fetch_k = opts.top_k.saturating_mul(3).max(20);
-    let results = db.similar_to(query, fetch_k)?;
-
+    // Fetch candidates for re-ranking. The window is global while the filter
+    // is table-scoped, so a window full of foreign/dead records doesn't mean
+    // "no matches" — grow the window and retry until we have enough valid
+    // hits or the store is exhausted.
     let now = Utc::now();
-
-    let mut scored: Vec<ScoredRecord> = results
-        .into_iter()
-        .filter(|(r, _)| r.table == table)
-        .filter(|(r, _)| opts.include_expired || !crate::ttl::is_record_expired(r))
-        .filter(|(r, _)| opts.include_superseded || !crate::ttl::is_record_superseded(r))
-        .map(|(record, similarity)| {
-            let age_secs = (now - record.created_at).num_seconds().max(0) as f64;
-            let recency = (1.0 - (age_secs / opts.decay_window_secs).min(1.0)).max(0.0) as f32;
-            let final_score = alpha * similarity + (1.0 - alpha) * recency;
-            ScoredRecord {
-                record: ScoredRecordData::from(&record),
-                similarity,
-                recency,
-                final_score,
-            }
-        })
-        .collect();
+    let mut fetch_k = opts.top_k.saturating_mul(3).max(20);
+    let mut scored: Vec<ScoredRecord> = Vec::new();
+    loop {
+        let results = db.similar_to(query, fetch_k)?;
+        let raw_len = results.len();
+        scored = results
+            .into_iter()
+            .filter(|(r, _)| r.table == table)
+            .filter(|(r, _)| opts.include_expired || !crate::ttl::is_record_expired(r))
+            .filter(|(r, _)| opts.include_superseded || !crate::ttl::is_record_superseded(r))
+            .filter(|(r, _)| {
+                crate::agent_visible(opts.agent.as_deref(), &r.data)
+            })
+            .map(|(record, similarity)| {
+                let age_secs = (now - record.created_at).num_seconds().max(0) as f64;
+                let recency = (1.0 - (age_secs / opts.decay_window_secs).min(1.0)).max(0.0) as f32;
+                let final_score = alpha * similarity + (1.0 - alpha) * recency;
+                ScoredRecord {
+                    record: ScoredRecordData::from(&record),
+                    similarity,
+                    recency,
+                    final_score,
+                }
+            })
+            .collect();
+        if scored.len() >= opts.top_k || raw_len < fetch_k || fetch_k >= 4096 {
+            break;
+        }
+        fetch_k = fetch_k.saturating_mul(4);
+    }
 
     scored.sort_by(|a, b| {
         b.final_score
