@@ -2039,6 +2039,58 @@ impl Axil {
         self.traverse_steps(start, &steps)
     }
 
+    /// Traverse a path restricted to edges **recorded** at or before
+    /// `knowledge_time` — the second temporal axis ("what did the graph look
+    /// like as of then?"). Event-time windows (`valid_from`/`valid_until`)
+    /// are not filtered here; for the full bi-temporal query use
+    /// `GraphEngine::traverse_ids_bitemporal`.
+    ///
+    /// Walks the trait-level edge lists and filters by `EdgeInfo.created_at`,
+    /// so it works with any `GraphIndex` backend without an ABI change.
+    pub fn traverse_known_at(
+        &self,
+        start: &RecordId,
+        path: &str,
+        knowledge_time: &chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<Record>> {
+        let steps = crate::plugin::parse_path(path)?;
+        let gi = self.require_graph_index()?;
+        let timer = self.metrics.start_timer(OpType::Traversal);
+
+        let mut current: Vec<RecordId> = vec![start.clone()];
+        for step in steps {
+            let mut next: Vec<RecordId> = Vec::new();
+            let mut seen = std::collections::HashSet::new();
+            for node in &current {
+                for edge in gi
+                    .edges(node.clone(), Some(&step.edge_type), step.direction)
+                    .unwrap_or_default()
+                {
+                    let known = chrono::DateTime::parse_from_rfc3339(&edge.created_at)
+                        .map(|t| t.with_timezone(&chrono::Utc) <= *knowledge_time)
+                        .unwrap_or(false);
+                    if !known {
+                        continue;
+                    }
+                    // The far side of this edge relative to the node we're on.
+                    let neighbor = if edge.from == *node { edge.to } else { edge.from };
+                    if seen.insert(neighbor.clone()) {
+                        next.push(neighbor);
+                    }
+                }
+            }
+            current = next;
+            if current.is_empty() {
+                break;
+            }
+        }
+
+        let result = self.resolve_ids(&current);
+        let elapsed = timer.finish();
+        crate::otel::record_operation("traverse_known_at", "", elapsed);
+        result
+    }
+
     /// Traverse using pre-parsed steps.
     pub fn traverse_steps(&self, start: &RecordId, steps: &[TraversalStep]) -> Result<Vec<Record>> {
         let _span = crate::otel::span("axil.traverse", &[("depth", steps.len().to_string())]);
@@ -3055,6 +3107,24 @@ impl Axil {
         dead_records: (usize, usize),
     ) -> Vec<crate::diagnostics::ProblemDetection> {
         let mut problems = Vec::new();
+
+        // Vectors present on disk but unloadable into the live index (e.g.
+        // written by an older version before insert-time validation). They
+        // are invisible to search; heal --reindex re-embeds and replaces them.
+        if let Some(ref vi) = self.vector_index {
+            let skipped = vi.skipped_at_load();
+            if skipped > 0 {
+                problems.push(crate::diagnostics::ProblemDetection {
+                    detector: "vector_load_skips".to_string(),
+                    severity: Severity::Warning,
+                    message: format!(
+                        "{skipped} vector(s) on disk could not be loaded into the index                          (corrupt, wrong dimensions, or non-finite)"
+                    ),
+                    recommendation: "Rebuild them: axil heal --reindex".to_string(),
+                    auto_fixable: self.embedder.is_some(),
+                });
+            }
+        }
 
         // Hot table imbalance
         if let Ok(tables) = self.tables_with_counts() {
@@ -6749,6 +6819,78 @@ mod tests {
 
         let fresh = Record::new("notes", json!({}));
         assert!(!is_expired_record(&fresh, &now));
+    }
+
+    /// Minimal vector index stub for doctor-problem tests.
+    struct StubVectorIndex {
+        skips: usize,
+    }
+
+    impl crate::plugin::VectorIndex for StubVectorIndex {
+        fn add(&self, _id: RecordId, _vector: &[f32]) -> Result<()> {
+            Ok(())
+        }
+        fn search(&self, _query: &[f32], _top_k: usize) -> Result<Vec<(RecordId, f32)>> {
+            Ok(Vec::new())
+        }
+        fn count(&self) -> usize {
+            0
+        }
+        fn dimensions(&self) -> usize {
+            4
+        }
+        fn skipped_at_load(&self) -> usize {
+            self.skips
+        }
+    }
+
+    impl crate::plugin::Engine for StubVectorIndex {
+        fn name(&self) -> &str {
+            "stub-vector"
+        }
+        fn capabilities(&self) -> Vec<crate::plugin::Capability> {
+            vec![crate::plugin::Capability::VectorSearch]
+        }
+        fn on_record_insert(&self, _record: &Record) -> Result<()> {
+            Ok(())
+        }
+        fn on_record_delete(&self, _id: &RecordId) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn doctor_reports_unloadable_vectors_as_healable_problem() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("doctor-skips.axil");
+        let db = Axil::open(&path)
+            .with_vector_index(Box::new(StubVectorIndex { skips: 2 }))
+            .build()
+            .unwrap();
+
+        let problems = db.detect_problems();
+        let hit = problems
+            .iter()
+            .find(|p| p.detector == "vector_load_skips")
+            .expect("expected a vector_load_skips problem");
+        assert!(hit.message.contains('2'));
+        assert!(hit.recommendation.contains("heal --reindex"));
+    }
+
+    #[test]
+    fn doctor_is_quiet_when_no_vectors_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("doctor-clean.axil");
+        let db = Axil::open(&path)
+            .with_vector_index(Box::new(StubVectorIndex { skips: 0 }))
+            .build()
+            .unwrap();
+
+        assert!(
+            db.detect_problems()
+                .iter()
+                .all(|p| p.detector != "vector_load_skips")
+        );
     }
 
     #[test]

@@ -24,11 +24,16 @@ pub enum Query {
         field: Option<String>,
         clauses: Vec<Clause>,
     },
-    /// Graph traversal: `TRAVERSE ->edge [FROM id]`
+    /// Graph traversal: `TRAVERSE ->edge [FROM id] [KNOWN AT '<rfc3339>']`
     Traverse {
         path: String,
         from: Option<String>,
         clauses: Vec<Clause>,
+        /// Knowledge-time cutoff: only edges recorded at or before this
+        /// timestamp are traversed ("what did the graph look like then?").
+        /// The event-time axis (valid_from/valid_until) remains an
+        /// engine-level API — `GraphEngine::traverse_ids_bitemporal`.
+        known_at: Option<String>,
     },
     /// Fetch by ID: `GET id`
     Get { id: String },

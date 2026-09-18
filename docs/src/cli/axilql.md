@@ -33,6 +33,18 @@ TRAVERSE ->modified->file FROM <record-id>
 TRAVERSE <-mentions WHERE table = "_entities"
 ```
 
+**Knowledge-time cutoff** — restrict traversal to edges recorded at or before a
+timestamp, answering "what did the graph look like as of then?":
+
+```sql
+TRAVERSE ->depends_on FROM <record-id> KNOWN AT '2026-01-01T00:00:00Z'
+```
+
+`KNOWN AT` takes an RFC 3339 timestamp and requires the record-seeded form
+(`FROM <record-id>`). It filters on when each edge was *recorded*; the
+event-time axis (edge validity windows) is available programmatically via
+`GraphEngine::traverse_ids_bitemporal`.
+
 ### GET — fetch by ID
 
 ```sql

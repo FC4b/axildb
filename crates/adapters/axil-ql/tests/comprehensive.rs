@@ -693,3 +693,70 @@ fn serialize_query_result() {
     assert!(json.contains("count"));
     assert!(json.contains("elapsed_ms"));
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// KNOWN AT — knowledge-time filtering on TRAVERSE
+// ═══════════════════════════════════════════════════════════════════════
+
+#[test]
+fn p60_traverse_known_at_parses() {
+    let q = parse("TRAVERSE ->depends_on FROM rec_01HZ3ABC KNOWN AT '2026-01-01T00:00:00Z'").unwrap();
+    match &q {
+        Query::Traverse {
+            known_at: Some(ts),
+            ..
+        } => assert_eq!(ts, "2026-01-01T00:00:00Z"),
+        _ => panic!("expected Traverse with known_at"),
+    }
+}
+
+#[test]
+fn p61_traverse_known_at_validates_timestamp() {
+    let err = parse("TRAVERSE ->edge FROM rec_01 KNOWN AT 'not-a-date'").unwrap_err();
+    assert!(err.message.contains("RFC 3339"), "{}", err.message);
+}
+
+#[test]
+fn p62_traverse_known_requires_at() {
+    let err = parse("TRAVERSE ->edge FROM rec_01 KNOWN").unwrap_err();
+    assert!(err.message.contains("KNOWN requires AT"), "{}", err.message);
+}
+
+#[test]
+fn c60_traverse_known_at_filters_by_edge_creation_time() {
+    use axil_graph::AxilBuilderGraphExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("kt.axil");
+    let db = axil_core::Axil::open(&db_path)
+        .with_graph_engine()
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let a = db
+        .insert("services", serde_json::json!({"name": "api"}))
+        .unwrap();
+    let b = db
+        .insert("services", serde_json::json!({"name": "db"}))
+        .unwrap();
+    db.relate(&a.id, "depends_on", &b.id, None).unwrap();
+
+    // No cutoff: the edge is traversable.
+    let q = format!(r#"TRAVERSE ->depends_on FROM "{}""#, a.id);
+    assert_eq!(axil_ql::run(&db, &q).unwrap().count, 1);
+
+    // Knowledge cutoff before the edge was recorded: filtered out.
+    let q = format!(
+        r#"TRAVERSE ->depends_on FROM "{}" KNOWN AT '2020-01-01T00:00:00Z'"#,
+        a.id
+    );
+    assert_eq!(axil_ql::run(&db, &q).unwrap().count, 0);
+
+    // Cutoff after the edge was recorded: visible again.
+    let q = format!(
+        r#"TRAVERSE ->depends_on FROM "{}" KNOWN AT '2030-01-01T00:00:00Z'"#,
+        a.id
+    );
+    assert_eq!(axil_ql::run(&db, &q).unwrap().count, 1);
+}

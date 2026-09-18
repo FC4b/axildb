@@ -40,6 +40,8 @@ pub enum TokenKind {
     Recall,
     Find,
     Traverse,
+    Known,
+    At,
     Get,
     Count,
     Agg,
@@ -97,6 +99,8 @@ impl fmt::Display for TokenKind {
             TokenKind::Recall => write!(f, "RECALL"),
             TokenKind::Find => write!(f, "FIND"),
             TokenKind::Traverse => write!(f, "TRAVERSE"),
+            TokenKind::Known => write!(f, "KNOWN"),
+            TokenKind::At => write!(f, "AT"),
             TokenKind::Get => write!(f, "GET"),
             TokenKind::Count => write!(f, "COUNT"),
             TokenKind::Agg => write!(f, "AGG"),
@@ -429,6 +433,10 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, LexError> {
                 TokenKind::Find
             } else if text.eq_ignore_ascii_case("TRAVERSE") {
                 TokenKind::Traverse
+            } else if text.eq_ignore_ascii_case("KNOWN") {
+                TokenKind::Known
+            } else if text.eq_ignore_ascii_case("AT") {
+                TokenKind::At
             } else if text.eq_ignore_ascii_case("GET") {
                 TokenKind::Get
             } else if text.eq_ignore_ascii_case("COUNT") {

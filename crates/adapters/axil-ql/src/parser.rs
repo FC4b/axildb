@@ -160,11 +160,53 @@ impl Parser {
         self.advance(); // consume FROM
         let from = self.expect_id_value("FROM requires a record ID or table name")?;
 
+        // Optional knowledge-time cutoff: KNOWN AT '<rfc3339>'.
+        let known_at = if matches!(self.peek().kind, TokenKind::Known) {
+            self.advance(); // consume KNOWN
+            if !matches!(self.peek().kind, TokenKind::At) {
+                return Err(ParseError {
+                    message: "KNOWN requires AT <timestamp>".to_string(),
+                    span: self.peek().span,
+                    suggestion: Some(
+                        "e.g. TRAVERSE ->depends_on FROM <id> KNOWN AT '2026-01-01T00:00:00Z'"
+                            .to_string(),
+                    ),
+                });
+            }
+            self.advance(); // consume AT
+            match self.peek().kind {
+                TokenKind::StringLit(_) | TokenKind::Ident(_) => {
+                    let raw = match &self.advance().kind {
+                        TokenKind::StringLit(s) | TokenKind::Ident(s) => s.clone(),
+                        _ => unreachable!("peeked above"),
+                    };
+                    if chrono::DateTime::parse_from_rfc3339(&raw).is_err() {
+                        return Err(ParseError {
+                            message: format!("KNOWN AT requires an RFC 3339 timestamp, got '{raw}'"),
+                            span: self.peek().span,
+                            suggestion: Some("e.g. KNOWN AT '2026-01-01T00:00:00Z'".to_string()),
+                        });
+                    }
+                    Some(raw)
+                }
+                _ => {
+                    return Err(ParseError {
+                        message: "KNOWN AT requires an RFC 3339 timestamp string".to_string(),
+                        span: self.peek().span,
+                        suggestion: Some("e.g. KNOWN AT '2026-01-01T00:00:00Z'".to_string()),
+                    })
+                }
+            }
+        } else {
+            None
+        };
+
         let clauses = self.parse_clauses()?;
         Ok(Query::Traverse {
             path,
             from: Some(from),
             clauses,
+            known_at,
         })
     }
 

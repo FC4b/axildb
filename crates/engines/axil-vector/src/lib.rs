@@ -348,6 +348,10 @@ impl Engine for VectorEngine {
 }
 
 impl VectorIndex for VectorEngine {
+    fn skipped_at_load(&self) -> usize {
+        self.skipped_at_load
+    }
+
     fn add(&self, id: RecordId, vector: &[f32]) -> axil_core::Result<()> {
         // Validate before touching storage: a rejected write must leave any
         // previously stored vector for this id intact.

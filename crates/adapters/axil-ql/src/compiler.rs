@@ -338,6 +338,7 @@ pub fn execute(db: &Axil, query: &Query) -> Result<QueryResult, CompileError> {
             path,
             from,
             clauses,
+            known_at,
         } => {
             match from {
                 Some(ref from_val) => {
@@ -345,9 +346,22 @@ pub fn execute(db: &Axil, query: &Query) -> Result<QueryResult, CompileError> {
                     if let Ok(rid) = RecordId::from_string(from_val) {
                         // Direct record-seeded traversal via Axil::traverse(),
                         // then apply clauses (WHERE, LIMIT, OFFSET) to results.
-                        let mut records = db.traverse(&rid, path).map_err(|e| CompileError {
-                            message: e.to_string(),
-                        })?;
+                        // KNOWN AT restricts to edges recorded by the cutoff
+                        // (knowledge-time filtering).
+                        let mut records = match &known_at {
+                            Some(ts) => {
+                                let dt = chrono::DateTime::parse_from_rfc3339(ts)
+                                    .map_err(|e| CompileError {
+                                        message: format!("invalid KNOWN AT timestamp: {e}"),
+                                    })?
+                                    .with_timezone(&chrono::Utc);
+                                db.traverse_known_at(&rid, path, &dt)
+                                    .map_err(|e| CompileError { message: e.to_string() })?
+                            }
+                            None => db.traverse(&rid, path).map_err(|e| CompileError {
+                                message: e.to_string(),
+                            })?,
+                        };
                         let mut limit = None;
                         let mut offset = 0usize;
                         for clause in clauses {
@@ -513,7 +527,9 @@ fn execute_explain(db: &Axil, query: &Query) -> Result<QueryResult, CompileError
             path,
             from,
             clauses,
+            known_at,
         } => {
+            let _ = known_at; // plan shape is identical; the filter is applied at execution
             match from {
                 Some(ref from_val) => {
                     if RecordId::from_string(from_val).is_ok() {

@@ -384,6 +384,7 @@ name = "axil-ql"
 version = "2.2.0"
 dependencies = [
  "axil-core",
+ "axil-graph",
  "chrono",
  "serde",
  "serde_json",

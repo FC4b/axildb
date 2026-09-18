@@ -128,6 +128,14 @@ pub trait VectorIndex: Engine {
         0
     }
 
+    /// Entries present in durable storage that could not be loaded into the
+    /// live index at open (unparsable id, wrong dimensions, non-finite
+    /// values). Default 0 so backends that don't track this keep compiling;
+    /// surfaced by `doctor` as a healable anomaly.
+    fn skipped_at_load(&self) -> usize {
+        0
+    }
+
     /// All vector IDs currently in the index.
     fn all_ids(&self) -> Result<Vec<RecordId>> {
         Ok(Vec::new())

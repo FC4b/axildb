@@ -1,0 +1,3 @@
+[index]
+# axil-cli main.rs is ~830 KB — index it so Axil can code-search its own CLI
+max_file_size_kb = 1024
