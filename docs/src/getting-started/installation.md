@@ -8,6 +8,25 @@ and embeddings work out of the box on every platform (including Windows). The
 prebuilt archive ships the **default** feature set — every component in the
 table below except `rerank`, `web-docs`, and `otel`.
 
+### One-line install (shell)
+
+Linux/macOS (POSIX sh — needs only `curl` + `tar`):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/FC4b/axildb/main/scripts/install.sh | sh
+```
+
+Windows (PowerShell):
+
+```powershell
+irm https://raw.githubusercontent.com/FC4b/axildb/main/scripts/install.ps1 | iex
+```
+
+Each script detects the platform, downloads the archive from the latest
+release, and installs into `$AXIL_HOME/bin` (default `~/.axil/bin`), printing
+any PATH step you need. Review the script before piping it into a shell —
+it is short on purpose.
+
 ### Via cargo-binstall
 
 [`cargo binstall`](https://github.com/cargo-bins/cargo-binstall) fetches the

@@ -96,7 +96,10 @@ Report the install method you used and the verification output when done.
 **1. Install** — a prebuilt `axil` binary, no toolchain, no ~3-min compile. The archives **bundle a known-good ONNX runtime next to the binary**, so vector search and embeddings work out of the box (including on Windows):
 
 ```bash
-# Prebuilt binary, no source build — fetches the platform archive from the releases page.
+# One line, no toolchain (Linux/macOS; Windows: scripts/install.ps1 via irm | iex):
+curl -fsSL https://raw.githubusercontent.com/FC4b/axildb/main/scripts/install.sh | sh
+
+# …or prebuilt via cargo — fetches the platform archive from the releases page.
 cargo binstall axildb          # https://github.com/cargo-bins/cargo-binstall
 
 # …or download an archive for your platform from the releases page and extract it

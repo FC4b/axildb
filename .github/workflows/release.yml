@@ -9,12 +9,12 @@
 # hand-authored. `dist-workspace.toml` is kept only to back the `dist plan`
 # sanity check job.
 #
-# Scope: this builds the six triples, bundles onnxruntime, and uploads the
-# ARCHIVES to the GitHub Release. It does NOT produce one-line `curl|sh`
-# installers or an `axil-update` self-updater — the prebuilt distribution is
-# `cargo binstall axildb` + these archives. Adding real installers means a full
-# cargo-dist adoption, which must first solve ONNX bundling and be validated by
-# an actual tagged-release CI run (see dist-workspace.toml header).
+# Scope: this builds the six triples (onnxruntime statically linked — the
+# archives are self-contained) and uploads them to the GitHub Release. The
+# one-line `curl|sh` / `irm|iex` installers live in scripts/install.sh and
+# scripts/install.ps1; they consume these archives directly from
+# releases/latest/download, so NO full cargo-dist adoption is required for
+# them. An `axil-update` self-updater is still not produced.
 #
 # Trigger: release-plz emits PER-CRATE tags like `axildb-v1.2.0` (NOT a bare
 # `v1.2.0`). This runs AFTER release-plz pushes that tag and UPLOADS assets to

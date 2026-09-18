@@ -11,8 +11,10 @@
 # step, which is the load-bearing fix for the Windows ORT-init failure. Until a
 # tagged-release CI run validates a full cargo-dist adoption (installers +
 # updater), the prebuilt distribution is: `cargo binstall axildb` + the archives
-# this workflow uploads. One-line `curl|sh` installers and `axil-update` are NOT
-# produced — don't advertise them.
+# this workflow uploads. One-line `curl|sh` / `irm|iex` installers exist as
+# scripts/install.sh + scripts/install.ps1 (they consume these archives from
+# releases/latest/download - no cargo-dist adoption needed); an `axil-update`
+# self-updater is still NOT produced - don't advertise it.
 #
 # Why prebuilts exist at all: `cargo install axildb` builds from source (~3 min,
 # needs a C toolchain) and on Windows leaves the `download-binaries`-produced
@@ -39,9 +41,9 @@ ci = "github"
 allow-dirty = ["ci"]
 # No cargo-dist installers: the hand-authored workflow ships archives only, and
 # `cargo binstall` consumes them via [package.metadata.binstall] in axil-cli's
-# Cargo.toml. One-line installers + `axil-update` are deferred until a tagged CI
-# run can validate a full cargo-dist adoption (which must also solve ONNX
-# bundling — see the header).
+# Cargo.toml. The shell/PowerShell installers (scripts/) also consume these
+# archives directly and need no cargo-dist adoption; `axil-update` remains
+# deferred.
 installers = []
 # Prebuilt targets: x86_64 + aarch64 across the three desktop OSes.
 # NOTE: aarch64-pc-windows-msvc may lack a prebuilt `ort` download-binaries
