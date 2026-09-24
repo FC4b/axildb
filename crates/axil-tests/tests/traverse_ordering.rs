@@ -110,6 +110,30 @@ fn vector_seeded_traversal_order_by_returns_true_top_n() {
     assert_eq!(ranks(&top), [9, 8, 7]);
 }
 
+/// Without a traversal the same rule holds for the vector candidates
+/// themselves: `similar_to(k)` picks the candidate set, the ordering sorts
+/// all of it, and `limit` pages the sorted result — not the `limit` nearest.
+#[test]
+fn vector_candidates_order_by_returns_true_top_n() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    // Similarity to [1, 0, 0] falls as rank rises, so the highest ranks are
+    // the least similar candidates.
+    for rank in 0..10i64 {
+        let r = db.insert("files", json!({"rank": rank})).unwrap();
+        db.add_vector(&r.id, &[1.0, rank as f32 * 0.1, 0.0]).unwrap();
+    }
+
+    let top = db
+        .query()
+        .similar_to_vector(vec![1.0, 0.0, 0.0], 10)
+        .order_by("rank", SortDirection::Desc)
+        .limit(3)
+        .exec()
+        .unwrap();
+    assert_eq!(ranks(&top), [9, 8, 7]);
+}
+
 #[test]
 fn unordered_traversal_still_honors_limit() {
     let dir = tempfile::tempdir().unwrap();
