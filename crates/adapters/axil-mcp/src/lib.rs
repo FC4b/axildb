@@ -239,10 +239,11 @@ impl McpServer {
         /// the typical message is sub-kilobyte.
         const MAX_LINE_BYTES: u64 = 16 * 1024 * 1024;
 
+        // End of input needs no variant: the reader task drops its sender,
+        // which closes the channel.
         enum Incoming {
             Frame(String),
             TooLarge,
-            Eof,
         }
 
         let mut stdout = output;
@@ -317,7 +318,7 @@ impl McpServer {
                 incoming = in_rx.recv() => {
                     let line = match incoming {
                         // The reader task ended (stdin closed): stop reading.
-                        None | Some(Incoming::Eof) => break,
+                        None => break,
                         Some(Incoming::TooLarge) => {
                             let resp = JsonRpcResponse::error(
                                 None,
