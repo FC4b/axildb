@@ -9132,6 +9132,18 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             // Keep a copy for cascade fallbacks — the primary recall consumes `cfg`.
             let cfg_for_cascade = cfg.clone();
 
+            // --table / --type drop rows after the recall, so over-fetch to let
+            // matches ranked just below the cut still fill top_k; the result is
+            // truncated back to top_k once filtered. Same factor as the MCP
+            // `recall` tool's `TABLE_FILTER_INFLATION`, so both surfaces return
+            // the same rows for the same filtered query.
+            const FILTER_INFLATION: usize = 5;
+            let fetch_k = if table_filter.is_some() || type_filter.is_some() {
+                top_k.saturating_mul(FILTER_INFLATION)
+            } else {
+                top_k
+            };
+
             // Deadline-bounded recall: when --timeout-ms is set we run db.recall in a worker
             // thread and wait up to the remaining budget on a channel. If it doesn't finish
             // in time we return empty partial results and abandon the thread — the CLI process
@@ -9146,7 +9158,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                 let db_handle = db_arc.clone();
                 let q = query.clone();
                 let cfg_clone = cfg.clone();
-                let tk = top_k;
+                let tk = fetch_k;
                 let (tx, rx) = std::sync::mpsc::channel();
                 std::thread::spawn(move || {
                     let _ = tx.send(db_handle.recall(&q, tk, Some(cfg_clone)));
@@ -9172,7 +9184,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                 (db_arc, result)
             } else {
                 let db = Arc::new(db);
-                let r = db.recall(&query, top_k, Some(cfg))?;
+                let r = db.recall(&query, fetch_k, Some(cfg))?;
                 (db, r)
             };
 
@@ -9342,7 +9354,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                     cfg_relaxed.qtc = None;
                     cfg_relaxed.min_confidence = None;
                     cfg_relaxed.scope_filter.clear();
-                    if let Ok(mut r1) = db.recall(&query, top_k, Some(cfg_relaxed)) {
+                    if let Ok(mut r1) = db.recall(&query, fetch_k, Some(cfg_relaxed)) {
                         apply_filters(&mut r1);
                         if !r1.is_empty() {
                             recall_results = r1;
@@ -9358,7 +9370,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                     let expanded = expand_query(&db, &query, expand_neighbors);
                     if expanded != query {
                         if let Ok(mut r2) =
-                            db.recall(&expanded, top_k, Some(cfg_for_cascade.clone()))
+                            db.recall(&expanded, fetch_k, Some(cfg_for_cascade.clone()))
                         {
                             apply_filters(&mut r2);
                             if !r2.is_empty() {
@@ -9400,6 +9412,9 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                         rung
                     );
                 }
+            }
+            if fetch_k > top_k {
+                recall_results.truncate(top_k);
             }
 
             // --profile: surface the identifier-aware query classification and
