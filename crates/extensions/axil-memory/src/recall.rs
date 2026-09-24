@@ -193,18 +193,13 @@ fn recall_by_vector(
 }
 
 /// Entries in the default vector index — the most raw hits any search window
-/// can return. `Axil::info` is the public view of the count; should the
-/// vector entry ever be missing, fall back to the record count, which bounds
-/// the live entries (every indexed vector belongs to a stored record).
+/// can return. Without a vector index, fall back to the record count, which
+/// bounds the live entries (every indexed vector belongs to a stored record).
 fn vector_index_size(db: &Axil) -> Result<usize> {
-    let info = db.info()?;
-    Ok(info
-        .plugins
-        .get("vector")
-        .and_then(|v| v.get("count"))
-        .and_then(|c| c.as_u64())
-        .map(|c| c as usize)
-        .unwrap_or(info.total_records))
+    match db.vector_count() {
+        Some(count) => Ok(count),
+        None => Ok(db.info()?.total_records),
+    }
 }
 
 /// Cross-memory query: searches all memory types, returns tagged results.

@@ -1861,6 +1861,13 @@ impl Axil {
         self.vector_index.is_some()
     }
 
+    /// Number of vectors in the default vector index, or `None` when no
+    /// vector index is configured. Constant time — unlike [`Axil::info`],
+    /// which also stats every companion file on disk.
+    pub fn vector_count(&self) -> Option<usize> {
+        self.vector_index.as_ref().map(|vi| vi.count())
+    }
+
     /// Fetch a record's stored vector from the default vector index, if present.
     ///
     /// Returns `Ok(None)` when no vector index is configured or the record has
