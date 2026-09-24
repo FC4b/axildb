@@ -38,12 +38,18 @@ timestamp, answering "what did the graph look like as of then?":
 
 ```sql
 TRAVERSE ->depends_on FROM <record-id> KNOWN AT '2026-01-01T00:00:00Z'
+TRAVERSE ->depends_on FROM services KNOWN AT '2026-01-01T00:00:00Z' WHERE tier = 1
 ```
 
-`KNOWN AT` takes an RFC 3339 timestamp and requires the record-seeded form
-(`FROM <record-id>`). It filters on when each edge was *recorded*; the
-event-time axis (edge validity windows) is available programmatically via
-`GraphEngine::traverse_ids_bitemporal`.
+`KNOWN AT` takes an RFC 3339 timestamp and works with either seed form. It
+filters on when each edge was *recorded*; the event-time axis (edge validity
+windows) is available programmatically via
+`GraphEngine::traverse_ids_bitemporal`. Trailing clauses keep their meaning,
+so a cutoff later than every edge returns the same records as the plain
+query: with `FROM <table>`, `WHERE` picks the seed rows and `ORDER BY` /
+`OFFSET` / `LIMIT` apply to the endpoints (100 by default). A chained
+`TRAVERSE` clause after `KNOWN AT` is rejected — write the whole path after
+the leading `TRAVERSE`.
 
 ### GET — fetch by ID
 

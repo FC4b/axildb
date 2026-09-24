@@ -202,11 +202,18 @@ impl Parser {
         };
 
         let clauses = self.parse_clauses()?;
-        Ok(Query::Traverse {
-            path,
-            from: Some(from),
-            clauses,
-            known_at,
+        Ok(match known_at {
+            Some(known_at) => Query::TraverseKnownAt {
+                path,
+                from,
+                clauses,
+                known_at,
+            },
+            None => Query::Traverse {
+                path,
+                from: Some(from),
+                clauses,
+            },
         })
     }
 

@@ -4,11 +4,12 @@ use serde::{Deserialize, Serialize};
 
 /// A parsed AxilQL query.
 ///
-/// The AST is an **unstable compilation surface**: it grows a variant (or a
-/// variant grows a field) whenever the language gains a verb or clause, and
-/// that growth is not treated as a breaking change. Downstream code should
-/// feed query *strings* to [`crate::run`] rather than matching this enum;
-/// matches must include a wildcard arm.
+/// The AST is an **unstable compilation surface**: it grows a variant whenever
+/// the language gains a verb or clause, and that growth is not treated as a
+/// breaking change. A published variant's fields never change — syntax that
+/// needs new data gets a new variant instead (see [`Query::TraverseKnownAt`]).
+/// Downstream code should feed query *strings* to [`crate::run`] rather than
+/// matching this enum; matches must include a wildcard arm.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum Query {
@@ -24,16 +25,11 @@ pub enum Query {
         field: Option<String>,
         clauses: Vec<Clause>,
     },
-    /// Graph traversal: `TRAVERSE ->edge [FROM id] [KNOWN AT '<rfc3339>']`
+    /// Graph traversal: `TRAVERSE ->edge [FROM id]`
     Traverse {
         path: String,
         from: Option<String>,
         clauses: Vec<Clause>,
-        /// Knowledge-time cutoff: only edges recorded at or before this
-        /// timestamp are traversed ("what did the graph look like then?").
-        /// The event-time axis (valid_from/valid_until) remains an
-        /// engine-level API — `GraphEngine::traverse_ids_bitemporal`.
-        known_at: Option<String>,
     },
     /// Fetch by ID: `GET id`
     Get { id: String },
@@ -52,6 +48,24 @@ pub enum Query {
     },
     /// Show query plan: `EXPLAIN <query>`
     Explain { inner: Box<Query> },
+    /// Graph traversal as of a knowledge-time cutoff:
+    /// `TRAVERSE ->edge FROM <id|table> KNOWN AT '<rfc3339>'`.
+    ///
+    /// Only edges recorded at or before `known_at` are walked ("what did the
+    /// graph look like then?"); everything else behaves as
+    /// [`Query::Traverse`]. The event-time axis (edge validity windows)
+    /// remains an engine-level API — `GraphEngine::traverse_ids_bitemporal`.
+    #[non_exhaustive]
+    TraverseKnownAt {
+        /// Traversal path, e.g. `->depends_on`.
+        path: String,
+        /// Seed: a record ID, or a table whose rows all seed the walk.
+        from: String,
+        /// Trailing clauses, applied as for [`Query::Traverse`].
+        clauses: Vec<Clause>,
+        /// Knowledge-time cutoff as an RFC 3339 timestamp.
+        known_at: String,
+    },
 }
 
 /// A single aggregation spec in an `AGG` statement.
@@ -142,7 +156,8 @@ impl Query {
         match self {
             Query::Recall { clauses, .. }
             | Query::Find { clauses, .. }
-            | Query::Traverse { clauses, .. } => clauses,
+            | Query::Traverse { clauses, .. }
+            | Query::TraverseKnownAt { clauses, .. } => clauses,
             Query::Get { .. }
             | Query::Count { .. }
             | Query::Agg { .. }
