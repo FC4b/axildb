@@ -18599,6 +18599,8 @@ fn run_ingest_pass(
         let chunks = chunk_text(&content, chunk_bytes);
         let rel = path.strip_prefix(root_canonical).unwrap_or(path);
         let mut new_ids: Vec<String> = Vec::with_capacity(chunks.len());
+        // Ids of chunks whose insert failed but may still be persisted.
+        let mut failed_ids: Vec<RecordId> = Vec::new();
         let mut chunk_errors: Vec<String> = Vec::new();
         for (chunk_idx, chunk) in chunks.iter().enumerate() {
             let data = json!({
@@ -18610,20 +18612,29 @@ fn run_ingest_pass(
                 "file_hash": hash,
                 "source": "ingest",
             });
+            // `insert` persists the record before its index hooks run, so an
+            // Err can leave a half-indexed copy behind under an id the error
+            // doesn't carry. Fixing the id up front lets the retry delete that
+            // copy instead of stacking a duplicate chunk beside it, and lets a
+            // final failure hand the id to the rollback below.
+            let record = axil_core::Record::new(table, data);
+            let id = record.id.clone();
             // One retry: transient backend hiccups (e.g. an auto-embed model
             // fetch) shouldn't fail a whole file.
-            let rec = match db.insert(table, data.clone()) {
-                Ok(rec) => rec,
-                Err(first_err) => match db.insert(table, data) {
-                    Ok(rec) => rec,
-                    Err(_) => {
-                        chunk_errors.push(format!("chunk {chunk_idx}: {first_err}"));
-                        continue;
-                    }
-                },
-            };
-            new_ids.push(rec.id.to_string());
-            chunks_written += 1;
+            let inserted = db.insert_preserving(record.clone()).or_else(|first_err| {
+                let _ = db.delete(&id);
+                db.insert_preserving(record).map_err(|_| first_err)
+            });
+            match inserted {
+                Ok(rec) => {
+                    new_ids.push(rec.id.to_string());
+                    chunks_written += 1;
+                }
+                Err(first_err) => {
+                    failed_ids.push(id);
+                    chunk_errors.push(format!("chunk {chunk_idx}: {first_err}"));
+                }
+            }
         }
         if !chunk_errors.is_empty() {
             // Never checkpoint an incomplete replacement: roll back the partial
@@ -18633,6 +18644,9 @@ fn run_ingest_pass(
                 if let Ok(rid) = axil_core::RecordId::from_string(id_str.as_str()) {
                     let _ = db.delete(&rid);
                 }
+            }
+            for rid in &failed_ids {
+                let _ = db.delete(rid);
             }
             chunks_written -= new_ids.len();
             files_failed += 1;
@@ -18697,6 +18711,129 @@ fn run_ingest_pass(
         "state_file": state_path.display().to_string(),
         "table": table,
     }))
+}
+
+#[cfg(all(test, feature = "indexer"))]
+mod ingest_retry_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use axil_core::plugin::{Capability, Engine, VectorIndex};
+    use axil_core::Record;
+
+    /// A vector index whose insert hook fails its first `failures` calls: the
+    /// shape of a transient auto-embed error, which `Axil::insert` reports
+    /// only after the record is already persisted.
+    struct FlakyIndex {
+        failures: AtomicUsize,
+    }
+
+    impl Engine for FlakyIndex {
+        fn name(&self) -> &str {
+            "flaky"
+        }
+
+        fn capabilities(&self) -> Vec<Capability> {
+            vec![Capability::VectorSearch]
+        }
+
+        fn on_record_insert(&self, _record: &Record) -> axil_core::Result<()> {
+            let left = self.failures.load(Ordering::SeqCst);
+            if left > 0 {
+                self.failures.store(left - 1, Ordering::SeqCst);
+                return Err(axil_core::AxilError::plugin("injected index failure"));
+            }
+            Ok(())
+        }
+
+        fn on_record_delete(&self, _id: &RecordId) -> axil_core::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl VectorIndex for FlakyIndex {
+        fn add(&self, _id: RecordId, _vector: &[f32]) -> axil_core::Result<()> {
+            Ok(())
+        }
+
+        fn search(&self, _query: &[f32], _top_k: usize) -> axil_core::Result<Vec<(RecordId, f32)>> {
+            Ok(Vec::new())
+        }
+
+        fn count(&self) -> usize {
+            0
+        }
+
+        fn dimensions(&self) -> usize {
+            3
+        }
+    }
+
+    /// Ingest one single-chunk file through a DB whose index hook fails
+    /// `failures` times. Returns the pass report, the records left in the
+    /// ingest table, and the checkpointed state.
+    fn ingest_with_failures(failures: usize) -> (Value, Vec<Record>, Value) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let file = root.join("note.md");
+        std::fs::write(
+            &file,
+            "One short paragraph, so the file is a single chunk.\n",
+        )
+        .unwrap();
+        let size = std::fs::metadata(&file).unwrap().len();
+        let state_path = root.join("ingest.state.json");
+        let db = Axil::open(root.join("memory.axil"))
+            .with_vector_index(Box::new(FlakyIndex {
+                failures: AtomicUsize::new(failures),
+            }))
+            .build()
+            .unwrap();
+        let out = Output {
+            format: OutputFormat::Json,
+            quiet: true,
+            jsonl: false,
+        };
+
+        let report = run_ingest_pass(
+            &db,
+            &root,
+            &[(file, size)],
+            &state_path,
+            "notes",
+            4096,
+            false,
+            &out,
+        )
+        .unwrap();
+        let records = db.list("notes").unwrap();
+        let state = serde_json::from_str(&std::fs::read_to_string(&state_path).unwrap()).unwrap();
+        (report, records, state)
+    }
+
+    #[test]
+    fn retried_chunk_insert_leaves_no_duplicate() {
+        let (report, records, state) = ingest_with_failures(1);
+        assert_eq!(report["files_ingested"], 1, "report: {report}");
+        assert_eq!(
+            records.len(),
+            1,
+            "the failed first attempt must not leave a second copy of the chunk"
+        );
+        let entry = state.as_object().unwrap().values().next().unwrap();
+        assert_eq!(entry["record_ids"], json!([records[0].id.to_string()]));
+    }
+
+    #[test]
+    fn failed_chunk_insert_rolls_back_every_persisted_copy() {
+        let (report, records, _) = ingest_with_failures(2);
+        assert_eq!(report["files_failed"], 1, "report: {report}");
+        assert!(
+            records.is_empty(),
+            "rollback must remove what both attempts persisted, found {} record(s)",
+            records.len()
+        );
+    }
 }
 
 /// Split text into chunks of at most `max_bytes`, splitting on paragraph boundaries (12.2).
