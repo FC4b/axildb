@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.1.4](https://github.com/FC4b/axildb/compare/axil-scip-v2.1.3...axil-scip-v2.1.4) - 2026-09-24
+
+### Other
+
+- updated the following local packages: axil-core, axil-graph
+
 ## [2.1.3](https://github.com/FC4b/axildb/compare/axil-scip-v2.1.2...axil-scip-v2.1.3) - 2026-07-18
 
 ### Other

@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.0](https://github.com/FC4b/axildb/compare/axil-memory-v2.1.3...axil-memory-v2.2.0) - 2026-09-24
+
+### Added
+
+- *(lifecycle)* per-table lifecycle policy + wire dead healing knobs
+
+### Fixed
+
+- *(memory)* keep writes, superseding and links inside an agent's scope
+- *(core,vector,mcp,memory)* land phase 27 codex-review hardening
+
+### Other
+
+- *(core,memory)* Axil::vector_count for recall's index-size check
+- *(memory)* supersede through core's shared mark_superseded path
+
 ## [2.1.3](https://github.com/FC4b/axildb/compare/axil-memory-v2.1.2...axil-memory-v2.1.3) - 2026-07-18
 
 ### Other
