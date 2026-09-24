@@ -461,7 +461,7 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
         #[cfg(feature = "event-log")]
         ToolDefinition {
             name: "recall_delta".into(),
-            description: "Pull committed semantic events that happened after a cursor, oldest first. Surfaces high-signal cross-agent changes — a belief was revised, a decision superseded, an error fixed, a checkpoint written — so a second agent can ask 'what changed since I last looked' without re-scanning. Each event carries a monotonic `cursor`; pass the last one back in as `since_cursor` to resume. `exclude_agent` drops events written by that agent (e.g. skip your own). Returns committed facts only — it does not read record bodies and does not relax cross-agent session isolation; resolve a returned `record_id` through the normal access path.".into(),
+            description: "Pull committed semantic events that happened after a cursor, oldest first. Surfaces high-signal cross-agent changes — a belief was revised, a decision superseded, an error fixed, a checkpoint written — so a second agent can ask 'what changed since I last looked' without re-scanning. Each event carries a monotonic `cursor`; pass the response's `next_cursor` back in as `since_cursor` to resume (it advances past events `exclude_agent` dropped, so an all-excluded page still moves forward). `exclude_agent` drops events written by that agent (e.g. skip your own). Returns committed facts only — it does not read record bodies and does not relax cross-agent session isolation; resolve a returned `record_id` through the normal access path.".into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
