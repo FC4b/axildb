@@ -308,6 +308,93 @@ compact = "never"
     assert!(db.get(&r.id).unwrap().is_some());
 }
 
+#[test]
+fn malformed_lifecycle_entry_fails_safe_and_is_reported() {
+    // A capitalized enum value used to discard the whole `[lifecycle]`
+    // section, silently re-enabling supersede + purge for the table the user
+    // had just protected.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("axil.toml"),
+        r#"
+[lifecycle.tables.autopsies]
+supersede = false
+compact = "Never"
+
+[lifecycle.tables.notes]
+supersede = false
+"#,
+    )
+    .unwrap();
+
+    let path = dir.path().join("test.axil");
+    let vector = axil_vector::VectorEngine::open(&path, 4).unwrap();
+    let db = Axil::open(&path)
+        .with_vector_index(Box::new(vector))
+        .with_embedder(Box::new(FrontWindowEmbedder))
+        .build()
+        .unwrap();
+
+    // The malformed table fails safe; the valid sibling applies as written.
+    assert_eq!(
+        db.lifecycle_policy("autopsies"),
+        TableLifecycle::most_protective()
+    );
+    assert!(!db.lifecycle_policy("notes").supersede);
+    assert_eq!(db.lifecycle_policy("notes").compact, CompactMode::Auto);
+
+    // Loudly: the handle and doctor both carry the problem.
+    assert_eq!(
+        db.lifecycle_warnings().len(),
+        1,
+        "{:?}",
+        db.lifecycle_warnings()
+    );
+    assert!(db.lifecycle_warnings()[0].contains("autopsies"));
+    let doctor = db.doctor().unwrap();
+    let check = doctor
+        .checks
+        .iter()
+        .find(|c| c.name == "lifecycle_config")
+        .expect("doctor must report the malformed lifecycle entry");
+    assert_eq!(check.status, axil_core::Severity::Warning);
+
+    // And the protection is real: no demotion on insert, no purge on heal.
+    let v1 = db
+        .insert(
+            "autopsies",
+            json!({"summary": "auth timeout experiment v1"}),
+        )
+        .unwrap();
+    db.insert(
+        "autopsies",
+        json!({"summary": "auth timeout experiment v2"}),
+    )
+    .unwrap();
+    assert!(!superseded_flag(&db, &v1.id));
+    mark_superseded(&db, &v1.id);
+    db.heal_all(&HealingConfig::default(), false).unwrap();
+    assert!(db.get(&v1.id).unwrap().is_some());
+}
+
+#[test]
+fn clean_lifecycle_config_has_no_warnings() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("axil.toml"),
+        "[lifecycle.tables.autopsies]\ncompact = \"never\"\n",
+    )
+    .unwrap();
+    let db = Axil::open(dir.path().join("test.axil")).build().unwrap();
+    assert!(db.lifecycle_warnings().is_empty());
+    assert!(!db
+        .doctor()
+        .unwrap()
+        .checks
+        .iter()
+        .any(|c| c.name == "lifecycle_config"));
+}
+
 // ── time-series downsampling ───────────────────────────────────────────
 
 #[test]

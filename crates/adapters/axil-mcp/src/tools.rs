@@ -1741,7 +1741,13 @@ fn handle_inspect(db: &Axil, _args: &Value) -> ToolCallResult {
 /// Pull-based "what changed since I last looked" over the durable semantic
 /// event log. Returns committed facts only — never another agent's private
 /// record body — so it surfaces cross-agent signals without relaxing session
-/// isolation. The trailing `cursor` is the resume point for the next pull.
+/// isolation.
+///
+/// `next_cursor` is the resume point for the next pull: the last entry
+/// *scanned*, not the last event returned, so events dropped by
+/// `exclude_agent` are consumed once instead of rescanned forever. When
+/// nothing new was scanned it echoes `since_cursor`, so a caught-up caller
+/// never falls back to the start of the tape.
 #[cfg(feature = "event-log")]
 fn handle_recall_delta(db: &Axil, args: &Value) -> ToolCallResult {
     let since = args.get("since_cursor").and_then(|v| v.as_str());
@@ -1752,14 +1758,14 @@ fn handle_recall_delta(db: &Axil, args: &Value) -> ToolCallResult {
         .unwrap_or(50)
         .clamp(1, 1000) as usize;
 
-    match db.recall_delta(since, exclude_agent, limit) {
-        Ok(events) => {
-            let next_cursor = events.last().map(|e| e.cursor.clone());
-            let v = serde_json::to_value(&events).unwrap_or(json!([]));
+    match db.recall_delta_page(since, exclude_agent, limit) {
+        Ok(page) => {
+            let next_cursor = page.next_cursor.or_else(|| since.map(str::to_string));
+            let v = serde_json::to_value(&page.events).unwrap_or(json!([]));
             ToolCallResult::json(&json!({
                 "events": v,
                 "next_cursor": next_cursor,
-                "count": events.len(),
+                "count": page.events.len(),
             }))
         }
         Err(e) => ToolCallResult::error(format!("recall_delta failed: {e}")),

@@ -654,15 +654,11 @@ pub fn remember(db: &Axil, observation: Observation) -> Result<PipelineOutcome> 
             }
             let record = db.insert(table, data)?;
 
-            // Mark the old record as superseded with backlink to the new record.
-            if let Ok(Some(old_record)) = db.get(&old_id) {
-                let mut old_data = old_record.data.clone();
-                if let Some(obj) = old_data.as_object_mut() {
-                    obj.insert("_superseded".to_string(), json!(true));
-                    obj.insert("_superseded_by".to_string(), json!(record.id.to_string()));
-                }
-                let _ = db.update(&old_id, old_data);
-            }
+            // Demote the old record (with a backlink to the new one) through
+            // core's single supersede path, so the lifecycle and pin rules
+            // hold here exactly as on insert. The insert above may already
+            // have auto-superseded it; that is a no-op here.
+            let _ = db.mark_superseded(&old_id, &record, Some(similarity));
             (
                 PipelineAction::Superseded {
                     old_id: old_id.to_string(),
@@ -728,9 +724,29 @@ enum ResolveResult {
     },
 }
 
+impl ResolveResult {
+    /// Precedence when candidates disagree: `Duplicate` > `Supersedes` >
+    /// `Contradicts` > `Novel`. A duplicate means the observation is already
+    /// stored, which settles everything else; a supersede resolves the
+    /// conflict with a definite newer value; a contradiction only asks for
+    /// review, so it is the answer only when nothing more decisive exists.
+    fn rank(&self) -> u8 {
+        match self {
+            ResolveResult::Duplicate { .. } => 3,
+            ResolveResult::Supersedes { .. } => 2,
+            ResolveResult::Contradicts { .. } => 1,
+            ResolveResult::Novel => 0,
+        }
+    }
+}
+
 /// Check new text against existing memories using vector similarity.
 ///
-/// Uses cascaded filtering: only check top-k similar records (not all).
+/// Uses cascaded filtering: only check top-k similar records (not all). Every
+/// candidate is classified and the strongest outcome wins (see
+/// [`ResolveResult::rank`]); among equals, the most similar candidate wins.
+/// Stopping at the first contradiction would miss a later exact duplicate or
+/// a supersedable older value.
 fn resolve_against_existing(db: &Axil, text: &str, table: &str) -> ResolveResult {
     // Find similar records via vector search.
     let similar = match db.similar_to(text, 5) {
@@ -741,6 +757,8 @@ fn resolve_against_existing(db: &Axil, text: &str, table: &str) -> ResolveResult
     // Same knob as the core insert path (`healing.supersede_similarity_threshold`,
     // default 0.92); values above 1.0 disable superseding here too.
     let supersede_threshold = db.supersede_threshold();
+    let temp_record = Record::new(table, json!({ "summary": text }));
+    let mut best = ResolveResult::Novel;
 
     for (record, similarity) in &similar {
         // Only consider records in the same table.
@@ -758,13 +776,14 @@ fn resolve_against_existing(db: &Axil, text: &str, table: &str) -> ResolveResult
             continue;
         }
 
+        let mut outcome = ResolveResult::Novel;
         if *similarity > DUPLICATE_THRESHOLD {
             let existing_text = crate::util::value_text(&record.data);
             let text_sim =
                 crate::util::word_jaccard(&text.to_lowercase(), &existing_text.to_lowercase());
 
             if text_sim > 0.90 {
-                return ResolveResult::Duplicate {
+                outcome = ResolveResult::Duplicate {
                     existing_id: record.id.clone(),
                     similarity: *similarity,
                 };
@@ -772,33 +791,41 @@ fn resolve_against_existing(db: &Axil, text: &str, table: &str) -> ResolveResult
         }
 
         // Check for superseding/contradicting via conflict detection.
-        if *similarity >= supersede_threshold {
-            let temp_record = Record::new(table, json!({ "summary": text }));
-            match check_conflict(&temp_record, record, *similarity) {
+        if outcome.rank() == 0 && *similarity >= supersede_threshold {
+            outcome = match check_conflict(&temp_record, record, *similarity) {
+                // A supersede core would refuse (e.g. a pinned record) is
+                // surfaced as a contradiction instead: both are kept.
                 ConflictResult::Supersedes {
                     old_record_id,
                     similarity,
-                } => {
-                    return ResolveResult::Supersedes {
-                        old_id: old_record_id,
-                        similarity,
-                    };
+                } if db.can_supersede(record, &temp_record) => ResolveResult::Supersedes {
+                    old_id: old_record_id,
+                    similarity,
+                },
+                ConflictResult::Supersedes {
+                    old_record_id: existing_record_id,
+                    similarity,
                 }
-                ConflictResult::Contradicts {
+                | ConflictResult::Contradicts {
                     existing_record_id,
                     similarity,
-                } => {
-                    return ResolveResult::Contradicts {
-                        existing_id: existing_record_id,
-                        similarity,
-                    };
-                }
-                ConflictResult::Novel => {}
+                } => ResolveResult::Contradicts {
+                    existing_id: existing_record_id,
+                    similarity,
+                },
+                ConflictResult::Novel => ResolveResult::Novel,
+            };
+        }
+
+        if outcome.rank() > best.rank() {
+            best = outcome;
+            if best.rank() == 3 {
+                break;
             }
         }
     }
 
-    ResolveResult::Novel
+    best
 }
 
 /// Map memory type to the default storage table.

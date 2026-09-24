@@ -115,8 +115,10 @@ pub enum ConflictConfidence {
 ///
 /// Enhanced with negation-aware confidence levels:
 /// - High: shared entities + explicit negation word → auto-supersede
-/// - Medium: similarity > 0.95 + shared entities → surface for review
-/// - Low: similarity > 0.92 + shared entities → surface for review
+/// - Medium: similarity > 0.95 + shared entities + a value that changed under
+///   the same framing → surface for review (Contradicts); without the changed
+///   value it is treated as Low
+/// - Low: similarity > 0.92 + shared entities → novel
 ///
 /// Returns the conflict type: Novel, Supersedes, or Contradicts.
 pub fn check_conflict(
@@ -156,10 +158,18 @@ pub fn check_conflict(
     let confidence = detect_conflict_confidence(&new_lower, &existing_lower, &shared, similarity);
 
     // Only High confidence (explicit negation detected) auto-supersedes.
-    // Medium — near-identical framing about a shared entity whose value
-    // changed ("deploys at 5pm" -> "deploys at 6pm") — is surfaced as a
-    // contradiction for review: an edge the agent can query, never a silent
-    // demotion of the old record. Low stays novel: too noisy to edge.
+    // Medium is only a similarity signal: a reworded restatement of the same
+    // fact scores just as high. It becomes a contradiction — surfaced for
+    // review as an edge, never a silent demotion — only with positive
+    // evidence that a value changed under the same framing ("deploys at 5pm"
+    // -> "deploys at 6pm"). Low stays novel: too noisy to edge.
+    let confidence = if confidence == ConflictConfidence::Medium
+        && !has_changed_value(&new_lower, &existing_lower)
+    {
+        ConflictConfidence::Low
+    } else {
+        confidence
+    };
     match confidence {
         ConflictConfidence::High => {
             if new_record.created_at > existing_record.created_at {
@@ -233,6 +243,72 @@ fn has_negation_near_entity(text: &str, entities: &[&Entity]) -> bool {
         }
     }
     false
+}
+
+/// Minimum overlap of the non-value words for two texts to count as the same
+/// framing in [`has_changed_value`].
+const SAME_FRAMING_THRESHOLD: f32 = 0.5;
+
+/// Positive evidence that two statements give a shared subject a different
+/// **value**: each side has a value-like token the other lacks (a number,
+/// time, version, size, or `code span`), while the remaining words largely
+/// match.
+///
+/// Requiring a token on *both* sides means an added detail ("uses `JWT`" ->
+/// "uses `JWT` with 15m expiry") is not a change; requiring matching framing
+/// means two differently-worded sentences that happen to mention different
+/// numbers are not either. A reworded restatement with no differing value
+/// ("auth uses `JWT` for sessions" / "session tokens in auth are `JWT`") never
+/// qualifies.
+fn has_changed_value(text_a: &str, text_b: &str) -> bool {
+    let (values_a, words_a) = split_value_tokens(text_a);
+    let (values_b, words_b) = split_value_tokens(text_b);
+    if values_a.is_subset(&values_b) || values_b.is_subset(&values_a) {
+        return false;
+    }
+    let union = words_a.union(&words_b).count();
+    if union == 0 {
+        return true;
+    }
+    let shared = words_a.intersection(&words_b).count();
+    shared as f32 / union as f32 >= SAME_FRAMING_THRESHOLD
+}
+
+/// Split text into value-like tokens (code spans, and words containing a
+/// digit) and the remaining framing words, lowercased and stripped of
+/// surrounding punctuation.
+fn split_value_tokens(
+    text: &str,
+) -> (
+    std::collections::HashSet<String>,
+    std::collections::HashSet<String>,
+) {
+    let mut values = std::collections::HashSet::new();
+    let mut words = std::collections::HashSet::new();
+    // Odd-indexed segments of a backtick split are code spans.
+    for (i, segment) in text.split('`').enumerate() {
+        if i % 2 == 1 {
+            let span = segment.trim().to_lowercase();
+            if !span.is_empty() {
+                values.insert(span);
+            }
+            continue;
+        }
+        for raw in segment.split_whitespace() {
+            let token = raw
+                .trim_matches(|c: char| !c.is_alphanumeric())
+                .to_lowercase();
+            if token.is_empty() {
+                continue;
+            }
+            if token.chars().any(|c| c.is_ascii_digit()) {
+                values.insert(token);
+            } else {
+                words.insert(token);
+            }
+        }
+    }
+    (values, words)
 }
 
 /// Compute confidence score for a record.
@@ -427,6 +503,52 @@ mod tests {
             }
             other => panic!("expected Contradicts for a changed value, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn reworded_restatement_is_not_a_contradiction() {
+        // Same fact, different wording, no value changed: embedding
+        // similarity alone (0.96) must not make it a contradiction.
+        let mut r1 = Record::new("facts", json!({"summary": "Auth uses `JWT` for sessions"}));
+        r1.created_at = Utc::now() - chrono::Duration::days(5);
+        let r2 = Record::new(
+            "facts",
+            json!({"summary": "Session tokens in auth are `JWT`"}),
+        );
+        let result = check_conflict(&r2, &r1, 0.96);
+        assert!(
+            matches!(result, ConflictResult::Novel),
+            "a restatement must stay novel, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn changed_value_evidence_requires_a_replaced_value_under_the_same_framing() {
+        // Replaced value, same framing.
+        assert!(has_changed_value(
+            "`deploysvc` deploys at 5pm on weekdays",
+            "`deploysvc` deploys at 6pm on weekdays"
+        ));
+        assert!(has_changed_value(
+            "`api` listens on port 8080",
+            "`api` listens on port 9090"
+        ));
+        assert!(has_changed_value("auth uses `jwt`", "auth uses `sessions`"));
+        // Added detail is not a change.
+        assert!(!has_changed_value(
+            "auth uses `jwt`",
+            "auth uses `jwt` with 15m expiry"
+        ));
+        // Different numbers under unrelated framing are not a change either.
+        assert!(!has_changed_value(
+            "`api` listens on port 8080",
+            "the 9090 metrics endpoint belongs to `api` now"
+        ));
+        // No value tokens at all: no evidence.
+        assert!(!has_changed_value(
+            "auth uses `jwt` for sessions",
+            "session tokens in auth are `jwt`"
+        ));
     }
 
     #[test]

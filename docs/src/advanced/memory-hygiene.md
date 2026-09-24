@@ -40,12 +40,16 @@ you which heavier tool to reach for next.
 `db.compact()` does three things:
 
 1. Purges records with expired `valid_until` timestamps
-2. Hard-deletes records marked `superseded`
+2. Hard-deletes superseded records in your own tables
 3. Cleans orphaned edges, vectors, and FTS entries (those pointing at
    record IDs that no longer exist)
 
 Skipped: pinned records, records with importance ≥ 0.8, and every record
-in a table configured `compact = "never"` (see below). Returns a
+in a table configured `compact = "never"` (see below). Superseded records
+in `_`-prefixed system tables are kept: there the supersede marker is
+version history — `SemanticMemory::history` and `supersede_chain` return
+those facts, and belief-revision explanations follow them — not garbage
+(expired records in those tables are still purged). Returns a
 `CompactReport` showing counts cleaned. Cheap to run on a healthy DB —
 most cleanup paths short-circuit when there's nothing to do.
 
@@ -80,8 +84,19 @@ records are likewise excluded from the "pending cleanup" counts, so
 `doctor` and `session-heal` don't nag (or auto-heal) about records that
 are kept by design. The policy is enforced inside the core
 insert/compact/downsample paths, so CLI, MCP, and embedded use all
-honor it. To scope it to a single database in a multi-DB project, put
-the `axil.toml` next to that `.axil` file — the nearest config wins.
+honor it. Every writer that marks a record superseded — insert-path
+auto-supersede, `axil detect-conflicts`, the brain pipeline — goes
+through one core path (`Axil::mark_superseded`) that checks the policy,
+so `supersede = false` alone is enough to keep a table's records live;
+`detect-conflicts` records a contradiction for review instead. To scope
+it to a single database in a multi-DB project, put the `axil.toml` next
+to that `.axil` file — the nearest config wins.
+
+A typo in a policy entry fails **safe**: the table gets the most
+protective policy (never supersede, decay, or compact) and `axil doctor`
+reports the problem, rather than the entry being dropped and the table
+quietly losing its protection. See
+[Configuration](../getting-started/configuration.md#per-table-lifecycle-policy).
 
 ## `axil heal` — compact + rebuild
 

@@ -61,9 +61,11 @@ fn named_space_files(db_path: &Path) -> Vec<(PathBuf, String)> {
 /// Best-effort cross-process serialization for branch file copies.
 ///
 /// redb's own file lock cannot be held across the copy — on Windows its
-/// byte-range lock makes the file uncopyable while held (verified: OS error 33)
-/// — so the handles must be dropped first. This marker file closes the
-/// resulting two-writers-both-branching race. It is advisory: it serializes
+/// byte-range lock makes the file uncopyable while held (verified: OS error 33),
+/// and on Unix the copy succeeds but captures a header redb marks "recovery
+/// required" while the file is open, so the branch would need a full repair
+/// on first open — so the handles must be dropped first. This marker file
+/// closes the resulting two-writers-both-branching race. It is advisory: it serializes
 /// processes that go through branch creation, but not an unrelated writer that
 /// opens the database mid-copy (see the quiesce notes on [`copy_branch_files`]).
 struct BranchCopyGuard {
@@ -136,9 +138,11 @@ fn branch_path(db_path: &Path, name: &str) -> PathBuf {
 /// prefer [`Axil::branch_create`](crate::Axil::branch_create), which flushes the
 /// engines and closes the handles before copying.
 ///
-/// On Windows this also requires that no live [`Axil`](crate::Axil) handle holds
-/// the core file open: redb takes a byte-range lock for the lifetime of the
-/// `Database`, so `fs::copy` of a held-open file fails with a sharing violation.
+/// It also requires that no live [`Axil`](crate::Axil) handle holds the core
+/// file open. On Windows redb takes a byte-range lock for the lifetime of the
+/// `Database`, so `fs::copy` of a held-open file fails with a lock violation;
+/// on Unix the copy succeeds but the branch is flagged for repair (redb marks
+/// the on-disk header "recovery required" while the file is open).
 pub fn branch_create(db_path: &Path, name: &str) -> Result<PathBuf> {
     validate_branch_name(name)?;
     copy_branch_files(db_path, name)
@@ -895,12 +899,28 @@ mod tests {
         assert!(branches.is_empty());
     }
 
-    /// Probe: can we fs::copy the core file while a live redb handle holds
-    /// it? If yes, `Axil::branch_create` can hold the single-writer lock
-    /// across the copy instead of dropping it (closing the writer race).
+    /// Whether redb asks to repair `path` on open (the file was not cleanly
+    /// closed). Opens the file directly with redb, bypassing `Axil`.
+    fn redb_needs_repair(path: &Path) -> bool {
+        let repaired = std::rc::Rc::new(std::cell::Cell::new(false));
+        let flag = repaired.clone();
+        let db = redb::Database::builder()
+            .set_repair_callback(move |_| flag.set(true))
+            .open(path)
+            .unwrap();
+        drop(db);
+        repaired.get()
+    }
+
+    /// Probe: can the core file be copied while a live redb handle holds it?
+    /// If it could, `Axil::branch_create` could hold the single-writer lock
+    /// across the copy instead of dropping it. It cannot, on any platform:
+    /// Windows refuses the copy outright (redb's byte-range lock, OS error 33
+    /// `ERROR_LOCK_VIOLATION`), and on Unix the copy succeeds but snapshots a
+    /// header redb flags "recovery required" for as long as the file is open,
+    /// so the branch would only open through a full repair.
     #[test]
-    #[should_panic(expected = "locked a portion of the file")]
-    fn fs_copy_works_while_redb_handle_open() {
+    fn fs_copy_of_open_redb_file_is_never_a_clean_snapshot() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("probe.axil");
         let db = Axil::open(&db_path).build().unwrap();
@@ -908,11 +928,37 @@ mod tests {
         let dest = dir.path().join("probe-copy.axil");
         let copied = std::fs::copy(&db_path, &dest);
         drop(db);
+
+        if cfg!(windows) {
+            let err = copied.expect_err("Windows must refuse copying a redb file held open");
+            assert_eq!(err.raw_os_error(), Some(33), "unexpected copy error: {err}");
+        } else {
+            copied.expect("Unix allows copying a redb file held open");
+            assert!(
+                redb_needs_repair(&dest),
+                "a copy taken while the handle is open must be flagged for repair"
+            );
+        }
+    }
+
+    /// `Axil::branch_create` flushes and drops the handle before copying, so
+    /// the branch is a cleanly-closed file that opens without a repair — on
+    /// every platform, which is why that path never holds the lock across the
+    /// copy.
+    #[test]
+    fn live_branch_create_copies_a_cleanly_closed_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("live.axil");
+        let db = Axil::open(&db_path).build().unwrap();
+        db.insert("notes", json!({"live": true})).unwrap();
+
+        let branch = db.branch_create("clean").unwrap();
         assert!(
-            copied.is_ok(),
-            "fs::copy while redb handle open failed: {:?}",
-            copied.err()
+            !redb_needs_repair(&branch),
+            "a branch copied from a quiesced handle must not need repair"
         );
+        let branch_db = Axil::open(&branch).build().unwrap();
+        assert_eq!(branch_db.list("notes").unwrap().len(), 1);
     }
 
     #[test]

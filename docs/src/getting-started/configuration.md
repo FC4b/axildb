@@ -67,6 +67,16 @@ model = "gpt-4o-mini"
 |-----|------|---------|-------------|
 | `healing.auto_compact` | bool | `true` | Allow automatic healing (`axil heal`, session-close auto-heal) to purge expired/superseded records. `false` makes compaction manual-only (`axil compact` / `axil heal --compact` still work). |
 | `healing.supersede_similarity_threshold` | float | `0.92` | Auto-supersede fires when a new record's vector similarity to a same-table record exceeds this. Values above `1.0` disable auto-supersede globally. |
+| `healing.event_log` | bool | `false` | Capture the durable semantic event log (`recall_delta`). Only in builds with the `event-log` feature; ignored otherwise. |
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `debug.slow_query_threshold_ms` | int | `100` | Queries slower than this are recorded in the slow-query log. |
+
+Like the lifecycle policy below, the supersede threshold, `healing.event_log`
+and `debug.slow_query_threshold_ms` are read by the core when a database
+opens, from the `axil.toml` nearest the database, so the CLI, the MCP server
+and embedded use all apply them.
 
 ### Per-table lifecycle policy
 
@@ -83,7 +93,7 @@ compact = "never"   # compaction never purges this table (append-only)
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `lifecycle.tables.<t>.supersede` | bool | `true` | Allow auto-supersede to mark older similar records in `<t>` as superseded (and the brain pipeline to dedupe near-identical observations). |
+| `lifecycle.tables.<t>.supersede` | bool | `true` | Allow any writer — insert-path auto-supersede, `axil detect-conflicts`, the brain pipeline — to mark older records in `<t>` as superseded (and the brain pipeline to dedupe near-identical observations). With `false`, a conflict `detect-conflicts` finds is recorded as a contradiction for review instead. |
 | `lifecycle.tables.<t>.decay` | bool | `true` | Allow importance decay for `<t>` (false = infinite half-life). |
 | `lifecycle.tables.<t>.compact` | string | `"auto"` | `"never"` = `compact()`/`heal` never delete records from `<t>`, and its records are excluded from "pending cleanup" diagnostics. |
 
@@ -91,6 +101,17 @@ The policy is enforced in the core (`AxilBuilder::build` reads the nearest
 `axil.toml`), so CLI, MCP server, and embedded library use all honor it.
 To scope a policy to one database in a multi-DB project, place the
 `axil.toml` next to that `.axil` file — nearest config wins.
+
+Entries are parsed strictly and **fail safe**. A malformed entry — a wrong
+value (`compact = "Never"`; the values are lowercase), a wrong type
+(`supersede = "false"`), an unknown knob (`supercede = false`), or a
+misspelled section (`[lifecycle.table.<t>]`) — gives that table the most
+protective policy (`supersede = false`, `decay = false`, `compact = "never"`)
+instead of silently dropping it, while valid entries still apply. Each
+problem is printed as a warning when the database opens and reported by
+`axil doctor` (check `lifecycle_config`) until the file is fixed. If the
+whole file is not valid TOML, every table named in a
+`[lifecycle.tables.<t>]` header is protected the same way.
 
 ### LLM (optional)
 

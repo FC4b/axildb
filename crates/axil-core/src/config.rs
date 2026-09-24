@@ -209,6 +209,22 @@ impl Default for TableLifecycle {
     }
 }
 
+impl TableLifecycle {
+    /// The most protective policy: never supersede, never decay, never
+    /// compact.
+    ///
+    /// Applied to a table whose `[lifecycle.tables.<table>]` entry is
+    /// malformed. Someone who wrote an entry for a table meant to protect it,
+    /// so a typo must not quietly hand that table the do-everything default.
+    pub fn most_protective() -> Self {
+        Self {
+            supersede: false,
+            decay: false,
+            compact: CompactMode::Never,
+        }
+    }
+}
+
 /// Compaction policy for a table (`compact = "auto" | "never"`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -224,26 +240,207 @@ pub enum CompactMode {
 /// order as [`load_config_from`]: walk up from `start_dir`, then the global
 /// `~/.config/axil/config.toml`, then defaults).
 ///
-/// Best-effort: an unreadable or invalid file yields the default (empty)
-/// policy rather than an error, matching how optional tuning config is treated
-/// elsewhere.
+/// Never an error, and never fails open: a malformed per-table entry gives
+/// that table [`TableLifecycle::most_protective`] while valid entries still
+/// apply. Use [`load_lifecycle_checked_from`] to also get the warnings.
 pub fn load_lifecycle_from(start_dir: &Path) -> LifecycleConfig {
+    load_lifecycle_checked_from(start_dir).config
+}
+
+/// The `[lifecycle]` section as loaded, plus every problem found in it.
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct LifecycleLoad {
+    /// Resolved policy. Tables named in malformed entries carry
+    /// [`TableLifecycle::most_protective`].
+    pub config: LifecycleConfig,
+    /// One human-readable warning per malformed entry; empty when the section
+    /// is clean. Surface these — each one means the file does not say what its
+    /// author intended.
+    pub warnings: Vec<String>,
+    /// The config file the section was read from, if one was found.
+    pub source: Option<PathBuf>,
+}
+
+/// [`load_lifecycle_from`], keeping the warnings for malformed entries.
+///
+/// A policy typo (`compact = "Never"`, `supersede = "false"`, an unknown
+/// knob) must not silently turn an append-only table back into a normal one
+/// whose records the next auto-heal supersedes and purges. So instead of
+/// discarding the whole section, each malformed table entry resolves to
+/// [`TableLifecycle::most_protective`] and yields a warning that callers (the
+/// database builder, `doctor`, `axil config show`) can show the user. If the
+/// file is not valid TOML at all, every table named in a
+/// `[lifecycle.tables.<name>]` header is protected the same way.
+pub fn load_lifecycle_checked_from(start_dir: &Path) -> LifecycleLoad {
     let Some(path) = find_config_file(start_dir) else {
-        return LifecycleConfig::default();
+        return LifecycleLoad::default();
     };
-    let Ok(contents) = std::fs::read_to_string(&path) else {
-        return LifecycleConfig::default();
+    let contents = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(e) => {
+            return LifecycleLoad {
+                warnings: vec![format!(
+                    "could not read {}: {e} — [lifecycle] policy not applied",
+                    path.display()
+                )],
+                source: Some(path),
+                ..LifecycleLoad::default()
+            };
+        }
     };
-    lifecycle_from_toml(&contents)
+    let (config, warnings) = lifecycle_from_toml_checked(&contents);
+    let warnings = warnings
+        .into_iter()
+        .map(|w| format!("{}: {w}", path.display()))
+        .collect();
+    LifecycleLoad {
+        config,
+        warnings,
+        source: Some(path),
+    }
 }
 
 /// Parse the `[lifecycle]` section out of a raw `axil.toml` document.
 fn lifecycle_from_toml(contents: &str) -> LifecycleConfig {
-    toml::from_str::<toml::Value>(contents)
-        .ok()
-        .and_then(|v| v.get("lifecycle").cloned())
-        .and_then(|v| v.try_into().ok())
-        .unwrap_or_default()
+    lifecycle_from_toml_checked(contents).0
+}
+
+/// Knobs a `[lifecycle.tables.<table>]` entry may set.
+const TABLE_LIFECYCLE_KEYS: &[&str] = &["supersede", "decay", "compact"];
+
+/// Parse `[lifecycle]`, failing safe: see [`load_lifecycle_checked_from`].
+fn lifecycle_from_toml_checked(contents: &str) -> (LifecycleConfig, Vec<String>) {
+    fn protect(
+        config: &mut LifecycleConfig,
+        warnings: &mut Vec<String>,
+        table: &str,
+        problem: String,
+    ) {
+        config
+            .tables
+            .insert(table.to_string(), TableLifecycle::most_protective());
+        warnings.push(format!(
+            "[lifecycle.tables.{table}] {problem} — applying the most protective policy \
+             (supersede = false, decay = false, compact = \"never\") until it is fixed"
+        ));
+    }
+
+    let mut config = LifecycleConfig::default();
+    let mut warnings = Vec::new();
+
+    let doc = match toml::from_str::<toml::Value>(contents) {
+        Ok(doc) => doc,
+        Err(e) => {
+            let reason = format!("is in a file that is not valid TOML ({})", e.message());
+            for table in lifecycle_tables_named_in_headers(contents) {
+                protect(&mut config, &mut warnings, &table, reason.clone());
+            }
+            return (config, warnings);
+        }
+    };
+    let Some(section) = doc.get("lifecycle") else {
+        return (config, warnings);
+    };
+    let Some(section) = section.as_table() else {
+        warnings.push(
+            "`lifecycle` must be a table of `[lifecycle.tables.<name>]` entries — ignored"
+                .to_string(),
+        );
+        return (config, warnings);
+    };
+
+    for (key, value) in section {
+        if key != "tables" {
+            // Most likely a misspelled `tables` (`[lifecycle.table.x]`): the
+            // table-shaped entries under it name tables the author meant to
+            // protect, so protect them.
+            let named: Vec<&String> = value
+                .as_table()
+                .map(|t| {
+                    t.iter()
+                        .filter(|(_, v)| v.is_table())
+                        .map(|(k, _)| k)
+                        .collect()
+                })
+                .unwrap_or_default();
+            if named.is_empty() {
+                warnings.push(format!(
+                    "unknown key `lifecycle.{key}` (expected `[lifecycle.tables.<name>]`) — ignored"
+                ));
+            }
+            for table in named {
+                protect(
+                    &mut config,
+                    &mut warnings,
+                    table,
+                    format!("was written as `[lifecycle.{key}.{table}]`, not `lifecycle.tables`"),
+                );
+            }
+            continue;
+        }
+        let Some(tables) = value.as_table() else {
+            warnings.push(
+                "`lifecycle.tables` must be a table of per-table policies — ignored".to_string(),
+            );
+            continue;
+        };
+        for (table, entry) in tables {
+            match parse_table_lifecycle(entry) {
+                Ok(policy) => {
+                    config.tables.insert(table.clone(), policy);
+                }
+                Err(problem) => protect(&mut config, &mut warnings, table, problem),
+            }
+        }
+    }
+    (config, warnings)
+}
+
+/// Parse one `[lifecycle.tables.<table>]` entry strictly: a wrong type, an
+/// unknown value, or an unknown knob is an error rather than a default.
+fn parse_table_lifecycle(entry: &toml::Value) -> Result<TableLifecycle, String> {
+    let Some(map) = entry.as_table() else {
+        return Err("must be a table of knobs (supersede, decay, compact)".to_string());
+    };
+    let unknown: Vec<&str> = map
+        .keys()
+        .map(String::as_str)
+        .filter(|k| !TABLE_LIFECYCLE_KEYS.contains(k))
+        .collect();
+    if !unknown.is_empty() {
+        return Err(format!(
+            "has unknown key(s) {} (valid: supersede, decay, compact)",
+            unknown.join(", ")
+        ));
+    }
+    entry
+        .clone()
+        .try_into::<TableLifecycle>()
+        .map_err(|e| format!("is invalid: {}", e.message()))
+}
+
+/// Table names from `[lifecycle.tables.<name>]` headers, found by a plain
+/// text scan — the fallback when the file does not parse as TOML at all.
+fn lifecycle_tables_named_in_headers(contents: &str) -> Vec<String> {
+    let mut tables = Vec::new();
+    for line in contents.lines() {
+        let Some(header) = line
+            .trim()
+            .strip_prefix('[')
+            .and_then(|l| l.split(']').next())
+        else {
+            continue;
+        };
+        let parts: Vec<&str> = header.split('.').map(str::trim).collect();
+        if let ["lifecycle", "tables", name] = parts.as_slice() {
+            let name = name.trim_matches(|c| c == '"' || c == '\'');
+            if !name.is_empty() && !tables.iter().any(|t| t == name) {
+                tables.push(name.to_string());
+            }
+        }
+    }
+    tables
 }
 
 /// Brain configuration.
@@ -1054,6 +1251,97 @@ mod tests {
             .is_empty());
         // Invalid TOML degrades to the default policy, never an error.
         assert!(lifecycle_from_toml("not [ valid").tables.is_empty());
+    }
+
+    #[test]
+    fn malformed_lifecycle_entries_fail_safe_and_warn() {
+        let src = r#"
+            [lifecycle.tables.autopsies]
+            compact = "Never"
+
+            [lifecycle.tables.trials]
+            supersede = "false"
+
+            [lifecycle.tables.audit]
+            supercede = false
+
+            [lifecycle.tables.notes]
+            supersede = false
+        "#;
+        let (cfg, warnings) = lifecycle_from_toml_checked(src);
+
+        // Every malformed entry gets the most protective policy, never the
+        // do-everything default.
+        for table in ["autopsies", "trials", "audit"] {
+            assert_eq!(
+                cfg.policy_for(table),
+                TableLifecycle::most_protective(),
+                "{table} must fail safe"
+            );
+            assert!(
+                warnings
+                    .iter()
+                    .any(|w| w.contains(&format!("[lifecycle.tables.{table}]"))),
+                "{table} must be reported: {warnings:?}"
+            );
+        }
+        // The valid sibling entry still applies as written.
+        let notes = cfg.policy_for("notes");
+        assert!(!notes.supersede);
+        assert!(notes.decay);
+        assert_eq!(notes.compact, CompactMode::Auto);
+        assert_eq!(warnings.len(), 3, "{warnings:?}");
+    }
+
+    #[test]
+    fn misspelled_tables_key_protects_the_named_tables() {
+        let (cfg, warnings) =
+            lifecycle_from_toml_checked("[lifecycle.table.autopsies]\nsupersede = false\n");
+        assert_eq!(
+            cfg.policy_for("autopsies"),
+            TableLifecycle::most_protective()
+        );
+        assert_eq!(warnings.len(), 1);
+    }
+
+    #[test]
+    fn unparseable_file_still_protects_lifecycle_tables() {
+        // Not valid TOML anywhere in the file: tables named in lifecycle
+        // headers are protected by a text scan instead of dropping to default.
+        let src = "[lifecycle.tables.autopsies]\nsupersede = false\ncompact = never\n";
+        let (cfg, warnings) = lifecycle_from_toml_checked(src);
+        assert_eq!(
+            cfg.policy_for("autopsies"),
+            TableLifecycle::most_protective()
+        );
+        assert_eq!(warnings.len(), 1);
+        assert!(lifecycle_from_toml_checked("not [ valid").1.is_empty());
+    }
+
+    #[test]
+    fn malformed_lifecycle_decay_entry_still_stops_decay() {
+        // `load_config_from` keeps accepting the file (many callers `.ok()`
+        // its result), so the decay opt-out must fail safe there too.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("axil.toml"),
+            "[lifecycle.tables.autopsies]\ndecay = \"no\"\n",
+        )
+        .unwrap();
+        let cfg = load_config_from(dir.path()).expect("file still loads");
+        assert_eq!(cfg.decay.half_life_for("autopsies"), f64::MAX);
+
+        let loaded = load_lifecycle_checked_from(dir.path());
+        assert_eq!(
+            loaded.config.policy_for("autopsies"),
+            TableLifecycle::most_protective()
+        );
+        assert_eq!(loaded.warnings.len(), 1);
+        assert!(
+            loaded.warnings[0].contains("axil.toml"),
+            "{:?}",
+            loaded.warnings
+        );
     }
 
     #[test]
