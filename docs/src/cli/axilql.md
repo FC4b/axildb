@@ -73,8 +73,9 @@ AGG min(fees), max(fees), sum(fees) FROM trades
 Metric functions: `count`, `avg(field)`, `min(field)`, `max(field)`,
 `sum(field)` (names case-insensitive). Returns one row per group with
 `count`, one `<func>_<field>` key per metric, and a `skipped` counter for
-rows whose field was missing or non-numeric. The CLI `axil agg` command and
-the MCP `aggregate` tool run the same executor.
+rows whose field was missing or non-numeric. Every matching row is folded —
+there is no result cap. The CLI `axil agg` command and the MCP `aggregate`
+tool run the same executor.
 
 ### EXPLAIN — show query plan
 

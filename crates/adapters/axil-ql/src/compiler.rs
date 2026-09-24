@@ -88,11 +88,7 @@ fn filtered_count(
     table: &str,
     wheres: &[axil_core::query::WhereClause],
 ) -> Result<usize, CompileError> {
-    let mut qb = db.query().table(table);
-    for wc in wheres {
-        qb = qb.where_field(&wc.field, wc.op.clone(), wc.value.clone());
-    }
-    Ok(qb.exec()?.len())
+    Ok(crate::aggregate::matching_records(db, table, wheres)?.len())
 }
 
 /// Convert an AST [`AggSpec`] to the executor's [`aggregate::AggMetric`].

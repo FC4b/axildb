@@ -760,3 +760,33 @@ fn c60_traverse_known_at_filters_by_edge_creation_time() {
     );
     assert_eq!(axil_ql::run(&db, &q).unwrap().count, 1);
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// COUNT / AGG see every matching row, not the first page
+// ═══════════════════════════════════════════════════════════════════════
+
+#[test]
+fn c80_count_and_agg_are_not_capped_at_a_page() {
+    let (_dir, db) = setup_db();
+    for v in 1..=130 {
+        db.insert("runs", serde_json::json!({"v": v, "kind": "a"}))
+            .unwrap();
+    }
+
+    assert_eq!(axil_ql::run(&db, "COUNT FROM runs").unwrap().count, 130);
+    assert_eq!(
+        axil_ql::run(&db, "COUNT FROM runs WHERE v > 0")
+            .unwrap()
+            .count,
+        130
+    );
+    assert_eq!(axil_ql::run(&db, "COUNT WHERE v > 0").unwrap().count, 130);
+
+    let out = axil_ql::run(&db, "AGG count, sum(v) FROM runs WHERE v > 0").unwrap();
+    assert_eq!(out.results[0]["total_rows"], 130);
+    assert_eq!(out.results[0]["groups"][0]["sum_v"], 8515.0);
+
+    let out = axil_ql::run(&db, "AGG count, max(v) FROM runs GROUP BY kind").unwrap();
+    assert_eq!(out.results[0]["groups"][0]["count"], 130);
+    assert_eq!(out.results[0]["groups"][0]["max_v"], 130.0);
+}
