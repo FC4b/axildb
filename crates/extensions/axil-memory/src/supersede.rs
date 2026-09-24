@@ -78,54 +78,20 @@ impl<'a> SupersedeEngine<'a> {
         let mut superseded = Vec::new();
 
         for (candidate, similarity) in &candidates {
-            // Skip self.
-            if candidate.id == new_record.id {
-                continue;
-            }
-
-            // Only supersede within the same table.
-            if candidate.table != new_record.table {
-                continue;
-            }
-
-            // Only supersede within the same agent scope.
+            // Agent scope is the one rule core's shared supersede path does
+            // not know about; everything else (same table, lifecycle policy,
+            // pinned, recency, already superseded) is enforced by
+            // `mark_superseded` itself, which also writes the canonical
+            // markers, links the `supersedes` edge and captures the event.
             if !crate::agent_owns(owner, &candidate.data) {
                 continue;
             }
 
-            // Skip already superseded records.
-            if crate::ttl::is_record_superseded(candidate) {
-                continue;
-            }
-
-            // Pinned records are absolute: the core supersede path exempts
-            // them and this pass must not become a side door around that.
-            if axil_core::importance::is_pinned(&candidate.data) {
-                continue;
-            }
-
-            // Recency guard, mirroring core: a new record must never demote
-            // something stored after it (imports preserve source timestamps).
-            if new_record.created_at < candidate.created_at {
-                continue;
-            }
-
-            if *similarity >= self.threshold {
-                // Mark old record as superseded — top-level flags, the same
-                // canonical spelling core's consolidation writes, so every
-                // reader (cleanup, recall filters, event log) agrees.
-                let mut old_data = candidate.data.clone();
-                old_data["_superseded"] = json!(true);
-                old_data["_superseded_by"] = json!(new_record.id.to_string());
-                self.db.update(&candidate.id, old_data)?;
-
-                // Create graph edge if graph is available.
-                if self.db.has_graph_index() {
-                    let _ = self
-                        .db
-                        .relate(&new_record.id, EDGE_SUPERSEDES, &candidate.id, None);
-                }
-
+            if *similarity >= self.threshold
+                && self
+                    .db
+                    .mark_superseded(&candidate.id, new_record, Some(*similarity))?
+            {
                 superseded.push(candidate.id.clone());
             }
         }
