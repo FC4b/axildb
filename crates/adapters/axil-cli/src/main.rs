@@ -6111,23 +6111,43 @@ fn attach_detected_engines(mut builder: axil_core::AxilBuilder) -> Result<axil_c
     Ok(builder)
 }
 
+/// Build an [`AxilBuilder`](axil_core::AxilBuilder) into a handle with the
+/// `axil.toml` settings that live on the handle (not the builder) applied.
+///
+/// Every CLI open helper builds through this — the MCP server's
+/// `open_with_best_effort`, `store --embed`'s `open_with_embedder_creating`,
+/// the read-only fallback, all of them — so a handle setting added here
+/// reaches every open path instead of only the helper that remembered it.
+/// Builder-level settings (lifecycle policy, supersede threshold) are already
+/// resolved from the same `axil.toml` by `AxilBuilder::build` itself.
+trait BuildConfigured {
+    /// `AxilBuilder::build`, then apply the config-driven handle settings.
+    fn build_configured(self) -> axil_core::Result<Axil>;
+}
+
+impl BuildConfigured for axil_core::AxilBuilder {
+    fn build_configured(self) -> axil_core::Result<Axil> {
+        let config = self
+            .path()
+            .parent()
+            .and_then(|dir| axil_core::load_config_from(dir).ok())
+            .unwrap_or_default();
+        let mut db = self.build()?;
+        db.set_slow_query_threshold(config.debug.slow_query_threshold_ms as f64);
+        // `[healing] event_log`: off by default — the tape is an opt-in
+        // write-amplifier, and a no-op unless the `event-log` feature is built.
+        #[cfg(feature = "event-log")]
+        if config.healing.event_log {
+            db.set_event_log_enabled(true);
+        }
+        Ok(db)
+    }
+}
+
 /// Open a database with all detected plugins.
 fn open_with_all_detected(path: &Path) -> Result<Axil> {
     let builder = attach_detected_engines(Axil::open(path))?;
-    let db = builder.build().context("failed to open database")?;
-    // Honor the `[healing] event_log` config flag (no-op unless the `event-log`
-    // feature is compiled in). Off by default — opt-in write-amplifier.
-    #[cfg(feature = "event-log")]
-    {
-        let cfg = path
-            .parent()
-            .and_then(|d| axil_core::config::load_config_from(d).ok())
-            .unwrap_or_default();
-        if cfg.healing.event_log {
-            db.set_event_log_enabled(true);
-        }
-    }
-    Ok(db)
+    builder.build_configured().context("failed to open database")
 }
 
 /// Number of times a hot read command retries the writable open when the
@@ -6201,7 +6221,7 @@ fn open_read_command(path: &Path) -> Result<Axil> {
             );
             Axil::open(path)
                 .read_only(true)
-                .build()
+                .build_configured()
                 .context("failed to open database read-only")
         }
         Err(e) => Err(e),
@@ -6254,7 +6274,7 @@ fn open_for_scip_ingest(path: &Path) -> Result<Axil> {
             axil_core::companion_path(path, ".graph").display()
         );
     }
-    builder.build().context("failed to open database")
+    builder.build_configured().context("failed to open database")
 }
 
 /// Open a database with vector support (auto-detecting dimensions).
@@ -6269,7 +6289,7 @@ fn open_with_vector(path: &Path, dimensions: Option<usize>) -> Result<Axil> {
             .with_vector_auto()
             .context("failed to auto-detect vector dimensions — use --dimensions")?,
     };
-    db.build().context("failed to open database")
+    db.build_configured().context("failed to open database")
 }
 
 /// Open for a `store --vector` in the *default* space: attach all detected
@@ -6297,7 +6317,7 @@ fn open_with_vector_creating(path: &Path, dims: usize) -> Result<Axil> {
             );
         }
     }
-    let db = builder.build().context("failed to open database")?;
+    let db = builder.build_configured().context("failed to open database")?;
     if !db.has_vector_index() {
         anyhow::bail!(
             "the vector engine is disabled in axil.toml ([engines] disabled) — \
@@ -6327,7 +6347,7 @@ fn open_for_store(path: &Path, raw_vector: Option<&[f32]>, named_space: bool) ->
 #[cfg(feature = "vector")]
 fn open_for_space_ops(path: &Path) -> Result<Axil> {
     axil_vector::with_vector_spaces(Axil::open(path))
-        .build()
+        .build_configured()
         .context("failed to open database")
 }
 
@@ -6424,7 +6444,7 @@ fn open_with_embedder(path: &Path) -> Result<Axil> {
     // Attaching a second embedder here would re-open the redb file this
     // process already holds and fail.
     let db = attach_detected_engines(Axil::open(path))?
-        .build()
+        .build_configured()
         .context("failed to open database")?;
     if !db.has_embedder() {
         anyhow::bail!(
@@ -6465,7 +6485,7 @@ fn open_with_embedder_creating(path: &Path) -> Result<Axil> {
             );
         }
     }
-    let db = builder.build().context("failed to open database")?;
+    let db = builder.build_configured().context("failed to open database")?;
     if !db.has_embedder() {
         anyhow::bail!(
             "the vector engine is disabled in axil.toml ([engines] disabled) — \
@@ -6508,7 +6528,7 @@ fn open_with_timeseries(path: &Path) -> Result<Axil> {
             .context("failed to open timeseries store")?;
     }
 
-    let db = builder.build().context("failed to open database")?;
+    let db = builder.build_configured().context("failed to open database")?;
 
     if is_new_ts {
         let n = db
@@ -6533,7 +6553,7 @@ fn open_with_fts(path: &Path) -> Result<Axil> {
             .context("failed to create FTS store")?;
     }
 
-    builder.build().context("failed to open database")
+    builder.build_configured().context("failed to open database")
 }
 
 /// Open with all features enabled (for init).
@@ -6574,7 +6594,7 @@ fn open_with_all_features_inner(mut builder: axil_core::AxilBuilder) -> Result<A
             .context("failed to create FTS store")?;
     }
 
-    builder.build().context("failed to create database")
+    builder.build_configured().context("failed to create database")
 }
 
 /// Load config from `axil.toml` in the same directory as the database file.
@@ -6629,12 +6649,12 @@ fn wire_llm(db: Axil, db_path: &Path) -> Result<Axil> {
             let builder = attach_detected_engines(Axil::open(db_path))?
                 .with_llm(std::sync::Arc::new(http_llm))
                 .with_llm_config(config.llm);
-            return builder.build().context("failed to open database with LLM");
+            return builder.build_configured().context("failed to open database with LLM");
         }
     }
 
     let builder = attach_detected_engines(Axil::open(db_path))?;
-    builder.build().context("failed to open database")
+    builder.build_configured().context("failed to open database")
 }
 
 // ─── Main ───────────────────────────────────────────────────────────────────
@@ -20706,6 +20726,92 @@ mod where_clause_tests {
                     assert!(err.contains(needle), "{input:?}: {err:?} lacks {needle:?}");
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod open_helper_tests {
+    use super::*;
+
+    /// A fresh DB path whose directory holds an `axil.toml` with `toml`.
+    fn db_with_config(toml: &str) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("axil.toml"), toml).unwrap();
+        let path = dir.path().join("h.axil");
+        (dir, path)
+    }
+
+    /// Drift guard: every DB-opening helper builds through `build_configured`,
+    /// so a config-driven handle setting can't reach some open paths and
+    /// silently miss others (the MCP server and `store --embed` once skipped
+    /// `[healing] event_log` this way).
+    #[test]
+    fn open_helpers_build_through_build_configured() {
+        let src = include_str!("main.rs");
+        let mut scanned = 0;
+        for (start, _) in src.match_indices("\nfn ") {
+            let item = &src[start + "\nfn ".len()..];
+            let name: String = item
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect();
+            if !(name.starts_with("open_") || name == "wire_llm") {
+                continue;
+            }
+            let body = &item[..item.find("\n}\n").expect("helper body ends")];
+            assert!(
+                !body.contains(".build()"),
+                "`{name}` calls `.build()` directly — use `.build_configured()` so \
+                 axil.toml handle settings apply on this open path too"
+            );
+            scanned += 1;
+        }
+        assert!(scanned >= 3, "expected to scan the open_* helpers, found {scanned}");
+    }
+
+    #[test]
+    fn open_helpers_apply_slow_query_threshold() {
+        let (_dir, path) = db_with_config("[debug]\nslow_query_threshold_ms = 5000\n");
+        let db = open_with_all_detected(&path).unwrap();
+        db.record_slow_query("probe", 200.0, 0);
+        assert!(
+            db.slow_queries(None, None).is_empty(),
+            "a 200ms query is under the configured 5000ms threshold"
+        );
+    }
+
+    /// Each helper opens, checks, and drops its handle before the next opens,
+    /// so the single-writer lock never collides.
+    #[cfg(feature = "event-log")]
+    #[test]
+    fn every_open_helper_honors_event_log_config() {
+        let check = |name: &str, db: Result<Axil>| {
+            let db = db.unwrap_or_else(|e| panic!("{name}: {e:#}"));
+            assert!(db.event_log_enabled(), "{name} ignored [healing] event_log = true");
+        };
+        let config = "[healing]\nevent_log = true\n";
+        let (_dir, path) = db_with_config(config);
+        check("open_with_all_detected", open_with_all_detected(&path));
+        check("open_read_command", open_read_command(&path));
+        #[cfg(feature = "fts")]
+        check("open_with_fts", open_with_fts(&path));
+        #[cfg(feature = "timeseries")]
+        check("open_with_timeseries", open_with_timeseries(&path));
+        #[cfg(feature = "vector")]
+        {
+            check("open_for_space_ops", open_for_space_ops(&path));
+            check("open_with_vector_creating", open_with_vector_creating(&path, 4));
+            check("open_with_vector", open_with_vector(&path, None));
+        }
+        #[cfg(feature = "embed")]
+        {
+            // A separate DB: the embedder needs its own model-sized store.
+            let (_dir, path) = db_with_config(config);
+            check("open_with_embedder_creating", open_with_embedder_creating(&path));
+            check("open_with_embedder", open_with_embedder(&path));
+            #[cfg(feature = "indexer")]
+            check("open_with_best_effort", open_with_best_effort(&path));
         }
     }
 }

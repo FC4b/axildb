@@ -182,9 +182,20 @@ impl McpServer {
     /// Missing companions are silently skipped — tools that require an
     /// absent plugin return a structured error at call time instead of
     /// failing at open.
+    ///
+    /// Honors `[healing] event_log` from the database directory's `axil.toml`
+    /// (with the `event-log` feature), as the CLI's open paths do.
     pub fn open(path: &Path) -> anyhow::Result<Self> {
         let builder = attach_detected_engines(Axil::open(path))?;
         let db = builder.build()?;
+        #[cfg(feature = "event-log")]
+        if path
+            .parent()
+            .and_then(|dir| axil_core::load_config_from(dir).ok())
+            .is_some_and(|config| config.healing.event_log)
+        {
+            db.set_event_log_enabled(true);
+        }
         Ok(Self { db: Arc::new(db) })
     }
 
@@ -803,6 +814,15 @@ mod adapter_tests {
         let db = Arc::new(Axil::open(dir.path().join("m.axil")).build().unwrap());
         let mut a = McpAdapter::new();
         assert!(a.bind(db).is_ok());
+    }
+
+    #[cfg(feature = "event-log")]
+    #[test]
+    fn open_honors_event_log_config() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("axil.toml"), "[healing]\nevent_log = true\n").unwrap();
+        let server = McpServer::open(&dir.path().join("m.axil")).unwrap();
+        assert!(server.db.event_log_enabled());
     }
 }
 
