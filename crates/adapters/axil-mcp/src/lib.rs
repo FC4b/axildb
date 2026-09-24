@@ -183,19 +183,12 @@ impl McpServer {
     /// absent plugin return a structured error at call time instead of
     /// failing at open.
     ///
-    /// Honors `[healing] event_log` from the database directory's `axil.toml`
-    /// (with the `event-log` feature), as the CLI's open paths do.
+    /// Handle settings from the database directory's `axil.toml` (such as
+    /// `[healing] event_log`) are applied by `AxilBuilder::build` itself, as
+    /// on every other open path.
     pub fn open(path: &Path) -> anyhow::Result<Self> {
         let builder = attach_detected_engines(Axil::open(path))?;
         let db = builder.build()?;
-        #[cfg(feature = "event-log")]
-        if path
-            .parent()
-            .and_then(|dir| axil_core::load_config_from(dir).ok())
-            .is_some_and(|config| config.healing.event_log)
-        {
-            db.set_event_log_enabled(true);
-        }
         Ok(Self { db: Arc::new(db) })
     }
 
