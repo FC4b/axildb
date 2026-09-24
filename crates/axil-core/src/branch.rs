@@ -31,6 +31,95 @@ pub struct BranchDiff {
 /// Known companion file suffixes (same as db.rs COMPANION_SUFFIXES).
 const COMPANION_SUFFIXES: &[&str] = &[".vec", ".graph", ".ts"];
 
+/// Enumerate named vector-space companion files (`<db>.vec.<name>`) next to a
+/// database path. A branch that skips these loses every named-space index.
+fn named_space_files(db_path: &Path) -> Vec<(PathBuf, String)> {
+    let parent = db_path.parent().unwrap_or(Path::new("."));
+    let db_name = db_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    let prefix = format!("{db_name}.vec.");
+    let mut out = Vec::new();
+    if let Ok(entries) = fs::read_dir(parent) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy().to_string();
+            if let Some(space) = name_str.strip_prefix(&prefix) {
+                // Space names are validated (alnum, hyphen, underscore), so a
+                // remainder containing a dot is not a space file.
+                if !space.is_empty()
+                    && !space.contains('.')
+                    && entry.path().is_file()
+                {
+                    out.push((entry.path(), space.to_string()));
+                }
+            }
+        }
+    }
+    out.sort_by(|a, b| a.1.cmp(&b.1));
+    out
+}
+
+/// Best-effort cross-process serialization for branch file copies.
+///
+/// redb's own file lock cannot be held across the copy — on Windows its
+/// byte-range lock makes the file uncopyable while held (verified: OS error 33),
+/// and on Unix the copy succeeds but captures a header redb marks "recovery
+/// required" while the file is open, so the branch would need a full repair
+/// on first open — so the handles must be dropped first. This marker file
+/// closes the resulting two-writers-both-branching race. It is advisory: it serializes
+/// processes that go through branch creation, but not an unrelated writer that
+/// opens the database mid-copy (see the quiesce notes on [`copy_branch_files`]).
+struct BranchCopyGuard {
+    lock_path: PathBuf,
+    #[allow(dead_code)]
+    held: bool,
+}
+
+impl BranchCopyGuard {
+    fn acquire(db_path: &Path) -> std::io::Result<Self> {
+        let mut p = db_path.as_os_str().to_owned();
+        p.push(".branch-lock");
+        let lock_path = PathBuf::from(p);
+
+        const RETRIES: usize = 50; // ~5s total wait
+        const STALE_SECS: u64 = 300;
+        for _ in 0..RETRIES {
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&lock_path)
+            {
+                Ok(_) => return Ok(Self { lock_path, held: true }),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    // Break a stale marker left by a crashed creator.
+                    let stale = std::fs::metadata(&lock_path)
+                        .and_then(|m| m.modified())
+                        .ok()
+                        .and_then(|m| m.elapsed().ok())
+                        .is_some_and(|age| age.as_secs() > STALE_SECS);
+                    if stale {
+                        let _ = std::fs::remove_file(&lock_path);
+                        continue;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Err(std::io::Error::new(
+            std::io::ErrorKind::WouldBlock,
+            "another branch creation appears in progress (lock marker present)",
+        ))
+    }
+}
+
+impl Drop for BranchCopyGuard {
+    fn drop(&mut self) {
+        if self.held {
+            let _ = std::fs::remove_file(&self.lock_path);
+        }
+    }
+}
+
 /// Build the branch base path: `<db_path>.branch.<name>`.
 fn branch_path(db_path: &Path, name: &str) -> PathBuf {
     let mut p = db_path.as_os_str().to_owned();
@@ -49,20 +138,49 @@ fn branch_path(db_path: &Path, name: &str) -> PathBuf {
 /// prefer [`Axil::branch_create`](crate::Axil::branch_create), which flushes the
 /// engines and closes the handles before copying.
 ///
-/// On Windows this also requires that no live [`Axil`](crate::Axil) handle holds
-/// the core file open: redb takes a byte-range lock for the lifetime of the
-/// `Database`, so `fs::copy` of a held-open file fails with a sharing violation.
+/// It also requires that no live [`Axil`](crate::Axil) handle holds the core
+/// file open. On Windows redb takes a byte-range lock for the lifetime of the
+/// `Database`, so `fs::copy` of a held-open file fails with a lock violation;
+/// on Unix the copy succeeds but the branch is flagged for repair (redb marks
+/// the on-disk header "recovery required" while the file is open).
 pub fn branch_create(db_path: &Path, name: &str) -> Result<PathBuf> {
     validate_branch_name(name)?;
     copy_branch_files(db_path, name)
+}
+
+/// `fs::copy` with a short retry: freshly-written companion files are
+/// transiently locked on Windows (antivirus/indexer, OS error 32), and a
+/// copy that only fails on that passes a moment later.
+fn copy_file_retry(src: &Path, dest: &Path) -> std::io::Result<u64> {
+    const RETRIES: usize = 4;
+    let mut last_err = None;
+    for attempt in 0..RETRIES {
+        if attempt > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(50 * attempt as u64));
+        }
+        match fs::copy(src, dest) {
+            Ok(n) => return Ok(n),
+            Err(e) => last_err = Some(e),
+        }
+    }
+    Err(last_err.unwrap())
 }
 
 /// Copy the core `.axil` and every companion file/dir to the branch location.
 ///
 /// The caller must have already validated `name` and ensured the database is
 /// quiescent (no open writer). Shared copy step behind both the free
-/// [`branch_create`] function and [`Axil::branch_create`](crate::Axil::branch_create).
+/// [`branch_create`] function and [`Axil::branch_create`](crate::Axil::branch_create),
+/// which flushes the engines and closes the handles before copying.
+///
+/// Concurrency: the copy is serialized against other branch creations with an
+/// advisory marker file (`<db>.branch-lock`, auto-broken after 5 minutes).
+/// The core file is copied first, so the only remaining window is an external
+/// writer acquiring the lock mid-copy and mutating *companion* files after
+/// their core snapshot was taken — `doctor` + `heal --reindex` reconcile that.
 pub(crate) fn copy_branch_files(db_path: &Path, name: &str) -> Result<PathBuf> {
+    let _guard = BranchCopyGuard::acquire(db_path)
+        .map_err(|e| AxilError::plugin(format!("branch copy could not start: {e}")))?;
     let dest = branch_path(db_path, name);
     if dest.exists() {
         return Err(AxilError::plugin(format!(
@@ -87,13 +205,25 @@ pub(crate) fn copy_branch_files(db_path: &Path, name: &str) -> Result<PathBuf> {
         let src = crate::companion_path(db_path, suffix);
         if src.exists() {
             let companion_dest = crate::companion_path(&dest, suffix);
-            fs::copy(&src, &companion_dest).map_err(|e| {
+            copy_file_retry(&src, &companion_dest).map_err(|e| {
                 AxilError::plugin(format!(
                     "failed to copy companion file {}: {e}",
                     src.display()
                 ))
             })?;
         }
+    }
+
+    // Copy named vector-space companions (`<db>.vec.<name>`) — a branch
+    // without them loses every named-space index.
+    for (src, space) in named_space_files(db_path) {
+        let companion_dest = crate::companion_path(&dest, &format!(".vec.{space}"));
+        copy_file_retry(&src, &companion_dest).map_err(|e| {
+            AxilError::plugin(format!(
+                "failed to copy named vector space {}: {e}",
+                src.display()
+            ))
+        })?;
     }
 
     // Copy FTS directory if it exists.
@@ -147,6 +277,11 @@ pub fn branch_delete(db_path: &Path, name: &str) -> Result<()> {
         if companion.exists() {
             let _ = fs::remove_file(&companion);
         }
+    }
+
+    // Delete named vector-space companions too.
+    for (companion, _space) in named_space_files(&dest) {
+        let _ = fs::remove_file(&companion);
     }
 
     // Delete FTS directory.
@@ -762,6 +897,102 @@ mod tests {
         let (_dir, db_path) = temp_db();
         let branches = branch_list(&db_path).unwrap();
         assert!(branches.is_empty());
+    }
+
+    /// Whether redb asks to repair `path` on open (the file was not cleanly
+    /// closed). Opens the file directly with redb, bypassing `Axil`.
+    fn redb_needs_repair(path: &Path) -> bool {
+        let repaired = std::rc::Rc::new(std::cell::Cell::new(false));
+        let flag = repaired.clone();
+        let db = redb::Database::builder()
+            .set_repair_callback(move |_| flag.set(true))
+            .open(path)
+            .unwrap();
+        drop(db);
+        repaired.get()
+    }
+
+    /// Probe: can the core file be copied while a live redb handle holds it?
+    /// If it could, `Axil::branch_create` could hold the single-writer lock
+    /// across the copy instead of dropping it. It cannot, on any platform:
+    /// Windows refuses the copy outright (redb's byte-range lock, OS error 33
+    /// `ERROR_LOCK_VIOLATION`), and on Unix the copy succeeds but snapshots a
+    /// header redb flags "recovery required" for as long as the file is open,
+    /// so the branch would only open through a full repair.
+    #[test]
+    fn fs_copy_of_open_redb_file_is_never_a_clean_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("probe.axil");
+        let db = Axil::open(&db_path).build().unwrap();
+        db.insert("notes", json!({"probe": true})).unwrap();
+        let dest = dir.path().join("probe-copy.axil");
+        let copied = std::fs::copy(&db_path, &dest);
+        drop(db);
+
+        if cfg!(windows) {
+            let err = copied.expect_err("Windows must refuse copying a redb file held open");
+            assert_eq!(err.raw_os_error(), Some(33), "unexpected copy error: {err}");
+        } else {
+            copied.expect("Unix allows copying a redb file held open");
+            assert!(
+                redb_needs_repair(&dest),
+                "a copy taken while the handle is open must be flagged for repair"
+            );
+        }
+    }
+
+    /// `Axil::branch_create` flushes and drops the handle before copying, so
+    /// the branch is a cleanly-closed file that opens without a repair — on
+    /// every platform, which is why that path never holds the lock across the
+    /// copy.
+    #[test]
+    fn live_branch_create_copies_a_cleanly_closed_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("live.axil");
+        let db = Axil::open(&db_path).build().unwrap();
+        db.insert("notes", json!({"live": true})).unwrap();
+
+        let branch = db.branch_create("clean").unwrap();
+        assert!(
+            !redb_needs_repair(&branch),
+            "a branch copied from a quiesced handle must not need repair"
+        );
+        let branch_db = Axil::open(&branch).build().unwrap();
+        assert_eq!(branch_db.list("notes").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn branch_copy_includes_named_vector_space_files() {
+        let (_dir, db_path) = temp_db();
+
+        // Simulate two named-space companion files next to the database.
+        let space_a = crate::companion_path(&db_path, ".vec.alpha");
+        let space_b = crate::companion_path(&db_path, ".vec.beta");
+        fs::write(&space_a, b"alpha-vec-data").unwrap();
+        fs::write(&space_b, b"beta-vec-data").unwrap();
+
+        let bp = branch_create(&db_path, "spaces").unwrap();
+        assert!(crate::companion_path(&bp, ".vec.alpha").exists());
+        assert!(crate::companion_path(&bp, ".vec.beta").exists());
+
+        // And they go away with the branch.
+        branch_delete(&db_path, "spaces").unwrap();
+        assert!(!crate::companion_path(&bp, ".vec.alpha").exists());
+        assert!(!crate::companion_path(&bp, ".vec.beta").exists());
+    }
+
+    #[test]
+    fn branch_copy_lock_marker_is_released() {
+        let (_dir, db_path) = temp_db();
+
+        branch_create(&db_path, "locked").unwrap();
+
+        let mut lock = db_path.as_os_str().to_owned();
+        lock.push(".branch-lock");
+        assert!(
+            !PathBuf::from(&lock).exists(),
+            "lock marker must be removed after a successful copy"
+        );
     }
 
     /// The changelog-replay merge path (cdc feature) propagates a branch delete

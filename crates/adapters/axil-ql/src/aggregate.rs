@@ -1,17 +1,17 @@
 //! Aggregation executor — the single fold behind the AxilQL `AGG` statement,
 //! the CLI `axil agg` command, and the MCP `aggregate` tool.
 //!
-//! It consumes the record stream from a filtered table query
-//! (`db.query().table(t).where_field(..).exec()`) and folds it into per-group
-//! accumulators (`count` / `avg` / `min` / `max` / `sum`), emitting a stable
-//! JSON envelope. Numeric extraction is via [`serde_json::Value::as_f64`];
-//! non-numeric or missing values are skipped for `avg`/`min`/`max`/`sum` and
-//! surfaced per group as `skipped`. Groups are sorted by key for determinism.
+//! It consumes every record of a filtered table query (no result cap) and
+//! folds it into per-group accumulators (`count` / `avg` / `min` / `max` /
+//! `sum`), emitting a stable JSON envelope. Numeric extraction is via
+//! [`serde_json::Value::as_f64`]; non-numeric or missing values are skipped
+//! for `avg`/`min`/`max`/`sum` and surfaced per group as `skipped`. Groups
+//! are sorted by key for determinism.
 
 use std::collections::BTreeMap;
 
 use axil_core::query::WhereClause;
-use axil_core::Axil;
+use axil_core::{Axil, Record};
 use serde_json::{json, Value};
 
 /// A single aggregation metric requested over a table.
@@ -143,6 +143,24 @@ fn render_key(v: Option<&Value>) -> Option<String> {
     }
 }
 
+/// Every record of `table` matching all `wheres` (AND-composed).
+///
+/// The limit is set explicitly: left unset, `QueryBuilder` returns only its
+/// default first page (100 rows), which silently truncates any count or fold
+/// over a larger table. A filtered scan already loads the whole table before
+/// filtering, so lifting the cap adds no peak memory on that path.
+pub(crate) fn matching_records(
+    db: &Axil,
+    table: &str,
+    wheres: &[WhereClause],
+) -> axil_core::Result<Vec<Record>> {
+    let mut qb = db.query().table(table).limit(usize::MAX);
+    for wc in wheres {
+        qb = qb.where_field(&wc.field, wc.op.clone(), wc.value.clone());
+    }
+    qb.exec()
+}
+
 /// Run an aggregation and return the stable JSON envelope:
 ///
 /// ```json
@@ -159,11 +177,7 @@ fn render_key(v: Option<&Value>) -> Option<String> {
 /// Groups are ordered by key (the `null` group first). A field-bearing metric
 /// with no numeric samples in a group renders as JSON `null`.
 pub fn aggregate(db: &Axil, req: &AggRequest) -> axil_core::Result<Value> {
-    let mut qb = db.query().table(req.table);
-    for wc in req.where_clauses {
-        qb = qb.where_field(&wc.field, wc.op.clone(), wc.value.clone());
-    }
-    let records = qb.exec()?;
+    let records = matching_records(db, req.table, req.where_clauses)?;
 
     let n_metrics = req.metrics.len();
     let mut groups: BTreeMap<Option<String>, GroupAcc> = BTreeMap::new();
@@ -416,6 +430,39 @@ mod tests {
         assert_eq!(out["total_rows"], 1);
         let groups = out["groups"].as_array().unwrap();
         assert_eq!(groups[0]["count"], 1);
+    }
+
+    #[test]
+    fn folds_every_row_past_the_query_default_limit() {
+        let (_d, db) = setup_db();
+        for v in 1..=130 {
+            let parity = if v % 2 == 0 { "even" } else { "odd" };
+            db.insert("runs", json!({"v": v, "parity": parity}))
+                .unwrap();
+        }
+        let metrics = [AggMetric::Count, AggMetric::Sum("v".into())];
+        let positive = [WhereClause {
+            field: "v".into(),
+            op: axil_core::Op::Gt,
+            value: json!(0),
+        }];
+
+        // Both the filtered scan and the unfiltered listing see all 130 rows.
+        for wheres in [&positive[..], &[]] {
+            let out = aggregate(&db, &req("runs", &metrics, None, wheres)).unwrap();
+            assert_eq!(out["total_rows"], 130);
+            assert_eq!(out["groups"][0]["count"], 130);
+            assert_eq!(out["groups"][0]["sum_v"], 8515.0);
+        }
+
+        let out = aggregate(&db, &req("runs", &metrics, Some("parity"), &positive)).unwrap();
+        let groups = out["groups"].as_array().unwrap();
+        assert_eq!(groups[0]["group"], "even");
+        assert_eq!(groups[0]["count"], 65);
+        assert_eq!(groups[0]["sum_v"], 4290.0);
+        assert_eq!(groups[1]["group"], "odd");
+        assert_eq!(groups[1]["count"], 65);
+        assert_eq!(groups[1]["sum_v"], 4225.0);
     }
 
     #[test]

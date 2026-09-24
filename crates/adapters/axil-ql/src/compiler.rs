@@ -88,11 +88,7 @@ fn filtered_count(
     table: &str,
     wheres: &[axil_core::query::WhereClause],
 ) -> Result<usize, CompileError> {
-    let mut qb = db.query().table(table);
-    for wc in wheres {
-        qb = qb.where_field(&wc.field, wc.op.clone(), wc.value.clone());
-    }
-    Ok(qb.exec()?.len())
+    Ok(crate::aggregate::matching_records(db, table, wheres)?.len())
 }
 
 /// Convert an AST [`AggSpec`] to the executor's [`aggregate::AggMetric`].
@@ -338,83 +334,216 @@ pub fn execute(db: &Axil, query: &Query) -> Result<QueryResult, CompileError> {
             path,
             from,
             clauses,
+        } => match from {
+            Some(from_val) => execute_traverse(db, path, from_val, clauses, None, start),
+            None => Err(CompileError {
+                message:
+                    "TRAVERSE requires FROM <table> or FROM <record_id> to specify starting point"
+                        .to_string(),
+            }),
+        },
+
+        Query::TraverseKnownAt {
+            path,
+            from,
+            clauses,
+            known_at,
         } => {
-            match from {
-                Some(ref from_val) => {
-                    // Try as a record ID first; fall back to table name.
-                    if let Ok(rid) = RecordId::from_string(from_val) {
-                        // Direct record-seeded traversal via Axil::traverse(),
-                        // then apply clauses (WHERE, LIMIT, OFFSET) to results.
-                        let mut records = db.traverse(&rid, path).map_err(|e| CompileError {
-                            message: e.to_string(),
-                        })?;
-                        let mut limit = None;
-                        let mut offset = 0usize;
-                        for clause in clauses {
-                            match clause {
-                                Clause::Where(conditions) => {
-                                    records.retain(|r| {
-                                        conditions.iter().all(|cond| {
-                                            let wc = axil_core::query::WhereClause {
-                                                field: cond.field.clone(),
-                                                op: compare_op_to_core(&cond.op),
-                                                value: condition_to_json(&cond.value),
-                                            };
-                                            axil_core::query::matches_where(r, &wc)
-                                        })
-                                    });
-                                }
-                                Clause::Limit(n) => limit = Some(*n),
-                                Clause::Offset(n) => offset = *n,
-                                Clause::OrderBy(field, dir) => {
-                                    let desc = matches!(dir, SortDir::Desc);
-                                    records.sort_by(|a, b| {
-                                        let va = a.data.get(field.as_str());
-                                        let vb = b.data.get(field.as_str());
-                                        let ord = axil_core::query::compare_json_values(va, vb);
-                                        if desc {
-                                            ord.reverse()
-                                        } else {
-                                            ord
-                                        }
-                                    });
-                                }
-                                _ => {}
-                            }
-                        }
-                        if offset > 0 {
-                            records = if offset < records.len() {
-                                records.split_off(offset)
-                            } else {
-                                Vec::new()
-                            };
-                        }
-                        if let Some(n) = limit {
-                            records.truncate(n);
-                        }
-                        let count = records.len();
-                        let values: Vec<serde_json::Value> =
-                            records.iter().map(record_to_json).collect();
-                        Ok(QueryResult {
-                            results: values,
-                            count,
-                            profile: None,
-                            plan: None,
-                            elapsed_ms: start.elapsed().as_secs_f64() * 1000.0,
-                        })
+            let cutoff = parse_known_at(known_at)?;
+            reject_chained_traverse(clauses)?;
+            execute_traverse(db, path, from, clauses, Some(&cutoff), start)
+        }
+    }
+}
+
+/// Parse a `KNOWN AT` cutoff. The parser already validated it; this guards
+/// ASTs that arrive through deserialization.
+fn parse_known_at(ts: &str) -> Result<chrono::DateTime<chrono::Utc>, CompileError> {
+    chrono::DateTime::parse_from_rfc3339(ts)
+        .map(|t| t.with_timezone(&chrono::Utc))
+        .map_err(|e| CompileError {
+            message: format!("invalid KNOWN AT timestamp '{ts}': {e}"),
+        })
+}
+
+/// A chained `TRAVERSE` clause after `KNOWN AT` has no single meaning (extend
+/// the path? replace it?), so it is refused rather than guessed at.
+fn reject_chained_traverse(clauses: &[Clause]) -> Result<(), CompileError> {
+    if clauses.iter().any(|c| matches!(c, Clause::Traverse(_))) {
+        return Err(CompileError {
+            message: "KNOWN AT cannot be combined with a chained TRAVERSE clause; \
+                      write the whole path after TRAVERSE (e.g. TRAVERSE ->a->b FROM <seed> KNOWN AT '<ts>')"
+                .to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Execute `TRAVERSE <path> FROM <seed>`, optionally restricted to edges
+/// recorded by the `known_at` cutoff. `seed` is tried as a record ID first
+/// and falls back to a table name whose rows all seed the walk.
+fn execute_traverse(
+    db: &Axil,
+    path: &str,
+    seed: &str,
+    clauses: &[Clause],
+    known_at: Option<&chrono::DateTime<chrono::Utc>>,
+    start: std::time::Instant,
+) -> Result<QueryResult, CompileError> {
+    let Ok(rid) = RecordId::from_string(seed) else {
+        return match known_at {
+            // Fan-out traversal from every record in the table.
+            None => execute_search(db, clauses, start, |qb| qb.table(seed).traverse(path)),
+            Some(cutoff) => traverse_table_known_at(db, path, seed, clauses, cutoff, start),
+        };
+    };
+
+    // Direct record-seeded traversal, then apply clauses (WHERE, LIMIT,
+    // OFFSET, ORDER BY) to the endpoints.
+    let mut records = match known_at {
+        Some(cutoff) => db.traverse_known_at(&rid, path, cutoff)?,
+        None => db.traverse(&rid, path)?,
+    };
+    let mut limit = None;
+    let mut offset = 0usize;
+    for clause in clauses {
+        match clause {
+            Clause::Where(conditions) => {
+                records.retain(|r| {
+                    conditions.iter().all(|cond| {
+                        let wc = axil_core::query::WhereClause {
+                            field: cond.field.clone(),
+                            op: compare_op_to_core(&cond.op),
+                            value: condition_to_json(&cond.value),
+                        };
+                        axil_core::query::matches_where(r, &wc)
+                    })
+                });
+            }
+            Clause::Limit(n) => limit = Some(*n),
+            Clause::Offset(n) => offset = *n,
+            Clause::OrderBy(field, dir) => {
+                let desc = matches!(dir, SortDir::Desc);
+                records.sort_by(|a, b| {
+                    let va = a.data.get(field.as_str());
+                    let vb = b.data.get(field.as_str());
+                    let ord = axil_core::query::compare_json_values(va, vb);
+                    if desc {
+                        ord.reverse()
                     } else {
-                        // Treat as table name — fan-out traversal from all records in table.
-                        execute_search(db, clauses, start, |qb| qb.table(from_val).traverse(path))
+                        ord
                     }
+                });
+            }
+            _ => {}
+        }
+    }
+    if offset > 0 {
+        records = if offset < records.len() {
+            records.split_off(offset)
+        } else {
+            Vec::new()
+        };
+    }
+    if let Some(n) = limit {
+        records.truncate(n);
+    }
+    let count = records.len();
+    let values: Vec<serde_json::Value> = records.iter().map(record_to_json).collect();
+    Ok(QueryResult {
+        results: values,
+        count,
+        profile: None,
+        plan: None,
+        elapsed_ms: start.elapsed().as_secs_f64() * 1000.0,
+    })
+}
+
+/// Result cap a table-seeded traversal applies when the query has no `LIMIT`
+/// — the `QueryBuilder` default, which the un-cut table traversal inherits.
+const DEFAULT_TRAVERSE_LIMIT: usize = 100;
+
+/// Table-seeded `TRAVERSE ... KNOWN AT`: seed from every matching row of the
+/// table, walk each seed through only the edges recorded by `cutoff`, and
+/// union the endpoints (first-seen order, deduplicated).
+///
+/// Clauses mean exactly what they mean on the un-cut table traversal
+/// (`QueryBuilder::table(..).traverse(..)`), so a cutoff later than every
+/// edge reproduces its result: `WHERE` (and `FROM`) select the seed rows,
+/// `ORDER BY` sorts the endpoints (ties broken by record ID), then `OFFSET`
+/// and `LIMIT` page them, with the builder's default cap when `LIMIT` is
+/// absent.
+fn traverse_table_known_at(
+    db: &Axil,
+    path: &str,
+    table: &str,
+    clauses: &[Clause],
+    cutoff: &chrono::DateTime<chrono::Utc>,
+    start: std::time::Instant,
+) -> Result<QueryResult, CompileError> {
+    if !db.has_graph_index() {
+        return Err(axil_core::AxilError::plugin("no graph index configured for traversal").into());
+    }
+
+    let mut seed_query = db.query().table(table);
+    let mut order_by = None;
+    let mut limit = DEFAULT_TRAVERSE_LIMIT;
+    let mut offset = 0usize;
+    for clause in clauses {
+        match clause {
+            Clause::Where(conditions) => {
+                for cond in conditions {
+                    seed_query = seed_query.where_field(
+                        &cond.field,
+                        compare_op_to_core(&cond.op),
+                        condition_to_json(&cond.value),
+                    );
                 }
-                None => {
-                    return Err(CompileError {
-                        message: "TRAVERSE requires FROM <table> or FROM <record_id> to specify starting point".to_string(),
-                    });
-                }
+            }
+            Clause::From(t) => seed_query = seed_query.table(t),
+            Clause::OrderBy(field, dir) => order_by = Some((field, dir)),
+            Clause::Limit(n) => limit = *n,
+            Clause::Offset(n) => offset = *n,
+            _ => {}
+        }
+    }
+    // Every matching row seeds the walk — no result cap on the seed set.
+    let seeds = seed_query.limit(usize::MAX).exec()?;
+
+    let mut seen = std::collections::HashSet::new();
+    let mut records = Vec::new();
+    for seed in &seeds {
+        for endpoint in db.traverse_known_at(&seed.id, path, cutoff)? {
+            if seen.insert(endpoint.id.clone()) {
+                records.push(endpoint);
             }
         }
     }
+
+    if let Some((field, dir)) = order_by {
+        records.sort_by(|a, b| {
+            let ord = axil_core::query::compare_json_values(a.data.get(field), b.data.get(field));
+            let ord = match dir {
+                SortDir::Asc => ord,
+                SortDir::Desc => ord.reverse(),
+            };
+            ord.then_with(|| a.id.cmp(&b.id))
+        });
+    }
+
+    let values: Vec<serde_json::Value> = records
+        .iter()
+        .skip(offset)
+        .take(limit)
+        .map(record_to_json)
+        .collect();
+    Ok(QueryResult {
+        count: values.len(),
+        results: values,
+        profile: None,
+        plan: None,
+        elapsed_ms: start.elapsed().as_secs_f64() * 1000.0,
+    })
 }
 
 /// Build and execute a query with the given initial operation and clauses.
@@ -456,6 +585,50 @@ where
             elapsed_ms: start.elapsed().as_secs_f64() * 1000.0,
         })
     }
+}
+
+/// Plan for `TRAVERSE <path> FROM <seed>`. A `KNOWN AT` cutoff is recorded
+/// on the `graph_traverse` step, the step it restricts.
+fn traverse_plan(
+    db: &Axil,
+    path: &str,
+    seed: &str,
+    clauses: &[Clause],
+    known_at: Option<&str>,
+) -> axil_core::QueryPlan {
+    let mut plan = if RecordId::from_string(seed).is_ok() {
+        // Record-seeded traversal — show a direct plan
+        axil_core::QueryPlan {
+            plan: vec![
+                axil_core::PlanStep {
+                    step: 1,
+                    step_type: "record_lookup".to_string(),
+                    params: serde_json::json!({"id": seed}),
+                },
+                axil_core::PlanStep {
+                    step: 2,
+                    step_type: "graph_traverse".to_string(),
+                    params: serde_json::json!({"path": path}),
+                },
+            ],
+            estimated_cost: axil_core::EstimatedCost::Medium,
+        }
+    } else {
+        let (qb, _) = apply_clauses(db.query().table(seed).traverse(path), clauses);
+        qb.explain()
+    };
+    if let Some(ts) = known_at {
+        for step in plan
+            .plan
+            .iter_mut()
+            .filter(|s| s.step_type == "graph_traverse")
+        {
+            if let Some(params) = step.params.as_object_mut() {
+                params.insert("known_at".to_string(), serde_json::json!(ts));
+            }
+        }
+    }
+    plan
 }
 
 /// Execute EXPLAIN: return the query plan without executing.
@@ -513,38 +686,23 @@ fn execute_explain(db: &Axil, query: &Query) -> Result<QueryResult, CompileError
             path,
             from,
             clauses,
-        } => {
-            match from {
-                Some(ref from_val) => {
-                    if RecordId::from_string(from_val).is_ok() {
-                        // Record-seeded traversal — show a direct plan
-                        axil_core::QueryPlan {
-                            plan: vec![
-                                axil_core::PlanStep {
-                                    step: 1,
-                                    step_type: "record_lookup".to_string(),
-                                    params: serde_json::json!({"id": from_val}),
-                                },
-                                axil_core::PlanStep {
-                                    step: 2,
-                                    step_type: "graph_traverse".to_string(),
-                                    params: serde_json::json!({"path": path}),
-                                },
-                            ],
-                            estimated_cost: axil_core::EstimatedCost::Medium,
-                        }
-                    } else {
-                        let (qb, _) =
-                            apply_clauses(db.query().table(from_val).traverse(path), clauses);
-                        qb.explain()
-                    }
-                }
-                None => {
-                    return Err(CompileError {
-                        message: "TRAVERSE requires FROM <table> or FROM <record_id>".to_string(),
-                    });
-                }
+        } => match from {
+            Some(from_val) => traverse_plan(db, path, from_val, clauses, None),
+            None => {
+                return Err(CompileError {
+                    message: "TRAVERSE requires FROM <table> or FROM <record_id>".to_string(),
+                });
             }
+        },
+        Query::TraverseKnownAt {
+            path,
+            from,
+            clauses,
+            known_at,
+        } => {
+            parse_known_at(known_at)?;
+            reject_chained_traverse(clauses)?;
+            traverse_plan(db, path, from, clauses, Some(known_at))
         }
         Query::Explain { inner } => {
             return execute_explain(db, inner);

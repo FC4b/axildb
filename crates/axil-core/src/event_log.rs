@@ -59,6 +59,19 @@ pub struct SemanticEvent {
     pub agent_id: Option<String>,
 }
 
+/// One page of [`Axil::recall_delta_page`](crate::Axil::recall_delta_page).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct DeltaPage {
+    /// Events that passed the filter, oldest first.
+    pub events: Vec<SemanticEvent>,
+    /// Where the next pull resumes: the cursor of the last entry **scanned**,
+    /// whether it was returned or filtered out. Resuming from the last
+    /// *returned* event instead would rescan a filtered-out run forever.
+    /// `None` when nothing new was scanned — keep the cursor you passed in.
+    pub next_cursor: Option<String>,
+}
+
 /// Curated allowlist of semantic event kinds. A `(table, op, record)` tuple that
 /// matches none of these is **not** captured — keeping the tape a high-signal
 /// feed, not a full mirror of the write stream.
@@ -112,6 +125,55 @@ pub fn classify(op: &str, record: &Record) -> Option<&'static str> {
 
     // Error fixed: an error record carrying a non-empty `fix`.
     if table == ERRORS_TABLE && non_empty_str(data, "fix") {
+        return Some(kind::ERROR_FIXED);
+    }
+
+    None
+}
+
+/// Classify a committed write by what it **changed**, not the state it left.
+///
+/// [`classify`] reads a record's state, so every later update of an
+/// already-fixed error or already-superseded decision (an access-count bump,
+/// a worker annotation) would match again and re-log the same event. This
+/// compares against `previous` — the record as it was before the write, `None`
+/// for an insert — and reports a kind only when its trigger is new:
+///
+/// - `belief-revised`: a doubted belief whose `doubted`, `_doubt_reason` or
+///   `confidence` changed;
+/// - `decision-superseded`: `_superseded` went from unset/false to true;
+/// - `error-fixed`: an `errors` record's non-empty `fix` appeared or changed;
+/// - `checkpoint-written`: inserts only, as in [`classify`].
+///
+/// With `previous = None` this is exactly [`classify`].
+pub fn classify_transition(
+    op: &str,
+    previous: Option<&Record>,
+    record: &Record,
+) -> Option<&'static str> {
+    let Some(previous) = previous else {
+        return classify(op, record);
+    };
+    let (before, after) = (&previous.data, &record.data);
+    let table = record.table.as_str();
+
+    let doubted = bool_field(after, "doubted") || after.get("_doubt_reason").is_some();
+    if table == BELIEFS_TABLE
+        && (op == "update" || op == "insert")
+        && doubted
+        && ["doubted", "_doubt_reason", "confidence"]
+            .iter()
+            .any(|k| before.get(k) != after.get(k))
+    {
+        return Some(kind::BELIEF_REVISED);
+    }
+
+    if bool_field(after, "_superseded") && !bool_field(before, "_superseded") {
+        return Some(kind::DECISION_SUPERSEDED);
+    }
+
+    if table == ERRORS_TABLE && non_empty_str(after, "fix") && before.get("fix") != after.get("fix")
+    {
         return Some(kind::ERROR_FIXED);
     }
 
@@ -232,6 +294,70 @@ mod tests {
         assert_eq!(classify("insert", &fixed), Some(kind::ERROR_FIXED));
         let open = Record::new(ERRORS_TABLE, json!({"error": "boom", "fix": ""}));
         assert_eq!(classify("insert", &open), None);
+    }
+
+    #[test]
+    fn transition_ignores_repeat_updates_of_the_same_state() {
+        let mut fixed = Record::new(ERRORS_TABLE, json!({"error": "boom", "fix": "patch"}));
+        let mut annotated = fixed.clone();
+        annotated.data["_near_duplicate_of"] = json!("01OTHER");
+        // Re-writing an already-fixed error is not a new fix.
+        assert_eq!(
+            classify_transition("update", Some(&fixed), &annotated),
+            None
+        );
+
+        // Gaining (or changing) a fix is.
+        let open = Record::new(ERRORS_TABLE, json!({"error": "boom"}));
+        assert_eq!(
+            classify_transition("update", Some(&open), &fixed),
+            Some(kind::ERROR_FIXED)
+        );
+        let before = fixed.clone();
+        fixed.data["fix"] = json!("better patch");
+        assert_eq!(
+            classify_transition("update", Some(&before), &fixed),
+            Some(kind::ERROR_FIXED)
+        );
+
+        // Superseded once, logged once.
+        let live = Record::new("decisions", json!({"summary": "old"}));
+        let mut dead = live.clone();
+        dead.data["_superseded"] = json!(true);
+        assert_eq!(
+            classify_transition("update", Some(&live), &dead),
+            Some(kind::DECISION_SUPERSEDED)
+        );
+        let mut touched = dead.clone();
+        touched.data["_access_count"] = json!(3);
+        assert_eq!(classify_transition("update", Some(&dead), &touched), None);
+
+        // An error that is already superseded can still gain a fix.
+        let mut dead_error = Record::new(ERRORS_TABLE, json!({"error": "x", "_superseded": true}));
+        let before = dead_error.clone();
+        dead_error.data["fix"] = json!("patch");
+        assert_eq!(
+            classify_transition("update", Some(&before), &dead_error),
+            Some(kind::ERROR_FIXED)
+        );
+
+        // A doubted belief touched again without revising it is not logged.
+        let belief = Record::new(BELIEFS_TABLE, json!({"doubted": true, "confidence": 0.3}));
+        let mut read = belief.clone();
+        read.data["_access_count"] = json!(1);
+        assert_eq!(classify_transition("update", Some(&belief), &read), None);
+        let mut revised = belief.clone();
+        revised.data["confidence"] = json!(0.1);
+        assert_eq!(
+            classify_transition("update", Some(&belief), &revised),
+            Some(kind::BELIEF_REVISED)
+        );
+
+        // Without a previous state it is plain `classify`.
+        assert_eq!(
+            classify_transition("insert", None, &fixed),
+            classify("insert", &fixed)
+        );
     }
 
     #[test]

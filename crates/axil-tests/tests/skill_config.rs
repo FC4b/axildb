@@ -352,11 +352,19 @@ fn test_skill_list_shows_all() {
 
     let json: Value = serde_json::from_str(stdout.trim()).unwrap();
     let skills = json.as_array().unwrap();
-    assert_eq!(skills.len(), 8, "should list 8 skills");
+    assert_eq!(skills.len(), 9, "should list 9 skills");
 
     let names: Vec<&str> = skills.iter().map(|s| s["name"].as_str().unwrap()).collect();
     for expected in [
-        "memory", "report", "diagnose", "optimize", "autoagent", "learn", "retro", "brief",
+        "memory",
+        "report",
+        "diagnose",
+        "optimize",
+        "autoagent",
+        "learn",
+        "retro",
+        "brief",
+        "checkpoint",
     ] {
         assert!(names.contains(&expected), "skill list missing `{expected}`");
     }
@@ -378,14 +386,15 @@ fn test_skill_install_and_uninstall() {
     assert_eq!(code, 0, "skill install should succeed");
 
     let json = parse_json(&stdout);
-    assert_eq!(json["installed"], 8);
+    assert_eq!(json["installed"], 9);
 
-    // Verify files exist
-    assert!(skills_dir.join("axil.md").exists());
-    assert!(skills_dir.join("axil-report.md").exists());
-    assert!(skills_dir.join("axil-diagnose.md").exists());
-    assert!(skills_dir.join("axil-optimize.md").exists());
-    assert!(skills_dir.join("axil-autoagent.md").exists());
+    // Verify files exist (skills/<name>/SKILL.md directory layout)
+    assert!(skills_dir.join("axil").join("SKILL.md").exists());
+    assert!(skills_dir.join("axil-report").join("SKILL.md").exists());
+    assert!(skills_dir.join("axil-diagnose").join("SKILL.md").exists());
+    assert!(skills_dir.join("axil-optimize").join("SKILL.md").exists());
+    assert!(skills_dir.join("axil-autoagent").join("SKILL.md").exists());
+    assert!(skills_dir.join("axil-checkpoint").join("SKILL.md").exists());
 
     // List should show installed
     let output = Command::new(axil_bin())
@@ -410,11 +419,11 @@ fn test_skill_install_and_uninstall() {
     assert_eq!(code, 0, "skill uninstall should succeed");
 
     let json = parse_json(&stdout);
-    assert_eq!(json["removed"], 8);
+    assert_eq!(json["removed"], 9);
 
-    // Verify files removed
-    assert!(!skills_dir.join("axil.md").exists());
-    assert!(!skills_dir.join("axil-report.md").exists());
+    // Verify skill directories removed
+    assert!(!skills_dir.join("axil").exists());
+    assert!(!skills_dir.join("axil-report").exists());
 }
 
 #[test]
@@ -434,8 +443,8 @@ fn test_skill_install_only_one() {
     let json = parse_json(&stdout);
     assert_eq!(json["installed"], 1);
 
-    assert!(skills_dir.join("axil.md").exists());
-    assert!(!skills_dir.join("axil-report.md").exists());
+    assert!(skills_dir.join("axil").join("SKILL.md").exists());
+    assert!(!skills_dir.join("axil-report").exists());
 }
 
 #[test]

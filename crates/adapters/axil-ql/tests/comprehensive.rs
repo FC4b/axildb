@@ -693,3 +693,490 @@ fn serialize_query_result() {
     assert!(json.contains("count"));
     assert!(json.contains("elapsed_ms"));
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// KNOWN AT — knowledge-time filtering on TRAVERSE
+// ═══════════════════════════════════════════════════════════════════════
+
+#[test]
+fn p60_traverse_known_at_parses() {
+    let q =
+        parse("TRAVERSE ->depends_on FROM rec_01HZ3ABC KNOWN AT '2026-01-01T00:00:00Z' LIMIT 5")
+            .unwrap();
+    match &q {
+        Query::TraverseKnownAt {
+            path,
+            from,
+            known_at,
+            clauses,
+            ..
+        } => {
+            assert_eq!(path, "->depends_on");
+            assert_eq!(from, "rec_01HZ3ABC");
+            assert_eq!(known_at, "2026-01-01T00:00:00Z");
+            assert!(matches!(clauses.as_slice(), [Clause::Limit(5)]));
+        }
+        _ => panic!("expected TraverseKnownAt, got {q:?}"),
+    }
+    assert_eq!(q.clauses(), &[Clause::Limit(5)]);
+
+    // A seed that is itself spelled like the keyword stays a seed.
+    let q = parse("TRAVERSE ->e FROM known KNOWN AT '2026-01-01T00:00:00Z'").unwrap();
+    assert!(matches!(&q, Query::TraverseKnownAt { from, .. } if from == "known"));
+}
+
+#[test]
+fn p63_plain_traverse_keeps_published_shape() {
+    // Destructured without `..` on purpose: this stops compiling if a field is
+    // ever added to the published `Query::Traverse` variant, which
+    // cargo-semver-checks treats as a major break.
+    let q = parse("TRAVERSE ->e FROM rec_01 LIMIT 3").unwrap();
+    match q {
+        Query::Traverse {
+            path,
+            from,
+            clauses,
+        } => {
+            assert_eq!(path, "->e");
+            assert_eq!(from.as_deref(), Some("rec_01"));
+            assert_eq!(clauses, vec![Clause::Limit(3)]);
+        }
+        other => panic!("expected Traverse, got {other:?}"),
+    }
+}
+
+#[test]
+fn serialize_traverse_known_at_roundtrips() {
+    let q = parse("TRAVERSE ->e FROM rec_01 KNOWN AT '2026-01-01T00:00:00Z'").unwrap();
+    let json = serde_json::to_value(&q).unwrap();
+    assert_eq!(json["TraverseKnownAt"]["known_at"], "2026-01-01T00:00:00Z");
+    let back: Query = serde_json::from_value(json).unwrap();
+    assert_eq!(back, q);
+
+    // Plain TRAVERSE serialises exactly as the published shape did.
+    let plain = serde_json::to_value(parse("TRAVERSE ->e FROM rec_01").unwrap()).unwrap();
+    assert_eq!(
+        plain,
+        serde_json::json!({"Traverse": {"path": "->e", "from": "rec_01", "clauses": []}})
+    );
+}
+
+#[test]
+fn p61_traverse_known_at_validates_timestamp() {
+    let err = parse("TRAVERSE ->edge FROM rec_01 KNOWN AT 'not-a-date'").unwrap_err();
+    assert!(err.message.contains("RFC 3339"), "{}", err.message);
+}
+
+#[test]
+fn p62_traverse_known_requires_at() {
+    let err = parse("TRAVERSE ->edge FROM rec_01 KNOWN").unwrap_err();
+    assert!(err.message.contains("KNOWN requires AT"), "{}", err.message);
+}
+
+#[test]
+fn c60_traverse_known_at_filters_by_edge_creation_time() {
+    use axil_graph::AxilBuilderGraphExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("kt.axil");
+    let db = axil_core::Axil::open(&db_path)
+        .with_graph_engine()
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let a = db
+        .insert("services", serde_json::json!({"name": "api"}))
+        .unwrap();
+    let b = db
+        .insert("services", serde_json::json!({"name": "db"}))
+        .unwrap();
+    db.relate(&a.id, "depends_on", &b.id, None).unwrap();
+
+    // No cutoff: the edge is traversable.
+    let q = format!(r#"TRAVERSE ->depends_on FROM "{}""#, a.id);
+    assert_eq!(axil_ql::run(&db, &q).unwrap().count, 1);
+
+    // Knowledge cutoff before the edge was recorded: filtered out.
+    let q = format!(
+        r#"TRAVERSE ->depends_on FROM "{}" KNOWN AT '2020-01-01T00:00:00Z'"#,
+        a.id
+    );
+    assert_eq!(axil_ql::run(&db, &q).unwrap().count, 0);
+
+    // Cutoff after the edge was recorded: visible again.
+    let q = format!(
+        r#"TRAVERSE ->depends_on FROM "{}" KNOWN AT '2030-01-01T00:00:00Z'"#,
+        a.id
+    );
+    assert_eq!(axil_ql::run(&db, &q).unwrap().count, 1);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Soft keywords — AGG / GROUP / KNOWN / AT stay usable as identifiers
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Field name of the first condition of a statement's WHERE, wherever the
+/// statement keeps it.
+fn first_where_field(q: &Query) -> String {
+    match q {
+        Query::Count {
+            where_conditions, ..
+        }
+        | Query::Agg {
+            where_conditions, ..
+        } => where_conditions[0].field.clone(),
+        other => match other.clauses().iter().find_map(|c| match c {
+            Clause::Where(conds) => Some(conds[0].field.clone()),
+            _ => None,
+        }) {
+            Some(f) => f,
+            None => panic!("no WHERE in {other:?}"),
+        },
+    }
+}
+
+#[test]
+fn p70_soft_keywords_as_where_fields() {
+    for name in ["at", "known", "agg", "group", "AT", "Known"] {
+        for q in [
+            format!(r#"COUNT FROM ev WHERE {name} > "2026-01-01""#),
+            format!(r#"COUNT FROM ev WHERE x = 1 AND {name} = 2"#),
+            format!(r#"RECALL "x" TOP 5 WHERE {name} = 1"#),
+            format!(r#"FIND "x" WHERE {name} CONTAINS "y""#),
+            format!(r#"AGG count FROM ev WHERE {name} = 1 GROUP BY family"#),
+            format!(r#"TRAVERSE ->e FROM t WHERE {name} = 1"#),
+        ] {
+            let parsed = parse(&q).unwrap_or_else(|e| panic!("{q}: {e}"));
+            let field = if q.contains(" AND ") {
+                match &parsed {
+                    Query::Count {
+                        where_conditions, ..
+                    } => where_conditions[1].field.clone(),
+                    _ => unreachable!(),
+                }
+            } else {
+                first_where_field(&parsed)
+            };
+            // Identifiers keep the spelling the user wrote.
+            assert_eq!(field, name, "{q}");
+        }
+    }
+}
+
+#[test]
+fn p71_soft_keywords_as_table_names() {
+    for name in ["at", "known", "agg", "group"] {
+        let q = parse(&format!("COUNT FROM {name}")).unwrap();
+        assert!(matches!(&q, Query::Count { table: Some(t), .. } if t == name));
+
+        let q = parse(&format!(r#"RECALL "x" TOP 5 FROM {name}"#)).unwrap();
+        assert!(matches!(&q.clauses()[0], Clause::From(t) if t == name));
+
+        let q = parse(&format!("AGG count FROM {name}")).unwrap();
+        assert!(matches!(&q, Query::Agg { table, .. } if table == name));
+
+        let q = parse(&format!("TRAVERSE ->e FROM {name}")).unwrap();
+        assert!(matches!(&q, Query::Traverse { from: Some(f), .. } if f == name));
+    }
+}
+
+#[test]
+fn p72_soft_keywords_in_order_by_in_and_agg_fields() {
+    for name in ["at", "known", "agg", "group"] {
+        let q = parse(&format!(r#"FIND "x" ORDER BY {name} DESC"#)).unwrap();
+        assert!(
+            matches!(&q.clauses()[0], Clause::OrderBy(f, SortDir::Desc) if f == name),
+            "{q:?}"
+        );
+
+        let q = parse(&format!(r#"FIND "x" IN {name}"#)).unwrap();
+        assert!(matches!(&q, Query::Find { field: Some(f), .. } if f == name));
+
+        let q = parse(&format!(
+            "AGG avg({name}), max({name}) FROM t GROUP BY {name}"
+        ))
+        .unwrap();
+        match &q {
+            Query::Agg {
+                metrics, group_by, ..
+            } => {
+                assert_eq!(
+                    metrics,
+                    &vec![
+                        AggSpec::Avg(name.to_string()),
+                        AggSpec::Max(name.to_string())
+                    ]
+                );
+                assert_eq!(group_by.as_deref(), Some(name));
+            }
+            _ => panic!("expected Agg"),
+        }
+
+        // A bare soft keyword is also a bare string value, like any identifier.
+        let q = parse(&format!("COUNT FROM t WHERE kind = {name}")).unwrap();
+        match &q {
+            Query::Count {
+                where_conditions, ..
+            } => assert_eq!(
+                where_conditions[0].value,
+                ConditionValue::String(name.to_string())
+            ),
+            _ => panic!("expected Count"),
+        }
+    }
+}
+
+#[test]
+fn p73_soft_keywords_still_work_in_keyword_position() {
+    // Statement-leading AGG and GROUP BY, any case.
+    let q = parse("agg count from group where at > 1 group by group").unwrap();
+    match &q {
+        Query::Agg {
+            table,
+            where_conditions,
+            group_by,
+            ..
+        } => {
+            assert_eq!(table, "group");
+            assert_eq!(where_conditions[0].field, "at");
+            assert_eq!(group_by.as_deref(), Some("group"));
+        }
+        _ => panic!("expected Agg"),
+    }
+    assert!(matches!(
+        parse("EXPLAIN AGG count FROM t GROUP BY g").unwrap(),
+        Query::Explain { .. }
+    ));
+    // GROUP must still be followed by BY.
+    assert!(parse("AGG count FROM t GROUP g").is_err());
+}
+
+#[test]
+fn c70_where_on_field_named_at_executes() {
+    let (_dir, db) = setup_db();
+    db.insert("ev", serde_json::json!({"at": "2025-06-01T00:00:00Z"}))
+        .unwrap();
+    db.insert("ev", serde_json::json!({"at": "2026-06-01T00:00:00Z"}))
+        .unwrap();
+    db.insert("ev", serde_json::json!({"at": "2026-07-01T00:00:00Z"}))
+        .unwrap();
+
+    let result = axil_ql::run(&db, r#"COUNT FROM ev WHERE at > "2026-01-01""#).unwrap();
+    assert_eq!(result.count, 2);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// KNOWN AT on a table-seeded TRAVERSE
+// ═══════════════════════════════════════════════════════════════════════
+
+fn setup_graph_db() -> (tempfile::TempDir, axil_core::Axil) {
+    use axil_graph::AxilBuilderGraphExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = axil_core::Axil::open(dir.path().join("kt.axil"))
+        .with_graph_engine()
+        .unwrap()
+        .build()
+        .unwrap();
+    (dir, db)
+}
+
+/// Endpoint ids of a query result, in result order.
+fn result_ids(db: &axil_core::Axil, q: &str) -> Vec<String> {
+    axil_ql::run(db, q)
+        .unwrap_or_else(|e| panic!("{q}: {e}"))
+        .results
+        .iter()
+        .map(|r| r["id"].as_str().unwrap().to_string())
+        .collect()
+}
+
+/// Two seeds in `svc`, three endpoints in `lib`. `s1->l1` and `s2->l2` are
+/// recorded before the returned cutoff; `s1->l3` and `s2->l1` after it.
+fn seed_edges_around_cutoff(db: &axil_core::Axil) -> String {
+    use serde_json::json;
+
+    let s1 = db.insert("svc", json!({"name": "s1", "tier": 1})).unwrap();
+    let s2 = db.insert("svc", json!({"name": "s2", "tier": 2})).unwrap();
+    let l1 = db.insert("lib", json!({"name": "l1", "rank": 3})).unwrap();
+    let l2 = db.insert("lib", json!({"name": "l2", "rank": 1})).unwrap();
+    let l3 = db.insert("lib", json!({"name": "l3", "rank": 2})).unwrap();
+
+    db.relate(&s1.id, "uses", &l1.id, None).unwrap();
+    db.relate(&s2.id, "uses", &l2.id, None).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let cutoff = chrono::Utc::now().to_rfc3339();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    db.relate(&s1.id, "uses", &l3.id, None).unwrap();
+    db.relate(&s2.id, "uses", &l1.id, None).unwrap();
+    cutoff
+}
+
+#[test]
+fn c61_traverse_from_table_known_at_applies_cutoff() {
+    let (_dir, db) = setup_graph_db();
+    let cutoff = seed_edges_around_cutoff(&db);
+
+    let names = |q: &str| -> Vec<String> {
+        let mut v: Vec<String> = axil_ql::run(&db, q)
+            .unwrap_or_else(|e| panic!("{q}: {e}"))
+            .results
+            .iter()
+            .map(|r| r["data"]["name"].as_str().unwrap().to_string())
+            .collect();
+        v.sort();
+        v
+    };
+
+    // Today's graph: every endpoint, deduplicated across seeds.
+    assert_eq!(names("TRAVERSE ->uses FROM svc"), ["l1", "l2", "l3"]);
+    // The graph as it was known at the cutoff: only the early edges.
+    assert_eq!(
+        names(&format!("TRAVERSE ->uses FROM svc KNOWN AT '{cutoff}'")),
+        ["l1", "l2"]
+    );
+    // Before any edge was recorded: nothing.
+    assert!(names("TRAVERSE ->uses FROM svc KNOWN AT '2020-01-01T00:00:00Z'").is_empty());
+    // WHERE still selects the seed rows: s1 only reached l1 by the cutoff.
+    assert_eq!(
+        names(&format!(
+            "TRAVERSE ->uses FROM svc KNOWN AT '{cutoff}' WHERE tier = 1"
+        )),
+        ["l1"]
+    );
+}
+
+#[test]
+fn c62_known_at_after_every_edge_matches_no_cutoff() {
+    let (_dir, db) = setup_graph_db();
+    seed_edges_around_cutoff(&db);
+    // A lone seed with more endpoints than the default result cap.
+    let hub = db
+        .insert("hub", serde_json::json!({"name": "hub"}))
+        .unwrap();
+    for i in 0..105 {
+        let leaf = db.insert("leaf", serde_json::json!({"i": i})).unwrap();
+        db.relate(&hub.id, "has", &leaf.id, None).unwrap();
+    }
+
+    let future = "KNOWN AT '2999-01-01T00:00:00Z'";
+    for (path, table, suffix) in [
+        ("->uses", "svc", ""),
+        ("->uses", "svc", "WHERE tier = 1"),
+        ("->uses", "svc", "ORDER BY rank DESC"),
+        ("->uses", "svc", "ORDER BY rank OFFSET 1"),
+        ("->uses", "svc", "WHERE tier = 2 ORDER BY rank DESC LIMIT 5"),
+        ("->uses", "svc", "LIMIT 2 OFFSET 1"),
+        // No LIMIT: both stop at the same default result cap.
+        ("->has", "hub", ""),
+        ("->has", "hub", "LIMIT 3 OFFSET 2"),
+        ("->has", "hub", "ORDER BY i DESC LIMIT 200"),
+    ] {
+        let plain = format!("TRAVERSE {path} FROM {table} {suffix}");
+        let cut = format!("TRAVERSE {path} FROM {table} {future} {suffix}");
+        let expected = result_ids(&db, &plain);
+        assert!(!expected.is_empty(), "{plain}");
+        assert_eq!(result_ids(&db, &cut), expected, "{cut}");
+    }
+    assert_eq!(result_ids(&db, "TRAVERSE ->has FROM hub").len(), 100);
+}
+
+#[test]
+fn c64_traverse_from_table_known_at_orders_before_paging() {
+    let (_dir, db) = setup_graph_db();
+    let hub = db
+        .insert("hub", serde_json::json!({"name": "hub"}))
+        .unwrap();
+    for i in 0..10 {
+        let leaf = db.insert("leaf", serde_json::json!({"i": i})).unwrap();
+        db.relate(&hub.id, "has", &leaf.id, None).unwrap();
+    }
+    // ORDER BY ranks every endpoint before OFFSET/LIMIT page them, so this is
+    // the true top of the ordering, not a sorted sample of the first few
+    // endpoints the walk happened to reach.
+    let result = axil_ql::run(
+        &db,
+        "TRAVERSE ->has FROM hub KNOWN AT '2999-01-01T00:00:00Z' ORDER BY i DESC LIMIT 3 OFFSET 1",
+    )
+    .unwrap();
+    let got: Vec<i64> = result
+        .results
+        .iter()
+        .map(|r| r["data"]["i"].as_i64().unwrap())
+        .collect();
+    assert_eq!(got, [8, 7, 6]);
+}
+
+#[test]
+fn c65_known_at_rejects_chained_traverse() {
+    let (_dir, db) = setup_graph_db();
+    let seed = db.insert("svc", serde_json::json!({"name": "s"})).unwrap();
+    for from in [seed.id.to_string(), "svc".to_string()] {
+        for prefix in ["", "EXPLAIN "] {
+            let q = format!(
+                r#"{prefix}TRAVERSE ->a FROM "{from}" KNOWN AT '2026-01-01T00:00:00Z' TRAVERSE ->b"#
+            );
+            let err = axil_ql::run(&db, &q).unwrap_err().to_string();
+            assert!(err.contains("chained TRAVERSE"), "{q}: {err}");
+        }
+    }
+}
+
+#[test]
+fn c63_explain_traverse_known_at_shows_cutoff() {
+    let (_dir, db) = setup_graph_db();
+    let seed = db.insert("svc", serde_json::json!({"name": "s"})).unwrap();
+    let ts = "2026-01-01T00:00:00Z";
+
+    for from in [seed.id.to_string(), "svc".to_string()] {
+        let q = format!(r#"EXPLAIN TRAVERSE ->uses FROM "{from}" KNOWN AT '{ts}'"#);
+        let plan = axil_ql::run(&db, &q).unwrap().plan.expect("plan");
+        let step = plan
+            .plan
+            .iter()
+            .find(|s| s.step_type == "graph_traverse")
+            .unwrap_or_else(|| panic!("{q}: no graph_traverse step"));
+        assert_eq!(step.params["known_at"], ts, "{q}");
+
+        // Without KNOWN AT the plan carries no cutoff.
+        let q = format!(r#"EXPLAIN TRAVERSE ->uses FROM "{from}""#);
+        let plan = axil_ql::run(&db, &q).unwrap().plan.expect("plan");
+        let step = plan
+            .plan
+            .iter()
+            .find(|s| s.step_type == "graph_traverse")
+            .unwrap();
+        assert!(step.params.get("known_at").is_none(), "{q}");
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// COUNT / AGG see every matching row, not the first page
+// ═══════════════════════════════════════════════════════════════════════
+
+#[test]
+fn c80_count_and_agg_are_not_capped_at_a_page() {
+    let (_dir, db) = setup_db();
+    for v in 1..=130 {
+        db.insert("runs", serde_json::json!({"v": v, "kind": "a"}))
+            .unwrap();
+    }
+
+    assert_eq!(axil_ql::run(&db, "COUNT FROM runs").unwrap().count, 130);
+    assert_eq!(
+        axil_ql::run(&db, "COUNT FROM runs WHERE v > 0")
+            .unwrap()
+            .count,
+        130
+    );
+    assert_eq!(axil_ql::run(&db, "COUNT WHERE v > 0").unwrap().count, 130);
+
+    let out = axil_ql::run(&db, "AGG count, sum(v) FROM runs WHERE v > 0").unwrap();
+    assert_eq!(out.results[0]["total_rows"], 130);
+    assert_eq!(out.results[0]["groups"][0]["sum_v"], 8515.0);
+
+    let out = axil_ql::run(&db, "AGG count, max(v) FROM runs GROUP BY kind").unwrap();
+    assert_eq!(out.results[0]["groups"][0]["count"], 130);
+    assert_eq!(out.results[0]["groups"][0]["max_v"], 130.0);
+}

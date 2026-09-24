@@ -160,11 +160,60 @@ impl Parser {
         self.advance(); // consume FROM
         let from = self.expect_id_value("FROM requires a record ID or table name")?;
 
+        // Optional knowledge-time cutoff: KNOWN AT '<rfc3339>'.
+        let known_at = if matches!(self.peek().kind, TokenKind::Known) {
+            self.advance(); // consume KNOWN
+            if !matches!(self.peek().kind, TokenKind::At) {
+                return Err(ParseError {
+                    message: "KNOWN requires AT <timestamp>".to_string(),
+                    span: self.peek().span,
+                    suggestion: Some(
+                        "e.g. TRAVERSE ->depends_on FROM <id> KNOWN AT '2026-01-01T00:00:00Z'"
+                            .to_string(),
+                    ),
+                });
+            }
+            self.advance(); // consume AT
+            match self.peek().kind {
+                TokenKind::StringLit(_) | TokenKind::Ident(_) => {
+                    let raw = match &self.advance().kind {
+                        TokenKind::StringLit(s) | TokenKind::Ident(s) => s.clone(),
+                        _ => unreachable!("peeked above"),
+                    };
+                    if chrono::DateTime::parse_from_rfc3339(&raw).is_err() {
+                        return Err(ParseError {
+                            message: format!("KNOWN AT requires an RFC 3339 timestamp, got '{raw}'"),
+                            span: self.peek().span,
+                            suggestion: Some("e.g. KNOWN AT '2026-01-01T00:00:00Z'".to_string()),
+                        });
+                    }
+                    Some(raw)
+                }
+                _ => {
+                    return Err(ParseError {
+                        message: "KNOWN AT requires an RFC 3339 timestamp string".to_string(),
+                        span: self.peek().span,
+                        suggestion: Some("e.g. KNOWN AT '2026-01-01T00:00:00Z'".to_string()),
+                    })
+                }
+            }
+        } else {
+            None
+        };
+
         let clauses = self.parse_clauses()?;
-        Ok(Query::Traverse {
-            path,
-            from: Some(from),
-            clauses,
+        Ok(match known_at {
+            Some(known_at) => Query::TraverseKnownAt {
+                path,
+                from,
+                clauses,
+                known_at,
+            },
+            None => Query::Traverse {
+                path,
+                from: Some(from),
+                clauses,
+            },
         })
     }
 
@@ -389,7 +438,8 @@ impl Parser {
     }
 
     fn parse_condition_value(&mut self) -> Result<ConditionValue, ParseError> {
-        let val = match &self.peek().kind {
+        let tok = self.peek();
+        let val = match &tok.kind {
             TokenKind::StringLit(s) => Some(ConditionValue::String(s.clone())),
             TokenKind::IntLit(n) => Some(ConditionValue::Integer(*n)),
             TokenKind::FloatLit(n) => Some(ConditionValue::Float(*n)),
@@ -397,6 +447,7 @@ impl Parser {
             TokenKind::False => Some(ConditionValue::Bool(false)),
             TokenKind::Null => Some(ConditionValue::Null),
             TokenKind::Ident(s) => Some(ConditionValue::String(s.clone())),
+            kind if is_soft_keyword(kind) => Some(ConditionValue::String(tok.text.clone())),
             _ => None,
         };
         match val {
@@ -517,6 +568,10 @@ impl Parser {
                 self.advance();
                 Ok(s)
             }
+            kind if is_soft_keyword(kind) => {
+                self.advance();
+                Ok(tok.text)
+            }
             _ => Err(ParseError {
                 message: format!("{ctx}: expected an identifier, found {}", tok.kind),
                 span: tok.span,
@@ -539,6 +594,10 @@ impl Parser {
                 let s = s.clone();
                 self.advance();
                 Ok(s)
+            }
+            kind if is_soft_keyword(kind) => {
+                self.advance();
+                Ok(tok.text)
             }
             // ULIDs like 01HZ3ABC... get split: "01" as IntLit, "HZ3ABC..." as Ident.
             // Concatenate consecutive number + ident tokens to reconstruct the full ID.
@@ -627,6 +686,20 @@ impl Parser {
             }),
         }
     }
+}
+
+/// Contextual ("soft") keywords: recognised as keywords only in their
+/// grammatical position — statement-leading `AGG`, `GROUP BY` after an `AGG`
+/// source, and `KNOWN AT` after a `TRAVERSE` seed — and read as plain
+/// identifiers (with the spelling the user wrote) everywhere an identifier is
+/// expected. Fields and tables named `at`, `known`, `agg`, or `group` are
+/// common (hook events carry an `at` timestamp), so reserving these words
+/// would break ordinary queries.
+fn is_soft_keyword(kind: &TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::Agg | TokenKind::Group | TokenKind::Known | TokenKind::At
+    )
 }
 
 /// Suggest corrections for common mistakes.

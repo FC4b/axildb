@@ -33,6 +33,24 @@ TRAVERSE ->modified->file FROM <record-id>
 TRAVERSE <-mentions WHERE table = "_entities"
 ```
 
+**Knowledge-time cutoff** — restrict traversal to edges recorded at or before a
+timestamp, answering "what did the graph look like as of then?":
+
+```sql
+TRAVERSE ->depends_on FROM <record-id> KNOWN AT '2026-01-01T00:00:00Z'
+TRAVERSE ->depends_on FROM services KNOWN AT '2026-01-01T00:00:00Z' WHERE tier = 1
+```
+
+`KNOWN AT` takes an RFC 3339 timestamp and works with either seed form. It
+filters on when each edge was *recorded*; the event-time axis (edge validity
+windows) is available programmatically via
+`GraphEngine::traverse_ids_bitemporal`. Trailing clauses keep their meaning,
+so a cutoff later than every edge returns the same records as the plain
+query: with `FROM <table>`, `WHERE` picks the seed rows and `ORDER BY` /
+`OFFSET` / `LIMIT` apply to the endpoints (100 by default). A chained
+`TRAVERSE` clause after `KNOWN AT` is rejected — write the whole path after
+the leading `TRAVERSE`.
+
 ### GET — fetch by ID
 
 ```sql
@@ -61,8 +79,9 @@ AGG min(fees), max(fees), sum(fees) FROM trades
 Metric functions: `count`, `avg(field)`, `min(field)`, `max(field)`,
 `sum(field)` (names case-insensitive). Returns one row per group with
 `count`, one `<func>_<field>` key per metric, and a `skipped` counter for
-rows whose field was missing or non-numeric. The CLI `axil agg` command and
-the MCP `aggregate` tool run the same executor.
+rows whose field was missing or non-numeric. Every matching row is folded —
+there is no result cap. The CLI `axil agg` command and the MCP `aggregate`
+tool run the same executor.
 
 ### EXPLAIN — show query plan
 
@@ -84,6 +103,17 @@ EXPLAIN RECALL "auth error" TOP 5
 | `BOOST` | Adjust scoring | `BOOST recency 0.8` |
 | `PROFILE` | Include timing | `RECALL "x" TOP 5 PROFILE` |
 | `TRAVERSE` | Chain traversal | `TRAVERSE ->edge` |
+
+## Contextual keywords
+
+`AGG`, `GROUP`, `KNOWN`, and `AT` are keywords only where the grammar expects
+them (a leading `AGG`, `GROUP BY`, `KNOWN AT`). Anywhere else they are
+ordinary identifiers, so fields and tables with those names need no quoting:
+
+```sql
+COUNT FROM events WHERE at > "2026-01-01"
+AGG count FROM group GROUP BY known
+```
 
 ## Operators
 

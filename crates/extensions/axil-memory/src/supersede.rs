@@ -10,9 +10,7 @@ use serde_json::json;
 use axil_core::{Axil, Record, RecordId, Result};
 
 use crate::ttl::set_meta_field;
-use crate::types::{
-    EDGE_SUPERSEDES, META_RECORDED_AT, META_SUPERSEDED, META_SUPERSEDED_BY, META_VALID_FROM,
-};
+use crate::types::{EDGE_SUPERSEDES, META_RECORDED_AT, META_VALID_FROM};
 
 /// Default similarity threshold for auto-superseding.
 pub const DEFAULT_SUPERSEDE_THRESHOLD: f32 = 0.92;
@@ -27,10 +25,13 @@ pub struct SupersedeEngine<'a> {
 }
 
 impl<'a> SupersedeEngine<'a> {
+    /// The threshold defaults to the handle's configured
+    /// `healing.supersede_similarity_threshold` (0.92 when unset); override
+    /// with [`SupersedeEngine::with_threshold`].
     pub fn new(db: &'a Axil) -> Self {
         Self {
             db,
-            threshold: DEFAULT_SUPERSEDE_THRESHOLD,
+            threshold: db.supersede_threshold(),
         }
     }
 
@@ -42,12 +43,22 @@ impl<'a> SupersedeEngine<'a> {
 
     /// Check for and apply superseding after inserting a record.
     ///
-    /// Searches for similar records in the same table. If any exceed the
-    /// threshold, marks them as superseded and creates graph edges.
+    /// Searches for similar records in the same table and agent scope. If any
+    /// exceed the threshold, marks them as superseded and creates graph edges.
+    ///
+    /// Scope is exact: an agent's record supersedes only that agent's records,
+    /// and an unscoped (global) record only global ones. A private write must
+    /// never demote shared memory for every agent, and a global write must
+    /// never demote a fact an agent keeps privately.
     ///
     /// Returns the IDs of superseded records.
     pub fn check_and_supersede(&self, new_record: &Record) -> Result<Vec<RecordId>> {
         if !self.db.has_vector_index() {
+            return Ok(Vec::new());
+        }
+
+        // Append-only tables opt out of superseding entirely.
+        if !self.db.lifecycle_policy(&new_record.table).supersede {
             return Ok(Vec::new());
         }
 
@@ -63,48 +74,24 @@ impl<'a> SupersedeEngine<'a> {
             Err(_) => return Ok(Vec::new()), // No embedder = no superseding
         };
 
+        let owner = new_record.data.get("_agent").and_then(|v| v.as_str());
         let mut superseded = Vec::new();
 
         for (candidate, similarity) in &candidates {
-            // Skip self.
-            if candidate.id == new_record.id {
+            // Agent scope is the one rule core's shared supersede path does
+            // not know about; everything else (same table, lifecycle policy,
+            // pinned, recency, already superseded) is enforced by
+            // `mark_superseded` itself, which also writes the canonical
+            // markers, links the `supersedes` edge and captures the event.
+            if !crate::agent_owns(owner, &candidate.data) {
                 continue;
             }
 
-            // Only supersede within the same table.
-            if candidate.table != new_record.table {
-                continue;
-            }
-
-            // Skip already superseded records.
-            if candidate
-                .data
-                .get("_meta")
-                .and_then(|m| m.get(META_SUPERSEDED))
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false)
+            if *similarity >= self.threshold
+                && self
+                    .db
+                    .mark_superseded(&candidate.id, new_record, Some(*similarity))?
             {
-                continue;
-            }
-
-            if *similarity >= self.threshold {
-                // Mark old record as superseded.
-                let mut old_data = candidate.data.clone();
-                set_meta_field(&mut old_data, META_SUPERSEDED, json!(true));
-                set_meta_field(
-                    &mut old_data,
-                    META_SUPERSEDED_BY,
-                    json!(new_record.id.to_string()),
-                );
-                self.db.update(&candidate.id, old_data)?;
-
-                // Create graph edge if graph is available.
-                if self.db.has_graph_index() {
-                    let _ = self
-                        .db
-                        .relate(&new_record.id, EDGE_SUPERSEDES, &candidate.id, None);
-                }
-
                 superseded.push(candidate.id.clone());
             }
         }
@@ -210,5 +197,69 @@ mod tests {
         let r = Record::new("test", json!({"x": 1, "y": 2}));
         let text = extract_text_content(&r);
         assert!(!text.is_empty());
+    }
+
+    use crate::test_support::vector_db;
+    use crate::AgentMemory;
+
+    const PLAN: &str = "ship friday after the release freeze lifts";
+    // Similar enough to PLAN to supersede it (cosine ~0.94 under the mock).
+    const REVISED_PLAN: &str = "ship friday after the release freeze lifts 5pm";
+
+    fn superseded(db: &Axil, id: &RecordId) -> bool {
+        crate::ttl::is_record_superseded(&db.get(id).unwrap().unwrap())
+    }
+
+    #[test]
+    fn supersede_applies_within_one_agent() {
+        let (db, _mock, _dir) = vector_db();
+        let claude = AgentMemory::for_agent(&db, "claude");
+        let old = claude.semantic().know("deploy", PLAN, None).unwrap();
+        claude
+            .semantic()
+            .know("deploy", REVISED_PLAN, None)
+            .unwrap();
+        assert!(
+            superseded(&db, &old.id),
+            "the mock must clear the threshold"
+        );
+    }
+
+    #[test]
+    fn supersede_never_crosses_into_another_agents_memory() {
+        let (db, _mock, _dir) = vector_db();
+        let claude = AgentMemory::for_agent(&db, "claude");
+        let codex = AgentMemory::for_agent(&db, "codex");
+
+        let claudes = claude.semantic().know("deploy", PLAN, None).unwrap();
+        codex.semantic().know("deploy", REVISED_PLAN, None).unwrap();
+
+        assert!(!superseded(&db, &claudes.id));
+        let facts = claude.semantic().list_facts(Some("deploy")).unwrap();
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].id, claudes.id);
+    }
+
+    #[test]
+    fn supersede_never_crosses_between_agent_and_global_memory() {
+        let (db, _mock, _dir) = vector_db();
+        let claude = AgentMemory::for_agent(&db, "claude");
+        let global = AgentMemory::new(&db);
+
+        // A private write must not demote the shared fact for everyone...
+        let shared = global.semantic().know("deploy", PLAN, None).unwrap();
+        claude
+            .semantic()
+            .know("deploy", REVISED_PLAN, None)
+            .unwrap();
+        assert!(!superseded(&db, &shared.id));
+
+        // ...and a global write must not reach into an agent's private fact.
+        let private = claude.semantic().know("release", PLAN, None).unwrap();
+        global
+            .semantic()
+            .know("release", REVISED_PLAN, None)
+            .unwrap();
+        assert!(!superseded(&db, &private.id));
     }
 }

@@ -1,5 +1,6 @@
 use std::io::{self, Read as IoRead, Write as IoWrite};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -426,7 +427,12 @@ When to use which:
 #[command(
     name = "axil",
     about = "One file. One binary. Built for agents.",
-    version,
+    // Crate semver plus the git state of the source tree, e.g.
+    // `axil 2.2.0 (e4b647d-dirty)`. The describe suffix distinguishes two
+    // builds of the same unreleased version, and `-dirty` flags
+    // uncommitted-source builds (see build.rs). Empty suffix (crates.io
+    // builds, tarballs) degrades to the plain semver.
+    version = concat!(env!("CARGO_PKG_VERSION"), env!("AXIL_VERSION_SUFFIX")),
     after_help = COMMANDS_OVERVIEW
 )]
 struct Cli {
@@ -1564,6 +1570,9 @@ enum Command {
         /// Filter by table name.
         #[arg(long)]
         table: Option<String>,
+        /// Cap the result to the N most recent records.
+        #[arg(long)]
+        limit: Option<usize>,
     },
 
     /// Show a timeline of records (newest first).
@@ -1601,8 +1610,9 @@ enum Command {
 
     /// Memory lifecycle / repair: rebuild drifted indexes (`--reindex`),
     /// compact (`--compact`), or clean orphans (`--orphans`). A bare `heal`
-    /// also downsamples (purges records past the retention window). Run
-    /// deliberately — check `axil doctor` first.
+    /// also downsamples (purges records past the retention window) unless
+    /// `[healing] auto_compact = false`. Run deliberately — check
+    /// `axil doctor` first.
     Heal {
         /// Just compact (purge expired/superseded).
         #[arg(long)]
@@ -5698,27 +5708,41 @@ fn read_json_input(data: &str) -> Result<Value> {
 
 /// Parse a `--where` expression into one or more `(field, op, value)` conditions.
 ///
+/// Each condition is read positionally as `field op value`: the field runs up
+/// to whitespace or an operator character, the operator follows it (`>= <=
+/// != == = > <` or the word operator `contains`), and the value is the rest.
+/// Locating the operator by position rather than by scanning the whole
+/// condition keeps operator characters inside a value (`url contains ?q=1`)
+/// in the value.
+///
 /// A single expression may hold multiple conditions joined by `AND`
-/// (case-insensitive, whole word); the split is quote-aware, so an `AND` — or
-/// an operator character — inside a single- or double-quoted string value is not
-/// treated as a separator. Conditions AND-compose, matching core WHERE
+/// (case-insensitive, whole word). Conditions AND-compose, matching core WHERE
 /// semantics. Repeatable `--where` flags compose the same way, so
 /// `--where "a>1 AND b<2"` and `--where a>1 --where b<2` are equivalent.
 ///
-/// Supported operators: `>= <= != = > <` and the word operator `contains`.
-/// Quoted values are always typed as strings (quotes force string typing);
-/// unquoted values are typed by `serde_json` (numbers, `true`/`false`/`null`),
-/// falling back to a bare string. Only flat top-level fields are supported —
-/// OR, parentheses, and nested dot-paths are non-goals.
+/// A quote opens a quoted value only as the value's first character. Quoted
+/// values are always strings (quotes force string typing) and may hold `AND`
+/// or operator characters; a quote anywhere else (`name=O'Brien`) is literal.
+/// Unquoted values run to the next `AND` and are typed by `serde_json`
+/// (numbers, `true`/`false`/`null`), falling back to a bare string. Only flat
+/// top-level fields are supported — OR, parentheses, and nested dot-paths are
+/// non-goals.
+///
+/// `axil-mcp`'s `parse_where_expr` is a line-for-line twin; keep the two (and
+/// their shared `where_clause_cases` test table) in sync.
 fn parse_where_clause(clause: &str) -> Result<Vec<(String, Op, Value)>> {
-    ensure_where_quotes_balanced(clause)?;
+    let bytes = clause.as_bytes();
     let mut out = Vec::new();
-    for cond in split_where_conditions(clause) {
-        let cond = cond.trim();
-        if cond.is_empty() {
+    let mut i = skip_where_spaces(bytes, 0);
+    while i < bytes.len() {
+        // A stray `AND` (leading, trailing, or doubled) joins nothing.
+        if matches_keyword(bytes, i, b"and") {
+            i = skip_where_spaces(bytes, i + 3);
             continue;
         }
-        out.push(parse_single_condition(cond)?);
+        let (cond, end) = parse_where_condition(clause, i)?;
+        out.push(cond);
+        i = skip_where_spaces(bytes, end);
     }
     if out.is_empty() {
         anyhow::bail!("invalid where clause: {clause} (expected field=value, field>value, etc.)");
@@ -5726,64 +5750,78 @@ fn parse_where_clause(clause: &str) -> Result<Vec<(String, Op, Value)>> {
     Ok(out)
 }
 
-/// Reject a where expression containing an unterminated quote. A dangling
-/// quote would otherwise swallow the rest of the expression into a string
-/// value that can never match — a silent empty result instead of an error.
-fn ensure_where_quotes_balanced(clause: &str) -> Result<()> {
-    let mut in_quote: Option<u8> = None;
-    for &c in clause.as_bytes() {
-        match in_quote {
-            Some(q) if c == q => in_quote = None,
-            None if c == b'"' || c == b'\'' => in_quote = Some(c),
-            _ => {}
-        }
+/// Symbol operators, longest spelling first so `>=` is never read as `>`.
+const WHERE_SYMBOL_OPS: &[&str] = &[">=", "<=", "!=", "==", "=", ">", "<"];
+
+/// Advance `i` past ASCII whitespace.
+fn skip_where_spaces(bytes: &[u8], mut i: usize) -> usize {
+    while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+        i += 1;
     }
-    if let Some(q) = in_quote {
-        anyhow::bail!(
-            "invalid where clause: unterminated {} quote in '{clause}'",
-            q as char
-        );
-    }
-    Ok(())
+    i
 }
 
-/// Split a where expression on the `AND` keyword (case-insensitive, whole word),
-/// ignoring any `AND` that appears inside a single- or double-quoted string.
+/// Parse the `field op value` condition starting at byte `start` of `clause`,
+/// returning it with the offset where it ends: the joining `AND`, or the end
+/// of input.
 ///
-/// Split points are always ASCII (`AND` and quote characters), so slicing the
-/// original `&str` at those byte offsets never lands inside a multi-byte
-/// character in a UTF-8 value.
-fn split_where_conditions(clause: &str) -> Vec<&str> {
+/// Every offset this produces sits on an ASCII byte (whitespace, an operator,
+/// a quote, `AND`) or the end of input, so slicing never splits a multi-byte
+/// UTF-8 character.
+fn parse_where_condition(clause: &str, start: usize) -> Result<((String, Op, Value), usize)> {
     let bytes = clause.as_bytes();
-    let mut parts = Vec::new();
-    let mut start = 0usize;
-    let mut i = 0usize;
-    let mut in_quote: Option<u8> = None;
-    while i < bytes.len() {
-        let c = bytes[i];
-        match in_quote {
-            Some(q) => {
-                if c == q {
-                    in_quote = None;
-                }
-                i += 1;
-            }
-            None => {
-                if c == b'"' || c == b'\'' {
-                    in_quote = Some(c);
-                    i += 1;
-                } else if (c == b'a' || c == b'A') && matches_keyword(bytes, i, b"and") {
-                    parts.push(&clause[start..i]);
-                    i += 3;
-                    start = i;
-                } else {
-                    i += 1;
-                }
-            }
-        }
+    let is_op_char = |b: u8| matches!(b, b'>' | b'<' | b'!' | b'=');
+    let mut i = start;
+    while i < bytes.len() && !bytes[i].is_ascii_whitespace() && !is_op_char(bytes[i]) {
+        i += 1;
     }
-    parts.push(&clause[start..]);
-    parts
+    let field = clause[start..i].to_string();
+    if field.is_empty() {
+        anyhow::bail!("invalid where clause: field name must not be empty in '{clause}'");
+    }
+
+    i = skip_where_spaces(bytes, i);
+    let rest = &clause[i..];
+    let op_str = if let Some(sym) = WHERE_SYMBOL_OPS.iter().find(|s| rest.starts_with(**s)) {
+        *sym
+    } else if matches_keyword(bytes, i, b"contains") {
+        "contains"
+    } else if rest.starts_with('!') {
+        anyhow::bail!("invalid where clause: '{clause}' ('!' must be part of the '!=' operator)");
+    } else {
+        anyhow::bail!(
+            "invalid where clause: {clause} (expected field=value, field>value, field contains value, etc.)"
+        );
+    };
+    let op: Op = op_str.parse().map_err(|e| anyhow::anyhow!("{e}"))?;
+    i = skip_where_spaces(bytes, i + op_str.len());
+
+    if let Some(&q) = bytes.get(i).filter(|&&b| b == b'\'' || b == b'"') {
+        let close = clause[i + 1..]
+            .find(q as char)
+            .map(|p| i + 1 + p)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "invalid where clause: unterminated {} quote in '{clause}'",
+                    q as char
+                )
+            })?;
+        let value = Value::String(clause[i + 1..close].to_string());
+        let end = skip_where_spaces(bytes, close + 1);
+        if end < bytes.len() && !matches_keyword(bytes, end, b"and") {
+            anyhow::bail!(
+                "invalid where clause: unexpected text after the quoted value in '{clause}'"
+            );
+        }
+        return Ok(((field, op, value), end));
+    }
+
+    let mut end = i;
+    while end < bytes.len() && !matches_keyword(bytes, end, b"and") {
+        end += 1;
+    }
+    let value = parse_where_value(clause[i..end].trim())?;
+    Ok(((field, op, value), end))
 }
 
 /// True when `kw` (ASCII, lowercase) occurs at `bytes[i..]` case-insensitively
@@ -5805,106 +5843,6 @@ fn matches_keyword(bytes: &[u8], i: usize, kw: &[u8]) -> bool {
     let before_ok = i == 0 || !is_ident(bytes[i - 1]);
     let after_ok = end >= bytes.len() || !is_ident(bytes[end]);
     before_ok && after_ok
-}
-
-/// Parse a single condition (`field op value`) into `(field, op, value)`.
-///
-/// The operator is located outside any quoted region, so a value like
-/// `'a = b'` (which contains an operator character) is not mis-split.
-fn parse_single_condition(cond: &str) -> Result<(String, Op, Value)> {
-    let bytes = cond.as_bytes();
-    let mut i = 0usize;
-    let mut in_quote: Option<u8> = None;
-    while i < bytes.len() {
-        let c = bytes[i];
-        match in_quote {
-            Some(q) => {
-                if c == q {
-                    in_quote = None;
-                }
-                i += 1;
-            }
-            None => {
-                if c == b'"' || c == b'\'' {
-                    in_quote = Some(c);
-                    i += 1;
-                    continue;
-                }
-                if matches!(c, b'>' | b'<' | b'!' | b'=') {
-                    let rest = &cond[i..];
-                    let (op_str, op_len): (&str, usize) = if rest.starts_with(">=") {
-                        (">=", 2)
-                    } else if rest.starts_with("<=") {
-                        ("<=", 2)
-                    } else if rest.starts_with("!=") {
-                        ("!=", 2)
-                    } else if c == b'=' {
-                        ("=", 1)
-                    } else if c == b'>' {
-                        (">", 1)
-                    } else if c == b'<' {
-                        ("<", 1)
-                    } else {
-                        anyhow::bail!(
-                            "invalid where clause: '{cond}' ('!' must be part of the '!=' operator)"
-                        );
-                    };
-                    let field = cond[..i].trim().to_string();
-                    if field.is_empty() {
-                        anyhow::bail!(
-                            "invalid where clause: field name must not be empty in '{cond}'"
-                        );
-                    }
-                    let op: Op = op_str.parse().map_err(|e| anyhow::anyhow!("{e}"))?;
-                    let value = parse_where_value(cond[i + op_len..].trim())?;
-                    return Ok((field, op, value));
-                }
-                i += 1;
-            }
-        }
-    }
-    // No symbol operator outside quotes — try the `contains` word operator.
-    if let Some(pos) = find_keyword_outside_quotes(cond, b"contains") {
-        let field = cond[..pos].trim().to_string();
-        if field.is_empty() {
-            anyhow::bail!("invalid where clause: field name must not be empty in '{cond}'");
-        }
-        let value = parse_where_value(cond[pos + "contains".len()..].trim())?;
-        return Ok((field, Op::Contains, value));
-    }
-    anyhow::bail!(
-        "invalid where clause: {cond} (expected field=value, field>value, field contains value, etc.)"
-    )
-}
-
-/// Find the byte offset of `kw` (ASCII, lowercase) as a whole word outside any
-/// quoted region, or `None`.
-fn find_keyword_outside_quotes(s: &str, kw: &[u8]) -> Option<usize> {
-    let bytes = s.as_bytes();
-    let mut i = 0usize;
-    let mut in_quote: Option<u8> = None;
-    while i < bytes.len() {
-        let c = bytes[i];
-        match in_quote {
-            Some(q) => {
-                if c == q {
-                    in_quote = None;
-                }
-                i += 1;
-            }
-            None => {
-                if c == b'"' || c == b'\'' {
-                    in_quote = Some(c);
-                    i += 1;
-                } else if c.eq_ignore_ascii_case(&kw[0]) && matches_keyword(bytes, i, kw) {
-                    return Some(i);
-                } else {
-                    i += 1;
-                }
-            }
-        }
-    }
-    None
 }
 
 /// Type a where-clause value string. A single- or double-quoted value is always
@@ -6036,6 +5974,26 @@ fn resolve_embedding_model(db_path: &Path) -> axil_vector::models::EmbeddingMode
     axil_vector::models::EmbeddingModel::BgeSmall
 }
 
+/// Reject a raw vector bound for the *default* vector space unless it has the
+/// text embedder's dimension. The default space belongs to the embedder: every
+/// open attaches it at the model's dimension, so a store created (or written)
+/// at any other length makes the whole database refuse to open. Call before
+/// opening, since the open itself may create that store.
+#[cfg(feature = "embed")]
+fn ensure_default_space_dims(db_path: &Path, len: usize) -> Result<()> {
+    let model = resolve_embedding_model(db_path);
+    if len != model.dimensions() {
+        anyhow::bail!(
+            "vector has {len} dimensions, but the default vector space holds \
+             {}-dimension {} text embeddings. Store raw vectors of another size \
+             in a named space: --space <name>",
+            model.dimensions(),
+            model.name()
+        );
+    }
+    Ok(())
+}
+
 // NOTE: `axil_mcp::attach_detected_engines` is the parallel implementation for
 // the MCP server — keep the engine set + gating in sync (the vector/embed setup
 // differs because the two crates resolve the embedder differently, but the
@@ -6156,20 +6114,7 @@ fn attach_detected_engines(mut builder: axil_core::AxilBuilder) -> Result<axil_c
 /// Open a database with all detected plugins.
 fn open_with_all_detected(path: &Path) -> Result<Axil> {
     let builder = attach_detected_engines(Axil::open(path))?;
-    let db = builder.build().context("failed to open database")?;
-    // Honor the `[healing] event_log` config flag (no-op unless the `event-log`
-    // feature is compiled in). Off by default — opt-in write-amplifier.
-    #[cfg(feature = "event-log")]
-    {
-        let cfg = path
-            .parent()
-            .and_then(|d| axil_core::config::load_config_from(d).ok())
-            .unwrap_or_default();
-        if cfg.healing.event_log {
-            db.set_event_log_enabled(true);
-        }
-    }
-    Ok(db)
+    builder.build().context("failed to open database")
 }
 
 /// Number of times a hot read command retries the writable open when the
@@ -6623,6 +6568,27 @@ fn open_with_all_features_inner(mut builder: axil_core::AxilBuilder) -> Result<A
 fn load_config(db_path: &Path) -> Result<axil_core::AxilConfig> {
     let dir = db_path.parent().unwrap_or(Path::new("."));
     axil_core::load_config_from(dir).map_err(|e| anyhow::anyhow!("{e}"))
+}
+
+/// Resolve a dotted key against the raw `axil.toml` document. Covers sections
+/// that are not `AxilConfig` fields (e.g. `lifecycle.tables.<t>.supersede`),
+/// which `get_config_value` cannot see.
+fn raw_config_value(start_dir: &Path, key: &str) -> Option<String> {
+    let path = axil_core::find_config_file(start_dir)?;
+    let contents = std::fs::read_to_string(&path).ok()?;
+    let doc: toml::Value = toml::from_str(&contents).ok()?;
+    let mut current = &doc;
+    for part in key.split('.') {
+        current = current.get(part)?;
+    }
+    match current {
+        toml::Value::String(s) => Some(s.clone()),
+        toml::Value::Integer(n) => Some(n.to_string()),
+        toml::Value::Float(f) => Some(f.to_string()),
+        toml::Value::Boolean(b) => Some(b.to_string()),
+        toml::Value::Datetime(d) => Some(d.to_string()),
+        toml::Value::Table(_) | toml::Value::Array(_) => None,
+    }
 }
 
 /// Wire up an LLM provider to an existing Axil database based on config.
@@ -7826,11 +7792,12 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             let now = chrono::Utc::now();
             let tier_config = axil_core::tiering::TierConfig::default();
 
-            // Load project config so per-table decay half-lives (e.g. faster
-            // decay for `errors`, slower for `preferences`) apply to tiering.
-            let decay_cfg = detect_project_root(&db_path)
-                .and_then(|r| axil_core::load_config_from(&r).ok())
-                .map(|c| c.decay);
+            // Load config so per-table decay half-lives (e.g. faster decay for
+            // `errors`, slower for `preferences`) apply to tiering. Resolved
+            // from the DB's own directory upward so a database-local
+            // `axil.toml` (and its `[lifecycle] decay = false` opt-outs) wins
+            // over the project root.
+            let decay_cfg = load_config(&db_path).ok().map(|c| c.decay);
 
             // Collect all records and classify tiers
             let tables = db.tables().context("failed to list tables")?;
@@ -7912,10 +7879,10 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             let default_half_life = axil_core::importance::DEFAULT_HALF_LIFE_DAYS;
             let threshold = axil_core::importance::ARCHIVE_THRESHOLD;
 
-            // Per-table half-life overrides from axil.toml `[decay.tables]`.
-            let decay_cfg = detect_project_root(&db_path)
-                .and_then(|r| axil_core::load_config_from(&r).ok())
-                .map(|c| c.decay);
+            // Per-table half-life overrides from axil.toml `[decay.tables]`,
+            // resolved from the DB's own directory upward so a database-local
+            // config (and its `[lifecycle] decay = false` opt-outs) wins.
+            let decay_cfg = load_config(&db_path).ok().map(|c| c.decay);
 
             let tables = db.tables().context("failed to list tables")?;
             let mut results = Vec::new();
@@ -8524,6 +8491,12 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             if space.is_some() && raw_vector.is_none() {
                 anyhow::bail!("--space requires --vector");
             }
+            // Checked before the open, which would create the default store at
+            // the vector's length.
+            #[cfg(feature = "embed")]
+            if let (Some(v), None) = (&raw_vector, &space) {
+                ensure_default_space_dims(&db_path, v.len())?;
+            }
 
             // Open path: `--embed` needs the embedder; otherwise the raw-vector
             // policy is shared across feature ladders by `open_for_store` (a
@@ -9126,19 +9099,42 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             // Keep a copy for cascade fallbacks — the primary recall consumes `cfg`.
             let cfg_for_cascade = cfg.clone();
 
+            // Every post-filter below (--table, --type, --after, --before,
+            // --agent, --min-importance, --fresh-only) drops rows after the
+            // recall, so over-fetch to let matches ranked just below the cut
+            // still fill top_k; the result is truncated back to top_k once
+            // filtered. Same factor as the MCP `recall` tool's
+            // `TABLE_FILTER_INFLATION`, so both surfaces return the same rows
+            // for the same filtered query.
+            const FILTER_INFLATION: usize = 5;
+            let post_filtered = table_filter.is_some()
+                || type_filter.is_some()
+                || after_dt.is_some()
+                || before_dt.is_some()
+                || agent_filter.is_some()
+                || min_importance.is_some()
+                || (fresh_only && !stale_paths.is_empty());
+            let fetch_k = if post_filtered {
+                top_k.saturating_mul(FILTER_INFLATION)
+            } else {
+                top_k
+            };
+
             // Deadline-bounded recall: when --timeout-ms is set we run db.recall in a worker
             // thread and wait up to the remaining budget on a channel. If it doesn't finish
             // in time we return empty partial results and abandon the thread — the CLI process
             // exits shortly afterward and tears down any lingering work.
-            let mut recall_results = if deadline_exceeded() {
-                Vec::new()
+            // The handle lives in an Arc from here on: the timeout path shares it
+            // with a worker thread, and every later use in this command is by
+            // reference, so the shared form costs nothing.
+            let (db, mut recall_results) = if deadline_exceeded() {
+                (Arc::new(db), Vec::new())
             } else if let Some(d) = deadline {
-                use std::sync::Arc;
                 let db_arc: Arc<axil_core::Axil> = Arc::new(db);
                 let db_handle = db_arc.clone();
                 let q = query.clone();
                 let cfg_clone = cfg.clone();
-                let tk = top_k;
+                let tk = fetch_k;
                 let (tx, rx) = std::sync::mpsc::channel();
                 std::thread::spawn(move || {
                     let _ = tx.send(db_handle.recall(&q, tk, Some(cfg_clone)));
@@ -9156,20 +9152,16 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                         Vec::new()
                     }
                 };
-                // Reclaim `db` only if the worker already dropped its clone; otherwise we keep
-                // the Arc alive for the rest of the handler by leaving it leaked (the process
-                // is about to exit anyway and the leak is bounded to this invocation).
-                db = Arc::try_unwrap(db_arc).unwrap_or_else(|arc| {
-                    // SAFETY fallback: we can't take Axil out of the Arc when the worker thread
-                    // still holds it. Leak this arc and open a fresh handle for the remainder
-                    // of the pipeline — this path only runs on timeout with a stuck worker, so
-                    // the cost of re-opening the DB is an acceptable worst-case fallback.
-                    std::mem::forget(arc);
-                    open_with_all_detected(&db_path).expect("reopen after timeout fallback")
-                });
-                result
+                // Keep the Arc rather than trying to reclaim the inner value: on
+                // timeout the worker still owns a clone, and that clone holds the
+                // single-writer file lock, so re-opening the database here could
+                // never succeed. One extra live handle for the remainder of this
+                // command is bounded and harmless.
+                (db_arc, result)
             } else {
-                db.recall(&query, top_k, Some(cfg))?
+                let db = Arc::new(db);
+                let r = db.recall(&query, fetch_k, Some(cfg))?;
+                (db, r)
             };
 
             // Normalize the --type facet filter once (case-insensitive,
@@ -9338,7 +9330,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                     cfg_relaxed.qtc = None;
                     cfg_relaxed.min_confidence = None;
                     cfg_relaxed.scope_filter.clear();
-                    if let Ok(mut r1) = db.recall(&query, top_k, Some(cfg_relaxed)) {
+                    if let Ok(mut r1) = db.recall(&query, fetch_k, Some(cfg_relaxed)) {
                         apply_filters(&mut r1);
                         if !r1.is_empty() {
                             recall_results = r1;
@@ -9354,7 +9346,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                     let expanded = expand_query(&db, &query, expand_neighbors);
                     if expanded != query {
                         if let Ok(mut r2) =
-                            db.recall(&expanded, top_k, Some(cfg_for_cascade.clone()))
+                            db.recall(&expanded, fetch_k, Some(cfg_for_cascade.clone()))
                         {
                             apply_filters(&mut r2);
                             if !r2.is_empty() {
@@ -9396,6 +9388,9 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                         rung
                     );
                 }
+            }
+            if fetch_k > top_k {
+                recall_results.truncate(top_k);
             }
 
             // --profile: surface the identifier-aware query classification and
@@ -10176,12 +10171,23 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
 
         // ── Since ───────────────────────────────────────────────────
         #[cfg(feature = "timeseries")]
-        Command::Since { duration, table } => {
+        Command::Since {
+            duration,
+            table,
+            limit,
+        } => {
             let db_path = require_db(&db_opt)?;
             let secs = parse_duration(&duration)?;
             let db = open_with_timeseries(&db_path)?;
 
-            let records = db.since(table.as_deref(), secs)?;
+            let mut records = db.since(table.as_deref(), secs)?;
+            // `since` yields oldest-first; a limit should keep the *newest* N,
+            // so drop from the front rather than truncating the tail.
+            if let Some(n) = limit {
+                if records.len() > n {
+                    records.drain(..records.len() - n);
+                }
+            }
 
             let values: Vec<Value> = records.iter().map(record_to_json).collect();
             out.print_array(&values);
@@ -10293,7 +10299,8 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                                     compact
                                 }
                                 "vector_deletion_ratio" | "index_size_mismatch"
-                                | "missing_embeddings" | "missing_fts" => reindex,
+                                | "missing_embeddings" | "missing_fts"
+                                | "vector_load_skips" => reindex,
                                 "orphaned_edges" => orphans,
                                 _ => compact || orphans,
                             };
@@ -10386,7 +10393,11 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                 run_worker_and_report(&db, out);
             }
 
-            // Also run timeseries heal if available
+            // Also run timeseries heal if available. Its retention purge
+            // hard-deletes every record past `full_retention_days`, so it is
+            // automatic compaction and obeys `[healing] auto_compact = false`
+            // like `heal_all` does: skipped, leaving an explicit compact as
+            // the only thing that deletes.
             #[cfg(feature = "timeseries")]
             if !dry_run
                 && !compact
@@ -10395,7 +10406,14 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                 && db.has_timeseries_index()
                 && config.timeseries.auto_downsample
             {
-                let _ = db.heal(&config.timeseries);
+                if config.healing.auto_compact {
+                    let _ = db.heal(&config.timeseries);
+                } else {
+                    out.status(
+                        "timeseries downsample skipped: healing.auto_compact = false \
+                         (its retention purge deletes records)",
+                    );
+                }
             }
 
             Ok(EXIT_OK)
@@ -10547,8 +10565,12 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                         "space": s,
                     }));
                 }
-                // Default space: unchanged path.
+                // Default space: unchanged path, after the same dimension
+                // guard as `store --vector` (`--dimensions` would otherwise
+                // create the default store at the vector's length).
                 None => {
+                    #[cfg(feature = "embed")]
+                    ensure_default_space_dims(&db_path, vec.len())?;
                     let db = open_with_vector(&db_path, dimensions)?;
                     db.add_vector(&rid, &vec).context("add_vector failed")?;
                     out.print(&json!({
@@ -10785,6 +10807,23 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             let embedding_model = parse_model(&model)?;
             let new_dims = embedding_model.dimensions();
 
+            // The old store sits at `backup_path` while the new one is built.
+            // A backup that already exists was left by a run that died
+            // mid-rebuild: it is the only intact copy of the original vectors
+            // (the live store is the half-built one), so it is restored before
+            // anything reads or moves the store — never deleted.
+            let vec_path = axil_vector::vector_db_path(&db_path);
+            let backup_path = vec_path.with_extension("reembed-bak");
+            if backup_path.exists() {
+                std::fs::rename(&backup_path, &vec_path).context(
+                    "failed to restore the vector store backup left by an interrupted re-embed",
+                )?;
+                eprintln!(
+                    "axil: restored {} from an interrupted re-embed",
+                    vec_path.display()
+                );
+            }
+
             // Step 1: Open DB without vector to collect record IDs + text.
             let db = Axil::open(&db_path)
                 .build()
@@ -10798,6 +10837,10 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             };
 
             let mut work: Vec<(RecordId, String)> = Vec::new();
+            // Every record of the re-embedded tables, text or not: their
+            // vectors are rebuilt from scratch, so none of them carry over.
+            let mut rebuilt_ids: std::collections::HashSet<RecordId> =
+                std::collections::HashSet::new();
             for tbl in &tables {
                 for record in db.list(tbl).unwrap_or_default() {
                     if let Some(text) = record.data.get(&field).and_then(|v| v.as_str()) {
@@ -10805,6 +10848,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                             work.push((record.id.clone(), text.to_string()));
                         }
                     }
+                    rebuilt_ids.insert(record.id);
                 }
             }
 
@@ -10825,43 +10869,162 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                 new_dims,
             ));
 
-            // Step 2: Close DB, delete old .vec file, re-open with new model.
-            drop(db);
-            let vec_path = axil_vector::vector_db_path(&db_path);
-            match std::fs::remove_file(&vec_path) {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => {
-                    return Err(anyhow::anyhow!(e).context("failed to remove old vector store"))
+            // A table-scoped re-embed must not silently destroy every other
+            // table's vectors. With unchanged dimensions they are carried over
+            // from the old store; with a dimension change only a full re-embed
+            // can rebuild them, so scoping is refused outright. The old vectors
+            // are read through an engine opened on the store itself: `db` has
+            // no vector index attached, so `db.get_vector` sees none.
+            let mut preserve: Vec<(RecordId, Vec<f32>)> = Vec::new();
+            if table.is_some() {
+                // A full re-embed rebuilds everything, so it can ride over an
+                // unreadable store; a scoped one would silently discard it.
+                let stored_dims = axil_vector::read_stored_dimensions(&db_path).context(
+                    "failed to read the existing vector store; a --table re-embed \
+                     would discard every other table's vectors, so it was not started",
+                )?;
+                match stored_dims {
+                    Some(old) if old == new_dims => {
+                        use axil_core::plugin::VectorIndex;
+                        let old_store = axil_vector::VectorEngine::open(&db_path, old)
+                            .context("failed to open the existing vector store")?;
+                        for id in old_store
+                            .all_ids()
+                            .context("failed to list stored vectors")?
+                        {
+                            if rebuilt_ids.contains(&id) {
+                                continue;
+                            }
+                            if let Some(v) = old_store
+                                .get_vector(&id)
+                                .context("failed to read a stored vector")?
+                            {
+                                preserve.push((id, v));
+                            }
+                        }
+                    }
+                    Some(old) => anyhow::bail!(
+                        "cannot re-embed only one table when dimensions change \
+                         ({old} -> {new_dims}): the other tables' vectors cannot be \
+                         preserved. Run without --table to re-embed every table."
+                    ),
+                    None => {}
                 }
             }
 
-            let db = Axil::open(&db_path)
-                .with_embedder_model(embedding_model.clone())
-                .context("failed to initialize embedder")?
-                .build()
-                .context("failed to open database with new vector store")?;
+            // Step 2: Move the old vector store aside and rebuild from scratch.
+            // The backup is deleted only after every record embeds cleanly —
+            // any failure restores it, so the command is atomic.
+            drop(db);
+            let had_old_store = vec_path.exists();
+            if had_old_store {
+                std::fs::rename(&vec_path, &backup_path).map_err(|e| {
+                    anyhow::anyhow!(e).context("failed to back up old vector store")
+                })?;
+            }
 
-            // Step 3: Re-embed all collected records.
-            let mut success = 0usize;
-            let mut errors = 0usize;
-            let total = work.len();
-            for (i, (rid, text)) in work.iter().enumerate() {
-                match db.embed_text(rid, text) {
-                    Ok(()) => success += 1,
-                    Err(e) => {
-                        eprintln!("  [skip] {rid}: {e}");
-                        errors += 1;
+            let rebuilt = (|| -> Result<(usize, usize)> {
+                // Seed the fresh store with the untouched tables' vectors in
+                // one batch, before the embedder attaches to it.
+                if !preserve.is_empty() {
+                    use axil_core::plugin::VectorIndex;
+                    let store = axil_vector::VectorEngine::open(&db_path, new_dims)
+                        .context("failed to create the new vector store")?;
+                    let items: Vec<(RecordId, &[f32])> = preserve
+                        .iter()
+                        .map(|(id, v)| (id.clone(), v.as_slice()))
+                        .collect();
+                    store
+                        .add_batch(&items)
+                        .context("failed to carry over the other tables' vectors")?;
+                }
+
+                let db = Axil::open(&db_path)
+                    .with_embedder_model(embedding_model.clone())
+                    .context("failed to initialize embedder")?
+                    .build()
+                    .context("failed to open database with new vector store")?;
+
+                // Verify through the handle doing the rebuild: a short count
+                // would commit as vectors silently lost from other tables.
+                let preserved = preserve
+                    .iter()
+                    .filter(|(id, _)| matches!(db.get_vector(id), Ok(Some(_))))
+                    .count();
+                if preserved != preserve.len() {
+                    anyhow::bail!(
+                        "only {preserved}/{} of the other tables' vectors carried over; \
+                         the previous vector store was restored unchanged",
+                        preserve.len()
+                    );
+                }
+
+                // Step 3: Re-embed all collected records.
+                let mut success = 0usize;
+                let mut errors = 0usize;
+                let mut first_error: Option<String> = None;
+                let total = work.len();
+                for (i, (rid, text)) in work.iter().enumerate() {
+                    match db.embed_text(rid, text) {
+                        Ok(()) => success += 1,
+                        Err(e) => {
+                            eprintln!("  [skip] {rid}: {e}");
+                            errors += 1;
+                            first_error.get_or_insert_with(|| e.to_string());
+                        }
+                    }
+                    if (i + 1) % 100 == 0 {
+                        eprintln!("  [{}/{total}] re-embedded...", i + 1);
                     }
                 }
-                if (i + 1) % 100 == 0 {
-                    eprintln!("  [{}/{total}] re-embedded...", i + 1);
+
+                if errors > 0 {
+                    anyhow::bail!(
+                        "re-embed failed for {errors}/{total} record(s) (first error: {}); \
+                         the previous vector store was restored unchanged",
+                        first_error.unwrap_or_default()
+                    );
                 }
+                Ok((success, preserved))
+            })();
+
+            let (success, preserved) = match rebuilt {
+                Ok(counts) => counts,
+                Err(e) => {
+                    // Atomic semantics: restore the previous store instead of
+                    // leaving a partially-populated index behind. The rename
+                    // replaces the partial store in one step; if it fails, the
+                    // backup stays put and the next run restores it.
+                    if had_old_store {
+                        std::fs::rename(&backup_path, &vec_path).map_err(|restore_err| {
+                            anyhow::anyhow!(restore_err).context(format!(
+                                "re-embed failed ({e:#}) AND restoring the old vector store \
+                                 failed; the original is kept at {}",
+                                backup_path.display()
+                            ))
+                        })?;
+                    }
+                    return Err(e);
+                }
+            };
+
+            // A backup left behind would be restored over this finished
+            // rebuild by the next re-embed, so failing to remove it is an
+            // error, not a shrug.
+            if had_old_store {
+                std::fs::remove_file(&backup_path).with_context(|| {
+                    format!(
+                        "re-embed succeeded but its backup {} could not be removed; \
+                         delete it before the next re-embed",
+                        backup_path.display()
+                    )
+                })?;
             }
 
             out.print(&json!({
                 "reembedded": success,
-                "errors": errors,
+                "errors": 0,
+                "preserved_other_tables": preserved,
                 "model": embedding_model.name(),
                 "dimensions": new_dims,
                 "field": field,
@@ -17142,12 +17305,42 @@ fn run_config(cmd: ConfigCommand, out: &Output) -> Result<i32> {
 
         ConfigCommand::Show => {
             let config = axil_core::load_config_from(&cwd).map_err(|e| anyhow::anyhow!("{e}"))?;
-            out.print(&json!({
-                "config": serde_json::to_value(&config).unwrap_or(json!(null)),
-            }));
+            let mut config_json = serde_json::to_value(&config).unwrap_or(json!(null));
+            // `[lifecycle]` is parsed separately from AxilConfig (it is not a
+            // field there); merge it into the display so `show` is complete.
+            // A malformed entry is shown with the protective policy it fell
+            // back to, so the warnings say why it differs from the file.
+            let axil_core::LifecycleLoad {
+                config: lifecycle,
+                warnings: lifecycle_warnings,
+                ..
+            } = axil_core::load_lifecycle_checked_from(&cwd);
+            if !lifecycle.tables.is_empty() {
+                if let Some(obj) = config_json.as_object_mut() {
+                    obj.insert(
+                        "lifecycle".to_string(),
+                        serde_json::to_value(&lifecycle).unwrap_or(json!(null)),
+                    );
+                }
+            }
+            let mut shown = json!({ "config": config_json });
+            if !lifecycle_warnings.is_empty() {
+                shown["lifecycle_warnings"] = json!(lifecycle_warnings);
+            }
+            out.print(&shown);
+            for warning in &lifecycle_warnings {
+                out.status(&format!("warning: {warning}"));
+            }
             if !out.quiet {
                 if let Ok(toml_str) = toml::to_string_pretty(&config) {
                     out.status(&toml_str);
+                }
+                if !lifecycle.tables.is_empty() {
+                    if let Ok(toml_str) =
+                        toml::to_string_pretty(&json!({ "lifecycle": lifecycle }))
+                    {
+                        out.status(&toml_str);
+                    }
                 }
             }
             Ok(EXIT_OK)
@@ -17155,7 +17348,9 @@ fn run_config(cmd: ConfigCommand, out: &Output) -> Result<i32> {
 
         ConfigCommand::Get { key } => {
             let config = axil_core::load_config_from(&cwd).map_err(|e| anyhow::anyhow!("{e}"))?;
-            match axil_core::get_config_value(&config, &key) {
+            let value = axil_core::get_config_value(&config, &key)
+                .or_else(|| raw_config_value(&cwd, &key));
+            match value {
                 Some(value) => {
                     out.print(&json!({"key": key, "value": value}));
                     Ok(EXIT_OK)
@@ -17191,8 +17386,11 @@ fn run_report(cmd: ReportCommand, db_opt: &Option<PathBuf>, out: &Output) -> Res
             let reports_dir = cwd.join(&config.dev.reports_dir);
             std::fs::create_dir_all(&reports_dir).context("failed to create reports directory")?;
 
-            // Collect environment info
-            let axil_version = env!("CARGO_PKG_VERSION").to_string();
+            // Collect environment info. Include the git-describe suffix: a
+            // field report from a stale or uncommitted-source build should
+            // say so (two builds can share one crate version).
+            let axil_version =
+                concat!(env!("CARGO_PKG_VERSION"), env!("AXIL_VERSION_SUFFIX")).to_string();
             let os = std::env::consts::OS;
             let arch = std::env::consts::ARCH;
 
@@ -18260,6 +18458,7 @@ fn run_ingest_pass(
     let started = std::time::Instant::now();
     let mut files_ingested: usize = 0;
     let mut files_skipped: usize = 0;
+    let mut files_failed: usize = 0;
     let mut chunks_written: usize = 0;
 
     for (idx, (path, _size)) in candidates.iter().enumerate() {
@@ -18268,28 +18467,43 @@ fn run_ingest_pass(
 
         // Fast skip: mtime unchanged → trust the prior hash and don't even read the file.
         // Saves one syscall + full file read per unchanged file (10k-file runs feel it).
-        let mtime_now = std::fs::metadata(path)
-            .ok()
-            .and_then(|m| m.modified().ok())
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs());
-        if let (Some(prev), Some(now)) = (
+        let meta_now = std::fs::metadata(path).ok().and_then(|m| {
+            let secs = m
+                .modified()
+                .ok()?
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()?
+                .as_secs();
+            Some((secs, m.len()))
+        });
+        if let (Some(prev), Some((now_secs, now_size))) = (
             prev_entry
                 .and_then(|v| v.get("mtime"))
                 .and_then(|v| v.as_u64()),
-            mtime_now,
+            meta_now,
         ) {
-            if prev == now {
-                files_skipped += 1;
-                if (idx + 1) % 50 == 0 {
-                    out.status(&format!(
-                        "[ingest] {}/{} scanned ({} skipped)",
-                        idx + 1,
-                        total,
-                        files_skipped
-                    ));
+            if prev == now_secs {
+                // Same-second edits are real: mtime alone can't distinguish
+                // "unchanged" from "edited within the same second as the last
+                // ingest". Before trusting the fast skip, compare the file
+                // size captured in the same metadata call — an edit that
+                // changed length falls through to the hash check instead of
+                // being skipped until the next touch.
+                let prev_size = prev_entry
+                    .and_then(|v| v.get("size"))
+                    .and_then(|v| v.as_u64());
+                if prev_size == Some(now_size) {
+                    files_skipped += 1;
+                    if (idx + 1) % 50 == 0 {
+                        out.status(&format!(
+                            "[ingest] {}/{} scanned ({} skipped)",
+                            idx + 1,
+                            total,
+                            files_skipped
+                        ));
+                    }
+                    continue;
                 }
-                continue;
             }
         }
 
@@ -18362,6 +18576,9 @@ fn run_ingest_pass(
         let chunks = chunk_text(&content, chunk_bytes);
         let rel = path.strip_prefix(root_canonical).unwrap_or(path);
         let mut new_ids: Vec<String> = Vec::with_capacity(chunks.len());
+        // Ids of chunks whose insert failed but may still be persisted.
+        let mut failed_ids: Vec<RecordId> = Vec::new();
+        let mut chunk_errors: Vec<String> = Vec::new();
         for (chunk_idx, chunk) in chunks.iter().enumerate() {
             let data = json!({
                 "path": rel.display().to_string(),
@@ -18372,10 +18589,52 @@ fn run_ingest_pass(
                 "file_hash": hash,
                 "source": "ingest",
             });
-            if let Ok(rec) = db.insert(table, data) {
-                new_ids.push(rec.id.to_string());
-                chunks_written += 1;
+            // `insert` persists the record before its index hooks run, so an
+            // Err can leave a half-indexed copy behind under an id the error
+            // doesn't carry. Fixing the id up front lets the retry delete that
+            // copy instead of stacking a duplicate chunk beside it, and lets a
+            // final failure hand the id to the rollback below.
+            let record = axil_core::Record::new(table, data);
+            let id = record.id.clone();
+            // One retry: transient backend hiccups (e.g. an auto-embed model
+            // fetch) shouldn't fail a whole file.
+            let inserted = db.insert_preserving(record.clone()).or_else(|first_err| {
+                let _ = db.delete(&id);
+                db.insert_preserving(record).map_err(|_| first_err)
+            });
+            match inserted {
+                Ok(rec) => {
+                    new_ids.push(rec.id.to_string());
+                    chunks_written += 1;
+                }
+                Err(first_err) => {
+                    failed_ids.push(id);
+                    chunk_errors.push(format!("chunk {chunk_idx}: {first_err}"));
+                }
             }
+        }
+        if !chunk_errors.is_empty() {
+            // Never checkpoint an incomplete replacement: roll back the partial
+            // chunk set and leave the prior state entry untouched, so the old
+            // hash still matches on the next pass and re-ingests (repairing).
+            for id_str in &new_ids {
+                if let Ok(rid) = axil_core::RecordId::from_string(id_str.as_str()) {
+                    let _ = db.delete(&rid);
+                }
+            }
+            for rid in &failed_ids {
+                let _ = db.delete(rid);
+            }
+            chunks_written -= new_ids.len();
+            files_failed += 1;
+            out.status(&format!(
+                "[ingest] {} FAILED ({}/{} chunks): {} — will retry on the next pass",
+                rel.display(),
+                new_ids.len(),
+                chunks.len(),
+                chunk_errors[0]
+            ));
+            continue;
         }
         files_ingested += 1;
         if chunks_replaced > 0 {
@@ -18389,7 +18648,8 @@ fn run_ingest_pass(
             key,
             json!({
                 "hash": hash,
-                "mtime": mtime_now,
+                "mtime": meta_now.map(|(s, _)| s),
+                "size": meta_now.map(|(_, s)| s),
                 "chunks": chunks.len(),
                 "record_ids": new_ids,
                 "ingested_at": chrono::Utc::now().to_rfc3339(),
@@ -18422,11 +18682,135 @@ fn run_ingest_pass(
         "files_total": total,
         "files_ingested": files_ingested,
         "files_skipped": files_skipped,
+        "files_failed": files_failed,
         "chunks_written": chunks_written,
         "elapsed_sec": started.elapsed().as_secs_f64(),
         "state_file": state_path.display().to_string(),
         "table": table,
     }))
+}
+
+#[cfg(all(test, feature = "indexer"))]
+mod ingest_retry_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use axil_core::plugin::{Capability, Engine, VectorIndex};
+    use axil_core::Record;
+
+    /// A vector index whose insert hook fails its first `failures` calls: the
+    /// shape of a transient auto-embed error, which `Axil::insert` reports
+    /// only after the record is already persisted.
+    struct FlakyIndex {
+        failures: AtomicUsize,
+    }
+
+    impl Engine for FlakyIndex {
+        fn name(&self) -> &str {
+            "flaky"
+        }
+
+        fn capabilities(&self) -> Vec<Capability> {
+            vec![Capability::VectorSearch]
+        }
+
+        fn on_record_insert(&self, _record: &Record) -> axil_core::Result<()> {
+            let left = self.failures.load(Ordering::SeqCst);
+            if left > 0 {
+                self.failures.store(left - 1, Ordering::SeqCst);
+                return Err(axil_core::AxilError::plugin("injected index failure"));
+            }
+            Ok(())
+        }
+
+        fn on_record_delete(&self, _id: &RecordId) -> axil_core::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl VectorIndex for FlakyIndex {
+        fn add(&self, _id: RecordId, _vector: &[f32]) -> axil_core::Result<()> {
+            Ok(())
+        }
+
+        fn search(&self, _query: &[f32], _top_k: usize) -> axil_core::Result<Vec<(RecordId, f32)>> {
+            Ok(Vec::new())
+        }
+
+        fn count(&self) -> usize {
+            0
+        }
+
+        fn dimensions(&self) -> usize {
+            3
+        }
+    }
+
+    /// Ingest one single-chunk file through a DB whose index hook fails
+    /// `failures` times. Returns the pass report, the records left in the
+    /// ingest table, and the checkpointed state.
+    fn ingest_with_failures(failures: usize) -> (Value, Vec<Record>, Value) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let file = root.join("note.md");
+        std::fs::write(
+            &file,
+            "One short paragraph, so the file is a single chunk.\n",
+        )
+        .unwrap();
+        let size = std::fs::metadata(&file).unwrap().len();
+        let state_path = root.join("ingest.state.json");
+        let db = Axil::open(root.join("memory.axil"))
+            .with_vector_index(Box::new(FlakyIndex {
+                failures: AtomicUsize::new(failures),
+            }))
+            .build()
+            .unwrap();
+        let out = Output {
+            format: OutputFormat::Json,
+            quiet: true,
+            jsonl: false,
+        };
+
+        let report = run_ingest_pass(
+            &db,
+            &root,
+            &[(file, size)],
+            &state_path,
+            "notes",
+            4096,
+            false,
+            &out,
+        )
+        .unwrap();
+        let records = db.list("notes").unwrap();
+        let state = serde_json::from_str(&std::fs::read_to_string(&state_path).unwrap()).unwrap();
+        (report, records, state)
+    }
+
+    #[test]
+    fn retried_chunk_insert_leaves_no_duplicate() {
+        let (report, records, state) = ingest_with_failures(1);
+        assert_eq!(report["files_ingested"], 1, "report: {report}");
+        assert_eq!(
+            records.len(),
+            1,
+            "the failed first attempt must not leave a second copy of the chunk"
+        );
+        let entry = state.as_object().unwrap().values().next().unwrap();
+        assert_eq!(entry["record_ids"], json!([records[0].id.to_string()]));
+    }
+
+    #[test]
+    fn failed_chunk_insert_rolls_back_every_persisted_copy() {
+        let (report, records, _) = ingest_with_failures(2);
+        assert_eq!(report["files_failed"], 1, "report: {report}");
+        assert!(
+            records.is_empty(),
+            "rollback must remove what both attempts persisted, found {} record(s)",
+            records.len()
+        );
+    }
 }
 
 /// Split text into chunks of at most `max_bytes`, splitting on paragraph boundaries (12.2).
@@ -20267,5 +20651,147 @@ mod where_clause_tests {
         assert!(parse_where_clause("a = \"x AND b = 2").is_err());
         // Balanced quotes still parse.
         assert!(parse_where_clause("family = 'meanrev'").is_ok());
+    }
+
+    /// Where-clause cases shared verbatim with the `axil-mcp` twin's
+    /// `where_clause_cases` so the two parsers can't drift apart. `Ok` lists
+    /// each condition as `(field, op as Debug, value)`; `Err` holds a substring
+    /// of the error.
+    #[allow(clippy::type_complexity)]
+    fn where_clause_cases() -> Vec<(&'static str, Result<Vec<(&'static str, &'static str, Value)>, &'static str>)> {
+        vec![
+            ("score>80", Ok(vec![("score", "Gt", json!(80))])),
+            (
+                "oos_sharpe > 0.3 AND family = 'meanrev'",
+                Ok(vec![("oos_sharpe", "Gt", json!(0.3)), ("family", "Eq", json!("meanrev"))]),
+            ),
+            (
+                "a>1 and b<2 And c=3",
+                Ok(vec![("a", "Gt", json!(1)), ("b", "Lt", json!(2)), ("c", "Eq", json!(3))]),
+            ),
+            (
+                "x>=1 AND y<=2 AND z != 'bull' AND w == 4",
+                Ok(vec![
+                    ("x", "Gte", json!(1)),
+                    ("y", "Lte", json!(2)),
+                    ("z", "Ne", json!("bull")),
+                    ("w", "Eq", json!(4)),
+                ]),
+            ),
+            ("note = 'buy AND hold >= now'", Ok(vec![("note", "Eq", json!("buy AND hold >= now"))])),
+            (r#"family = "mean rev""#, Ok(vec![("family", "Eq", json!("mean rev"))])),
+            (r#"q = "it's""#, Ok(vec![("q", "Eq", json!("it's"))])),
+            ("regime = '5'", Ok(vec![("regime", "Eq", json!("5"))])),
+            ("family = mean rev", Ok(vec![("family", "Eq", json!("mean rev"))])),
+            ("summary contains 'timeout'", Ok(vec![("summary", "Contains", json!("timeout"))])),
+            ("name=O'Brien", Ok(vec![("name", "Eq", json!("O'Brien"))])),
+            (
+                "name = O'Brien AND n = 1",
+                Ok(vec![("name", "Eq", json!("O'Brien")), ("n", "Eq", json!(1))]),
+            ),
+            ("url contains ?q=1", Ok(vec![("url", "Contains", json!("?q=1"))])),
+            (
+                "url CONTAINS 'a=b' and n>1",
+                Ok(vec![("url", "Contains", json!("a=b")), ("n", "Gt", json!(1))]),
+            ),
+            ("contains_count > 3", Ok(vec![("contains_count", "Gt", json!(3))])),
+            ("=5", Err("field name must not be empty")),
+            ("just_a_field", Err("expected field=value")),
+            ("x ! 5", Err("'!' must be part of the '!=' operator")),
+            ("trades = 5 oops", Err("ambiguous where value")),
+            ("family = 'meanrev", Err("unterminated ' quote")),
+            ("a = \"x AND b = 2", Err("unterminated \" quote")),
+            ("note = 'a' b", Err("unexpected text after the quoted value")),
+        ]
+    }
+
+    #[test]
+    fn where_clause_table() {
+        for (input, expected) in where_clause_cases() {
+            let got = parse_where_clause(input);
+            match expected {
+                Ok(want) => {
+                    let got: Vec<(String, String, Value)> = got
+                        .unwrap_or_else(|e| panic!("{input:?} should parse: {e}"))
+                        .into_iter()
+                        .map(|(field, op, value)| (field, format!("{op:?}"), value))
+                        .collect();
+                    let want: Vec<(String, String, Value)> = want
+                        .into_iter()
+                        .map(|(field, op, value)| (field.to_string(), op.to_string(), value))
+                        .collect();
+                    assert_eq!(got, want, "{input:?}");
+                }
+                Err(needle) => {
+                    let err = match got {
+                        Ok(conds) => panic!("{input:?} should fail, parsed {conds:?}"),
+                        Err(e) => e.to_string(),
+                    };
+                    assert!(err.contains(needle), "{input:?}: {err:?} lacks {needle:?}");
+                }
+            }
+        }
+    }
+}
+
+/// `axil.toml` handle settings are applied by `AxilBuilder::build`, so every
+/// open helper gets them without doing anything itself; these tests exercise
+/// the helpers end to end so an open path that bypasses the builder (or
+/// clobbers a setting after it) is caught.
+#[cfg(test)]
+mod open_helper_tests {
+    use super::*;
+
+    /// A fresh DB path whose directory holds an `axil.toml` with `toml`.
+    fn db_with_config(toml: &str) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("axil.toml"), toml).unwrap();
+        let path = dir.path().join("h.axil");
+        (dir, path)
+    }
+
+    #[test]
+    fn open_helpers_apply_slow_query_threshold() {
+        let (_dir, path) = db_with_config("[debug]\nslow_query_threshold_ms = 5000\n");
+        let db = open_with_all_detected(&path).unwrap();
+        db.record_slow_query("probe", 200.0, 0);
+        assert!(
+            db.slow_queries(None, None).is_empty(),
+            "a 200ms query is under the configured 5000ms threshold"
+        );
+    }
+
+    /// Each helper opens, checks, and drops its handle before the next opens,
+    /// so the single-writer lock never collides.
+    #[cfg(feature = "event-log")]
+    #[test]
+    fn every_open_helper_honors_event_log_config() {
+        let check = |name: &str, db: Result<Axil>| {
+            let db = db.unwrap_or_else(|e| panic!("{name}: {e:#}"));
+            assert!(db.event_log_enabled(), "{name} ignored [healing] event_log = true");
+        };
+        let config = "[healing]\nevent_log = true\n";
+        let (_dir, path) = db_with_config(config);
+        check("open_with_all_detected", open_with_all_detected(&path));
+        check("open_read_command", open_read_command(&path));
+        #[cfg(feature = "fts")]
+        check("open_with_fts", open_with_fts(&path));
+        #[cfg(feature = "timeseries")]
+        check("open_with_timeseries", open_with_timeseries(&path));
+        #[cfg(feature = "vector")]
+        {
+            check("open_for_space_ops", open_for_space_ops(&path));
+            check("open_with_vector_creating", open_with_vector_creating(&path, 4));
+            check("open_with_vector", open_with_vector(&path, None));
+        }
+        #[cfg(feature = "embed")]
+        {
+            // A separate DB: the embedder needs its own model-sized store.
+            let (_dir, path) = db_with_config(config);
+            check("open_with_embedder_creating", open_with_embedder_creating(&path));
+            check("open_with_embedder", open_with_embedder(&path));
+            #[cfg(feature = "indexer")]
+            check("open_with_best_effort", open_with_best_effort(&path));
+        }
     }
 }

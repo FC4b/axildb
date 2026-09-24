@@ -9,12 +9,12 @@
 # hand-authored. `dist-workspace.toml` is kept only to back the `dist plan`
 # sanity check job.
 #
-# Scope: this builds the six triples, bundles onnxruntime, and uploads the
-# ARCHIVES to the GitHub Release. It does NOT produce one-line `curl|sh`
-# installers or an `axil-update` self-updater — the prebuilt distribution is
-# `cargo binstall axildb` + these archives. Adding real installers means a full
-# cargo-dist adoption, which must first solve ONNX bundling and be validated by
-# an actual tagged-release CI run (see dist-workspace.toml header).
+# Scope: this builds the six triples (onnxruntime statically linked — the
+# archives are self-contained) and uploads them to the GitHub Release. The
+# one-line `curl|sh` / `irm|iex` installers live in scripts/install.sh and
+# scripts/install.ps1; they consume these archives directly from
+# releases/latest/download, so NO full cargo-dist adoption is required for
+# them. An `axil-update` self-updater is still not produced.
 #
 # Trigger: release-plz emits PER-CRATE tags like `axildb-v1.2.0` (NOT a bare
 # `v1.2.0`). This runs AFTER release-plz pushes that tag and UPLOADS assets to
@@ -24,14 +24,14 @@
 #
 # GITHUB_TOKEN gotcha: a tag pushed by release-plz using the default
 # GITHUB_TOKEN does NOT trigger this `on: push: tags` workflow — GitHub blocks
-# workflow-token pushes from triggering other workflows (loop prevention). So a
-# release can land on crates.io with the Release present but ZERO archives.
-# Two remedies:
-#   1) Recover an affected tag with `workflow_dispatch` below — e.g.
-#      `gh workflow run release.yml -f tag=axildb-v2.0.0` — to build + upload its
-#      archives without touching the published tag.
-#   2) Permanent fix: give release-plz a PAT (repo secret, e.g. RELEASE_PLZ_TOKEN)
-#      so its tag push is a *user* push that DOES trigger this workflow.
+# workflow-token pushes from triggering other workflows (loop prevention).
+# workflow_dispatch is exempt from that rule, so release-plz.yml dispatches
+# this workflow for the new `axildb` tag right after releasing. The same
+# dispatch recovers an older tag by hand — e.g.
+# `gh workflow run release.yml -f tag=axildb-v2.0.0` — without touching the
+# published tag. If release-plz is ever given a PAT, its tag push triggers this
+# workflow too; the per-tag concurrency group below serializes the two runs and
+# `--clobber` makes the second upload idempotent.
 name: release
 
 on:
@@ -59,6 +59,12 @@ env:
   CARGO_TERM_COLOR: always
   # Tag to build/upload: the dispatched input when present, else the pushed tag.
   REL_TAG: ${{ inputs.tag || github.ref_name }}
+
+# One run per tag at a time: a tag-push run and a dispatched run for the same
+# tag must not upload over each other mid-flight.
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
 
 jobs:
   # Enumerate the planned artifacts; a green plan proves the config resolves all

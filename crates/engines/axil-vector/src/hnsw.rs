@@ -1,4 +1,7 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
+use std::fmt;
+use std::sync::OnceLock;
 
 use hnsw_rs::prelude::{DistCosine, Hnsw};
 
@@ -27,6 +30,86 @@ const EF_SEARCH_MAX: usize = 512;
 /// Tuned so recall@10 stays at/above the 0.90 oracle floor from a few thousand
 /// up to tens of thousands of vectors.
 const EF_POP_GROWTH: f64 = 2.5;
+/// Largest element magnitude the graph takes as-is. `DistCosine` multiplies
+/// element pairs in f32 before widening, so two elements at this bound (1e36)
+/// stay clear of f32 overflow.
+const GRAPH_MAX_ABS: f32 = 1e18;
+/// Smallest largest-element magnitude the graph takes as-is. Below it the
+/// pairwise products fall into the f32 subnormal range, whose coarse rounding
+/// can break Cauchy-Schwarz by more than `DistCosine` tolerates.
+const GRAPH_MIN_ABS: f32 = 1e-10;
+/// Smallest squared norm [`cosine_sim`] trusts from its f32 accumulation. At or
+/// above it the result is the plain f32 cosine; below it (or on overflow) the
+/// f32 sums have lost the magnitude, so it recomputes in f64.
+const F32_COSINE_MIN_SQ: f32 = 1e-6;
+
+/// Why a vector cannot enter the index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum VectorDefect {
+    /// Length differs from the index's configured dimensions.
+    Dimensions { expected: usize, got: usize },
+    /// Contains NaN or an infinity.
+    NonFinite,
+    /// Every element is zero: no direction, so cosine similarity is undefined.
+    Zero,
+}
+
+impl fmt::Display for VectorDefect {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Dimensions { expected, got } => {
+                write!(f, "dimension mismatch: expected {expected}, got {got}")
+            }
+            Self::NonFinite => f.write_str("vector contains NaN or Infinity"),
+            Self::Zero => f.write_str(
+                "vector is all zeros — it has no direction, so cosine similarity is undefined",
+            ),
+        }
+    }
+}
+
+/// The single definition of an indexable vector, shared by [`HnswIndex::add`],
+/// the engine's pre-persist validation, and the load path — so nothing that
+/// passes one can be rejected (or panic) in another.
+///
+/// Magnitude is otherwise unrestricted: cosine is scale-invariant, and both
+/// search paths evaluate any finite, non-zero vector exactly (see
+/// [`cosine_sim`] and [`graph_view`]).
+pub(crate) fn check_vector(vector: &[f32], dimensions: usize) -> Result<(), VectorDefect> {
+    if vector.len() != dimensions {
+        return Err(VectorDefect::Dimensions {
+            expected: dimensions,
+            got: vector.len(),
+        });
+    }
+    if vector.iter().any(|v| !v.is_finite()) {
+        return Err(VectorDefect::NonFinite);
+    }
+    if vector.iter().all(|v| *v == 0.0) {
+        return Err(VectorDefect::Zero);
+    }
+    Ok(())
+}
+
+/// The vector as the graph should see it, or `None` for a zero vector.
+///
+/// `DistCosine` multiplies element pairs in f32 and asserts the resulting
+/// distance is `>= -2e-5`. Magnitudes past ~1e19 overflow those products to
+/// infinity (inf/inf is NaN) and magnitudes small enough to make them
+/// subnormal round badly enough to break Cauchy-Schwarz — either one panics
+/// inside the graph. A vector outside the safe range is therefore rescaled so
+/// its largest element is ±1: same direction, so the same cosine. Vectors
+/// already in range, which is every real embedding, pass through untouched.
+fn graph_view(v: &[f32]) -> Option<Cow<'_, [f32]>> {
+    let max_abs = v.iter().fold(0.0f32, |m, x| m.max(x.abs()));
+    if max_abs == 0.0 {
+        None
+    } else if (GRAPH_MIN_ABS..=GRAPH_MAX_ABS).contains(&max_abs) {
+        Some(Cow::Borrowed(v))
+    } else {
+        Some(Cow::Owned(v.iter().map(|x| x / max_abs).collect()))
+    }
+}
 
 /// Search-time `ef` (HNSW candidate-list width) for a `population`-node graph
 /// returning `knbn` neighbours.
@@ -51,6 +134,7 @@ fn adaptive_ef(knbn: usize, population: usize) -> usize {
 /// Cosine similarity between two f32 slices (may have different lengths — uses min).
 /// Returns raw similarity in [-1.0, 1.0] — NOT clamped, so HNSW distance
 /// computation preserves full geometric information for graph construction.
+/// `0.0` when either side is a zero vector.
 fn cosine_sim(a: &[f32], b: &[f32]) -> f32 {
     let len = a.len().min(b.len());
     if len == 0 {
@@ -64,11 +148,27 @@ fn cosine_sim(a: &[f32], b: &[f32]) -> f32 {
         na += a[i] * a[i];
         nb += b[i] * b[i];
     }
-    let denom = na.sqrt() * nb.sqrt();
-    if denom < f32::EPSILON {
+    if dot.is_finite()
+        && na.is_finite()
+        && nb.is_finite()
+        && na >= F32_COSINE_MIN_SQ
+        && nb >= F32_COSINE_MIN_SQ
+    {
+        return dot / (na.sqrt() * nb.sqrt());
+    }
+    // Huge magnitudes overflowed the f32 sums, or tiny ones underflowed them.
+    // Every f32 product is exact in f64, so recompute there.
+    let (mut dot, mut na, mut nb) = (0.0f64, 0.0f64, 0.0f64);
+    for i in 0..len {
+        let (x, y) = (f64::from(a[i]), f64::from(b[i]));
+        dot += x * y;
+        na += x * x;
+        nb += y * y;
+    }
+    if na == 0.0 || nb == 0.0 {
         0.0
     } else {
-        dot / denom
+        (dot / (na.sqrt() * nb.sqrt())) as f32
     }
 }
 
@@ -88,22 +188,12 @@ fn new_graph() -> Hnsw<'static, f32, DistCosine> {
     graph
 }
 
-/// Incremental HNSW approximate nearest-neighbour index.
+/// The navigable graph plus the slot bookkeeping that maps it back to records.
 ///
-/// The `hnsw_rs` graph supports `O(log n)` insertion, so `add` links the new
-/// vector into the *live* graph — there is no dirty flag and store-then-recall
-/// never triggers a full rebuild. `remove` tombstones the record (drops it from
-/// the live id map so search skips it) and leaves the graph node in place; the
-/// node is reclaimed lazily by `rebuild_if_needed` (compaction), driven off the
-/// write path by the background worker once the tombstone ratio is high enough.
-///
-/// `vectors` is the source of truth; the graph indexes integer slots that map
-/// back to `RecordId`s via `slot_to_id` (live slots only).
-pub struct HnswIndex {
-    dimensions: usize,
-    vectors: HashMap<RecordId, Vec<f32>>,
-    /// Live navigable graph over integer slots. Always current — no dirty flag.
-    graph: Hnsw<'static, f32, DistCosine>,
+/// Slots are integers because `hnsw_rs` ids are `usize`; `slot_to_id` holds
+/// live slots only, so a tombstoned node still in the graph maps to nothing.
+struct LiveGraph {
+    hnsw: Hnsw<'static, f32, DistCosine>,
     /// RecordId → graph slot for the live (non-tombstoned) vectors.
     id_to_slot: HashMap<RecordId, usize>,
     /// Graph slot → RecordId for live vectors. A tombstoned slot is absent here
@@ -112,9 +202,77 @@ pub struct HnswIndex {
     /// Monotonic slot allocator — never reused within a graph generation so a
     /// tombstoned node can never be confused with a fresh insert.
     next_slot: usize,
-    /// Graph nodes that are tombstoned (removed or superseded) but still
-    /// physically present in the graph. Drives search over-fetch and the
-    /// compaction ratio.
+    /// Nodes physically in this graph that are tombstoned (removed or
+    /// superseded). Drives the search over-fetch.
+    dead: usize,
+}
+
+impl LiveGraph {
+    /// Build a graph over exactly the given live vectors.
+    fn build(vectors: &HashMap<RecordId, Vec<f32>>) -> Self {
+        let mut graph = Self {
+            hnsw: new_graph(),
+            id_to_slot: HashMap::with_capacity(vectors.len()),
+            slot_to_id: HashMap::with_capacity(vectors.len()),
+            next_slot: 0,
+            dead: 0,
+        };
+        for (id, vec) in vectors {
+            graph.insert(id, vec);
+        }
+        graph
+    }
+
+    /// Link a vector into the graph under a fresh slot, tombstoning the node an
+    /// earlier vector for the same id occupied.
+    fn insert(&mut self, id: &RecordId, vector: &[f32]) {
+        self.remove(id);
+        // Every indexed vector passed `check_vector`, so it is non-zero.
+        let Some(view) = graph_view(vector) else {
+            return;
+        };
+        let slot = self.next_slot;
+        self.next_slot += 1;
+        self.hnsw.insert((&view, slot));
+        self.slot_to_id.insert(slot, id.clone());
+        self.id_to_slot.insert(id.clone(), slot);
+    }
+
+    /// Tombstone the id's node: search skips it from now on, and the next
+    /// compaction drops it from the graph.
+    fn remove(&mut self, id: &RecordId) {
+        if let Some(slot) = self.id_to_slot.remove(id) {
+            self.slot_to_id.remove(&slot);
+            self.dead += 1;
+        }
+    }
+}
+
+/// Incremental HNSW approximate nearest-neighbour index.
+///
+/// The graph is built lazily — once, on the first search that needs it (above
+/// the exact-scan threshold) — not when the index is loaded: most processes
+/// that open a store only write to it, and a full graph build costs far more
+/// than reading the vectors. Once built, the `hnsw_rs` graph takes `O(log n)`
+/// insertions, so `add` links the new vector into the *live* graph and
+/// store-then-recall never triggers a full rebuild. `remove` tombstones the
+/// record (drops it from the live id map so search skips it) and leaves the
+/// graph node in place; the node is reclaimed lazily by `rebuild_if_needed`
+/// (compaction), driven off the write path by the background worker once the
+/// tombstone ratio is high enough.
+///
+/// `vectors` is the source of truth; the graph indexes integer slots that map
+/// back to `RecordId`s.
+pub struct HnswIndex {
+    dimensions: usize,
+    vectors: HashMap<RecordId, Vec<f32>>,
+    /// Navigable graph over the live vectors, absent until a search needs it.
+    /// Once built it is kept current by every `add`/`remove`.
+    graph: OnceLock<LiveGraph>,
+    /// Removes and re-adds of an indexed id since the last compaction — the
+    /// reclaimable work the compactor gates on. Counted whether or not the
+    /// graph is built, so the compaction ratio does not depend on whether this
+    /// process happened to search.
     tombstones: usize,
     /// Count of deletes since last full rebuild (for deletion ratio tracking).
     deletes_since_rebuild: usize,
@@ -128,10 +286,7 @@ impl HnswIndex {
         Self {
             dimensions,
             vectors: HashMap::new(),
-            graph: new_graph(),
-            id_to_slot: HashMap::new(),
-            slot_to_id: HashMap::new(),
-            next_slot: 0,
+            graph: OnceLock::new(),
             tombstones: 0,
             deletes_since_rebuild: 0,
             count_at_last_rebuild: 0,
@@ -140,53 +295,34 @@ impl HnswIndex {
 
     /// Create an index pre-loaded with vectors (e.g. from persistence).
     ///
-    /// Each loaded vector is inserted into the live graph on open. Load is
-    /// already `O(n)` (every vector is read from disk), so building the graph
-    /// here adds no asymptotic cost and leaves the index immediately
-    /// searchable with no first-search rebuild stall.
+    /// Cheap: the vectors are only taken over. The graph is built on the first
+    /// search that needs it, so a caller that never searches never pays for
+    /// it. The vectors must already satisfy the index's validity rules (the
+    /// engine's load path filters with the same check `add` applies).
     pub fn from_vectors(dimensions: usize, vectors: HashMap<RecordId, Vec<f32>>) -> Self {
         let mut index = Self::new(dimensions);
-        for (id, vec) in vectors {
-            // Vectors came from our own persistence, so dims already match and
-            // values are finite; insert directly into the live graph.
-            let slot = index.next_slot;
-            index.next_slot += 1;
-            index.graph.insert((&vec, slot));
-            index.slot_to_id.insert(slot, id.clone());
-            index.id_to_slot.insert(id.clone(), slot);
-            index.vectors.insert(id, vec);
-        }
-        index.count_at_last_rebuild = index.vectors.len();
+        index.count_at_last_rebuild = vectors.len();
+        index.vectors = vectors;
         index
     }
 
-    /// Insert a vector for a record. Rejects NaN/Infinity values.
+    /// Insert a vector for a record. Rejects wrong dimensions, NaN/Infinity
+    /// values, and the all-zero vector.
     ///
-    /// Links the vector into the live graph in `O(log n)` — there is no dirty
+    /// Links the vector into the live graph in `O(log n)` when the graph is
+    /// built (otherwise the eventual build picks it up) — there is no dirty
     /// flag and no rebuild is scheduled. Re-adding an existing id tombstones the
     /// old graph node and inserts the new vector under a fresh slot.
     pub fn add(&mut self, id: RecordId, vector: Vec<f32>) -> Result<(), String> {
-        if vector.len() != self.dimensions {
-            return Err(format!(
-                "dimension mismatch: expected {}, got {}",
-                self.dimensions,
-                vector.len()
-            ));
-        }
-        if vector.iter().any(|v| !v.is_finite()) {
-            return Err("vector contains NaN or Infinity".into());
-        }
-        // Re-add of an existing id: tombstone the stale graph node so search
-        // can never surface the old vector, then index the new one fresh.
-        if let Some(old_slot) = self.id_to_slot.remove(&id) {
-            self.slot_to_id.remove(&old_slot);
+        check_vector(&vector, self.dimensions).map_err(|d| d.to_string())?;
+        // Re-add of an existing id: its old graph node is now stale, so search
+        // must never surface it; count it toward compaction either way.
+        if self.vectors.contains_key(&id) {
             self.tombstones += 1;
         }
-        let slot = self.next_slot;
-        self.next_slot += 1;
-        self.graph.insert((&vector, slot));
-        self.slot_to_id.insert(slot, id.clone());
-        self.id_to_slot.insert(id.clone(), slot);
+        if let Some(graph) = self.graph.get_mut() {
+            graph.insert(&id, &vector);
+        }
         self.vectors.insert(id, vector);
         Ok(())
     }
@@ -198,8 +334,8 @@ impl HnswIndex {
     /// compaction, keeping deletes off the write-latency path.
     pub fn remove(&mut self, id: &RecordId) -> bool {
         if self.vectors.remove(id).is_some() {
-            if let Some(slot) = self.id_to_slot.remove(id) {
-                self.slot_to_id.remove(&slot);
+            if let Some(graph) = self.graph.get_mut() {
+                graph.remove(id);
             }
             self.tombstones += 1;
             self.deletes_since_rebuild += 1;
@@ -209,13 +345,27 @@ impl HnswIndex {
         }
     }
 
+    /// Whether the navigable graph has been built. It is built on the first
+    /// search above the exact-scan threshold, never by loading, inserting or
+    /// deleting.
+    pub fn is_graph_built(&self) -> bool {
+        self.graph.get().is_some()
+    }
+
+    /// The live graph, building it from the current vectors on first use.
+    /// Thread-safe and one-shot: concurrent first searches wait for a single
+    /// build instead of racing their own.
+    fn graph(&self) -> &LiveGraph {
+        self.graph.get_or_init(|| LiveGraph::build(&self.vectors))
+    }
+
     /// Number of deletions since last rebuild.
     pub fn deletes_since_rebuild(&self) -> usize {
         self.deletes_since_rebuild
     }
 
-    /// Total tombstoned graph nodes since the last rebuild — counting both
-    /// removed ids and the stale nodes left by re-adding an existing id.
+    /// Total tombstones since the last rebuild — counting both removed ids and
+    /// the stale graph nodes left by re-adding an existing id.
     ///
     /// This, not `deletes_since_rebuild`, is what the compactor must consult: a
     /// re-add (every update / re-embed) bumps `tombstones` but NOT
@@ -240,12 +390,14 @@ impl HnswIndex {
         self.search_clean(query, top_k)
     }
 
-    /// Search the live graph (`&self`).
+    /// Search the live graph (`&self`), building it first if this is the
+    /// first search that needs it.
     ///
     /// Over-fetches `top_k + tombstones` candidates so that, after skipping any
     /// tombstoned graph nodes, at least `top_k` live results remain when the
     /// corpus holds them. Distances are cosine distances; converted back to
-    /// similarity as `1 - distance`.
+    /// similarity as `1 - distance`. A zero query has no direction and scores
+    /// `0.0` against every vector on either path; a non-finite one is rejected.
     pub fn search_clean(
         &self,
         query: &[f32],
@@ -257,6 +409,9 @@ impl HnswIndex {
                 self.dimensions,
                 query.len()
             ));
+        }
+        if query.iter().any(|v| !v.is_finite()) {
+            return Err("query vector contains NaN or Infinity".into());
         }
 
         if self.vectors.is_empty() || top_k == 0 {
@@ -270,22 +425,28 @@ impl HnswIndex {
         if self.vectors.len() <= BRUTE_FORCE_MAX {
             return Ok(self.brute_force(query, top_k));
         }
+        // `DistCosine` calls a zero vector distance 0 (similarity 1.0) from
+        // everything; the exact scan scores it 0.0, consistently.
+        let Some(query_view) = graph_view(query) else {
+            return Ok(self.brute_force(query, top_k));
+        };
 
+        let graph = self.graph();
         // Over-fetch by the tombstone count so filtering them out still leaves
         // a full top_k. Cap at the physical graph population so we never ask
         // for more than exists.
-        let physical = self.vectors.len() + self.tombstones;
-        let knbn = top_k.saturating_add(self.tombstones).min(physical);
+        let physical = self.vectors.len() + graph.dead;
+        let knbn = top_k.saturating_add(graph.dead).min(physical);
         // Candidate-list width drives recall, and a fixed `ef` decays as the
         // graph grows — so widen it with the live population (see `adaptive_ef`).
         let ef = adaptive_ef(knbn, physical);
 
-        let neighbours = self.graph.search(query, knbn, ef);
+        let neighbours = graph.hnsw.search(&query_view, knbn, ef);
 
         let mut results: Vec<(RecordId, f32)> = Vec::with_capacity(top_k);
         for n in neighbours {
             // Tombstoned slots are absent from `slot_to_id` — skip them.
-            if let Some(id) = self.slot_to_id.get(&n.d_id) {
+            if let Some(id) = graph.slot_to_id.get(&n.d_id) {
                 results.push((id.clone(), 1.0 - n.distance));
                 if results.len() >= top_k {
                     break;
@@ -385,8 +546,9 @@ impl HnswIndex {
 
     /// Compact the graph if tombstones have accumulated.
     ///
-    /// Rebuilds the navigable graph from the live `vectors`, dropping every
-    /// tombstoned node and resetting slot bookkeeping. Off the write path —
+    /// Rebuilds a built navigable graph from the live `vectors`, dropping every
+    /// tombstoned node and resetting slot bookkeeping; an unbuilt graph has no
+    /// nodes to reclaim, so only the counters reset. Off the write path —
     /// invoked by the background worker, not by `add`/`remove`.
     pub fn rebuild_if_needed(&mut self) {
         if self.needs_rebuild() {
@@ -415,23 +577,11 @@ impl HnswIndex {
     }
 
     fn rebuild(&mut self) {
-        let graph = new_graph();
-        let mut id_to_slot = HashMap::with_capacity(self.vectors.len());
-        let mut slot_to_id = HashMap::with_capacity(self.vectors.len());
-        let mut next_slot = 0usize;
-
-        for (id, vec) in &self.vectors {
-            let slot = next_slot;
-            next_slot += 1;
-            graph.insert((vec, slot));
-            slot_to_id.insert(slot, id.clone());
-            id_to_slot.insert(id.clone(), slot);
+        // A graph in use is rebuilt now, keeping the cost off the next search;
+        // one never built stays unbuilt (the eventual build starts clean).
+        if self.graph.get().is_some() {
+            self.graph = OnceLock::from(LiveGraph::build(&self.vectors));
         }
-
-        self.graph = graph;
-        self.id_to_slot = id_to_slot;
-        self.slot_to_id = slot_to_id;
-        self.next_slot = next_slot;
         self.tombstones = 0;
         self.deletes_since_rebuild = 0;
         self.count_at_last_rebuild = self.vectors.len();
@@ -783,6 +933,9 @@ mod tests {
         // exact-scan fallback) is the thing under test.
         let total = 900usize;
         let mut index = HnswIndex::new(dims);
+        // Build the (empty) graph up front so every insert and tombstone lands
+        // in it; a lazily built graph would hold only the survivors.
+        index.graph();
 
         let mut rng = Rng::new(0x5EED);
         let mut live_ids = Vec::new();
@@ -800,7 +953,7 @@ mod tests {
             }
         }
         assert!(index.len() > BRUTE_FORCE_MAX, "need graph path, not brute-force");
-        assert!(index.tombstones > 0, "expected scattered tombstones");
+        assert!(index.graph().dead > 0, "expected scattered tombstones");
 
         let top_k = 10;
         let q: Vec<f32> = (0..dims).map(|_| rng.next_f32()).collect();
@@ -846,6 +999,193 @@ mod tests {
     }
 
     #[test]
+    fn extreme_magnitudes_search_by_direction_without_panicking() {
+        // The graph's `DistCosine` multiplies element pairs in f32: at 1e20 the
+        // products overflow (inf/inf = NaN), at 1e-25 they go subnormal and
+        // break Cauchy-Schwarz — both used to panic on its `dist >= -2e-5`
+        // assertion. Cosine is scale-invariant, so every vector must still rank
+        // by direction, on the graph path and the exact path alike.
+        let dims = 8;
+        let mut corpus = make_vectors(300, dims, 0xE77E);
+        for (i, (_, v)) in corpus.iter_mut().enumerate() {
+            let scale = match i % 4 {
+                0 => 1e20_f32,
+                1 => 1e-25,
+                2 => 1e30,
+                _ => 1.0,
+            };
+            for x in v.iter_mut() {
+                *x *= scale;
+            }
+        }
+        let mut index = HnswIndex::new(dims);
+        for (id, v) in &corpus {
+            index.add(id.clone(), v.clone()).unwrap();
+        }
+        assert!(index.len() > BRUTE_FORCE_MAX, "need the graph path");
+
+        let mut total = 0.0f32;
+        for (id, v) in corpus.iter().step_by(7) {
+            let hits = index.search_clean(v, 10).unwrap();
+            assert_eq!(&hits[0].0, id, "a stored vector must be its own top hit");
+            assert!(
+                (hits[0].1 - 1.0).abs() < 1e-4,
+                "self-similarity must be 1.0 at any magnitude, got {}",
+                hits[0].1
+            );
+            let got: Vec<RecordId> = hits.into_iter().map(|(id, _)| id).collect();
+            total += recall_overlap(&got, &brute_force_topk(&corpus, v, 10));
+            // The exact path scores the same vectors identically.
+            let exact = index.brute_force(v, 1);
+            assert_eq!(&exact[0].0, id);
+            assert!((exact[0].1 - 1.0).abs() < 1e-4);
+        }
+        let queries = corpus.iter().step_by(7).count() as f32;
+        assert!(total / queries >= RECALL_FLOOR_K10);
+    }
+
+    #[test]
+    fn zero_vector_is_rejected() {
+        // A zero vector has no direction: the graph would call it distance 0
+        // (similarity 1.0) to everything while the exact scan scores it 0.0.
+        let mut index = HnswIndex::new(3);
+        let err = index.add(RecordId::new(), vec![0.0, -0.0, 0.0]).unwrap_err();
+        assert!(err.contains("zero"), "unexpected error: {err}");
+        assert!(index.is_empty());
+    }
+
+    #[test]
+    fn zero_query_scores_zero_on_graph_path_like_exact_path() {
+        let dims = 8;
+        let mut index = HnswIndex::new(dims);
+        for (id, v) in make_vectors(200, dims, 0x2E80) {
+            index.add(id, v).unwrap();
+        }
+        assert!(index.len() > BRUTE_FORCE_MAX, "need the graph path");
+        let hits = index.search_clean(&[0.0; 8], 5).unwrap();
+        assert_eq!(hits.len(), 5);
+        assert!(
+            hits.iter().all(|(_, s)| *s == 0.0),
+            "a direction-less query must not score 1.0 against anything: {hits:?}"
+        );
+    }
+
+    #[test]
+    fn non_finite_query_is_rejected() {
+        let mut index = HnswIndex::new(3);
+        index.add(RecordId::new(), vec![1.0, 0.0, 0.0]).unwrap();
+        assert!(index.search_clean(&[f32::NAN, 0.0, 0.0], 1).is_err());
+        assert!(index.search_clean(&[f32::INFINITY, 0.0, 0.0], 1).is_err());
+    }
+
+    #[test]
+    fn graph_is_built_only_by_a_search_that_needs_it() {
+        let dims = 16;
+        let corpus = make_vectors(300, dims, 0x1A2B);
+        let mut index = HnswIndex::from_vectors(dims, corpus.iter().cloned().collect());
+        assert!(!index.is_graph_built(), "loading must not build the graph");
+
+        index
+            .add(RecordId("extra".into()), corpus[0].1.clone())
+            .unwrap();
+        assert!(index.remove(&corpus[1].0));
+        index.add(corpus[2].0.clone(), corpus[3].1.clone()).unwrap();
+        assert!(!index.is_graph_built(), "insert/delete must not build the graph");
+        // Compaction accounting does not depend on whether a graph exists.
+        assert_eq!(index.tombstones(), 2, "one delete + one re-add");
+        index.rebuild_if_needed();
+        assert!(!index.is_graph_built(), "compaction must not build the graph");
+        assert_eq!(index.tombstones(), 0);
+
+        index.search_clean(&corpus[5].1, 5).unwrap();
+        assert!(index.is_graph_built(), "a search above the exact-scan threshold builds it");
+
+        // A small corpus is served by the exact scan and never needs a graph.
+        let small = HnswIndex::from_vectors(
+            dims,
+            make_vectors(BRUTE_FORCE_MAX, dims, 0x5A11).into_iter().collect(),
+        );
+        small.search_clean(&corpus[5].1, 5).unwrap();
+        assert!(!small.is_graph_built());
+    }
+
+    #[test]
+    fn lazy_graph_returns_the_same_results_as_an_eager_one() {
+        // The same mutation sequence against an index whose graph exists from
+        // the start (inserts and tombstones land in it, the pre-lazy behavior)
+        // and one that only builds its graph at the first search.
+        fn mutate(index: &mut HnswIndex, corpus: &[(RecordId, Vec<f32>)]) {
+            for (id, _) in corpus.iter().step_by(5) {
+                assert!(index.remove(id));
+            }
+            for (i, (id, _)) in corpus.iter().enumerate().skip(1).step_by(9) {
+                index.add(id.clone(), corpus[i - 1].1.clone()).unwrap();
+            }
+            let extra = make_vectors(20, corpus[0].1.len(), 0xE4);
+            for (i, (_, v)) in extra.into_iter().enumerate() {
+                index.add(RecordId(format!("x{i:04}")), v).unwrap();
+            }
+        }
+        let dims = 24;
+        for n in [100usize, 600] {
+            let corpus = make_vectors(n, dims, 0x5EED + n as u64);
+            let mut eager = HnswIndex::new(dims);
+            eager.graph();
+            for (id, v) in &corpus {
+                eager.add(id.clone(), v.clone()).unwrap();
+            }
+            mutate(&mut eager, &corpus);
+            let mut lazy = HnswIndex::from_vectors(dims, corpus.iter().cloned().collect());
+            mutate(&mut lazy, &corpus);
+            assert_eq!(eager.vectors(), lazy.vectors());
+            assert_eq!(eager.tombstones(), lazy.tombstones());
+
+            let live: Vec<(RecordId, Vec<f32>)> = lazy
+                .vectors()
+                .iter()
+                .map(|(id, v)| (id.clone(), v.clone()))
+                .collect();
+            let ids = |r: &[(RecordId, f32)]| -> Vec<RecordId> {
+                r.iter().map(|(id, _)| id.clone()).collect()
+            };
+            let mut query_rng = Rng::new(0xFACE);
+            let (mut recall_eager, mut recall_lazy) = (0.0f32, 0.0f32);
+            let queries = 20;
+            for q in 0..queries {
+                // Half random queries, half exact copies of a stored vector.
+                let copy = q % 2 == 1;
+                let query: Vec<f32> = if copy {
+                    live[q * 7 % live.len()].1.clone()
+                } else {
+                    (0..dims).map(|_| query_rng.next_f32()).collect()
+                };
+                let a = eager.search_clean(&query, 10).unwrap();
+                let b = lazy.search_clean(&query, 10).unwrap();
+                if n <= BRUTE_FORCE_MAX {
+                    // Exact path: byte-identical, scores included.
+                    assert_eq!(a, b);
+                    continue;
+                }
+                // Graph path: two independently seeded ANN graphs, so hold
+                // each to the exact answer rather than to each other.
+                let exact = brute_force_topk(&live, &query, 10);
+                recall_eager += recall_overlap(&ids(&a), &exact);
+                recall_lazy += recall_overlap(&ids(&b), &exact);
+                if copy {
+                    assert!((a[0].1 - 1.0).abs() < 1e-5 && (b[0].1 - 1.0).abs() < 1e-5);
+                }
+            }
+            if n > BRUTE_FORCE_MAX {
+                assert!(lazy.is_graph_built());
+                assert!(recall_eager / queries as f32 >= RECALL_FLOOR_K10);
+                assert!(recall_lazy / queries as f32 >= RECALL_FLOOR_K10);
+            } else {
+                assert!(!lazy.is_graph_built());
+            }
+        }
+    }
+
+    #[test]
     fn incremental_graph_recall_matches_brute_force() {
         // Engine-layer correctness: a graph grown purely by incremental `add`s
         // (never compacted) must still find the true nearest neighbors. The
@@ -857,8 +1197,9 @@ mod tests {
         let queries = 100;
         let corpus = make_vectors(n, dims, 0x1AC3E5);
 
-        // Incremental: add one at a time, never compact.
+        // Incremental: add one at a time into a live graph, never compact.
         let mut incremental = HnswIndex::new(dims);
+        incremental.graph();
         for (id, v) in &corpus {
             incremental.add(id.clone(), v.clone()).unwrap();
         }

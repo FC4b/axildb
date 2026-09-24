@@ -793,9 +793,9 @@ impl<'a> QueryBuilder<'a> {
         let seed_cap = if self.traversal.is_some() {
             usize::MAX
         } else if self.reranker.is_some() {
-            (self.rerank_top_k_in + self.offset).max(self.limit + self.offset)
+            (self.rerank_top_k_in + self.offset).max(self.collection_cap())
         } else {
-            self.limit + self.offset
+            self.collection_cap()
         };
 
         let mut results = Vec::new();
@@ -823,8 +823,13 @@ impl<'a> QueryBuilder<'a> {
                 .graph_index
                 .ok_or_else(|| AxilError::plugin("no graph index configured for traversal"))?;
 
-            results =
-                fan_out_traversal(gi, self.storage, &results, steps, self.limit + self.offset)?;
+            results = fan_out_traversal(
+                gi,
+                self.storage,
+                &results,
+                steps,
+                self.collection_cap(),
+            )?;
         }
 
         // rerank stage. Same shape as exec_unified_profiled —
@@ -912,7 +917,7 @@ impl<'a> QueryBuilder<'a> {
             ));
         };
 
-        let result_cap = self.limit + self.offset;
+        let result_cap = self.collection_cap();
         let mut results = fan_out_traversal(gi, self.storage, &starting, steps, result_cap)?;
 
         self.apply_sort(&mut results);
@@ -989,7 +994,7 @@ impl<'a> QueryBuilder<'a> {
         let seed_cap = if self.traversal.is_some() {
             usize::MAX
         } else {
-            self.limit + self.offset
+            self.collection_cap()
         };
 
         let mut results = Vec::new();
@@ -1014,8 +1019,13 @@ impl<'a> QueryBuilder<'a> {
             let gi = self
                 .graph_index
                 .ok_or_else(|| AxilError::plugin("no graph index configured for traversal"))?;
-            results =
-                fan_out_traversal(gi, self.storage, &results, steps, self.limit + self.offset)?;
+            results = fan_out_traversal(
+                gi,
+                self.storage,
+                &results,
+                steps,
+                self.collection_cap(),
+            )?;
         }
 
         self.apply_sort(&mut results);
@@ -1141,7 +1151,7 @@ impl<'a> QueryBuilder<'a> {
         let seed_cap = if self.traversal.is_some() {
             usize::MAX
         } else {
-            self.limit + self.offset
+            self.collection_cap()
         };
 
         let mut results = Vec::new();
@@ -1169,8 +1179,13 @@ impl<'a> QueryBuilder<'a> {
             let gi = self
                 .graph_index
                 .ok_or_else(|| AxilError::plugin("no graph index configured for traversal"))?;
-            results =
-                fan_out_traversal(gi, self.storage, &results, steps, self.limit + self.offset)?;
+            results = fan_out_traversal(
+                gi,
+                self.storage,
+                &results,
+                steps,
+                self.collection_cap(),
+            )?;
         }
 
         // ── Step 6: Sort + Limit ──
@@ -1312,9 +1327,9 @@ impl<'a> QueryBuilder<'a> {
             // stage must hand it the full window — capping at
             // limit+offset would turn rerank into a no-op (it'd only
             // see the prefix that already won by fused score).
-            (self.rerank_top_k_in + self.offset).max(self.limit + self.offset)
+            (self.rerank_top_k_in + self.offset).max(self.collection_cap())
         } else {
-            self.limit + self.offset
+            self.collection_cap()
         };
 
         let mut results = Vec::new();
@@ -1345,8 +1360,13 @@ impl<'a> QueryBuilder<'a> {
             let gi = self
                 .graph_index
                 .ok_or_else(|| AxilError::plugin("no graph index configured for traversal"))?;
-            results =
-                fan_out_traversal(gi, self.storage, &results, steps, self.limit + self.offset)?;
+            results = fan_out_traversal(
+                gi,
+                self.storage,
+                &results,
+                steps,
+                self.collection_cap(),
+            )?;
             profile_steps.push(ProfileStep {
                 step: "graph_traverse".to_string(),
                 ms: trav_start.elapsed().as_secs_f64() * 1000.0,
@@ -1404,6 +1424,23 @@ impl<'a> QueryBuilder<'a> {
         let total_ms = total_start.elapsed().as_secs_f64() * 1000.0;
         let profile = build_profile(total_ms, profile_steps);
         Ok((result, profile))
+    }
+
+    /// How many rows to collect — traversal endpoints, or the vector / FTS /
+    /// fused candidates that pass the filters — before sorting and paging.
+    ///
+    /// Without an ordering, the first `offset + limit` rows reached are the
+    /// page, so collection can stop there. With `order_by` / `order_by_time`,
+    /// the rows reached first (nearest, most relevant, or first traversed) are
+    /// not the top of the sort — the true top-n may come last — so every
+    /// candidate must be collected before [`Self::apply_sort`] runs. Candidate
+    /// sets stay bounded by their search's own fetch size.
+    fn collection_cap(&self) -> usize {
+        if self.order_by.is_some() || self.time_sort.is_some() {
+            usize::MAX
+        } else {
+            self.limit.saturating_add(self.offset)
+        }
     }
 
     /// Apply `order_by` and/or `order_by_time` sorting to a result set.

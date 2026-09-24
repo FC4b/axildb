@@ -3,8 +3,9 @@
 //!
 //! What crosses the boundary is the **distillate**, never the raw episodic
 //! trail. Selection reuses Axil's own signals: it reads the promoted
-//! convention tables and each record's decayed importance (`_effective_-
-//! importance`, falling back to the insert-time `_importance`). The embedding,
+//! convention tables and each record's decayed importance, computed at
+//! selection time from `_importance`, the record's age and the table's
+//! configured half-life — the same function recall and tiering use. The embedding,
 //! when requested, is computed locally by the caller's `Axil` — the server
 //! never embeds.
 //!
@@ -13,7 +14,7 @@
 //! `canonical_id` rides on the upsert payload when present); graph-edge ops.
 
 use axil_atlas_proto::{Lww, Op, OpKind, Tier};
-use axil_core::{Axil, Record};
+use axil_core::{Axil, DecayConfig, Record};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -55,26 +56,60 @@ impl Default for SelectOpts {
 
 /// Scan the promoted tables of `db` and emit one `record.upsert` [`Op`] per
 /// selected record.
+///
+/// Per-table half-lives come from the `axil.toml` nearest the database — the
+/// same resolution `axil decay` and tiering use, so `[decay] tables.<t>` and
+/// `[lifecycle.tables.<t>] decay = false` apply here too.
 pub fn select_distillate(db: &Axil, opts: &SelectOpts) -> Result<Vec<Op>, SyncError> {
+    let decay = db
+        .path()
+        .parent()
+        .and_then(|dir| axil_core::load_config_from(dir).ok())
+        .map(|c| c.decay)
+        .unwrap_or_default();
+    select_distillate_with_decay(db, opts, &decay)
+}
+
+/// [`select_distillate`] with an explicit per-table half-life configuration.
+pub fn select_distillate_with_decay(
+    db: &Axil,
+    opts: &SelectOpts,
+    decay: &DecayConfig,
+) -> Result<Vec<Op>, SyncError> {
+    let now_secs = unix_now_secs();
     let mut ops = Vec::new();
     for table in &opts.tables {
         // Never sync the private episodic trail, even if it was passed in.
         if is_episodic(table) {
             continue;
         }
+        let half_life = decay.half_life_for(table);
         let recs = db.query().table(table).limit(opts.max_per_table).exec()?;
         for rec in recs {
-            if record_importance(&rec.data) < opts.min_importance {
+            let importance = record_importance(&rec, half_life, now_secs);
+            if importance < opts.min_importance {
                 continue;
             }
-            ops.push(record_to_op(db, &rec, &opts.member, opts.embed)?);
+            ops.push(record_to_op(
+                db,
+                &rec,
+                &opts.member,
+                opts.embed,
+                importance,
+            )?);
         }
     }
     Ok(ops)
 }
 
 /// Build a `record.upsert` op from a promoted record.
-fn record_to_op(db: &Axil, rec: &Record, member: &str, embed: bool) -> Result<Op, SyncError> {
+fn record_to_op(
+    db: &Axil,
+    rec: &Record,
+    member: &str,
+    embed: bool,
+    importance: f32,
+) -> Result<Op, SyncError> {
     // Prefer an explicit `content` field; fall back to the whole record body.
     // Strip Axil-internal (`_`-prefixed) fields first: the body carries volatile
     // local state — `_importance`, `_effective_importance`, `_access_count` —
@@ -121,7 +156,7 @@ fn record_to_op(db: &Axil, rec: &Record, member: &str, embed: bool) -> Result<Op
         "kind": rec.table,
         "canonical_id": canonical_id,
         "content": content,
-        "importance": record_importance(&rec.data),
+        "importance": importance,
         "model_id": Value::Null,
     });
 
@@ -141,13 +176,33 @@ fn record_to_op(db: &Axil, rec: &Record, member: &str, embed: bool) -> Result<Op
     })
 }
 
-/// Decayed importance if present, else the base insert-time score, else 1.0.
-fn record_importance(data: &Value) -> f32 {
-    data.get("_effective_importance")
-        .and_then(Value::as_f64)
-        .or_else(|| data.get("_importance").and_then(Value::as_f64))
-        .map(|f| f as f32)
-        .unwrap_or(1.0)
+/// Effective importance of `rec` now.
+///
+/// Decay is lazy: nothing rewrites `_effective_importance` on a schedule (only
+/// a manual `axil decay` does), so the stored field can be arbitrarily stale.
+/// Compute it instead from `_importance`, the record's age and the table's
+/// half-life with core's own decay function. A record that was never scored
+/// (no `_importance`, as in `_`-prefixed tables) has no decay signal: it keeps
+/// a stored `_effective_importance` if one exists, else 1.0 — always synced.
+fn record_importance(rec: &Record, half_life: f64, now_secs: i64) -> f32 {
+    let data = &rec.data;
+    if data.get("_importance").is_none() && !axil_core::importance::is_pinned(data) {
+        return data
+            .get("_effective_importance")
+            .and_then(Value::as_f64)
+            .map(|f| f as f32)
+            .unwrap_or(1.0);
+    }
+    let age_days = (now_secs - rec.created_at.timestamp()).max(0) as f64 / 86_400.0;
+    axil_core::importance::effective_importance(data, age_days, half_life)
+}
+
+/// Seconds since the Unix epoch (0 if the clock is before it).
+fn unix_now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 /// Drop Axil-internal (`_`-prefixed) top-level fields from a content value.
@@ -282,7 +337,7 @@ mod tests {
             .insert("decisions", json!({"summary": "chose A", "reason": "faster"}))
             .unwrap();
 
-        let before = record_to_op(&db, &rec, "mem_a", false).unwrap();
+        let before = record_to_op(&db, &rec, "mem_a", false, 1.0).unwrap();
 
         // Simulate a sweep mutating the internal fields in place.
         let mut mutated = rec.clone();
@@ -290,7 +345,7 @@ mod tests {
         obj.insert("_effective_importance".into(), json!(0.137));
         obj.insert("_access_count".into(), json!(9));
         obj.insert("_importance".into(), json!(0.42));
-        let after = record_to_op(&db, &mutated, "mem_a", false).unwrap();
+        let after = record_to_op(&db, &mutated, "mem_a", false, 1.0).unwrap();
 
         assert_eq!(
             before.op_id, after.op_id,
@@ -309,10 +364,82 @@ mod tests {
 
     #[test]
     fn min_importance_filters_records() {
-        // Pure-function check: the filter reads the effective/base importance.
-        assert_eq!(record_importance(&json!({"_effective_importance": 0.3})), 0.3);
-        assert_eq!(record_importance(&json!({"_importance": 0.7})), 0.7);
-        assert_eq!(record_importance(&json!({})), 1.0);
+        let now = unix_now_secs();
+        let half_life = axil_core::importance::DEFAULT_HALF_LIFE_DAYS;
+        let rec = |data| Record::new("decisions", data);
+        // A fresh scored record: effective == base.
+        let fresh = record_importance(&rec(json!({"_importance": 0.7})), half_life, now);
+        assert!((fresh - 0.7).abs() < 1e-3, "{fresh}");
+        // Unscored records have no decay signal and are always synced.
+        assert_eq!(record_importance(&rec(json!({})), half_life, now), 1.0);
+        assert_eq!(
+            record_importance(&rec(json!({"_effective_importance": 0.3})), half_life, now),
+            0.3
+        );
+    }
+
+    /// A record inserted long ago with high base importance and a stale stored
+    /// `_effective_importance`.
+    fn old_decision(db: &Axil) -> Record {
+        let mut rec = Record::new(
+            "decisions",
+            json!({"summary": "ancient choice", "_importance": 0.9, "_effective_importance": 0.9}),
+        );
+        rec.created_at = "2020-01-01T00:00:00Z".parse().unwrap();
+        rec.updated_at = rec.created_at;
+        db.insert_preserving(rec).unwrap()
+    }
+
+    #[test]
+    fn selection_decays_importance_instead_of_trusting_stored_values() {
+        // Years old at a 90-day half-life: far below the archive threshold, so
+        // the default options must not push it — even though its stored
+        // `_importance`/`_effective_importance` still say 0.9.
+        let tmp = TempDir::new().unwrap();
+        let db = db(&tmp);
+        old_decision(&db);
+        db.insert(
+            "decisions",
+            json!({"summary": "fresh choice", "_importance": 0.9}),
+        )
+        .unwrap();
+
+        let ops = select_distillate(
+            &db,
+            &SelectOpts {
+                embed: false,
+                ..SelectOpts::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(ops.len(), 1, "only the fresh decision survives decay");
+        assert_eq!(ops[0].payload["content"]["summary"], "fresh choice");
+    }
+
+    #[test]
+    fn selection_honors_the_configured_half_life() {
+        // `[lifecycle.tables.decisions] decay = false` next to the database
+        // stops decay, exactly as it does for recall and tiering.
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(
+            tmp.path().join("axil.toml"),
+            "[lifecycle.tables.decisions]\ndecay = false\n",
+        )
+        .unwrap();
+        let db = db(&tmp);
+        old_decision(&db);
+
+        let ops = select_distillate(
+            &db,
+            &SelectOpts {
+                embed: false,
+                ..SelectOpts::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(ops.len(), 1);
+        let importance = ops[0].payload["importance"].as_f64().unwrap();
+        assert!((importance - 0.9).abs() < 1e-3, "{importance}");
     }
 
     #[test]

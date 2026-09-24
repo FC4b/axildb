@@ -114,6 +114,23 @@ fn recall_options_defaults_are_sane() {
 }
 
 #[test]
+fn recall_options_struct_literal_keeps_its_published_shape() {
+    // Downstream crates build `RecallOptions` with a full struct literal, so
+    // a new field is a breaking change (cargo-semver-checks
+    // `constructible_struct_adds_field`). This literal names every published
+    // field and nothing else; it must keep compiling.
+    let opts = RecallOptions {
+        top_k: 3,
+        alpha: Some(0.5),
+        max_tokens: None,
+        include_expired: false,
+        include_superseded: false,
+        decay_window_secs: 86400.0,
+    };
+    assert_eq!(opts.top_k, 3);
+}
+
+#[test]
 fn remember_with_empty_database() {
     let (db, _dir) = temp_db();
     let mem = AgentMemory::new(&db);

@@ -29,17 +29,24 @@ axil --db <DB> query t --where "note contains 'timeout'" --limit 20
 The `--where` grammar:
 
 - One string may hold several conditions joined by `AND` (case-insensitive);
-  the split is quote-aware. Repeating `--where` composes the same way —
-  everything ANDs. `OR`, parentheses, and nested dot-paths are not supported.
-- Operators: `=`, `!=`, `>`, `<`, `>=`, `<=`, and the word operator
-  `contains` (substring for strings, membership for arrays).
+  an `AND` inside a quoted value does not split it. Repeating `--where`
+  composes the same way — everything ANDs. `OR`, parentheses, and nested
+  dot-paths are not supported.
+- Each condition reads left to right: field, then operator, then value.
+  Operators: `=` (or `==`), `!=`, `>`, `<`, `>=`, `<=`, and the word operator
+  `contains` (substring for strings, membership for arrays). Because the
+  operator is found by position, operator characters inside the value are
+  literal: `url contains ?q=1` matches the substring `?q=1`.
 - Unquoted values are typed by JSON rules (`0.3` compares numerically,
   `true`/`false`/`null` as themselves); single- or double-quoted values are
   always strings. Numbers compare numerically, never lexicographically.
+- A quote starts a quoted value only as the value's first character; an
+  apostrophe anywhere else is literal, so `name=O'Brien` needs no quoting.
 - Malformed input errors instead of silently matching nothing: an
-  unterminated quote is rejected, and an unquoted value like `5 oops` (a
-  scalar followed by trailing text — usually a missing `AND`) asks you to
-  quote it or split the conditions.
+  unterminated quote is rejected, text after a closing quote other than
+  `AND` is rejected, and an unquoted value like `5 oops` (a scalar followed
+  by trailing text — usually a missing `AND`) asks you to quote it or split
+  the conditions.
 
 Also accepted by `list` and `explain`.
 

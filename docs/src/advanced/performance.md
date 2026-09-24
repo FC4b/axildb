@@ -59,7 +59,8 @@ cargo build --release -p axildb --features full,memory
 
 ```toml
 [healing]
-auto_compact_threshold = 1000  # Compact after N deletes
+compact_expired_threshold = 1000     # doctor flags cleanup pressure after N expired
+compact_superseded_threshold = 500   # ...or N superseded records
 
 [index]
 embedding_model = "bge-small-en-v1.5-int8"  # Faster embeddings

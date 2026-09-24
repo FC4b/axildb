@@ -8,6 +8,7 @@ pub mod quantize;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use parking_lot::RwLock;
 use redb::{
@@ -22,7 +23,7 @@ use axil_core::record::{Record, RecordId};
 use axil_core::db::AxilBuilder;
 
 use crate::embed::Embedder;
-use crate::hnsw::HnswIndex;
+use crate::hnsw::{check_vector, HnswIndex, VectorDefect};
 use crate::models::EmbeddingModel;
 
 /// redb table: record_id → raw f32 bytes.
@@ -55,9 +56,49 @@ pub struct VectorEngine {
     index: RwLock<HnswIndex>,
     vector_db: Database,
     embedder: Option<Embedder>,
+    /// Entries present in the on-disk store but not loadable into the live
+    /// index at open (unparsable id, malformed bytes, wrong dimensions,
+    /// non-finite or all-zero values). Cleared by a purge.
+    skipped_at_load: AtomicUsize,
 }
 
 impl VectorEngine {
+    /// Validate a vector against the configured dimensions before any durable
+    /// write: the on-disk store has no schema gate of its own, and a rejected
+    /// insert must leave any previously stored vector for this id untouched.
+    /// Runs the very check [`HnswIndex::add`] applies (and the load path
+    /// filters with), so an insert that passes here can never be rejected by
+    /// the index after persisting, nor skipped at the next open.
+    fn validate_vector(&self, id: &RecordId, vector: &[f32]) -> axil_core::Result<()> {
+        check_vector(vector, self.config.dimensions).map_err(|defect| {
+            AxilError::plugin(match defect {
+                VectorDefect::Dimensions { expected, got } => {
+                    format!("dimension mismatch for {id}: expected {expected}, got {got}")
+                }
+                VectorDefect::NonFinite => {
+                    format!("vector for {id} contains non-finite values (NaN or infinity)")
+                }
+                VectorDefect::Zero => format!(
+                    "vector for {id} is all zeros — it has no direction, so cosine \
+                     similarity is undefined"
+                ),
+            })
+        })
+    }
+
+    /// Entries skipped at the last open because they were unloadable
+    /// (unparsable id, malformed bytes, wrong dimensions, non-finite or
+    /// all-zero values). `0` after a clean load or a purge.
+    pub fn skipped_at_load(&self) -> usize {
+        self.skipped_at_load.load(Ordering::Relaxed)
+    }
+
+    /// Whether the ANN graph has been built. It is built on the first search
+    /// that needs it — never by opening the store, inserting or deleting.
+    pub fn is_graph_built(&self) -> bool {
+        self.index.read().is_graph_built()
+    }
+
     /// Open (or create) a vector store alongside the given database path.
     ///
     /// The vector data is stored at `<db_path>.vec`.
@@ -107,7 +148,8 @@ impl VectorEngine {
         txn.commit().map_err(plugin_err)?;
 
         // Load existing vectors from storage.
-        let vectors = load_all_vectors(&vector_db, config.dimensions)?;
+        let (vectors, skipped_at_load) = load_all_vectors(&vector_db, config.dimensions)?;
+        warn_unloadable(skipped_at_load, &vec_path);
         let index = HnswIndex::from_vectors(config.dimensions, vectors);
 
         Ok(Self {
@@ -115,6 +157,7 @@ impl VectorEngine {
             index: RwLock::new(index),
             vector_db,
             embedder: None,
+            skipped_at_load: AtomicUsize::new(skipped_at_load),
         })
     }
 
@@ -179,7 +222,8 @@ impl VectorEngine {
             requested
         };
 
-        let vectors = load_all_vectors(&vector_db, dimensions)?;
+        let (vectors, skipped_at_load) = load_all_vectors(&vector_db, dimensions)?;
+        warn_unloadable(skipped_at_load, vec_path);
         let index = HnswIndex::from_vectors(dimensions, vectors);
         Ok(Self {
             config: VectorConfig {
@@ -189,6 +233,7 @@ impl VectorEngine {
             index: RwLock::new(index),
             vector_db,
             embedder: None,
+            skipped_at_load: AtomicUsize::new(skipped_at_load),
         })
     }
 
@@ -277,6 +322,7 @@ impl Engine for VectorEngine {
         let vector = embedder
             .embed(&combined)
             .map_err(|e| AxilError::plugin(format!("auto-embed failed: {e}")))?;
+        self.validate_vector(&record.id, &vector)?;
 
         // Persist to disk first so a crash can't leave the in-memory index
         // ahead of storage.
@@ -296,7 +342,39 @@ impl Engine for VectorEngine {
 }
 
 impl VectorIndex for VectorEngine {
+    fn skipped_at_load(&self) -> usize {
+        VectorEngine::skipped_at_load(self)
+    }
+
+    fn purge_unloadable(&self) -> axil_core::Result<usize> {
+        let dimensions = self.config.dimensions;
+        let txn = self.vector_db.begin_write().map_err(plugin_err)?;
+        let purged = {
+            let mut table = txn.open_table(VECTORS_TABLE).map_err(plugin_err)?;
+            // Judged by the same rule the load path applies, inside this write
+            // txn — a row rewritten with a valid vector since open is kept.
+            let mut doomed = Vec::new();
+            for entry in table.iter().map_err(plugin_err)? {
+                let (key, value) = entry.map_err(plugin_err)?;
+                if decode_row(key.value(), value.value(), dimensions).is_none() {
+                    doomed.push(key.value().to_string());
+                }
+            }
+            for key in &doomed {
+                table.remove(key.as_str()).map_err(plugin_err)?;
+            }
+            doomed.len()
+        };
+        txn.commit().map_err(plugin_err)?;
+        // Unloadable rows were never in the live index, so it needs no change.
+        self.skipped_at_load.store(0, Ordering::Relaxed);
+        Ok(purged)
+    }
+
     fn add(&self, id: RecordId, vector: &[f32]) -> axil_core::Result<()> {
+        // Validate before touching storage: a rejected write must leave any
+        // previously stored vector for this id intact.
+        self.validate_vector(&id, vector)?;
         // Persist to disk first so a crash can't leave the in-memory
         // index ahead of storage.
         persist_vector(&self.vector_db, &id, vector)?;
@@ -311,6 +389,11 @@ impl VectorIndex for VectorEngine {
         if items.is_empty() {
             return Ok(());
         }
+        // Validate the whole batch before any durable write so one bad item
+        // can't leave a half-persisted batch behind.
+        for (id, vector) in items {
+            self.validate_vector(id, vector)?;
+        }
         // Persist the whole batch to disk first (one fsync) so a crash can't
         // leave the in-memory index ahead of storage, then add to the live index.
         persist_vectors_batch(&self.vector_db, items)?;
@@ -323,10 +406,11 @@ impl VectorIndex for VectorEngine {
     }
 
     fn search(&self, query: &[f32], top_k: usize) -> axil_core::Result<Vec<(RecordId, f32)>> {
-        // The graph is always live and searchable, including immediately after
-        // an incremental `add` and despite accumulated tombstones — so search
-        // never needs the write lock. Compaction (tombstone reclaim) is the
-        // background worker's job, off this hot path.
+        // The graph is searchable immediately after an incremental `add` and
+        // despite accumulated tombstones, and its one-time lazy build is
+        // synchronized inside the index — so search never needs the write
+        // lock. Compaction (tombstone reclaim) is the background worker's job,
+        // off this hot path.
         self.index
             .read()
             .search_clean(query, top_k)
@@ -472,6 +556,22 @@ impl axil_core::VectorSpaceFactory for VectorSpaceFactory {
         list_vector_space_names(main_path)
     }
 
+    fn remove_from_space(
+        &self,
+        main_path: &Path,
+        space: &str,
+        id: &RecordId,
+    ) -> axil_core::Result<()> {
+        let vec_path = vector_space_db_path(main_path, space);
+        if !vec_path.exists() {
+            return Ok(());
+        }
+        // Straight to the durable store: no vector load, no graph build, and
+        // no write commit unless the space actually holds the id.
+        let db = Database::open(&vec_path).map_err(plugin_err)?;
+        delete_vector(&db, id)
+    }
+
     fn space_meta(&self, main_path: &Path, space: &str) -> axil_core::Result<(usize, usize)> {
         let vec_path = vector_space_db_path(main_path, space);
         if !vec_path.exists() {
@@ -566,6 +666,21 @@ fn persist_vectors_batch(
 
 /// Delete a vector from the vector database.
 fn delete_vector(db: &Database, id: &RecordId) -> axil_core::Result<()> {
+    // Most deletes have nothing here — a record that was never embedded, or a
+    // named space that never held the id (the record-delete fan-out visits
+    // every space). A read txn answers that without a durable write commit.
+    {
+        let txn = db.begin_read().map_err(plugin_err)?;
+        match txn.open_table(VECTORS_TABLE) {
+            Ok(table) => {
+                if table.get(id.as_str()).map_err(plugin_err)?.is_none() {
+                    return Ok(());
+                }
+            }
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(()),
+            Err(e) => return Err(plugin_err(e)),
+        }
+    }
     let txn = db.begin_write().map_err(plugin_err)?;
     {
         let mut table = txn.open_table(VECTORS_TABLE).map_err(plugin_err)?;
@@ -686,39 +801,59 @@ impl AxilBuilderVectorExt for AxilBuilder {
 
 }
 
+/// Decode one stored row, or `None` when it can never enter the index: an
+/// unparsable id, a byte length that is not exactly `dims` f32s, or a vector
+/// [`check_vector`] rejects. The one rule shared by load and purge.
+fn decode_row(id_str: &str, bytes: &[u8], dims: usize) -> Option<(RecordId, Vec<f32>)> {
+    let id = RecordId::from_string(id_str).ok()?;
+    if bytes.len() != dims.checked_mul(4)? {
+        return None;
+    }
+    let vector = bytes_to_vector(bytes);
+    check_vector(&vector, dims).ok()?;
+    Some((id, vector))
+}
+
 /// Load all persisted vectors into a HashMap.
 ///
-/// Validates each RecordId and skips vectors with wrong dimensions.
+/// Skips (and counts) every row [`decode_row`] rejects, so a bad row left by
+/// an older version can never reach — or panic — the index.
 fn load_all_vectors(
     db: &Database,
     expected_dims: usize,
-) -> axil_core::Result<HashMap<RecordId, Vec<f32>>> {
+) -> axil_core::Result<(HashMap<RecordId, Vec<f32>>, usize)> {
     let txn = db.begin_read().map_err(plugin_err)?;
     let table = txn.open_table(VECTORS_TABLE).map_err(plugin_err)?;
 
     let mut vectors = HashMap::new();
+    let mut skipped = 0usize;
     let iter = table.iter().map_err(plugin_err)?;
 
     for entry in iter {
         let entry: (redb::AccessGuard<'_, &str>, redb::AccessGuard<'_, &[u8]>) =
             entry.map_err(plugin_err)?;
-        let id_str: &str = entry.0.value();
-        let bytes: &[u8] = entry.1.value();
-
-        let id = match RecordId::from_string(id_str) {
-            Ok(id) => id,
-            Err(_) => continue,
-        };
-
-        let vector = bytes_to_vector(bytes);
-        if vector.len() != expected_dims {
-            continue;
+        match decode_row(entry.0.value(), entry.1.value(), expected_dims) {
+            Some((id, vector)) => {
+                vectors.insert(id, vector);
+            }
+            None => skipped += 1,
         }
-
-        vectors.insert(id, vector);
     }
 
-    Ok(vectors)
+    Ok((vectors, skipped))
+}
+
+/// Tell the operator, once per open, about rows the load had to skip.
+fn warn_unloadable(skipped: usize, vec_path: &Path) {
+    if skipped > 0 {
+        eprintln!(
+            "[axil vector] warning: skipped {skipped} unloadable entr{} in {} \
+             (unparsable id, malformed bytes, wrong dimensions, non-finite or all-zero \
+             values); `axil heal --reindex` clears them",
+            if skipped == 1 { "y" } else { "ies" },
+            vec_path.display()
+        );
+    }
 }
 
 #[cfg(test)]
@@ -766,6 +901,281 @@ mod tests {
         let results = plugin.search(&[1.0, 0.0, 0.0], 1).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, id1);
+    }
+
+    #[test]
+    fn rejected_add_wrong_dims_leaves_previous_vector_searchable() {
+        // A wrong-dimension insert must be rejected BEFORE it touches the
+        // durable store — otherwise the error surfaces but the old vector is
+        // already gone (and silently skipped at the next open).
+        let (plugin, dir) = temp_engine(3);
+        let id = RecordId::new();
+        plugin.add(id.clone(), &[1.0, 0.0, 0.0]).unwrap();
+
+        assert!(plugin.add(id.clone(), &[1.0, 0.0]).is_err());
+        let results = plugin.search(&[1.0, 0.0, 0.0], 5).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, id);
+
+        // Durable state, not just the live index.
+        drop(plugin);
+        let path = dir.path().join("test.axil");
+        let reopened = VectorEngine::open(&path, 3).unwrap();
+        assert_eq!(reopened.vector_count(), 1);
+        assert_eq!(reopened.search(&[1.0, 0.0, 0.0], 5).unwrap()[0].0, id);
+    }
+
+    #[test]
+    fn rejected_add_non_finite_leaves_previous_vector_searchable() {
+        let (plugin, _dir) = temp_engine(3);
+        let id = RecordId::new();
+        plugin.add(id.clone(), &[1.0, 0.0, 0.0]).unwrap();
+
+        assert!(plugin.add(id.clone(), &[f32::NAN, 0.0, 0.0]).is_err());
+        assert!(plugin
+            .add(id.clone(), &[f32::INFINITY, 0.0, 0.0])
+            .is_err());
+        let results = plugin.search(&[1.0, 0.0, 0.0], 5).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, id);
+    }
+
+    #[test]
+    fn add_batch_rejects_whole_batch_on_bad_item() {
+        // Batch validation happens before any durable write: one bad item
+        // must not leave a half-persisted batch behind.
+        let (plugin, _dir) = temp_engine(3);
+        let good = RecordId::new();
+        let bad = RecordId::new();
+
+        let err = plugin
+            .add_batch(&[
+                (good.clone(), &[1.0, 0.0, 0.0]),
+                (bad.clone(), &[1.0, 0.0]), // wrong dims
+            ])
+            .unwrap_err();
+        assert!(err.to_string().contains("dimension mismatch"));
+
+        assert_eq!(plugin.vector_count(), 0);
+        assert!(plugin.search(&[1.0, 0.0, 0.0], 5).unwrap().is_empty());
+    }
+
+    #[test]
+    fn unloadable_entries_are_counted_and_skipped_at_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("skip.axil");
+        let vec_path = vector_db_path(&path);
+        let good = RecordId::new();
+        let wrong_dims = RecordId::new();
+
+        {
+            let plugin = VectorEngine::open(&path, 3).unwrap();
+            plugin.add(good.clone(), &[1.0, 0.0, 0.0]).unwrap();
+        }
+
+        // Inject two unloadable rows directly: one unparsable id, one valid
+        // id whose vector has the wrong dimension count.
+        {
+            let db = redb::Database::open(&vec_path).unwrap();
+            let txn = db.begin_write().unwrap();
+            {
+                let mut table = txn.open_table(VECTORS_TABLE).unwrap();
+                table
+                    .insert("not-a-record-id", vector_to_bytes(&[1.0, 0.0, 0.0]).as_slice())
+                    .unwrap();
+                table
+                    .insert(
+                        wrong_dims.to_string().as_str(),
+                        vector_to_bytes(&[1.0, 0.0]).as_slice(),
+                    )
+                    .unwrap();
+            }
+            txn.commit().unwrap();
+        }
+
+        let plugin = VectorEngine::open(&path, 3).unwrap();
+        assert_eq!(plugin.skipped_at_load(), 2);
+        assert_eq!(plugin.vector_count(), 1);
+        assert_eq!(plugin.search(&[1.0, 0.0, 0.0], 5).unwrap()[0].0, good);
+    }
+
+    /// Write raw rows straight into a store's vectors table, bypassing every
+    /// insert-time check (what an older version, or corruption, leaves behind).
+    fn inject_rows(vec_path: &Path, rows: &[(&str, Vec<u8>)]) {
+        let db = redb::Database::open(vec_path).unwrap();
+        let txn = db.begin_write().unwrap();
+        {
+            let mut table = txn.open_table(VECTORS_TABLE).unwrap();
+            for (key, bytes) in rows {
+                table.insert(*key, bytes.as_slice()).unwrap();
+            }
+        }
+        txn.commit().unwrap();
+    }
+
+    #[test]
+    fn open_insert_delete_never_build_the_graph() {
+        // Every CLI invocation attaches the vector engine — `store`, the
+        // hook-spawned children — and most never search. None of them may pay
+        // for a full graph build.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("lazy.axil");
+        let items: Vec<(RecordId, Vec<f32>)> = (0..300)
+            .map(|i| {
+                let t = i as f32;
+                (RecordId::new(), vec![t.sin(), t.cos(), (t * 0.3).sin(), 1.0])
+            })
+            .collect();
+        {
+            let plugin = VectorEngine::open(&path, 4).unwrap();
+            let refs: Vec<(RecordId, &[f32])> = items
+                .iter()
+                .map(|(id, v)| (id.clone(), v.as_slice()))
+                .collect();
+            plugin.add_batch(&refs).unwrap();
+            assert!(!plugin.is_graph_built());
+        }
+
+        let plugin = VectorEngine::open(&path, 4).unwrap();
+        assert!(!plugin.is_graph_built(), "open must not build the graph");
+        plugin.add(RecordId::new(), &[0.5, 0.5, 0.5, 0.5]).unwrap();
+        plugin.on_record_delete(&items[0].0).unwrap();
+        plugin.on_record_delete(&RecordId::new()).unwrap();
+        assert!(!plugin.is_graph_built(), "insert/delete must not build the graph");
+        assert_eq!(plugin.vector_count(), 300);
+
+        let hits = plugin.search(&items[7].1, 1).unwrap();
+        assert_eq!(hits[0].0, items[7].0);
+        assert!(plugin.is_graph_built(), "the first graph-path search builds it");
+    }
+
+    #[test]
+    fn purge_unloadable_removes_bad_rows_for_good() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("purge.axil");
+        let good = RecordId::new();
+        {
+            let plugin = VectorEngine::open(&path, 3).unwrap();
+            plugin.add(good.clone(), &[1.0, 0.0, 0.0]).unwrap();
+            // Nothing to purge on a clean store.
+            assert_eq!(plugin.purge_unloadable().unwrap(), 0);
+        }
+        let orphan = RecordId::new();
+        inject_rows(
+            &vector_db_path(&path),
+            &[
+                ("not-a-record-id", vector_to_bytes(&[1.0, 0.0, 0.0])),
+                (orphan.as_str(), vector_to_bytes(&[1.0, 0.0])),
+            ],
+        );
+
+        let plugin = VectorEngine::open(&path, 3).unwrap();
+        assert_eq!(plugin.skipped_at_load(), 2);
+        assert_eq!(plugin.purge_unloadable().unwrap(), 2);
+        assert_eq!(VectorIndex::skipped_at_load(&plugin), 0);
+        assert_eq!(plugin.search(&[1.0, 0.0, 0.0], 5).unwrap()[0].0, good);
+
+        drop(plugin);
+        let reopened = VectorEngine::open(&path, 3).unwrap();
+        assert_eq!(reopened.skipped_at_load(), 0);
+        assert_eq!(reopened.vector_count(), 1);
+        assert_eq!(reopened.get_vector(&good).unwrap(), Some(vec![1.0, 0.0, 0.0]));
+    }
+
+    #[test]
+    fn huge_magnitude_vectors_survive_insert_and_reopen() {
+        // [1e20; 3] squares overflow f32. The graph's cosine distance used to
+        // panic on the second such insert — after the vector was already
+        // persisted, so the store then panicked on every reopen too.
+        let (plugin, dir) = temp_engine(3);
+        let a = RecordId::new();
+        let b = RecordId::new();
+        plugin.add(a.clone(), &[1e20, 1e20, 1e20]).unwrap();
+        plugin.add(b.clone(), &[1e20, 1e20, 1e20]).unwrap();
+        let hits = plugin.search(&[1.0, 1.0, 1.0], 2).unwrap();
+        assert_eq!(hits.len(), 2);
+        assert!(hits.iter().all(|(_, s)| (s - 1.0).abs() < 1e-5), "{hits:?}");
+
+        drop(plugin);
+        let reopened = VectorEngine::open(dir.path().join("test.axil"), 3).unwrap();
+        assert_eq!(reopened.skipped_at_load(), 0);
+        assert_eq!(reopened.vector_count(), 2);
+        let hits = reopened.search(&[2.0, 2.0, 2.0], 2).unwrap();
+        assert!(hits.iter().all(|(_, s)| (s - 1.0).abs() < 1e-5), "{hits:?}");
+    }
+
+    #[test]
+    fn zero_vector_is_rejected_before_persisting() {
+        let (plugin, dir) = temp_engine(3);
+        let id = RecordId::new();
+        plugin.add(id.clone(), &[1.0, 0.0, 0.0]).unwrap();
+
+        let err = plugin.add(id.clone(), &[0.0, 0.0, 0.0]).unwrap_err();
+        assert!(err.to_string().contains("zero"), "unexpected error: {err}");
+        let err = plugin
+            .add_batch(&[(RecordId::new(), [0.0_f32, 0.0, 0.0].as_slice())])
+            .unwrap_err();
+        assert!(err.to_string().contains("zero"), "unexpected error: {err}");
+
+        drop(plugin);
+        let reopened = VectorEngine::open(dir.path().join("test.axil"), 3).unwrap();
+        assert_eq!(reopened.vector_count(), 1);
+        assert_eq!(reopened.get_vector(&id).unwrap(), Some(vec![1.0, 0.0, 0.0]));
+    }
+
+    #[test]
+    fn load_skips_zero_and_truncated_rows_and_indexes_huge_rows() {
+        // Rows written before insert-time validation covered them: the load
+        // path must count the unusable ones and never panic on any of them.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy.axil");
+        let vec_path = vector_db_path(&path);
+        drop(VectorEngine::open(&path, 3).unwrap());
+
+        let huge = [RecordId::new(), RecordId::new()];
+        {
+            let db = redb::Database::open(&vec_path).unwrap();
+            let txn = db.begin_write().unwrap();
+            {
+                let mut table = txn.open_table(VECTORS_TABLE).unwrap();
+                // Directions spread over the sphere (a degenerate corpus can
+                // leave outliers unreachable in any HNSW graph).
+                for i in 0..200 {
+                    let t = i as f32;
+                    let v = [(t * 1.7).sin(), (t * 2.9).cos(), (t * 0.61).sin()];
+                    table
+                        .insert(RecordId::new().as_str(), vector_to_bytes(&v).as_slice())
+                        .unwrap();
+                }
+                for id in &huge {
+                    let v = [0.3e20, -0.5e20, 0.8e20];
+                    table
+                        .insert(id.as_str(), vector_to_bytes(&v).as_slice())
+                        .unwrap();
+                }
+                table
+                    .insert(
+                        RecordId::new().as_str(),
+                        vector_to_bytes(&[0.0, 0.0, 0.0]).as_slice(),
+                    )
+                    .unwrap();
+                let mut truncated = vector_to_bytes(&[1.0, 0.0, 0.0]);
+                truncated.extend_from_slice(&[0, 0]);
+                table
+                    .insert(RecordId::new().as_str(), truncated.as_slice())
+                    .unwrap();
+            }
+            txn.commit().unwrap();
+        }
+
+        let plugin = VectorEngine::open(&path, 3).unwrap();
+        assert_eq!(plugin.skipped_at_load(), 2, "zero row + truncated row");
+        assert_eq!(plugin.vector_count(), 202);
+        // > 128 live vectors, so this exercises the graph path.
+        let hits = plugin.search(&[0.3, -0.5, 0.8], 2).unwrap();
+        let ids: std::collections::HashSet<&RecordId> = hits.iter().map(|(id, _)| id).collect();
+        assert_eq!(ids, huge.iter().collect());
+        assert!(hits.iter().all(|(_, s)| (s - 1.0).abs() < 1e-5), "{hits:?}");
     }
 
     #[test]

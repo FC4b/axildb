@@ -90,6 +90,12 @@ pub struct RecallResult {
     pub tokens: usize,
 }
 
+/// Smallest ANN window a recall fetches, however small `top_k` is.
+const MIN_FETCH: usize = 20;
+
+/// Largest ANN window a recall grows to before settling for what it found.
+const MAX_FETCH: usize = 4096;
+
 /// Perform recency-weighted recall on a specific table.
 pub fn recall(
     db: &Axil,
@@ -101,35 +107,80 @@ pub fn recall(
     if !db.has_vector_index() {
         return Ok(Vec::new());
     }
+    let query_vec = db.embed_query(query)?;
+    let mut index_size = None;
+    recall_by_vector(
+        db,
+        &query_vec,
+        table,
+        opts,
+        memory_type,
+        None,
+        &mut index_size,
+    )
+}
 
+/// Recall against an already-embedded query, restricted to what `agent` may
+/// see (its own records plus unscoped ones; `None` sees everything).
+/// `index_size` caches the vector index's entry count across calls that share
+/// one query (see [`remember`]).
+fn recall_by_vector(
+    db: &Axil,
+    query_vec: &[f32],
+    table: &str,
+    opts: &RecallOptions,
+    memory_type: MemoryType,
+    agent: Option<&str>,
+    index_size: &mut Option<usize>,
+) -> Result<Vec<ScoredRecord>> {
     let alpha = opts
         .alpha
         .unwrap_or_else(|| memory_type.default_alpha())
         .clamp(0.0, 1.0);
 
-    // Fetch extra candidates for re-ranking.
-    let fetch_k = opts.top_k.saturating_mul(3).max(20);
-    let results = db.similar_to(query, fetch_k)?;
-
+    // Fetch candidates for re-ranking. The ANN window is global while the
+    // filter is table- and agent-scoped, so a window full of foreign or dead
+    // records doesn't mean "no matches" — grow the window and retry until we
+    // have enough valid hits or the index is exhausted. The query is embedded
+    // once by the caller; each pass is only a vector search.
     let now = Utc::now();
-
-    let mut scored: Vec<ScoredRecord> = results
-        .into_iter()
-        .filter(|(r, _)| r.table == table)
-        .filter(|(r, _)| opts.include_expired || !crate::ttl::is_record_expired(r))
-        .filter(|(r, _)| opts.include_superseded || !crate::ttl::is_record_superseded(r))
-        .map(|(record, similarity)| {
-            let age_secs = (now - record.created_at).num_seconds().max(0) as f64;
-            let recency = (1.0 - (age_secs / opts.decay_window_secs).min(1.0)).max(0.0) as f32;
-            let final_score = alpha * similarity + (1.0 - alpha) * recency;
-            ScoredRecord {
-                record: ScoredRecordData::from(&record),
-                similarity,
-                recency,
-                final_score,
-            }
-        })
-        .collect();
+    let mut fetch_k = opts.top_k.saturating_mul(3).clamp(MIN_FETCH, MAX_FETCH);
+    let mut scored: Vec<ScoredRecord> = loop {
+        let scored: Vec<ScoredRecord> = db
+            .similar_to_vector(query_vec, fetch_k)?
+            .into_iter()
+            .filter(|(r, _)| r.table == table)
+            .filter(|(r, _)| opts.include_expired || !crate::ttl::is_record_expired(r))
+            .filter(|(r, _)| opts.include_superseded || !crate::ttl::is_record_superseded(r))
+            .filter(|(r, _)| crate::agent_visible(agent, &r.data))
+            .map(|(record, similarity)| {
+                let age_secs = (now - record.created_at).num_seconds().max(0) as f64;
+                let recency = (1.0 - (age_secs / opts.decay_window_secs).min(1.0)).max(0.0) as f32;
+                let final_score = alpha * similarity + (1.0 - alpha) * recency;
+                ScoredRecord {
+                    record: ScoredRecordData::from(&record),
+                    similarity,
+                    recency,
+                    final_score,
+                }
+            })
+            .collect();
+        if scored.len() >= opts.top_k || fetch_k >= MAX_FETCH {
+            break scored;
+        }
+        // Exhaustion is judged against the index, never the resolved count:
+        // core drops hits whose record is gone and folds chunk hits into their
+        // source record, so a window that the index filled completely can
+        // still resolve to fewer rows than were asked for.
+        let size = match *index_size {
+            Some(n) => n,
+            None => *index_size.insert(vector_index_size(db)?),
+        };
+        if fetch_k >= size {
+            break scored;
+        }
+        fetch_k = fetch_k.saturating_mul(4).min(MAX_FETCH);
+    };
 
     scored.sort_by(|a, b| {
         b.final_score
@@ -141,8 +192,28 @@ pub fn recall(
     Ok(scored)
 }
 
+/// Entries in the default vector index — the most raw hits any search window
+/// can return. Without a vector index, fall back to the record count, which
+/// bounds the live entries (every indexed vector belongs to a stored record).
+fn vector_index_size(db: &Axil) -> Result<usize> {
+    match db.vector_count() {
+        Some(count) => Ok(count),
+        None => Ok(db.info()?.total_records),
+    }
+}
+
 /// Cross-memory query: searches all memory types, returns tagged results.
 pub fn remember(db: &Axil, query: &str, opts: RecallOptions) -> Result<Vec<RecallResult>> {
+    remember_scoped(db, query, opts, None)
+}
+
+/// [`remember`] restricted to what `agent` may see; `None` sees everything.
+pub(crate) fn remember_scoped(
+    db: &Axil,
+    query: &str,
+    opts: RecallOptions,
+    agent: Option<&str>,
+) -> Result<Vec<RecallResult>> {
     let mut all_results = Vec::new();
 
     // Use a larger per-type limit so the global merge has enough candidates.
@@ -152,14 +223,33 @@ pub fn remember(db: &Axil, query: &str, opts: RecallOptions) -> Result<Vec<Recal
         ..opts.clone()
     };
 
+    // One embedding serves every memory type.
+    let mut query_vec: Option<Vec<f32>> = None;
+    let mut index_size = None;
+
     for memory_type in MemoryType::all() {
         let table = memory_type.table_name();
 
         if db.count(table).unwrap_or(0) == 0 {
             continue;
         }
+        if !db.has_vector_index() {
+            break;
+        }
+        if query_vec.is_none() {
+            query_vec = Some(db.embed_query(query)?);
+        }
+        let vec = query_vec.as_deref().unwrap_or(&[]);
 
-        let results = recall(db, query, table, &per_type_opts, *memory_type)?;
+        let results = recall_by_vector(
+            db,
+            vec,
+            table,
+            &per_type_opts,
+            *memory_type,
+            agent,
+            &mut index_size,
+        )?;
 
         for scored in results {
             let tokens = estimate_tokens(&scored.record.data);
@@ -239,5 +329,106 @@ mod tests {
         let json = serde_json::to_string(&sr).unwrap();
         assert!(json.contains("similarity"));
         assert!(json.contains("final_score"));
+    }
+
+    use crate::test_support::{vector_db, MockVectors};
+    use crate::types::TABLE_ENTITIES;
+
+    /// Five semantic facts that all match `alpha`, but only weakly.
+    fn store_weak_matches(db: &Axil) {
+        let semantic = crate::SemanticMemory::new(db);
+        for i in 0..5 {
+            semantic
+                .know(
+                    &format!("svc{i}"),
+                    &format!("alpha detail{i} extra{i}"),
+                    None,
+                )
+                .unwrap();
+        }
+    }
+
+    /// `n` foreign-table rows whose vectors match `query` exactly, so they
+    /// outrank every memory record in the ANN window.
+    fn crowd_window(db: &Axil, mock: &MockVectors, query: &str, n: usize) {
+        let v = mock.vector_for(query);
+        let rows = (0..n)
+            .map(|i| serde_json::json!({ "note": format!("foreign {i}") }))
+            .collect();
+        for r in db.insert_batch("_foreign", rows).unwrap() {
+            db.add_vector(&r.id, &v).unwrap();
+        }
+    }
+
+    #[test]
+    fn recall_grows_past_a_window_crowded_by_dead_and_foreign_hits() {
+        let (db, mock, _dir) = vector_db();
+        store_weak_matches(&db);
+        // The first window (20) holds 19 foreign rows plus one index entry
+        // whose record is gone — core drops it, so the window resolves to 19
+        // rows, none of them in the target table.
+        crowd_window(&db, &mock, "alpha", 19);
+        mock.plant_orphan(mock.vector_for("alpha"));
+
+        let opts = RecallOptions {
+            top_k: 5,
+            ..Default::default()
+        };
+        let hits = recall(&db, "alpha", TABLE_ENTITIES, &opts, MemoryType::Semantic).unwrap();
+        assert_eq!(
+            hits.len(),
+            5,
+            "a short resolved window is not an exhausted index"
+        );
+        assert!(hits.iter().all(|h| h.record.table == TABLE_ENTITIES));
+    }
+
+    #[test]
+    fn recall_embeds_the_query_once_across_window_growth() {
+        let (db, mock, _dir) = vector_db();
+        store_weak_matches(&db);
+        crowd_window(&db, &mock, "alpha", 100);
+
+        let before = mock.embed_calls();
+        let opts = RecallOptions {
+            top_k: 5,
+            ..Default::default()
+        };
+        let hits = recall(&db, "alpha", TABLE_ENTITIES, &opts, MemoryType::Semantic).unwrap();
+        assert_eq!(hits.len(), 5);
+        assert_eq!(mock.embed_calls() - before, 1, "one embedding per recall");
+    }
+
+    #[test]
+    fn remember_embeds_the_query_once_across_memory_types() {
+        let (db, mock, _dir) = vector_db();
+        store_weak_matches(&db);
+        crate::ProceduralMemory::new(&db)
+            .learn("alpha-runbook", "alpha steps", None)
+            .unwrap();
+
+        let before = mock.embed_calls();
+        let results = remember(&db, "alpha", RecallOptions::default()).unwrap();
+        assert!(results
+            .iter()
+            .any(|r| r.memory_type == MemoryType::Semantic));
+        assert!(results
+            .iter()
+            .any(|r| r.memory_type == MemoryType::Procedural));
+        assert_eq!(mock.embed_calls() - before, 1, "one embedding per remember");
+    }
+
+    #[test]
+    fn recall_stops_when_the_index_is_exhausted() {
+        let (db, _mock, _dir) = vector_db();
+        store_weak_matches(&db);
+        // Fewer matches than asked for: the loop must terminate with what the
+        // index holds rather than spin on an under-full window.
+        let opts = RecallOptions {
+            top_k: 50,
+            ..Default::default()
+        };
+        let hits = recall(&db, "alpha", TABLE_ENTITIES, &opts, MemoryType::Semantic).unwrap();
+        assert_eq!(hits.len(), 5);
     }
 }

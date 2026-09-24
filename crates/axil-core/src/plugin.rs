@@ -128,6 +128,25 @@ pub trait VectorIndex: Engine {
         0
     }
 
+    /// Entries present in durable storage that could not be loaded into the
+    /// live index at open (unparsable id, wrong dimensions, non-finite
+    /// values). Default 0 so backends that don't track this keep compiling;
+    /// surfaced by `doctor` as a healable anomaly.
+    fn skipped_at_load(&self) -> usize {
+        0
+    }
+
+    /// Delete the durable entries counted by
+    /// [`skipped_at_load`](Self::skipped_at_load) and reset that count to 0.
+    ///
+    /// Such entries are invisible to search and can never load, so removing
+    /// them loses nothing; a live record whose entry was removed can be
+    /// re-embedded afterwards. Returns the number of entries removed. Default
+    /// `Ok(0)` for backends that don't track unloadable entries.
+    fn purge_unloadable(&self) -> Result<usize> {
+        Ok(0)
+    }
+
     /// All vector IDs currently in the index.
     fn all_ids(&self) -> Result<Vec<RecordId>> {
         Ok(Vec::new())

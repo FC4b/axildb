@@ -22,7 +22,9 @@ pub use axil_atlas_proto::{
     BootstrapSnapshot, CompoundQuery, CompoundResult, Locator, Op, OpKind, PullQuery, PullResponse,
     PushBatch, PushResponse, Tier,
 };
-pub use select::{select_distillate, SelectOpts, DEFAULT_PROMOTED_TABLES};
+pub use select::{
+    select_distillate, select_distillate_with_decay, SelectOpts, DEFAULT_PROMOTED_TABLES,
+};
 
 #[cfg(feature = "http")]
 pub mod client;

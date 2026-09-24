@@ -182,6 +182,10 @@ impl McpServer {
     /// Missing companions are silently skipped — tools that require an
     /// absent plugin return a structured error at call time instead of
     /// failing at open.
+    ///
+    /// Handle settings from the database directory's `axil.toml` (such as
+    /// `[healing] event_log`) are applied by `AxilBuilder::build` itself, as
+    /// on every other open path.
     pub fn open(path: &Path) -> anyhow::Result<Self> {
         let builder = attach_detected_engines(Axil::open(path))?;
         let db = builder.build()?;
@@ -199,7 +203,28 @@ impl McpServer {
     /// Run the MCP server, reading JSON-RPC from stdin and writing responses to stdout.
     ///
     /// This method runs until stdin is closed or a shutdown request is received.
+    ///
+    /// Pipelined requests keep their arrival order wherever it matters:
+    /// read-only tool calls overlap, while a state-mutating call waits for
+    /// every earlier request and holds back every later one. A handler that
+    /// panics is answered with a JSON-RPC internal error for its id.
+    ///
+    /// A read from tokio's stdin can't be cancelled, so one stays parked on
+    /// the blocking pool after this returns; a host that owns the runtime
+    /// should end it with `shutdown_background` (as [`McpAdapter`] does)
+    /// rather than a plain drop, which would wait for the next input line.
     pub async fn run(&self) -> anyhow::Result<()> {
+        self.serve(tokio::io::stdin(), tokio::io::stdout()).await
+    }
+
+    /// The transport-agnostic body of [`McpServer::run`]: read newline-delimited
+    /// JSON-RPC frames from `input` and write responses to `output` until EOF or
+    /// a `shutdown` request.
+    async fn serve<R, W>(&self, input: R, output: W) -> anyhow::Result<()>
+    where
+        R: tokio::io::AsyncRead + Unpin + Send + 'static,
+        W: tokio::io::AsyncWrite + Unpin,
+    {
         /// Per-message line cap (16 MB). Caps the malicious-client OOM
         /// vector where a single newline-less line is sent unbounded.
         /// A well-behaved JSON-RPC client emits one message per line
@@ -207,80 +232,143 @@ impl McpServer {
         /// the typical message is sub-kilobyte.
         const MAX_LINE_BYTES: u64 = 16 * 1024 * 1024;
 
-        let stdin = tokio::io::stdin();
-        let mut stdout = tokio::io::stdout();
-        // One persistent reader for the whole connection. A client that
-        // pipelines requests (several frames in one pipe chunk) gets them
-        // all buffered here; a per-iteration BufReader would drop the
-        // still-buffered frames on the floor when it goes out of scope,
-        // silently swallowing every request after the first.
-        let mut reader = BufReader::new(stdin);
+        // End of input needs no variant: the reader task drops its sender,
+        // which closes the channel.
+        enum Incoming {
+            Frame(String),
+            TooLarge,
+        }
+
+        let mut stdout = output;
+
+        // A dedicated reader task owns stdin so line reads never interleave
+        // with response writes; frames flow to the loop as messages.
+        let (in_tx, mut in_rx) = tokio::sync::mpsc::unbounded_channel::<Incoming>();
+        tokio::spawn(async move {
+            // One persistent reader for the whole connection. A client that
+            // pipelines requests (several frames in one pipe chunk) gets them
+            // all buffered here; a per-iteration BufReader would drop the
+            // still-buffered frames on the floor when it goes out of scope,
+            // silently swallowing every request after the first.
+            let mut reader = BufReader::new(input);
+            loop {
+                // Re-wrap with `take()` per iteration so each line read is
+                // hard-bounded without discarding the shared buffer.
+                let mut buf: Vec<u8> = Vec::with_capacity(4096);
+                let n = match (&mut reader)
+                    .take(MAX_LINE_BYTES)
+                    .read_until(b'\n', &mut buf)
+                    .await
+                {
+                    Ok(n) => n,
+                    Err(_) => break,
+                };
+                if n == 0 {
+                    break; // EOF
+                }
+                // If we read exactly MAX_LINE_BYTES without a trailing
+                // newline, the client is feeding us an unbounded line —
+                // surface a parse error and terminate the connection
+                // (the host should reconnect on the next tool call).
+                if n as u64 == MAX_LINE_BYTES && !buf.ends_with(b"\n") {
+                    let _ = in_tx.send(Incoming::TooLarge);
+                    break;
+                }
+                let line = String::from_utf8_lossy(&buf).to_string();
+                if in_tx.send(Incoming::Frame(line)).is_err() {
+                    break;
+                }
+            }
+        });
+
+        // Completed responses flow back through this channel: dispatch runs
+        // concurrently on the blocking pool, while every write stays
+        // serialized here. A slow tool call therefore no longer blocks the
+        // connection — later requests (and cancellations) are read while it
+        // runs. JSON-RPC responses carry their id, so replying out of order
+        // is well-defined for hosts.
+        let (resp_tx, mut resp_rx) = tokio::sync::mpsc::unbounded_channel::<JsonRpcResponse>();
+
+        // Requests are admitted in arrival order by a dispatcher task that
+        // keeps pipelined requests causally ordered: read-only requests overlap
+        // freely, but a state-mutating one runs only after everything before it
+        // has finished and before anything after it starts. A pipelined
+        // `store` → `recall` (or `delete` → `get`) observes the write.
+        let (req_tx, req_rx) = tokio::sync::mpsc::unbounded_channel::<JsonRpcRequest>();
+        tokio::spawn(dispatch_in_order(self.db.clone(), req_rx, resp_tx.clone()));
 
         loop {
-            // Re-wrap with `take()` per iteration so each line read is
-            // hard-bounded without discarding the shared buffer.
-            let mut buf: Vec<u8> = Vec::with_capacity(4096);
-            let n = (&mut reader)
-                .take(MAX_LINE_BYTES)
-                .read_until(b'\n', &mut buf)
-                .await?;
-            if n == 0 {
-                break; // EOF
-            }
-            // If we read exactly MAX_LINE_BYTES without a trailing
-            // newline, the client is feeding us an unbounded line —
-            // surface a parse error and terminate the connection
-            // (the host should reconnect on the next tool call).
-            let truncated = n as u64 == MAX_LINE_BYTES && !buf.ends_with(b"\n");
-            if truncated {
-                let resp = JsonRpcResponse::error(
-                    None,
-                    PARSE_ERROR,
-                    format!("line exceeds {MAX_LINE_BYTES}-byte cap"),
-                );
-                write_response(&mut stdout, &resp).await?;
-                break;
-            }
-            let line = match std::str::from_utf8(&buf) {
-                Ok(s) => s.trim().to_string(),
-                Err(_) => {
-                    let resp =
-                        JsonRpcResponse::error(None, PARSE_ERROR, "Parse error: invalid UTF-8");
-                    write_response(&mut stdout, &resp).await?;
+            tokio::select! {
+                biased;
+                // Prefer draining finished responses over reading new frames
+                // so a pipelining client gets replies as they complete.
+                maybe_resp = resp_rx.recv() => {
+                    if let Some(resp) = maybe_resp {
+                        write_response(&mut stdout, &resp).await?;
+                    }
                     continue;
                 }
-            };
-            if line.is_empty() {
-                continue;
-            }
+                incoming = in_rx.recv() => {
+                    let line = match incoming {
+                        // The reader task ended (stdin closed): stop reading.
+                        None => break,
+                        Some(Incoming::TooLarge) => {
+                            let resp = JsonRpcResponse::error(
+                                None,
+                                PARSE_ERROR,
+                                format!("line exceeds {MAX_LINE_BYTES}-byte cap"),
+                            );
+                            write_response(&mut stdout, &resp).await?;
+                            break;
+                        }
+                        Some(Incoming::Frame(line)) => line,
+                    };
 
-            // Parse the JSON-RPC message.
-            let request: JsonRpcRequest = match serde_json::from_str(&line) {
-                Ok(req) => req,
-                Err(_) => {
-                    let resp = JsonRpcResponse::error(None, PARSE_ERROR, "Parse error");
-                    write_response(&mut stdout, &resp).await?;
-                    continue;
+                    let line = line.trim().to_string();
+                    if line.is_empty() {
+                        continue;
+                    }
+
+                    // Parse the JSON-RPC message.
+                    let request: JsonRpcRequest = match serde_json::from_str(&line) {
+                        Ok(req) => req,
+                        Err(_) => {
+                            let resp =
+                                JsonRpcResponse::error(None, PARSE_ERROR, "Parse error");
+                            write_response(&mut stdout, &resp).await?;
+                            continue;
+                        }
+                    };
+
+                    // Shutdown exits the loop immediately; the reply is written
+                    // inline so it can never race the process teardown.
+                    if request.method == "shutdown" {
+                        let resp =
+                            JsonRpcResponse::success(request.id.clone(), serde_json::Value::Null);
+                        write_response(&mut stdout, &resp).await?;
+                        break;
+                    }
+
+                    // Notifications (no id) get no response.
+                    if request.id.is_none() {
+                        continue;
+                    }
+
+                    // The dispatcher answers through `resp_tx` whenever the
+                    // request completes.
+                    if req_tx.send(request).is_err() {
+                        break;
+                    }
                 }
-            };
-
-            let is_shutdown = request.method == "shutdown";
-
-            // Dispatch based on method.
-            let response = self.handle_request(&request);
-
-            // Notifications (no id) get no response.
-            if request.id.is_none() && !is_shutdown {
-                continue;
             }
+        }
 
-            if let Some(resp) = response {
-                write_response(&mut stdout, &resp).await?;
-            }
-
-            if is_shutdown {
-                break;
-            }
+        // Drain in-flight work before returning: a client that pipelines a
+        // request and closes stdin still gets its answer.
+        drop(req_tx);
+        drop(resp_tx);
+        while let Some(resp) = resp_rx.recv().await {
+            write_response(&mut stdout, &resp).await?;
         }
 
         Ok(())
@@ -314,6 +402,10 @@ impl McpServer {
         match req.method.as_str() {
             "initialize" => Some(self.handle_initialize(req)),
             "initialized" => None, // Notification, no response.
+            // Client-side cancellation notice: the work is already dispatched
+            // concurrently, so there is nothing to unwind here — the result
+            // for a cancelled id is simply discarded by the host.
+            "notifications/cancelled" => None,
             "shutdown" => Some(JsonRpcResponse::success(req.id.clone(), Value::Null)),
             "tools/list" => Some(self.handle_tools_list(req)),
             "tools/call" => Some(self.handle_tools_call(req)),
@@ -475,8 +567,13 @@ impl Adapter for McpAdapter {
         // builds no ambient runtime, so this never nests.
         let rt = tokio::runtime::Runtime::new()
             .map_err(|e| AxilError::plugin(format!("tokio runtime init failed: {e}")))?;
-        rt.block_on(server.run())
-            .map_err(|e| AxilError::plugin(format!("MCP server error: {e}")))
+        let served = rt.block_on(server.run());
+        // The stdin reader always has a read parked on tokio's blocking pool,
+        // and that read can't be cancelled: dropping the runtime would wait on
+        // it, so a client that sends `shutdown` but keeps stdin open would
+        // never see the process exit. Every reply is already written by now.
+        rt.shutdown_background();
+        served.map_err(|e| AxilError::plugin(format!("MCP server error: {e}")))
     }
 }
 
@@ -490,6 +587,87 @@ async fn write_response<W: AsyncWriteExt + Unpin>(
     writer.write_all(b"\n").await?;
     writer.flush().await?;
     Ok(())
+}
+
+/// Run requests in arrival order under a readers/writer discipline.
+///
+/// Consecutive read-only requests (see [`is_read_only_request`]) run
+/// concurrently. Any other request is a barrier: it waits for every earlier
+/// request to finish, and nothing admitted after it starts until it has.
+async fn dispatch_in_order(
+    db: Arc<Axil>,
+    mut requests: tokio::sync::mpsc::UnboundedReceiver<JsonRpcRequest>,
+    replies: tokio::sync::mpsc::UnboundedSender<JsonRpcResponse>,
+) {
+    let mut reads = tokio::task::JoinSet::new();
+    while let Some(request) = requests.recv().await {
+        // Reap finished reads so a long read-only stream doesn't pile up handles.
+        while reads.try_join_next().is_some() {}
+        if is_read_only_request(&request) {
+            reads.spawn(answer(db.clone(), request, replies.clone()));
+        } else {
+            while reads.join_next().await.is_some() {}
+            answer(db.clone(), request, replies.clone()).await;
+        }
+    }
+    // Dropping a JoinSet aborts its tasks, which would lose their replies.
+    while reads.join_next().await.is_some() {}
+}
+
+/// Run one request on the blocking pool and send its reply.
+///
+/// A panicking handler still gets an answer — a JSON-RPC internal error for
+/// its id — so the client never waits out a timeout for a reply that would
+/// otherwise never come.
+async fn answer(
+    db: Arc<Axil>,
+    request: JsonRpcRequest,
+    replies: tokio::sync::mpsc::UnboundedSender<JsonRpcResponse>,
+) {
+    let id = request.id.clone();
+    let handled =
+        tokio::task::spawn_blocking(move || McpServer { db }.handle_request(&request)).await;
+    let response = match handled {
+        Ok(response) => response,
+        Err(e) => {
+            let reason = match e.try_into_panic() {
+                Ok(payload) => {
+                    let detail = payload
+                        .downcast_ref::<&str>()
+                        .map(|s| s.to_string())
+                        .or_else(|| payload.downcast_ref::<String>().cloned())
+                        .unwrap_or_else(|| "non-string panic payload".into());
+                    format!("request handler panicked: {detail}")
+                }
+                Err(_) => "request handler was cancelled".into(),
+            };
+            Some(JsonRpcResponse::error(
+                id,
+                INTERNAL_ERROR,
+                format!("internal error: {reason}"),
+            ))
+        }
+    };
+    if let Some(response) = response {
+        let _ = replies.send(response);
+    }
+}
+
+/// Whether `request` leaves the database untouched, so it may overlap with
+/// other read-only requests. Anything not positively classified — an unknown
+/// method, an unknown or plugin tool — counts as mutating, which only ever
+/// costs concurrency, never ordering.
+fn is_read_only_request(request: &JsonRpcRequest) -> bool {
+    match request.method.as_str() {
+        "initialize" | "tools/list" => true,
+        "tools/call" => {
+            let params = request.params.as_ref();
+            let name = params.and_then(|p| p.get("name")).and_then(Value::as_str);
+            let args = params.and_then(|p| p.get("arguments")).unwrap_or(&Value::Null);
+            name.is_some_and(|name| tools::is_read_only_call(name, args))
+        }
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -630,5 +808,194 @@ mod adapter_tests {
         let db = Arc::new(Axil::open(dir.path().join("m.axil")).build().unwrap());
         let mut a = McpAdapter::new();
         assert!(a.bind(db).is_ok());
+    }
+
+    #[cfg(feature = "event-log")]
+    #[test]
+    fn open_honors_event_log_config() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("axil.toml"), "[healing]\nevent_log = true\n").unwrap();
+        let server = McpServer::open(&dir.path().join("m.axil")).unwrap();
+        assert!(server.db.event_log_enabled());
+    }
+}
+
+#[cfg(test)]
+mod serve_tests {
+    use super::*;
+    use axil_core::{Dispatch, Extension, McpCall, McpSurface, McpTool};
+    use serde_json::json;
+    use std::collections::HashMap;
+    use std::sync::{Condvar, Mutex};
+    use std::time::Duration;
+
+    /// How long a `slow` probe holds its request open — long enough that an
+    /// unordered follow-up request would reliably finish first.
+    const HOLD: Duration = Duration::from_millis(300);
+
+    /// Extension that claims a few tool names to make request scheduling
+    /// observable. It runs ahead of the built-in handlers and, except where it
+    /// answers itself, falls through to them.
+    #[derive(Default)]
+    struct Probe {
+        arrivals: Mutex<usize>,
+        arrived: Condvar,
+    }
+
+    impl Extension for Probe {
+        fn id(&self) -> &str {
+            "probe"
+        }
+
+        fn mcp_tools(&self) -> Option<McpSurface> {
+            let tool = |name: &str| McpTool::new(name, "scheduling probe", json!({}));
+            Some(McpSurface::new(vec![
+                tool("boom"),
+                tool("recall"),
+                tool("store"),
+                tool("list"),
+            ]))
+        }
+
+        fn handle_mcp(&self, _db: &Axil, call: &McpCall) -> axil_core::Result<Dispatch<Value>> {
+            let slow = call.params.get("slow").is_some();
+            match call.tool.as_str() {
+                "boom" => panic!("probe: mutating handler panicked"),
+                "recall" if call.params.get("panic").is_some() => {
+                    panic!("probe: read-only handler panicked")
+                }
+                // Rendezvous: report whether a second `recall` arrived while
+                // this one was still running.
+                "recall" => {
+                    let mut n = self.arrivals.lock().unwrap();
+                    *n += 1;
+                    self.arrived.notify_all();
+                    let (_n, wait) = self
+                        .arrived
+                        .wait_timeout_while(n, Duration::from_secs(5), |n| *n < 2)
+                        .unwrap();
+                    Ok(Dispatch::Handled(json!({"overlapped": !wait.timed_out()})))
+                }
+                "store" | "list" if slow => {
+                    std::thread::sleep(HOLD);
+                    Ok(Dispatch::NotHandled)
+                }
+                _ => Ok(Dispatch::NotHandled),
+            }
+        }
+    }
+
+    fn call(id: u64, tool: &str, arguments: Value) -> String {
+        json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "tools/call",
+            "params": {"name": tool, "arguments": arguments},
+        })
+        .to_string()
+    }
+
+    /// Pipeline `frames` into a fresh server in one write, close the input, and
+    /// collect every response by id once the server has drained.
+    async fn exchange(frames: &[String]) -> HashMap<u64, Value> {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Axil::open(dir.path().join("serve.axil"))
+            .with_extension(Probe::default())
+            .build()
+            .unwrap();
+        let server = McpServer::new(db);
+        let input = format!("{}\n", frames.join("\n"));
+        let mut output = Vec::new();
+        server
+            .serve(std::io::Cursor::new(input.into_bytes()), &mut output)
+            .await
+            .unwrap();
+        String::from_utf8(output)
+            .unwrap()
+            .lines()
+            .map(|line| {
+                let v: Value = serde_json::from_str(line).unwrap();
+                (v["id"].as_u64().expect("response carries its id"), v)
+            })
+            .collect()
+    }
+
+    fn reply(replies: &HashMap<u64, Value>, id: u64) -> &Value {
+        replies
+            .get(&id)
+            .unwrap_or_else(|| panic!("no response for request {id}: {replies:?}"))
+    }
+
+    /// The tool payload of a successful `tools/call` response.
+    fn payload(replies: &HashMap<u64, Value>, id: u64) -> Value {
+        let resp = reply(replies, id);
+        let text = resp["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_else(|| panic!("request {id} did not succeed: {resp}"));
+        serde_json::from_str(text).unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn handler_panic_answers_with_internal_error() {
+        let replies = exchange(&[
+            call(1, "boom", json!({})),
+            call(2, "recall", json!({"query": "q", "panic": true})),
+            call(3, "list", json!({"table": "notes"})),
+        ])
+        .await;
+        for id in [1, 2] {
+            assert_eq!(
+                reply(&replies, id)["error"]["code"],
+                INTERNAL_ERROR,
+                "a panicking handler must still answer request {id}"
+            );
+        }
+        assert_eq!(payload(&replies, 3), json!([]), "the server keeps serving");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn read_after_write_observes_the_write() {
+        let replies = exchange(&[
+            call(1, "store", json!({"table": "notes", "data": {"n": 1}, "slow": true})),
+            call(2, "list", json!({"table": "notes"})),
+        ])
+        .await;
+        assert!(reply(&replies, 1)["result"].is_object());
+        assert_eq!(
+            payload(&replies, 2).as_array().unwrap().len(),
+            1,
+            "a read pipelined after a write must not run before it"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn write_does_not_overtake_an_earlier_read() {
+        let replies = exchange(&[
+            call(1, "list", json!({"table": "notes", "slow": true})),
+            call(2, "store", json!({"table": "notes", "data": {"n": 1}})),
+        ])
+        .await;
+        assert_eq!(
+            payload(&replies, 1),
+            json!([]),
+            "a write pipelined after a read must wait for it"
+        );
+        assert!(reply(&replies, 2)["result"].is_object());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn read_only_requests_still_overlap() {
+        let replies = exchange(&[
+            call(1, "recall", json!({"query": "a"})),
+            call(2, "recall", json!({"query": "b"})),
+        ])
+        .await;
+        for id in [1, 2] {
+            assert_eq!(
+                payload(&replies, id)["overlapped"],
+                true,
+                "read-only request {id} ran alone"
+            );
+        }
     }
 }

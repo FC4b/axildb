@@ -223,6 +223,11 @@ fn main() {
     eprintln!("[2/3] rebuilding HNSW index...");
     let rebuild_start = Instant::now();
     plugin.rebuild().expect("rebuild");
+    // The HNSW graph is built lazily by the first search that needs it, so
+    // that search belongs to the rebuild cost, not to the query latencies.
+    plugin
+        .search(&make_vector(args.dims, 2_000_000), 10)
+        .expect("graph-building search");
     let rebuild_ms = rebuild_start.elapsed().as_millis();
 
     // 3. Search phase — generate query vectors once, reuse across top_k runs.

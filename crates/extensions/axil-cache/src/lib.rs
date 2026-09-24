@@ -46,7 +46,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use axil_core::{Axil, AxilError, Op, Record, Result};
+use axil_core::{Axil, AxilError, Op, Record, RecordId, Result};
 
 /// Table holding cached question/answer pairs.
 ///
@@ -181,7 +181,78 @@ pub fn put(
     // simply won't match this row semantically. The put still succeeds.
     let _ = db.embed_field(&record.id, FIELD_QUESTION);
     let _ = db.index_text(&record.id, FIELD_QUESTION, &req.question);
+    enforce_capacity(db, &record.id)?;
     Ok(record)
+}
+
+/// Retention bound for the cache table. TTL is optional, so without a cap the
+/// table grows without limit; once it exceeds this many entries, `put` evicts
+/// expired entries first, then the least-recently-used ones.
+const MAX_CACHE_ENTRIES: usize = 1024;
+
+/// Bring `_cache_entries` back under [`MAX_CACHE_ENTRIES`] after a put.
+///
+/// Expired entries go first — they can never be served, however popular they
+/// once were. Any remaining excess is evicted least-recently-used, where
+/// "used" is the last hit (or creation, for a never-hit entry). Raw hit counts
+/// are deliberately not the key: ranking by them evicts the just-inserted
+/// entry (it has zero hits) once every resident has been hit, so the cache
+/// stops learning, and it pins entries that were popular long ago forever.
+/// `keep` — the entry this put just stored — is never evicted.
+fn enforce_capacity(db: &Axil, keep: &RecordId) -> std::result::Result<(), CacheError> {
+    let entries = db.list(TABLE_CACHE_ENTRIES)?;
+    if entries.len() <= MAX_CACHE_ENTRIES {
+        return Ok(());
+    }
+    let mut live = entries.len();
+
+    let now = Utc::now();
+    let (expired, mut candidates): (Vec<Record>, Vec<Record>) = entries
+        .into_iter()
+        .filter(|r| r.id != *keep)
+        .partition(|r| is_expired(&r.data, now));
+    for record in &expired {
+        if db.delete(&record.id).unwrap_or(false) {
+            live -= 1;
+        }
+    }
+    if live <= MAX_CACHE_ENTRIES {
+        return Ok(());
+    }
+
+    // Least-recently-used first; fewer hits breaks a tie.
+    candidates.sort_by_cached_key(|r| {
+        let hits = r
+            .data
+            .get("hit_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        (last_used(r), hits)
+    });
+    for record in candidates {
+        if live <= MAX_CACHE_ENTRIES {
+            break;
+        }
+        if db.delete(&record.id).unwrap_or(false) {
+            live -= 1;
+        }
+    }
+    Ok(())
+}
+
+/// When an entry was last useful: its last hit, else when it was cached.
+fn last_used(record: &Record) -> DateTime<Utc> {
+    let parse = |key: &str| {
+        record
+            .data
+            .get(key)
+            .and_then(|v| v.as_str())
+            .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+            .map(|dt| dt.with_timezone(&Utc))
+    };
+    parse("last_hit_at")
+        .or_else(|| parse("created_at"))
+        .unwrap_or(record.created_at)
 }
 
 /// A cache hit surfaced to the caller.
@@ -345,11 +416,20 @@ fn ranked_candidates(db: &Axil, question: &str) -> Result<Vec<(Record, f32)>> {
                 else {
                     continue;
                 };
-                match db.embed_query(entry_question) {
-                    Ok(entry_vec) => out.push((record, cosine(&query_vec, &entry_vec))),
-                    // Skip an entry we cannot embed rather than fail the read.
-                    Err(_) => continue,
-                }
+                // `put` persists the question embedding — reuse it instead of
+                // re-embedding every stored question on every lookup (that
+                // made each read cost N model calls; a lookup should spend
+                // exactly one, on the query itself).
+                let entry_vec = match db.get_vector(&record.id) {
+                    Ok(Some(v)) if !v.is_empty() && v.iter().all(|f| f.is_finite()) => v,
+                    _ => match db.embed_query(entry_question) {
+                        // Legacy entry stored before embeddings were persisted.
+                        Ok(v) => v,
+                        // Skip an entry we cannot embed rather than fail the read.
+                        Err(_) => continue,
+                    },
+                };
+                out.push((record, cosine(&query_vec, &entry_vec)));
             }
             out.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
             return Ok(out);
@@ -946,5 +1026,118 @@ mod tests {
             Err(CacheError::BadTimestamp(_))
         ));
         assert_eq!(db.list(TABLE_CACHE_ENTRIES).unwrap().len(), 0);
+    }
+
+    /// Fill the cache to exactly `MAX_CACHE_ENTRIES` in one batch (bypassing
+    /// `put`, so no eviction runs while seeding). `row(i)` supplies each
+    /// entry's `(hit_count, last_hit_at, valid_until)`.
+    fn seed_full_cache(
+        db: &Axil,
+        row: impl Fn(usize) -> (u64, DateTime<Utc>, Option<DateTime<Utc>>),
+    ) -> Vec<Record> {
+        let created = Utc::now() - chrono::Duration::days(60);
+        let items: Vec<Value> = (0..MAX_CACHE_ENTRIES)
+            .map(|i| {
+                let (hits, last_hit, valid_until) = row(i);
+                let mut data = json!({
+                    "question": format!("seeded question {i}"),
+                    "answer": "seeded answer",
+                    "created_at": created.to_rfc3339(),
+                    "hit_count": hits,
+                    "last_hit_at": last_hit.to_rfc3339(),
+                    "code_refs": [],
+                });
+                if let Some(vu) = valid_until {
+                    data["valid_until"] = json!(vu.to_rfc3339());
+                }
+                data
+            })
+            .collect();
+        db.insert_batch(TABLE_CACHE_ENTRIES, items).unwrap()
+    }
+
+    #[test]
+    fn full_cache_put_keeps_the_new_entry() {
+        let (db, dir) = plain_db();
+        // Every resident entry has been served at least once.
+        seed_full_cache(&db, |i| {
+            (
+                1 + i as u64 % 5,
+                Utc::now() - chrono::Duration::hours(1),
+                None,
+            )
+        });
+
+        let first = put(&db, &put_req("brand new question", "fresh"), dir.path()).unwrap();
+        assert!(
+            db.get(&first.id).unwrap().is_some(),
+            "put must never evict the entry it just stored"
+        );
+        assert_eq!(
+            db.list(TABLE_CACHE_ENTRIES).unwrap().len(),
+            MAX_CACHE_ENTRIES
+        );
+
+        // The cache keeps learning: the next put survives too, and the entry
+        // stored before it is not the one that gets pushed out.
+        let second = put(&db, &put_req("another new question", "fresh"), dir.path()).unwrap();
+        assert!(db.get(&second.id).unwrap().is_some());
+        assert!(db.get(&first.id).unwrap().is_some());
+        assert_eq!(
+            db.list(TABLE_CACHE_ENTRIES).unwrap().len(),
+            MAX_CACHE_ENTRIES
+        );
+    }
+
+    #[test]
+    fn expired_entries_are_evicted_before_live_ones() {
+        let (db, dir) = plain_db();
+        let now = Utc::now();
+        // Entry 0 is the "best" by any usage measure — most hits, most recent
+        // use — but its TTL has passed, so it is worthless.
+        let seeded = seed_full_cache(&db, |i| {
+            if i == 0 {
+                (500, now, Some(now - chrono::Duration::hours(1)))
+            } else {
+                (1, now - chrono::Duration::days(10), None)
+            }
+        });
+
+        let fresh = put(&db, &put_req("brand new question", "fresh"), dir.path()).unwrap();
+        assert!(db.get(&fresh.id).unwrap().is_some());
+        assert!(
+            db.get(&seeded[0].id).unwrap().is_none(),
+            "the expired entry must be evicted first"
+        );
+        // Only the expired entry was evicted — every live seeded entry stays.
+        for record in &seeded[1..] {
+            assert!(db.get(&record.id).unwrap().is_some());
+        }
+    }
+
+    #[test]
+    fn stale_high_hit_entries_are_eventually_evicted() {
+        let (db, dir) = plain_db();
+        let now = Utc::now();
+        // Entry 0 was popular long ago and has not been used since; everything
+        // else is in active (if lighter) use.
+        let seeded = seed_full_cache(&db, |i| {
+            if i == 0 {
+                (1_000, now - chrono::Duration::days(90), None)
+            } else {
+                (1, now - chrono::Duration::minutes(i as i64 % 60), None)
+            }
+        });
+
+        let fresh = put(&db, &put_req("brand new question", "fresh"), dir.path()).unwrap();
+        assert!(db.get(&fresh.id).unwrap().is_some());
+        assert!(
+            db.get(&seeded[0].id).unwrap().is_none(),
+            "a long-unused entry must not be pinned forever by old hits"
+        );
+        assert_eq!(
+            db.list(TABLE_CACHE_ENTRIES).unwrap().len(),
+            MAX_CACHE_ENTRIES
+        );
     }
 }

@@ -156,6 +156,13 @@ pub struct AxilBuilder {
     vector_space_factory: Option<Arc<dyn VectorSpaceFactory>>,
     /// registered Tier-2 Extensions.
     extensions: Vec<Arc<dyn Extension>>,
+    /// Per-table lifecycle policy override. `None` = load from the nearest
+    /// `axil.toml` at build time.
+    lifecycle: Option<crate::config::LifecycleConfig>,
+    /// Auto-supersede similarity threshold override. `None` = load
+    /// `healing.supersede_similarity_threshold` from the nearest `axil.toml`
+    /// at build time (default 0.92).
+    supersede_threshold: Option<f32>,
     /// Set by FTS plugin when schema migration required a rebuild.
     pub needs_fts_reindex: bool,
     /// Open the core store read-only (no single-writer lock), serving committed
@@ -224,6 +231,17 @@ pub trait VectorSpaceFactory: Send + Sync {
     /// index — listings call this per space, so it has to stay proportional
     /// to metadata, not store size. Errors if the space does not exist.
     fn space_meta(&self, main_path: &Path, space: &str) -> Result<(usize, usize)>;
+
+    /// Remove `id`'s vector from a named space that is not currently open,
+    /// if the space holds one.
+    ///
+    /// Record deletes fan out to every named space, so this runs once per
+    /// space per delete. The default opens the space — loading every vector —
+    /// and deletes through the index; engines with a durable store should
+    /// override it to delete the entry directly.
+    fn remove_from_space(&self, main_path: &Path, space: &str, id: &RecordId) -> Result<()> {
+        self.open_space(main_path, space, None)?.on_record_delete(id)
+    }
 }
 
 /// True if `name` is a valid vector-space name (`[a-z0-9_-]{1,32}`).
@@ -332,6 +350,27 @@ impl AxilBuilder {
     /// Set LLM configuration (limits, pricing, etc.).
     pub fn with_llm_config(mut self, config: crate::llm::LlmConfig) -> Self {
         self.llm_config = config;
+        self
+    }
+
+    /// Set the per-table lifecycle policy explicitly.
+    ///
+    /// When not called, [`AxilBuilder::build`] loads `[lifecycle]` from the
+    /// `axil.toml` nearest the database file, so CLI/MCP/library opens all
+    /// honor the same policy without extra wiring.
+    pub fn with_lifecycle(mut self, lifecycle: crate::config::LifecycleConfig) -> Self {
+        self.lifecycle = Some(lifecycle);
+        self
+    }
+
+    /// Set the auto-supersede similarity threshold explicitly (0.0–1.0;
+    /// values above 1.0 effectively disable auto-supersede).
+    ///
+    /// When not called, [`AxilBuilder::build`] loads
+    /// `healing.supersede_similarity_threshold` from the `axil.toml` nearest
+    /// the database file (default 0.92).
+    pub fn with_supersede_threshold(mut self, threshold: f32) -> Self {
+        self.supersede_threshold = Some(threshold);
         self
     }
 
@@ -470,6 +509,38 @@ impl AxilBuilder {
         let llm_rate_limiter = Arc::new(crate::llm::LlmRateLimiter::new(
             self.llm_config.limits.clone(),
         ));
+        // Resolve lifecycle policy + supersede threshold: an explicit builder
+        // value wins; otherwise the `axil.toml` nearest the database governs
+        // (same walk-up search the CLI uses), so every open path — CLI, MCP,
+        // embedded — enforces the same policy.
+        let config_dir = self.path.parent().unwrap_or_else(|| Path::new("."));
+        let (lifecycle, lifecycle_warnings) = match self.lifecycle {
+            Some(explicit) => (explicit, Vec::new()),
+            None => {
+                let loaded = crate::config::load_lifecycle_checked_from(config_dir);
+                warn_config_once(&loaded.warnings);
+                (loaded.config, loaded.warnings)
+            }
+        };
+        // The same file supplies the handle's other tunables: the event log
+        // and the slow-query threshold have no builder override, so every open
+        // path picks them up here (the post-build setters still override).
+        let file_config = match crate::config::load_config_from(config_dir) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                warn_config_once(&[format!(
+                    "{e}; every setting in that file is ignored and defaults apply \
+                     ([lifecycle] entries still fail safe)"
+                )]);
+                crate::config::AxilConfig::default()
+            }
+        };
+        let supersede_threshold = self
+            .supersede_threshold
+            .unwrap_or(file_config.healing.supersede_similarity_threshold as f32);
+        let slow_query_threshold_ms = file_config.debug.slow_query_threshold_ms as f64;
+        #[cfg(feature = "event-log")]
+        let event_log_enabled = file_config.healing.event_log;
         let db = Axil {
             path: self.path,
             storage,
@@ -485,14 +556,17 @@ impl AxilBuilder {
             metrics: Arc::new(Metrics::new()),
             vector_space_factory: self.vector_space_factory,
             vector_space_cache: std::sync::RwLock::new(std::collections::HashMap::new()),
-            slow_query_threshold_ms: 100.0,
+            slow_query_threshold_ms,
             audit_enabled: std::sync::atomic::AtomicBool::new(false),
             log_counter: std::sync::atomic::AtomicU64::new(0),
             feedback_store: crate::feedback::FeedbackStore::new(),
             canonical_publisher: self.canonical_publisher,
             extensions: std::sync::RwLock::new(self.extensions),
+            lifecycle,
+            lifecycle_warnings,
+            supersede_threshold,
             #[cfg(feature = "event-log")]
-            event_log_enabled: std::sync::atomic::AtomicBool::new(false),
+            event_log_enabled: std::sync::atomic::AtomicBool::new(event_log_enabled),
             #[cfg(feature = "event-log")]
             event_cursor: crate::event_log::EventCursor::new(),
         };
@@ -538,6 +612,31 @@ impl AxilBuilder {
         }
 
         Ok(db)
+    }
+}
+
+/// Print each `axil.toml` warning to stderr, once per process.
+///
+/// A malformed lifecycle entry already fails safe (the table gets the most
+/// protective policy), and an unreadable file falls back to defaults, but the
+/// author must still learn that the file does not say what they meant.
+/// Callers commonly discard config errors (`.ok()`), so the builder reports
+/// them itself; deduped so a process that opens many handles warns once.
+fn warn_config_once(warnings: &[String]) {
+    static WARNED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    if warnings.is_empty() {
+        return;
+    }
+    let seen = WARNED.get_or_init(Default::default);
+    let mut seen = match seen.lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    for warning in warnings {
+        if seen.insert(warning.clone()) {
+            eprintln!("axil: warning: {warning}");
+        }
     }
 }
 
@@ -591,9 +690,19 @@ pub struct Axil {
     /// `Axil` handle (WASM plugins) can register *after* the database is open,
     /// not only at builder time.
     extensions: std::sync::RwLock<Vec<Arc<dyn Extension>>>,
+    /// Per-table lifecycle policy (auto-supersede / decay / compaction
+    /// opt-outs), resolved at build time.
+    lifecycle: crate::config::LifecycleConfig,
+    /// Problems found in the `[lifecycle]` section this handle loaded (empty
+    /// for an explicit [`AxilBuilder::with_lifecycle`]). Surfaced by `doctor`.
+    lifecycle_warnings: Vec<String>,
+    /// Auto-supersede similarity threshold, resolved at build time from
+    /// `healing.supersede_similarity_threshold` (default 0.92).
+    supersede_threshold: f32,
     /// Runtime gate for the durable semantic event log. Off by default even when
     /// the `event-log` feature is compiled in — it is a write-amplifier, so the
-    /// caller opts in explicitly via [`Axil::set_event_log_enabled`].
+    /// caller opts in: `[healing] event_log = true` in the nearest `axil.toml`
+    /// (read at build time) or [`Axil::set_event_log_enabled`].
     #[cfg(feature = "event-log")]
     event_log_enabled: std::sync::atomic::AtomicBool,
     /// Monotonic ULID cursor source for the event tape. Same-millisecond events
@@ -618,6 +727,8 @@ impl Axil {
             canonical_publisher: None,
             vector_space_factory: None,
             extensions: Vec::new(),
+            lifecycle: None,
+            supersede_threshold: None,
             needs_fts_reindex: false,
             read_only: false,
             #[cfg(feature = "encryption")]
@@ -745,7 +856,7 @@ impl Axil {
         self.storage.insert(&record)?;
         self.audit("insert", &record.id, &table);
         #[cfg(feature = "event-log")]
-        self.capture_semantic_event("insert", &record);
+        self.capture_semantic_event("insert", None, &record);
         self.run_insert_hooks(&record)?;
 
         self.publish_canonical_for_record(&record);
@@ -1366,6 +1477,45 @@ impl Axil {
                 vi.on_record_delete(id)?;
             }
 
+            // Fan the delete out to named vector spaces as well — a vector
+            // added via `add_vector_in` must not outlive its record as an
+            // orphan that can shadow live results in that space. Best-effort:
+            // the record is already gone from storage at this point.
+            if let Some(ref factory) = self.vector_space_factory {
+                match factory.space_names(&self.path) {
+                    Ok(spaces) => {
+                        // A space this handle already has open deletes through
+                        // its live index; any other is cleaned in its durable
+                        // store without being loaded. The cache read lock is
+                        // held throughout so no concurrent open can take the
+                        // file between the check and the direct delete.
+                        match self.vector_space_cache.read() {
+                            Ok(cache) => {
+                                for space in spaces {
+                                    let result = match cache.get(&space) {
+                                        Some(vi) => vi.on_record_delete(id),
+                                        None => factory.remove_from_space(&self.path, &space, id),
+                                    };
+                                    if let Err(e) = result {
+                                        eprintln!(
+                                            "warning: vector space '{space}' cleanup failed \
+                                             for {id}: {e}"
+                                        );
+                                    }
+                                }
+                            }
+                            Err(_) => eprintln!(
+                                "warning: named-space delete cleanup skipped: \
+                                 vector space cache lock poisoned"
+                            ),
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("warning: named-space delete cleanup skipped: {e}");
+                    }
+                }
+            }
+
             // Cascade-delete graph edges referencing this record.
             if let Some(ref gi) = self.graph_index {
                 gi.on_record_delete(id)?;
@@ -1390,31 +1540,51 @@ impl Axil {
 
             // Doubt beliefs sourced from deleted entity facts.
             if table_name == "_entities" {
-                if let Ok(beliefs) = self.storage.list("_beliefs", usize::MAX, 0) {
-                    let deleted_id_str = id.to_string();
-                    for belief in &beliefs {
-                        // Beliefs auto-generated from entities reference the entity name.
-                        // If the source entity fact is deleted, mark the belief as doubted.
-                        let is_consolidated = belief.data.get("source").and_then(|v| v.as_str())
-                            == Some("consolidated");
-                        let already_doubted = belief
-                            .data
-                            .get("doubted")
-                            .and_then(|v| v.as_bool())
-                            .unwrap_or(false);
-                        if is_consolidated && !already_doubted {
-                            let mut data = belief.data.clone();
-                            if let Some(obj) = data.as_object_mut() {
-                                obj.insert("doubted".to_string(), serde_json::json!(true));
-                                obj.insert("confidence".to_string(), serde_json::json!(0.3));
-                                obj.insert(
-                                    "_doubt_reason".to_string(),
-                                    serde_json::json!(format!(
-                                        "source entity fact {deleted_id_str} deleted"
-                                    )),
-                                );
+                // Only beliefs naming THIS entity lose standing — deleting one
+                // entity fact must never touch unrelated beliefs.
+                let deleted_name = existing_record
+                    .as_ref()
+                    .and_then(|r| r.data.get("entity"))
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
+                if let Some(deleted_name) = deleted_name {
+                    if let Ok(beliefs) = self.storage.list("_beliefs", usize::MAX, 0) {
+                        let deleted_id_str = id.to_string();
+                        for belief in &beliefs {
+                            // Beliefs auto-generated from entities carry the
+                            // source entity's name in `entity`.
+                            let belief_entity =
+                                belief.data.get("entity").and_then(|v| v.as_str());
+                            if belief_entity != Some(deleted_name.as_str()) {
+                                continue;
                             }
-                            let _ = self.storage.update(&belief.id, data);
+                            let already_doubted = belief
+                                .data
+                                .get("doubted")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false);
+                            let is_consolidated =
+                                belief.data.get("source").and_then(|v| v.as_str())
+                                    == Some("consolidated");
+                            if is_consolidated && !already_doubted {
+                                let mut data = belief.data.clone();
+                                if let Some(obj) = data.as_object_mut() {
+                                    obj.insert("doubted".to_string(), serde_json::json!(true));
+                                    obj.insert(
+                                        "confidence".to_string(),
+                                        serde_json::json!(0.3),
+                                    );
+                                    obj.insert(
+                                        "_doubt_reason".to_string(),
+                                        serde_json::json!(format!(
+                                            "source entity fact {deleted_id_str} deleted"
+                                        )),
+                                    );
+                                }
+                                // Through `update`, not raw storage, so the
+                                // revision reaches the event log.
+                                let _ = self.update(&belief.id, data);
+                            }
                         }
                     }
                 }
@@ -1433,7 +1603,24 @@ impl Axil {
     /// Engine hooks run after the storage write commits. See `insert` for
     /// the rationale on swallowing generic plugin errors.
     pub fn update(&self, id: &RecordId, data: Value) -> Result<Record> {
+        self.update_record(id, data, true)
+    }
+
+    /// The body of [`Axil::update`]. `reindex_text = false` skips the
+    /// text-derived work (re-embedding, recall-chunk rebuild) for internal
+    /// writes that only flip `_`-prefixed bookkeeping fields such as the
+    /// supersede markers; every other side effect (engine hooks, audit, event
+    /// capture) still runs.
+    fn update_record(&self, id: &RecordId, data: Value, reindex_text: bool) -> Result<Record> {
         let timer = self.metrics.start_timer(OpType::Update);
+        // The event log classifies transitions, so it needs the pre-write
+        // state. Only read it when the log is capturing.
+        #[cfg(feature = "event-log")]
+        let previous = if self.event_log_enabled() {
+            self.storage.get(id).ok().flatten()
+        } else {
+            None
+        };
         let record = self.storage.update(id, data)?;
 
         for plugin in &self.plugins {
@@ -1451,14 +1638,18 @@ impl Axil {
         }
 
         // Auto re-embed: if text changed and embedder is available, update the vector.
-        if !record.table.starts_with('_') && self.has_vector_index() && self.embedder.is_some() {
+        if reindex_text
+            && !record.table.starts_with('_')
+            && self.has_vector_index()
+            && self.embedder.is_some()
+        {
             let text = crate::util::searchable_text(&record.data);
             if !text.is_empty() && text.len() > 5 {
                 let _ = self.embed_text(id, &text);
             }
         }
 
-        if !record.table.starts_with('_') {
+        if reindex_text && !record.table.starts_with('_') {
             self.sync_recall_chunks_for_record(&record)?;
         }
 
@@ -1473,7 +1664,7 @@ impl Axil {
 
         self.audit("update", id, &record.table);
         #[cfg(feature = "event-log")]
-        self.capture_semantic_event("update", &record);
+        self.capture_semantic_event("update", previous.as_ref(), &record);
         timer.finish();
         Ok(record)
     }
@@ -1690,6 +1881,13 @@ impl Axil {
         self.vector_index.is_some()
     }
 
+    /// Number of vectors in the default vector index, or `None` when no
+    /// vector index is configured. Constant time — unlike [`Axil::info`],
+    /// which also stats every companion file on disk.
+    pub fn vector_count(&self) -> Option<usize> {
+        self.vector_index.as_ref().map(|vi| vi.count())
+    }
+
     /// Fetch a record's stored vector from the default vector index, if present.
     ///
     /// Returns `Ok(None)` when no vector index is configured or the record has
@@ -1792,13 +1990,25 @@ impl Axil {
                 vector.len()
             )));
         }
-        let results = vi.search(vector, top_k)?;
-        let mut records = Vec::with_capacity(results.len());
-        for (id, score) in results {
-            if let Some(record) = self.storage.get(&id)? {
-                records.push((record, score));
+        // Over-fetch, then filter: a stale vector whose record is gone must
+        // never crowd a live match out of top-k. The window grows until we
+        // have enough live hits or the space is exhausted.
+        let mut fetch_k = top_k.saturating_mul(3).max(20);
+        let mut records = loop {
+            let results = vi.search(vector, fetch_k)?;
+            let raw_len = results.len();
+            let mut live: Vec<(Record, f32)> = Vec::with_capacity(results.len());
+            for (id, score) in results {
+                if let Some(record) = self.storage.get(&id)? {
+                    live.push((record, score));
+                }
             }
-        }
+            if live.len() >= top_k || raw_len < fetch_k || fetch_k >= 4096 {
+                break live;
+            }
+            fetch_k = fetch_k.saturating_mul(4);
+        };
+        records.truncate(top_k);
         Ok(records)
     }
 
@@ -1924,6 +2134,58 @@ impl Axil {
     pub fn traverse(&self, start: &RecordId, path: &str) -> Result<Vec<Record>> {
         let steps = crate::plugin::parse_path(path)?;
         self.traverse_steps(start, &steps)
+    }
+
+    /// Traverse a path restricted to edges **recorded** at or before
+    /// `knowledge_time` — the second temporal axis ("what did the graph look
+    /// like as of then?"). Event-time windows (`valid_from`/`valid_until`)
+    /// are not filtered here; for the full bi-temporal query use
+    /// `GraphEngine::traverse_ids_bitemporal`.
+    ///
+    /// Walks the trait-level edge lists and filters by `EdgeInfo.created_at`,
+    /// so it works with any `GraphIndex` backend without an ABI change.
+    pub fn traverse_known_at(
+        &self,
+        start: &RecordId,
+        path: &str,
+        knowledge_time: &chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<Record>> {
+        let steps = crate::plugin::parse_path(path)?;
+        let gi = self.require_graph_index()?;
+        let timer = self.metrics.start_timer(OpType::Traversal);
+
+        let mut current: Vec<RecordId> = vec![start.clone()];
+        for step in steps {
+            let mut next: Vec<RecordId> = Vec::new();
+            let mut seen = std::collections::HashSet::new();
+            for node in &current {
+                for edge in gi
+                    .edges(node.clone(), Some(&step.edge_type), step.direction)
+                    .unwrap_or_default()
+                {
+                    let known = chrono::DateTime::parse_from_rfc3339(&edge.created_at)
+                        .map(|t| t.with_timezone(&chrono::Utc) <= *knowledge_time)
+                        .unwrap_or(false);
+                    if !known {
+                        continue;
+                    }
+                    // The far side of this edge relative to the node we're on.
+                    let neighbor = if edge.from == *node { edge.to } else { edge.from };
+                    if seen.insert(neighbor.clone()) {
+                        next.push(neighbor);
+                    }
+                }
+            }
+            current = next;
+            if current.is_empty() {
+                break;
+            }
+        }
+
+        let result = self.resolve_ids(&current);
+        let elapsed = timer.finish();
+        crate::otel::record_operation("traverse_known_at", "", elapsed);
+        result
     }
 
     /// Traverse using pre-parsed steps.
@@ -2056,6 +2318,13 @@ impl Axil {
         for id in &old_ids {
             if let Some(record) = self.storage.get(id)? {
                 if record.table == SUMMARIES_TABLE {
+                    continue;
+                }
+                // Append-only tables are excluded from downsampling entirely:
+                // originals are kept, never summarized-and-purged.
+                if self.lifecycle.policy_for(&record.table).compact
+                    == crate::config::CompactMode::Never
+                {
                     continue;
                 }
                 let day = record.created_at.format("%Y-%m-%d").to_string();
@@ -2711,6 +2980,13 @@ impl Axil {
         let all_ids = self.storage.all_record_ids()?;
         for id in &all_ids {
             if let Some(record) = self.storage.get(id)? {
+                // Append-only tables (`[lifecycle.tables.<t>] compact = "never"`)
+                // are never purged — audit-log semantics.
+                if self.lifecycle.policy_for(&record.table).compact
+                    == crate::config::CompactMode::Never
+                {
+                    continue;
+                }
                 // Protect high-importance records from compaction
                 if crate::importance::is_pinned(&record.data)
                     || crate::importance::get_importance(&record.data) >= 0.8
@@ -2720,7 +2996,7 @@ impl Axil {
                 if is_expired_record(&record, &now) {
                     self.delete(id)?;
                     purged_expired += 1;
-                } else if is_superseded_record(&record) {
+                } else if is_purgeable_superseded(&record) {
                     self.delete(id)?;
                     purged_superseded += 1;
                 }
@@ -2836,11 +3112,19 @@ impl Axil {
         let mut expired = 0usize;
         let mut superseded = 0usize;
         // Scan all records directly (single pass) instead of IDs + N gets.
+        // Records in `compact = "never"` tables are not "dead" — they will
+        // never be purged, so counting them would make doctor/session-heal
+        // nag (and trigger auto-heal) about records that are kept by design.
         if let Ok(records) = self.storage.scan_all_records() {
             for record in &records {
+                if self.lifecycle.policy_for(&record.table).compact
+                    == crate::config::CompactMode::Never
+                {
+                    continue;
+                }
                 if is_expired_record(record, &now) {
                     expired += 1;
-                } else if is_superseded_record(record) {
+                } else if is_purgeable_superseded(record) {
                     superseded += 1;
                 }
             }
@@ -2880,6 +3164,7 @@ impl Axil {
         let vi = self.require_vector_index()?;
         let old_size = vi.count();
         let deleted = vi.deleted_count();
+        self.purge_unloadable_vectors()?;
         let new_size = vi.rebuild()?;
 
         self.audit_heal_action(
@@ -2903,6 +3188,45 @@ impl Axil {
         })
     }
 
+    /// Delete the on-disk vector rows that could not be loaded into their
+    /// index at open (the `vector_load_skips` problem), in the default index
+    /// and every named space. Such rows are invisible to search and can never
+    /// load, so nothing is lost; a live record whose row goes is re-embedded
+    /// by [`reembed_missing`](Self::reembed_missing). Returns rows removed.
+    fn purge_unloadable_vectors(&self) -> Result<usize> {
+        let mut purged = 0;
+        if let Some(ref vi) = self.vector_index {
+            if vi.skipped_at_load() > 0 {
+                purged += vi.purge_unloadable()?;
+            }
+        }
+        // Named spaces are best-effort, like the delete fan-out: one bad
+        // space must not block repairing the rest.
+        if let Some(ref factory) = self.vector_space_factory {
+            for space in factory.space_names(&self.path).unwrap_or_default() {
+                match self.open_or_create_space(&space, None) {
+                    Ok(vi) if vi.skipped_at_load() > 0 => match vi.purge_unloadable() {
+                        Ok(n) => purged += n,
+                        Err(e) => eprintln!(
+                            "warning: vector space '{space}' purge of unloadable rows failed: {e}"
+                        ),
+                    },
+                    Ok(_) => {}
+                    Err(e) => eprintln!(
+                        "warning: could not open vector space '{space}' for repair: {e}"
+                    ),
+                }
+            }
+        }
+        if purged > 0 {
+            self.audit_heal_action(
+                "purge_unloadable_vectors",
+                &format!("removed {purged} unloadable vector row(s)"),
+            );
+        }
+        Ok(purged)
+    }
+
     /// Detect problems in the database.
     pub fn detect_problems(&self) -> Vec<crate::diagnostics::ProblemDetection> {
         // `count_orphaned_edges` and `count_dead_records` are each a full-DB
@@ -2920,6 +3244,26 @@ impl Axil {
         dead_records: (usize, usize),
     ) -> Vec<crate::diagnostics::ProblemDetection> {
         let mut problems = Vec::new();
+
+        // Vectors present on disk but unloadable into the live index (e.g.
+        // written by an older version before insert-time validation). They
+        // are invisible to search and can never load; heal purges them (no
+        // embedder needed) and then re-embeds any live record they belonged to.
+        if let Some(ref vi) = self.vector_index {
+            let skipped = vi.skipped_at_load();
+            if skipped > 0 {
+                problems.push(crate::diagnostics::ProblemDetection {
+                    detector: "vector_load_skips".to_string(),
+                    severity: Severity::Warning,
+                    message: format!(
+                        "{skipped} vector(s) on disk could not be loaded into the index \
+                         (corrupt, wrong dimensions, non-finite, or all-zero)"
+                    ),
+                    recommendation: "Rebuild them: axil heal --reindex".to_string(),
+                    auto_fixable: true,
+                });
+            }
+        }
 
         // Hot table imbalance
         if let Ok(tables) = self.tables_with_counts() {
@@ -3170,7 +3514,9 @@ impl Axil {
                     Severity::Ok => "low",
                 };
                 let command = match p.detector.as_str() {
-                    "vector_deletion_ratio" | "index_size_mismatch" => "axil heal --reindex",
+                    "vector_deletion_ratio" | "index_size_mismatch" | "vector_load_skips" => {
+                        "axil heal --reindex"
+                    }
                     "orphaned_edges" => "axil heal --orphans",
                     _ => "axil heal --compact",
                 };
@@ -3262,6 +3608,22 @@ impl Axil {
             let problems = self.detect_problems();
             for p in &problems {
                 if p.auto_fixable {
+                    // Purge-type fixes are gated on auto_compact below — keep
+                    // the dry-run preview consistent with the real run.
+                    let purge_type = matches!(
+                        p.detector.as_str(),
+                        "expired_records" | "superseded_records" | "storage_bloat"
+                    );
+                    if purge_type && !config.auto_compact {
+                        actions.push(crate::diagnostics::HealAction {
+                            action: p.detector.clone(),
+                            result: format!(
+                                "[dry-run] skipped (healing.auto_compact = false): {}",
+                                p.message
+                            ),
+                        });
+                        continue;
+                    }
                     actions.push(crate::diagnostics::HealAction {
                         action: p.detector.clone(),
                         result: format!("[dry-run] would fix: {}", p.message),
@@ -3275,18 +3637,60 @@ impl Axil {
             });
         }
 
-        // 1. Compact (expired + superseded + orphans)
-        let compact_report = self.compact()?;
-        if compact_report.compacted {
+        // 1. Compact (expired + superseded + orphans). `auto_compact = false`
+        // makes compaction manual-only (`axil heal --compact` / `axil compact`)
+        // — heal_all is what the session-close hook runs, so this knob is the
+        // operator's way to keep automatic healing from ever hard-deleting.
+        if config.auto_compact {
+            let compact_report = self.compact()?;
+            if compact_report.compacted {
+                actions.push(crate::diagnostics::HealAction {
+                    action: "compact".to_string(),
+                    result: format!(
+                        "purged {} expired, {} superseded, {} orphaned edges, {} orphaned vectors",
+                        compact_report.purged_expired,
+                        compact_report.purged_superseded,
+                        compact_report.cleaned_orphaned_edges,
+                        compact_report.cleaned_orphaned_vectors,
+                    ),
+                });
+            }
+        } else {
+            // Orphan cleanup is referential-integrity repair, not record
+            // deletion — it stays on even when purging is manual-only.
+            // Otherwise a dangling edge/vector would be redetected as
+            // auto-fixable forever with nothing ever fixing it.
+            let cleaned_edges = self.clean_orphaned_edges();
+            let cleaned_vectors = self.clean_orphaned_vectors();
+            let cleaned_fts = self.clean_orphaned_fts();
+            if cleaned_edges + cleaned_vectors + cleaned_fts > 0 {
+                actions.push(crate::diagnostics::HealAction {
+                    action: "clean_orphans".to_string(),
+                    result: format!(
+                        "removed {cleaned_edges} orphaned edges, {cleaned_vectors} orphaned \
+                         vectors, {cleaned_fts} orphaned FTS entries",
+                    ),
+                });
+            }
+            let (expired, superseded) = self.count_dead_records();
+            if expired + superseded > 0 {
+                actions.push(crate::diagnostics::HealAction {
+                    action: "compact_skipped".to_string(),
+                    result: format!(
+                        "{expired} expired + {superseded} superseded records pending; \
+                         healing.auto_compact = false — run 'axil heal --compact' to purge",
+                    ),
+                });
+            }
+        }
+
+        // Drop vector rows that can never load (`vector_load_skips`); step 3
+        // re-embeds any live record they belonged to.
+        let purged = self.purge_unloadable_vectors()?;
+        if purged > 0 {
             actions.push(crate::diagnostics::HealAction {
-                action: "compact".to_string(),
-                result: format!(
-                    "purged {} expired, {} superseded, {} orphaned edges, {} orphaned vectors",
-                    compact_report.purged_expired,
-                    compact_report.purged_superseded,
-                    compact_report.cleaned_orphaned_edges,
-                    compact_report.cleaned_orphaned_vectors,
-                ),
+                action: "purge_unloadable_vectors".to_string(),
+                result: format!("removed {purged} unloadable vector row(s)"),
             });
         }
 
@@ -3324,8 +3728,13 @@ impl Axil {
             });
         }
 
+        // The `compact_skipped` entry is informational (nothing changed), so
+        // it must not report the database as healed — session-heal logs would
+        // otherwise claim a successful repair every session while the same
+        // records stay pending.
+        let healed = actions.iter().any(|a| a.action != "compact_skipped");
         Ok(crate::diagnostics::SelfHealReport {
-            healed: !actions.is_empty(),
+            healed,
             actions,
             duration_ms: start.elapsed().as_secs_f64() * 1000.0,
         })
@@ -3528,9 +3937,11 @@ impl Axil {
     /// 3. The handle is then **dropped**, releasing the OS lock, and only then
     ///    are the files copied. On Windows, redb holds a byte-range lock on the
     ///    core file for the lifetime of the [`Database`], so an open file cannot
-    ///    be copied (`fs::copy` fails with a sharing-violation); the
-    ///    flush-then-close-then-copy sequence is what makes this work
-    ///    cross-platform. Single-writer means a brief in-process quiesce is
+    ///    be copied (`fs::copy` fails with a lock violation). On Unix the copy
+    ///    of an open file succeeds, but redb keeps the on-disk header marked
+    ///    "recovery required" until a clean close, so the branch would open
+    ///    through a full repair. Closing first is what yields a clean snapshot
+    ///    on every platform. Single-writer means a brief in-process quiesce is
     ///    sufficient — there is no need to hold the OS lock during the byte copy.
     ///
     /// Taking `self` by value enforces at the type level that no mutation method
@@ -3952,6 +4363,22 @@ impl Axil {
                     diagnostics::human_bytes(file_size)
                 ),
                 fix: None,
+            });
+        }
+
+        // 8. Lifecycle policy config: a malformed entry already failed safe,
+        // but the author has to fix the file for it to say what they meant.
+        if !self.lifecycle_warnings.is_empty() {
+            checks.push(CheckResult {
+                name: "lifecycle_config".to_string(),
+                status: Severity::Warning,
+                detail: self.lifecycle_warnings.join("; "),
+                fix: Some(
+                    "fix the [lifecycle.tables.<table>] entries in axil.toml \
+                     (valid knobs: supersede = true|false, decay = true|false, \
+                     compact = \"auto\"|\"never\")"
+                        .to_string(),
+                ),
             });
         }
 
@@ -4530,69 +4957,129 @@ impl Axil {
         &self.feedback_store
     }
 
+    /// Lifecycle policy for a table (default policy when not configured).
+    ///
+    /// Resolved at build time from `[lifecycle.tables.<table>]` in the
+    /// nearest `axil.toml`, or from [`AxilBuilder::with_lifecycle`].
+    pub fn lifecycle_policy(&self, table: &str) -> crate::config::TableLifecycle {
+        self.lifecycle.policy_for(table)
+    }
+
+    /// Problems found in the `[lifecycle]` section of the `axil.toml` this
+    /// handle loaded — one message per malformed entry, each of which was
+    /// resolved to the most protective policy
+    /// ([`TableLifecycle::most_protective`](crate::config::TableLifecycle::most_protective)).
+    /// Empty when the section is clean or the policy was set explicitly with
+    /// [`AxilBuilder::with_lifecycle`].
+    pub fn lifecycle_warnings(&self) -> &[String] {
+        &self.lifecycle_warnings
+    }
+
+    /// The auto-supersede similarity threshold in effect for this handle.
+    pub fn supersede_threshold(&self) -> f32 {
+        self.supersede_threshold
+    }
+
     /// Auto-supersede using a pre-computed embedding vector.
     ///
     /// Returns the number of existing records marked superseded. A normal
     /// insert discards this; [`crate::portable`] import uses it to report how
     /// many local records an import demoted.
     fn auto_supersede_with_vector(&self, new_record: &Record, vector: &[f32]) -> Result<usize> {
-        const SUPERSEDE_THRESHOLD: f32 = 0.92;
+        // Append-only tables (experiment logs, audit trails) opt out entirely:
+        // near-duplicate records there are distinct events, not revisions.
+        if !self.lifecycle.policy_for(&new_record.table).supersede {
+            return Ok(0);
+        }
 
         let mut superseded = 0usize;
         let candidates = self.similar_to_vector(vector, 10)?;
         for (candidate, score) in &candidates {
-            if candidate.id == new_record.id {
+            if *score < self.supersede_threshold {
                 continue;
             }
-            if candidate.table != new_record.table {
-                continue;
-            }
-            if *score < SUPERSEDE_THRESHOLD {
-                continue;
-            }
-            if crate::importance::is_pinned(&candidate.data) {
-                continue;
-            }
-
-            // Recency guard: never let an older record supersede a newer one.
-            // A normal insert always stamps `created_at = now()`, so this is a
-            // no-op for it (the incoming record is at least as new as anything
-            // already stored). It only bites the import path, which preserves
-            // the source `created_at`: an imported record must not demote a
-            // fresher local near-duplicate just because they are similar.
-            if new_record.created_at < candidate.created_at {
-                continue;
-            }
-
-            // Check if already superseded
-            if candidate
-                .data
-                .get("_superseded")
-                .and_then(|v| v.as_bool())
+            // Same-table, pin, recency and already-superseded rules are
+            // enforced by the shared write path. Best-effort per candidate: one
+            // failed write must not abort the others.
+            if self
+                .mark_superseded(&candidate.id, new_record, Some(*score))
                 .unwrap_or(false)
             {
-                continue;
-            }
-
-            // Mark as superseded
-            let mut data = candidate.data.clone();
-            if let Some(obj) = data.as_object_mut() {
-                obj.insert("_superseded".to_string(), serde_json::json!(true));
-                obj.insert(
-                    "_superseded_by".to_string(),
-                    serde_json::json!(new_record.id.to_string()),
-                );
-            }
-            if self.storage.update(&candidate.id, data).is_ok() {
                 superseded += 1;
-            }
-
-            // Create graph edge if available
-            if self.has_graph_index() {
-                let _ = self.relate(&new_record.id, "supersedes", &candidate.id, None);
             }
         }
         Ok(superseded)
+    }
+
+    /// Whether `old` may be marked superseded by `new`.
+    ///
+    /// The single rule set every writer that demotes a record obeys (see
+    /// [`Axil::mark_superseded`]):
+    ///
+    /// - two distinct records in the **same table** — a record never retires
+    ///   a fact in another table;
+    /// - the table's lifecycle policy allows it (`[lifecycle.tables.<t>]
+    ///   supersede = false` keeps every record live: near-duplicates in an
+    ///   append-only table are distinct events, not revisions);
+    /// - `old` is not pinned (pinned records are absolute);
+    /// - `old` is not newer than `new` — a normal insert is always the newest
+    ///   record, but import preserves source timestamps, and an imported record
+    ///   must not demote a fresher local one;
+    /// - `old` is not already superseded.
+    pub fn can_supersede(&self, old: &Record, new: &Record) -> bool {
+        old.id != new.id
+            && old.table == new.table
+            && self.lifecycle.policy_for(&old.table).supersede
+            && !crate::importance::is_pinned(&old.data)
+            && new.created_at >= old.created_at
+            && !is_superseded_record(old)
+    }
+
+    /// Mark the record `old_id` superseded by `new_record` — the one write path
+    /// for demoting a record.
+    ///
+    /// Re-reads `old_id` and applies [`Axil::can_supersede`]; if allowed, sets
+    /// `_superseded: true` + `_superseded_by: <new id>`, links
+    /// `new ->supersedes-> old` when a graph is attached (with `similarity` as
+    /// an edge property when given), and records a `decision-superseded` event
+    /// when the event log is on. Returns `Ok(true)` when the record was marked
+    /// and `Ok(false)` when it does not exist or a rule refused.
+    ///
+    /// Core's insert-path auto-supersede, [`Axil::detect_conflicts`] and the
+    /// brain pipeline all go through here; extensions that demote records
+    /// should too, so the lifecycle policy and pin rules hold everywhere.
+    pub fn mark_superseded(
+        &self,
+        old_id: &RecordId,
+        new_record: &Record,
+        similarity: Option<f32>,
+    ) -> Result<bool> {
+        let Some(old) = self.storage.get(old_id)? else {
+            return Ok(false);
+        };
+        if !self.can_supersede(&old, new_record) {
+            return Ok(false);
+        }
+        let mut data = old.data;
+        if let Some(obj) = data.as_object_mut() {
+            obj.insert("_superseded".to_string(), serde_json::json!(true));
+            obj.insert(
+                "_superseded_by".to_string(),
+                serde_json::json!(new_record.id.to_string()),
+            );
+        }
+        // Only `_`-prefixed markers change, so skip re-embedding.
+        self.update_record(old_id, data, false)?;
+        if self.has_graph_index() {
+            let props = similarity.map(|s| serde_json::json!({ "similarity": s }));
+            let _ = self.relate(
+                &new_record.id,
+                crate::util::edge_types::SUPERSEDES,
+                old_id,
+                props,
+            );
+        }
+        Ok(true)
     }
 
     /// Auto-link a record by extracting entities and creating graph edges.
@@ -4973,8 +5460,12 @@ impl Axil {
 
     /// Detect contradictions and superseding for a newly inserted record.
     ///
-    /// Checks vector similarity against existing records in the same table.
-    /// Returns conflicts found and creates graph edges for them.
+    /// Checks vector similarity against existing, live (not superseded)
+    /// records in the same table. Returns conflicts found and creates graph
+    /// edges for them. A supersede goes through [`Axil::mark_superseded`]; when
+    /// its rules refuse (an append-only table, a pinned record) the conflict is
+    /// surfaced as a contradiction for review instead — never a silent
+    /// demotion.
     pub fn detect_conflicts(
         &self,
         record_id: &RecordId,
@@ -4998,45 +5489,41 @@ impl Axil {
             if sim_rid == record_id {
                 continue;
             }
-            if let Some(existing) = self.storage.get(sim_rid)? {
-                let result = crate::consolidation::check_conflict(&record, &existing, *sim_score);
-                match &result {
-                    crate::consolidation::ConflictResult::Supersedes { .. } => {
-                        if let Some(ref gi) = self.graph_index {
-                            gi.relate(
-                                record_id.clone(),
-                                crate::util::edge_types::SUPERSEDES,
-                                sim_rid.clone(),
-                                serde_json::json!({"similarity": sim_score}),
-                            )?;
-                        }
-                        // Mark old record as superseded via data
-                        if let Some(old_record) = self.storage.get(sim_rid)? {
-                            let mut new_data = old_record.data.clone();
-                            if let serde_json::Value::Object(ref mut map) = new_data {
-                                map.insert("_superseded".to_string(), serde_json::json!(true));
-                                map.insert(
-                                    "_superseded_by".to_string(),
-                                    serde_json::json!(record_id.as_str()),
-                                );
-                            }
-                            self.update(sim_rid, new_data)?;
-                        }
-                        conflicts.push(result);
-                    }
-                    crate::consolidation::ConflictResult::Contradicts { .. } => {
-                        if let Some(ref gi) = self.graph_index {
-                            gi.relate(
-                                record_id.clone(),
-                                crate::util::edge_types::CONTRADICTS,
-                                sim_rid.clone(),
-                                serde_json::json!({"similarity": sim_score}),
-                            )?;
-                        }
-                        conflicts.push(result);
-                    }
-                    crate::consolidation::ConflictResult::Novel => {}
+            let Some(existing) = self.storage.get(sim_rid)? else {
+                continue;
+            };
+            // Conflicts are between live claims in the same table; a
+            // superseded record is history, not a competing claim.
+            if existing.table != record.table || is_superseded_record(&existing) {
+                continue;
+            }
+            let mut result = crate::consolidation::check_conflict(&record, &existing, *sim_score);
+            if matches!(
+                result,
+                crate::consolidation::ConflictResult::Supersedes { .. }
+            ) && !self.mark_superseded(sim_rid, &record, Some(*sim_score))?
+            {
+                result = crate::consolidation::ConflictResult::Contradicts {
+                    existing_record_id: sim_rid.clone(),
+                    similarity: *sim_score,
+                };
+            }
+            match &result {
+                crate::consolidation::ConflictResult::Supersedes { .. } => {
+                    conflicts.push(result);
                 }
+                crate::consolidation::ConflictResult::Contradicts { .. } => {
+                    if let Some(ref gi) = self.graph_index {
+                        gi.relate(
+                            record_id.clone(),
+                            crate::util::edge_types::CONTRADICTS,
+                            sim_rid.clone(),
+                            serde_json::json!({"similarity": sim_score}),
+                        )?;
+                    }
+                    conflicts.push(result);
+                }
+                crate::consolidation::ConflictResult::Novel => {}
             }
         }
 
@@ -5256,8 +5743,10 @@ impl Axil {
     ///
     /// Off by default even with the `event-log` feature compiled in: the tape is
     /// a write-amplifier (an extra committed write per allowlisted event), so the
-    /// caller opts in. When off, the capture hook is a single relaxed atomic load
-    /// and never touches storage.
+    /// caller opts in — here, or with `[healing] event_log = true` in the
+    /// `axil.toml` the handle was built from (this setter overrides it). When
+    /// off, the capture hook is a single relaxed atomic load and never touches
+    /// storage.
     #[cfg(feature = "event-log")]
     pub fn set_event_log_enabled(&self, enabled: bool) {
         self.event_log_enabled
@@ -5274,17 +5763,20 @@ impl Axil {
     /// Capture a committed write as a semantic event when it matches the curated
     /// allowlist. No-op unless the event log is enabled.
     ///
-    /// Called from `insert` / `update` / `delete` *after* the storage write
-    /// commits, so it only ever records facts that are already durable. Captures
-    /// allowlisted `_`-prefixed events (belief revisions, checkpoint writes) that
-    /// the per-record audit log deliberately skips. Best-effort: a failed append
+    /// Called from `insert` / `update` *after* the storage write commits, so it
+    /// only ever records facts that are already durable. `previous` is the
+    /// record as it was before the write (`None` for an insert): events are
+    /// classified on the transition, so re-writing an already-fixed error or
+    /// already-superseded decision does not log it again. Captures allowlisted
+    /// `_`-prefixed events (belief revisions, checkpoint writes) that the
+    /// per-record audit log deliberately skips. Best-effort: a failed append
     /// never fails the originating write.
     #[cfg(feature = "event-log")]
-    fn capture_semantic_event(&self, op: &str, record: &Record) {
+    fn capture_semantic_event(&self, op: &str, previous: Option<&Record>, record: &Record) {
         if !self.event_log_enabled() {
             return;
         }
-        let Some(kind) = crate::event_log::classify(op, record) else {
+        let Some(kind) = crate::event_log::classify_transition(op, previous, record) else {
             return;
         };
         let cursor = self.event_cursor.next();
@@ -5314,6 +5806,10 @@ impl Axil {
     /// does not read record bodies and does not relax cross-agent session
     /// isolation; an agent still resolves a returned `record_id` through the
     /// normal access path. Only available with the `event-log` feature.
+    ///
+    /// To page through the tape, use [`Axil::recall_delta_page`]: its
+    /// `next_cursor` advances past events `exclude_agent` filtered out, which
+    /// the last returned event's cursor does not.
     #[cfg(feature = "event-log")]
     pub fn recall_delta(
         &self,
@@ -5321,30 +5817,55 @@ impl Axil {
         exclude_agent: Option<&str>,
         limit: usize,
     ) -> Result<Vec<crate::event_log::SemanticEvent>> {
-        // Over-read when filtering so an excluded run can't starve the page; the
-        // tape is a high-signal feed so the slop is small.
-        let scan_limit = if exclude_agent.is_some() {
-            limit.saturating_mul(4).max(limit)
-        } else {
-            limit
-        };
-        let raw = self.storage.events_since(cursor, scan_limit)?;
-        let mut out = Vec::with_capacity(raw.len().min(limit));
-        for bytes in raw {
-            let Ok(event) = serde_json::from_slice::<crate::event_log::SemanticEvent>(&bytes) else {
-                continue;
-            };
-            if let Some(excl) = exclude_agent {
-                if event.agent_id.as_deref() == Some(excl) {
+        self.recall_delta_page(cursor, exclude_agent, limit)
+            .map(|page| page.events)
+    }
+
+    /// [`Axil::recall_delta`] plus the cursor to resume from.
+    ///
+    /// Scans forward from `cursor` until `limit` events pass the filter or the
+    /// tape ends (bounded per call; a page may come back short or even empty
+    /// with a `next_cursor` that has moved — call again from it). The returned
+    /// `next_cursor` is the last entry scanned, so a long run of excluded events
+    /// (another agent's burst of writes) is consumed once instead of being
+    /// rescanned on every pull.
+    #[cfg(feature = "event-log")]
+    pub fn recall_delta_page(
+        &self,
+        cursor: Option<&str>,
+        exclude_agent: Option<&str>,
+        limit: usize,
+    ) -> Result<crate::event_log::DeltaPage> {
+        // Upper bound on entries examined per call, so one pull over a huge
+        // filtered-out run stays cheap; `next_cursor` makes the rest resumable.
+        const MAX_SCAN: usize = 10_000;
+        let batch = limit.clamp(64, 1_000);
+        let mut page = crate::event_log::DeltaPage::default();
+        let mut scanned = 0usize;
+        while page.events.len() < limit && scanned < MAX_SCAN {
+            let from = page.next_cursor.as_deref().or(cursor);
+            let raw = self.storage.events_since_keyed(from, batch)?;
+            let exhausted = raw.len() < batch;
+            for (key, bytes) in raw {
+                scanned += 1;
+                page.next_cursor = Some(key);
+                let Ok(event) = serde_json::from_slice::<crate::event_log::SemanticEvent>(&bytes)
+                else {
+                    continue;
+                };
+                if exclude_agent.is_some() && event.agent_id.as_deref() == exclude_agent {
                     continue;
                 }
+                page.events.push(event);
+                if page.events.len() >= limit {
+                    break;
+                }
             }
-            out.push(event);
-            if out.len() >= limit {
+            if exhausted {
                 break;
             }
         }
-        Ok(out)
+        Ok(page)
     }
 
     /// Trim the semantic event log to at most `max` retained entries (oldest
@@ -5655,9 +6176,25 @@ fn dir_size(path: &Path) -> u64 {
 }
 
 /// Check if a record is marked as superseded.
-fn is_superseded_record(record: &Record) -> bool {
+///
+/// Canonical marker is the top-level `data._superseded` flag (what
+/// consolidation and the brain pipeline write). Two legacy spellings are
+/// honored on read so records marked by older writers stay dead: the memory
+/// extension's `data._meta.superseded` and the historical
+/// `metadata.superseded`.
+pub fn is_superseded_record(record: &Record) -> bool {
     // Check data field (where detect_conflicts persists it)
     if record.data.get("_superseded").and_then(|v| v.as_bool()) == Some(true) {
+        return true;
+    }
+    // Legacy: the memory extension's `_meta` sub-object.
+    if record
+        .data
+        .get("_meta")
+        .and_then(|m| m.get("superseded"))
+        .and_then(|v| v.as_bool())
+        == Some(true)
+    {
         return true;
     }
     // Also check metadata for backward compatibility
@@ -5667,8 +6204,25 @@ fn is_superseded_record(record: &Record) -> bool {
         .is_some_and(|meta| meta.get("superseded").and_then(|v| v.as_bool()) == Some(true))
 }
 
+/// Whether compaction may purge `record` for being superseded.
+///
+/// In user tables a superseded record is a stale revision, and compaction
+/// purges it. In `_`-prefixed system/extension tables the supersede marker is
+/// *history* owned by whatever wrote it: the memory extension's `history()` /
+/// `supersede_chain()` exist to return superseded facts, and belief-revision
+/// explanations follow `_superseded_by`. The insert path never auto-supersedes
+/// inside those tables, so compaction leaves their superseded rows alone
+/// (expiry still applies to them).
+fn is_purgeable_superseded(record: &Record) -> bool {
+    !record.table.starts_with('_') && is_superseded_record(record)
+}
+
 /// Check if a record is expired (has a valid_until in the past).
-fn is_expired_record(record: &Record, now: &chrono::DateTime<chrono::Utc>) -> bool {
+///
+/// Canonical field is top-level `data.valid_until`; `metadata.valid_until`
+/// and the memory extension's legacy `data._meta.valid_until` are honored
+/// on read.
+pub fn is_expired_record(record: &Record, now: &chrono::DateTime<chrono::Utc>) -> bool {
     // Check metadata.valid_until
     if let Some(ref meta) = record.metadata {
         if let Some(vu) = meta.get("valid_until").and_then(|v| v.as_str()) {
@@ -5681,6 +6235,19 @@ fn is_expired_record(record: &Record, now: &chrono::DateTime<chrono::Utc>) -> bo
     }
     // Check data.valid_until
     if let Some(vu) = record.data.get("valid_until").and_then(|v| v.as_str()) {
+        if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(vu) {
+            if dt < *now {
+                return true;
+            }
+        }
+    }
+    // Legacy: the memory extension's `_meta.valid_until`.
+    if let Some(vu) = record
+        .data
+        .get("_meta")
+        .and_then(|m| m.get("valid_until"))
+        .and_then(|v| v.as_str())
+    {
         if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(vu) {
             if dt < *now {
                 return true;
@@ -6473,6 +7040,183 @@ mod tests {
         let path = dir.path().join("test.axil");
         let db = Axil::open(&path).build().unwrap();
         (db, dir)
+    }
+
+    #[test]
+    fn slow_query_threshold_loads_from_axil_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("axil.toml"),
+            "[debug]\nslow_query_threshold_ms = 5000\n",
+        )
+        .unwrap();
+        let db = Axil::open(dir.path().join("test.axil")).build().unwrap();
+        // 1s is slow under the 100ms default, not under the configured 5s.
+        db.record_slow_query("query", 1_000.0, 1);
+        assert!(db.slow_queries(None, None).is_empty());
+        db.record_slow_query("query", 6_000.0, 1);
+        assert_eq!(db.slow_queries(None, None).len(), 1);
+
+        // Control: the default threshold logs the 1s query.
+        let (plain, _plain_dir) = temp_db();
+        plain.record_slow_query("query", 1_000.0, 1);
+        assert_eq!(plain.slow_queries(None, None).len(), 1);
+    }
+
+    #[test]
+    fn superseded_predicate_reads_all_schema_spellings() {
+        // Canonical: top-level data field (what consolidation writes).
+        let canonical = Record::new("decisions", json!({"_superseded": true, "summary": "old"}));
+        assert!(is_superseded_record(&canonical));
+
+        // Legacy: the memory extension's `_meta` sub-object.
+        let extension = Record::new(
+            "decisions",
+            json!({"_meta": {"superseded": true}, "summary": "old"}),
+        );
+        assert!(is_superseded_record(&extension));
+
+        // Legacy: historical metadata field.
+        let mut legacy = Record::new("decisions", json!({"summary": "old"}));
+        legacy.metadata = Some(json!({"superseded": true}));
+        assert!(is_superseded_record(&legacy));
+
+        let live = Record::new("decisions", json!({"summary": "current"}));
+        assert!(!is_superseded_record(&live));
+    }
+
+    #[test]
+    fn expired_predicate_reads_all_schema_spellings() {
+        let now = chrono::Utc::now();
+        let past = (now - chrono::Duration::hours(1)).to_rfc3339();
+
+        let mut meta_stamped = Record::new("notes", json!({}));
+        meta_stamped.data["_meta"]["valid_until"] = json!(past);
+        assert!(is_expired_record(&meta_stamped, &now));
+
+        let top = Record::new("notes", json!({"valid_until": past}));
+        assert!(is_expired_record(&top, &now));
+
+        let fresh = Record::new("notes", json!({}));
+        assert!(!is_expired_record(&fresh, &now));
+    }
+
+    /// Minimal vector index stub for doctor-problem tests.
+    struct StubVectorIndex {
+        skips: usize,
+    }
+
+    impl crate::plugin::VectorIndex for StubVectorIndex {
+        fn add(&self, _id: RecordId, _vector: &[f32]) -> Result<()> {
+            Ok(())
+        }
+        fn search(&self, _query: &[f32], _top_k: usize) -> Result<Vec<(RecordId, f32)>> {
+            Ok(Vec::new())
+        }
+        fn count(&self) -> usize {
+            0
+        }
+        fn dimensions(&self) -> usize {
+            4
+        }
+        fn skipped_at_load(&self) -> usize {
+            self.skips
+        }
+    }
+
+    impl crate::plugin::Engine for StubVectorIndex {
+        fn name(&self) -> &str {
+            "stub-vector"
+        }
+        fn capabilities(&self) -> Vec<crate::plugin::Capability> {
+            vec![crate::plugin::Capability::VectorSearch]
+        }
+        fn on_record_insert(&self, _record: &Record) -> Result<()> {
+            Ok(())
+        }
+        fn on_record_delete(&self, _id: &RecordId) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn doctor_reports_unloadable_vectors_as_healable_problem() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("doctor-skips.axil");
+        let db = Axil::open(&path)
+            .with_vector_index(Box::new(StubVectorIndex { skips: 2 }))
+            .build()
+            .unwrap();
+
+        let problems = db.detect_problems();
+        let hit = problems
+            .iter()
+            .find(|p| p.detector == "vector_load_skips")
+            .expect("expected a vector_load_skips problem");
+        assert!(hit.message.contains('2'));
+        assert!(hit.recommendation.contains("heal --reindex"));
+    }
+
+    #[test]
+    fn doctor_is_quiet_when_no_vectors_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("doctor-clean.axil");
+        let db = Axil::open(&path)
+            .with_vector_index(Box::new(StubVectorIndex { skips: 0 }))
+            .build()
+            .unwrap();
+
+        assert!(
+            db.detect_problems()
+                .iter()
+                .all(|p| p.detector != "vector_load_skips")
+        );
+    }
+
+    #[test]
+    fn deleting_one_entity_doubts_only_its_beliefs() {
+        let (db, _dir) = temp_db();
+
+        let ent1 = db
+            .insert("_entities", json!({"entity": "svc-a", "fact": "port 8080"}))
+            .unwrap();
+        let _ent2 = db
+            .insert("_entities", json!({"entity": "svc-b", "fact": "port 9090"}))
+            .unwrap();
+
+        let b1 = db
+            .insert(
+                "_beliefs",
+                json!({
+                    "statement": "svc-a: runs on port 8080",
+                    "confidence": 0.9,
+                    "source": "consolidated",
+                    "doubted": false,
+                    "entity": "svc-a",
+                }),
+            )
+            .unwrap();
+        let b2 = db
+            .insert(
+                "_beliefs",
+                json!({
+                    "statement": "svc-b: runs on port 9090",
+                    "confidence": 0.9,
+                    "source": "consolidated",
+                    "doubted": false,
+                    "entity": "svc-b",
+                }),
+            )
+            .unwrap();
+
+        db.delete(&ent1.id).unwrap();
+
+        let b1_after = db.get(&b1.id).unwrap().unwrap();
+        assert_eq!(b1_after.data["doubted"], json!(true));
+
+        let b2_after = db.get(&b2.id).unwrap().unwrap();
+        assert_ne!(b2_after.data["doubted"], json!(true));
+        assert_eq!(b2_after.data["confidence"], json!(0.9));
     }
 
     // Build a RecallResult with the given summary text + score.
@@ -7272,6 +8016,131 @@ mod tests {
 
             // No exclusion → all three.
             assert_eq!(db.recall_delta(None, None, 50).unwrap().len(), 3);
+        }
+
+        #[test]
+        fn event_log_setting_loads_from_axil_toml() {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(
+                dir.path().join("axil.toml"),
+                "[healing]\nevent_log = true\n",
+            )
+            .unwrap();
+            let db = Axil::open(dir.path().join("test.axil")).build().unwrap();
+            assert!(
+                db.event_log_enabled(),
+                "every open path must honor the file"
+            );
+            db.insert("errors", json!({"error": "boom", "fix": "patch"}))
+                .unwrap();
+            assert_eq!(db.event_log_len().unwrap(), 1);
+
+            // The setter still overrides the file.
+            db.set_event_log_enabled(false);
+            assert!(!db.event_log_enabled());
+
+            // Control: no config, no event log.
+            let (plain, _plain_dir) = temp_db();
+            assert!(!plain.event_log_enabled());
+        }
+
+        #[test]
+        fn delta_page_cursor_advances_past_an_excluded_run() {
+            let (db, _dir) = temp_db();
+            db.set_event_log_enabled(true);
+
+            // Agent A writes a long burst, then agent B writes once.
+            for i in 0..300 {
+                db.insert(
+                    "errors",
+                    json!({"error": format!("a{i}"), "fix": "f", "_agent_id": "agent-a"}),
+                )
+                .unwrap();
+            }
+            db.insert(
+                "errors",
+                json!({"error": "b", "fix": "f", "_agent_id": "agent-b"}),
+            )
+            .unwrap();
+
+            // Agent A pulls excluding itself: B's event must be reachable, not
+            // hidden behind a window of A's own events.
+            let mut cursor: Option<String> = None;
+            let mut seen = Vec::new();
+            for _ in 0..10 {
+                let page = db
+                    .recall_delta_page(cursor.as_deref(), Some("agent-a"), 50)
+                    .unwrap();
+                seen.extend(page.events);
+                match page.next_cursor {
+                    Some(next) => cursor = Some(next),
+                    None => break,
+                }
+            }
+            assert_eq!(seen.len(), 1, "agent B's event must surface exactly once");
+            assert_eq!(seen[0].agent_id.as_deref(), Some("agent-b"));
+
+            // Caught up: nothing new was scanned, so there is no new cursor.
+            let tail = db
+                .recall_delta_page(cursor.as_deref(), Some("agent-a"), 50)
+                .unwrap();
+            assert!(tail.events.is_empty());
+            assert_eq!(tail.next_cursor, None);
+        }
+
+        #[test]
+        fn internal_supersede_and_auto_doubt_are_logged_once() {
+            let (db, _dir) = temp_db();
+            db.set_event_log_enabled(true);
+            let old = db
+                .insert("decisions", json!({"summary": "use REST"}))
+                .unwrap();
+            let new = db
+                .insert("decisions", json!({"summary": "use gRPC"}))
+                .unwrap();
+            assert!(db.mark_superseded(&old.id, &new, None).unwrap());
+
+            // An unrelated later update of the superseded record, and of a
+            // fixed error, must not re-log their events.
+            let mut data = db.get(&old.id).unwrap().unwrap().data;
+            data["_access_count"] = json!(2);
+            db.update(&old.id, data).unwrap();
+            let err = db
+                .insert("errors", json!({"error": "boom", "fix": "patch"}))
+                .unwrap();
+            let mut data = err.data.clone();
+            data["_near_duplicate_of"] = json!(old.id.to_string());
+            db.update(&err.id, data).unwrap();
+
+            // Deleting a source entity fact auto-doubts its consolidated belief.
+            let fact = db
+                .insert("_entities", json!({"entity": "svc", "fact": "port 8080"}))
+                .unwrap();
+            db.insert(
+                "_beliefs",
+                json!({"statement": "svc runs on 8080", "entity": "svc", "source": "consolidated"}),
+            )
+            .unwrap();
+            db.delete(&fact.id).unwrap();
+
+            let kinds: Vec<String> = db
+                .recall_delta(None, None, 50)
+                .unwrap()
+                .into_iter()
+                .map(|e| e.kind)
+                .collect();
+            let count = |k: &str| kinds.iter().filter(|x| x.as_str() == k).count();
+            assert_eq!(
+                count(crate::event_log::kind::DECISION_SUPERSEDED),
+                1,
+                "{kinds:?}"
+            );
+            assert_eq!(count(crate::event_log::kind::ERROR_FIXED), 1, "{kinds:?}");
+            assert_eq!(
+                count(crate::event_log::kind::BELIEF_REVISED),
+                1,
+                "{kinds:?}"
+            );
         }
 
         #[test]

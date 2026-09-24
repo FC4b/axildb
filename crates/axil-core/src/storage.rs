@@ -1077,6 +1077,33 @@ impl Storage {
         Ok(out)
     }
 
+    /// [`Storage::events_since`], returning each entry's cursor key alongside
+    /// its body — a reader that filters entries still needs the key of the
+    /// last one it *scanned* to resume past them.
+    #[cfg(feature = "event-log")]
+    pub fn events_since_keyed(
+        &self,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<(String, Vec<u8>)>> {
+        let txn = self.begin_read()?;
+        let log = txn.open_table(EVENT_LOG)?;
+        let lower = match cursor {
+            // Exclusive lower bound: skip the cursor key itself.
+            Some(c) => std::ops::Bound::Excluded(c),
+            None => std::ops::Bound::Unbounded,
+        };
+        let mut out = Vec::new();
+        for entry in log.range::<&str>((lower, std::ops::Bound::Unbounded))? {
+            let (key, val): (redb::AccessGuard<'_, &str>, redb::AccessGuard<'_, &[u8]>) = entry?;
+            out.push((key.value().to_string(), val.value().to_vec()));
+            if out.len() >= limit {
+                break;
+            }
+        }
+        Ok(out)
+    }
+
     /// Trim the `_event_log` tape to keep at most `max` entries (removes the
     /// oldest). ULID keys sort oldest-first, so the front of the table is evicted.
     #[cfg(feature = "event-log")]

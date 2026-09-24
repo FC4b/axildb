@@ -155,6 +155,11 @@ fn run_axil(args: &Args) -> EngineResult {
     eprintln!("[axil] rebuilding HNSW...");
     let build_start = Instant::now();
     plugin.rebuild().expect("rebuild");
+    // The HNSW graph is built lazily by the first search that needs it, so
+    // that search belongs to the build cost, not to the query latencies.
+    plugin
+        .search(&make_vector(args.dims, 2_000_000), args.top_k)
+        .expect("graph-building search");
     let build_ms = build_start.elapsed().as_millis();
 
     eprintln!("[axil] running {} queries (top_k={})...", args.queries, args.top_k);
