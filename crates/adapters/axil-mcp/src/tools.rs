@@ -1283,23 +1283,34 @@ fn handle_lineage(db: &Axil, args: &Value) -> ToolCallResult {
 /// Parse a `--where`-style expression into one or more `(field, op, value)`
 /// conditions, mirroring the CLI `parse_where_clause` grammar.
 ///
-/// A single expression may hold several conditions joined by `AND`
-/// (case-insensitive, whole word); the split is quote-aware. Supported
-/// operators: `>= <= != = > <` and the word operator `contains`. Quoted values
-/// (single or double) are always strings; unquoted values are typed by
-/// `serde_json`, falling back to a bare string.
+/// Each condition is read positionally as `field op value`: the field runs up
+/// to whitespace or an operator character, the operator follows it (`>= <=
+/// != == = > <` or the word operator `contains`), and the value is the rest.
+/// Conditions join with `AND` (case-insensitive, whole word). Locating the
+/// operator by position rather than by scanning the whole condition keeps
+/// operator characters inside a value (`url contains ?q=1`) in the value.
+///
+/// A quote opens a quoted value only as the value's first character. Quoted
+/// values are always strings and may hold `AND` or operator characters; a
+/// quote anywhere else (`name = O'Brien`) is literal. Unquoted values run to
+/// the next `AND` and are typed by `serde_json`, falling back to a bare
+/// string.
 ///
 /// Kept adapter-local (a small twin of the CLI helper) rather than shared
 /// through `axil-core`, which is off-limits for this work.
 fn parse_where_expr(input: &str) -> Result<Vec<(String, axil_core::Op, Value)>, String> {
-    ensure_where_quotes_balanced(input)?;
+    let bytes = input.as_bytes();
     let mut out = Vec::new();
-    for cond in split_where_conditions(input) {
-        let cond = cond.trim();
-        if cond.is_empty() {
+    let mut i = skip_where_spaces(bytes, 0);
+    while i < bytes.len() {
+        // A stray `AND` (leading, trailing, or doubled) joins nothing.
+        if matches_keyword(bytes, i, b"and") {
+            i = skip_where_spaces(bytes, i + 3);
             continue;
         }
-        out.push(parse_single_condition(cond)?);
+        let (cond, end) = parse_where_condition(input, i)?;
+        out.push(cond);
+        i = skip_where_spaces(bytes, end);
     }
     if out.is_empty() {
         return Err(format!("invalid where clause: {input}"));
@@ -1307,59 +1318,81 @@ fn parse_where_expr(input: &str) -> Result<Vec<(String, axil_core::Op, Value)>, 
     Ok(out)
 }
 
-/// Reject a where expression containing an unterminated quote. A dangling
-/// quote would otherwise swallow the rest of the expression into a string
-/// value that can never match — a silent empty result instead of an error.
-fn ensure_where_quotes_balanced(clause: &str) -> Result<(), String> {
-    let mut in_quote: Option<u8> = None;
-    for &c in clause.as_bytes() {
-        match in_quote {
-            Some(q) if c == q => in_quote = None,
-            None if c == b'"' || c == b'\'' => in_quote = Some(c),
-            _ => {}
-        }
+/// Symbol operators, longest spelling first so `>=` is never read as `>`.
+const WHERE_SYMBOL_OPS: &[&str] = &[">=", "<=", "!=", "==", "=", ">", "<"];
+
+/// Advance `i` past ASCII whitespace.
+fn skip_where_spaces(bytes: &[u8], mut i: usize) -> usize {
+    while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+        i += 1;
     }
-    if let Some(q) = in_quote {
-        return Err(format!(
-            "invalid where clause: unterminated {} quote in '{clause}'",
-            q as char
-        ));
-    }
-    Ok(())
+    i
 }
 
-/// Split on the `AND` keyword (case-insensitive, whole word) outside quotes.
-fn split_where_conditions(clause: &str) -> Vec<&str> {
-    let bytes = clause.as_bytes();
-    let mut parts = Vec::new();
-    let mut start = 0usize;
-    let mut i = 0usize;
-    let mut in_quote: Option<u8> = None;
-    while i < bytes.len() {
-        let c = bytes[i];
-        match in_quote {
-            Some(q) => {
-                if c == q {
-                    in_quote = None;
-                }
-                i += 1;
-            }
-            None => {
-                if c == b'"' || c == b'\'' {
-                    in_quote = Some(c);
-                    i += 1;
-                } else if (c == b'a' || c == b'A') && matches_keyword(bytes, i, b"and") {
-                    parts.push(&clause[start..i]);
-                    i += 3;
-                    start = i;
-                } else {
-                    i += 1;
-                }
-            }
-        }
+/// Parse the `field op value` condition starting at byte `start` of `input`,
+/// returning it with the offset where it ends: the joining `AND`, or the end
+/// of input.
+///
+/// Every offset this produces sits on an ASCII byte (whitespace, an operator,
+/// a quote, `AND`) or the end of input, so slicing never splits a multi-byte
+/// UTF-8 character.
+fn parse_where_condition(
+    input: &str,
+    start: usize,
+) -> Result<((String, axil_core::Op, Value), usize), String> {
+    let bytes = input.as_bytes();
+    let is_op_char = |b: u8| matches!(b, b'>' | b'<' | b'!' | b'=');
+    let mut i = start;
+    while i < bytes.len() && !bytes[i].is_ascii_whitespace() && !is_op_char(bytes[i]) {
+        i += 1;
     }
-    parts.push(&clause[start..]);
-    parts
+    let field = input[start..i].to_string();
+    if field.is_empty() {
+        return Err(format!("field name must not be empty in '{input}'"));
+    }
+
+    i = skip_where_spaces(bytes, i);
+    let rest = &input[i..];
+    let op_str = if let Some(sym) = WHERE_SYMBOL_OPS.iter().find(|s| rest.starts_with(**s)) {
+        *sym
+    } else if matches_keyword(bytes, i, b"contains") {
+        "contains"
+    } else if rest.starts_with('!') {
+        return Err(format!("'{input}': '!' must be part of the '!=' operator"));
+    } else {
+        return Err(format!(
+            "invalid where clause: {input} (expected field=value, field>value, field contains value)"
+        ));
+    };
+    let op: axil_core::Op = op_str.parse().map_err(|e| format!("{e}"))?;
+    i = skip_where_spaces(bytes, i + op_str.len());
+
+    if let Some(&q) = bytes.get(i).filter(|&&b| b == b'\'' || b == b'"') {
+        let close = input[i + 1..]
+            .find(q as char)
+            .map(|p| i + 1 + p)
+            .ok_or_else(|| {
+                format!(
+                    "invalid where clause: unterminated {} quote in '{input}'",
+                    q as char
+                )
+            })?;
+        let value = Value::String(input[i + 1..close].to_string());
+        let end = skip_where_spaces(bytes, close + 1);
+        if end < bytes.len() && !matches_keyword(bytes, end, b"and") {
+            return Err(format!(
+                "invalid where clause: unexpected text after the quoted value in '{input}'"
+            ));
+        }
+        return Ok(((field, op, value), end));
+    }
+
+    let mut end = i;
+    while end < bytes.len() && !matches_keyword(bytes, end, b"and") {
+        end += 1;
+    }
+    let value = parse_where_value(input[i..end].trim())?;
+    Ok(((field, op, value), end))
 }
 
 /// True when `kw` (ASCII, lowercase) occurs at `bytes[i..]` case-insensitively
@@ -1376,98 +1409,6 @@ fn matches_keyword(bytes: &[u8], i: usize, kw: &[u8]) -> bool {
     let before_ok = i == 0 || !is_ident(bytes[i - 1]);
     let after_ok = end >= bytes.len() || !is_ident(bytes[end]);
     before_ok && after_ok
-}
-
-/// Parse a single `field op value` condition.
-fn parse_single_condition(cond: &str) -> Result<(String, axil_core::Op, Value), String> {
-    let bytes = cond.as_bytes();
-    let mut i = 0usize;
-    let mut in_quote: Option<u8> = None;
-    while i < bytes.len() {
-        let c = bytes[i];
-        match in_quote {
-            Some(q) => {
-                if c == q {
-                    in_quote = None;
-                }
-                i += 1;
-            }
-            None => {
-                if c == b'"' || c == b'\'' {
-                    in_quote = Some(c);
-                    i += 1;
-                    continue;
-                }
-                if matches!(c, b'>' | b'<' | b'!' | b'=') {
-                    let rest = &cond[i..];
-                    let (op_str, op_len): (&str, usize) = if rest.starts_with(">=") {
-                        (">=", 2)
-                    } else if rest.starts_with("<=") {
-                        ("<=", 2)
-                    } else if rest.starts_with("!=") {
-                        ("!=", 2)
-                    } else if c == b'=' {
-                        ("=", 1)
-                    } else if c == b'>' {
-                        (">", 1)
-                    } else if c == b'<' {
-                        ("<", 1)
-                    } else {
-                        return Err(format!("'{cond}': '!' must be part of the '!=' operator"));
-                    };
-                    let field = cond[..i].trim().to_string();
-                    if field.is_empty() {
-                        return Err(format!("field name must not be empty in '{cond}'"));
-                    }
-                    let op: axil_core::Op =
-                        op_str.parse().map_err(|e| format!("{e}"))?;
-                    let value = parse_where_value(cond[i + op_len..].trim())?;
-                    return Ok((field, op, value));
-                }
-                i += 1;
-            }
-        }
-    }
-    if let Some(pos) = find_keyword_outside_quotes(cond, b"contains") {
-        let field = cond[..pos].trim().to_string();
-        if field.is_empty() {
-            return Err(format!("field name must not be empty in '{cond}'"));
-        }
-        let value = parse_where_value(cond[pos + "contains".len()..].trim())?;
-        return Ok((field, axil_core::Op::Contains, value));
-    }
-    Err(format!(
-        "invalid where clause: {cond} (expected field=value, field>value, field contains value)"
-    ))
-}
-
-/// Find the byte offset of `kw` as a whole word outside any quoted region.
-fn find_keyword_outside_quotes(s: &str, kw: &[u8]) -> Option<usize> {
-    let bytes = s.as_bytes();
-    let mut i = 0usize;
-    let mut in_quote: Option<u8> = None;
-    while i < bytes.len() {
-        let c = bytes[i];
-        match in_quote {
-            Some(q) => {
-                if c == q {
-                    in_quote = None;
-                }
-                i += 1;
-            }
-            None => {
-                if c == b'"' || c == b'\'' {
-                    in_quote = Some(c);
-                    i += 1;
-                } else if c.eq_ignore_ascii_case(&kw[0]) && matches_keyword(bytes, i, kw) {
-                    return Some(i);
-                } else {
-                    i += 1;
-                }
-            }
-        }
-    }
-    None
 }
 
 /// Type a where-clause value: quoted → string; otherwise `serde_json` types it.
@@ -2041,6 +1982,104 @@ mod tests {
         assert_eq!(result.is_error, Some(true));
         assert!(parse_where_expr("family = 'meanrev").is_err());
         assert!(parse_where_expr("family = 'meanrev'").is_ok());
+    }
+
+    /// Where-clause cases shared verbatim with the CLI twin's
+    /// `where_clause_cases` so the two parsers can't drift apart. `Ok` lists
+    /// each condition as `(field, op as Debug, value)`; `Err` holds a substring
+    /// of the error.
+    #[allow(clippy::type_complexity)]
+    fn where_clause_cases() -> Vec<(&'static str, Result<Vec<(&'static str, &'static str, Value)>, &'static str>)> {
+        vec![
+            ("score>80", Ok(vec![("score", "Gt", json!(80))])),
+            (
+                "oos_sharpe > 0.3 AND family = 'meanrev'",
+                Ok(vec![("oos_sharpe", "Gt", json!(0.3)), ("family", "Eq", json!("meanrev"))]),
+            ),
+            (
+                "a>1 and b<2 And c=3",
+                Ok(vec![("a", "Gt", json!(1)), ("b", "Lt", json!(2)), ("c", "Eq", json!(3))]),
+            ),
+            (
+                "x>=1 AND y<=2 AND z != 'bull' AND w == 4",
+                Ok(vec![
+                    ("x", "Gte", json!(1)),
+                    ("y", "Lte", json!(2)),
+                    ("z", "Ne", json!("bull")),
+                    ("w", "Eq", json!(4)),
+                ]),
+            ),
+            ("note = 'buy AND hold >= now'", Ok(vec![("note", "Eq", json!("buy AND hold >= now"))])),
+            (r#"family = "mean rev""#, Ok(vec![("family", "Eq", json!("mean rev"))])),
+            (r#"q = "it's""#, Ok(vec![("q", "Eq", json!("it's"))])),
+            ("regime = '5'", Ok(vec![("regime", "Eq", json!("5"))])),
+            ("family = mean rev", Ok(vec![("family", "Eq", json!("mean rev"))])),
+            ("summary contains 'timeout'", Ok(vec![("summary", "Contains", json!("timeout"))])),
+            ("name=O'Brien", Ok(vec![("name", "Eq", json!("O'Brien"))])),
+            (
+                "name = O'Brien AND n = 1",
+                Ok(vec![("name", "Eq", json!("O'Brien")), ("n", "Eq", json!(1))]),
+            ),
+            ("url contains ?q=1", Ok(vec![("url", "Contains", json!("?q=1"))])),
+            (
+                "url CONTAINS 'a=b' and n>1",
+                Ok(vec![("url", "Contains", json!("a=b")), ("n", "Gt", json!(1))]),
+            ),
+            ("contains_count > 3", Ok(vec![("contains_count", "Gt", json!(3))])),
+            ("=5", Err("field name must not be empty")),
+            ("just_a_field", Err("expected field=value")),
+            ("x ! 5", Err("'!' must be part of the '!=' operator")),
+            ("trades = 5 oops", Err("ambiguous where value")),
+            ("family = 'meanrev", Err("unterminated ' quote")),
+            ("a = \"x AND b = 2", Err("unterminated \" quote")),
+            ("note = 'a' b", Err("unexpected text after the quoted value")),
+        ]
+    }
+
+    #[test]
+    fn where_clause_table() {
+        for (input, expected) in where_clause_cases() {
+            let got = parse_where_expr(input);
+            match expected {
+                Ok(want) => {
+                    let got: Vec<(String, String, Value)> = got
+                        .unwrap_or_else(|e| panic!("{input:?} should parse: {e}"))
+                        .into_iter()
+                        .map(|(field, op, value)| (field, format!("{op:?}"), value))
+                        .collect();
+                    let want: Vec<(String, String, Value)> = want
+                        .into_iter()
+                        .map(|(field, op, value)| (field.to_string(), op.to_string(), value))
+                        .collect();
+                    assert_eq!(got, want, "{input:?}");
+                }
+                Err(needle) => {
+                    let err = match got {
+                        Ok(conds) => panic!("{input:?} should fail, parsed {conds:?}"),
+                        Err(e) => e.to_string(),
+                    };
+                    assert!(err.contains(needle), "{input:?}: {err:?} lacks {needle:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn query_tool_where_value_keeps_apostrophes_and_operator_chars() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Axil::open(dir.path().join("q5.axil")).build().unwrap();
+        db.insert("people", json!({"name": "O'Brien", "url": "https://x/?q=1"}))
+            .unwrap();
+        db.insert("people", json!({"name": "Smith", "url": "https://y/"}))
+            .unwrap();
+        for clause in ["name=O'Brien", "url contains ?q=1"] {
+            let result = dispatch(&db, "query", &json!({"table": "people", "where": clause}));
+            assert!(result.is_error.is_none(), "{clause}: {result:?}");
+            let body = parse_json_payload(&result);
+            let rows = body.as_array().expect("expected JSON array");
+            assert_eq!(rows.len(), 1, "{clause} must match exactly O'Brien");
+            assert_eq!(rows[0]["data"]["name"], "O'Brien");
+        }
     }
 
     #[cfg(feature = "ql")]
