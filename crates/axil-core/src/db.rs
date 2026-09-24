@@ -507,14 +507,23 @@ impl AxilBuilder {
             Some(explicit) => (explicit, Vec::new()),
             None => {
                 let loaded = crate::config::load_lifecycle_checked_from(config_dir);
-                warn_lifecycle_once(&loaded.warnings);
+                warn_config_once(&loaded.warnings);
                 (loaded.config, loaded.warnings)
             }
         };
         // The same file supplies the handle's other tunables: the event log
         // and the slow-query threshold have no builder override, so every open
         // path picks them up here (the post-build setters still override).
-        let file_config = crate::config::load_config_from(config_dir).unwrap_or_default();
+        let file_config = match crate::config::load_config_from(config_dir) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                warn_config_once(&[format!(
+                    "{e}; every setting in that file is ignored and defaults apply \
+                     ([lifecycle] entries still fail safe)"
+                )]);
+                crate::config::AxilConfig::default()
+            }
+        };
         let supersede_threshold = self
             .supersede_threshold
             .unwrap_or(file_config.healing.supersede_similarity_threshold as f32);
@@ -595,14 +604,14 @@ impl AxilBuilder {
     }
 }
 
-/// Print each `[lifecycle]` config warning to stderr, once per process.
+/// Print each `axil.toml` warning to stderr, once per process.
 ///
 /// A malformed lifecycle entry already fails safe (the table gets the most
-/// protective policy), but the author must still learn that the file does not
-/// say what they meant. Callers commonly discard config errors (`.ok()`), so
-/// the builder reports it itself; deduped so a process that opens many
-/// handles warns once.
-fn warn_lifecycle_once(warnings: &[String]) {
+/// protective policy), and an unreadable file falls back to defaults, but the
+/// author must still learn that the file does not say what they meant.
+/// Callers commonly discard config errors (`.ok()`), so the builder reports
+/// them itself; deduped so a process that opens many handles warns once.
+fn warn_config_once(warnings: &[String]) {
     static WARNED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
         std::sync::OnceLock::new();
     if warnings.is_empty() {

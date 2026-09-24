@@ -17341,7 +17341,13 @@ fn run_config(cmd: ConfigCommand, out: &Output) -> Result<i32> {
             let mut config_json = serde_json::to_value(&config).unwrap_or(json!(null));
             // `[lifecycle]` is parsed separately from AxilConfig (it is not a
             // field there); merge it into the display so `show` is complete.
-            let lifecycle = axil_core::load_lifecycle_from(&cwd);
+            // A malformed entry is shown with the protective policy it fell
+            // back to, so the warnings say why it differs from the file.
+            let axil_core::LifecycleLoad {
+                config: lifecycle,
+                warnings: lifecycle_warnings,
+                ..
+            } = axil_core::load_lifecycle_checked_from(&cwd);
             if !lifecycle.tables.is_empty() {
                 if let Some(obj) = config_json.as_object_mut() {
                     obj.insert(
@@ -17350,7 +17356,14 @@ fn run_config(cmd: ConfigCommand, out: &Output) -> Result<i32> {
                     );
                 }
             }
-            out.print(&json!({ "config": config_json }));
+            let mut shown = json!({ "config": config_json });
+            if !lifecycle_warnings.is_empty() {
+                shown["lifecycle_warnings"] = json!(lifecycle_warnings);
+            }
+            out.print(&shown);
+            for warning in &lifecycle_warnings {
+                out.status(&format!("warning: {warning}"));
+            }
             if !out.quiet {
                 if let Ok(toml_str) = toml::to_string_pretty(&config) {
                     out.status(&toml_str);
