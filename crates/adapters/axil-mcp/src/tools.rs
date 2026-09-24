@@ -474,6 +474,50 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
     ]
 }
 
+/// Tools that never change database state, so the server may run them
+/// concurrently with one another. Every other tool — including anything a
+/// plugin adds — is serialized against all other requests. A name belongs here
+/// only if neither its built-in handler nor the Extension that claims it
+/// writes; `cache_get`, for instance, stays out because it evicts expired
+/// entries as it reads.
+const READ_ONLY_TOOLS: &[&str] = &[
+    "recall",
+    "search",
+    "query_history",
+    "get",
+    "list",
+    "query",
+    "aggregate",
+    "similar",
+    "lineage",
+    "boot",
+    "inspect",
+    "recall_delta",
+    "code_search",
+    "code_context",
+    "dep_docs",
+    "deps_status",
+    "checkpoint_show",
+];
+
+/// Whether calling `tool_name` with `args` leaves every database untouched,
+/// so it may overlap with other read-only calls (see [`READ_ONLY_TOOLS`]).
+///
+/// `recall` with `across` is the exception: it opens each sibling database
+/// with a writable handle, and two overlapping fan-outs would contend for the
+/// same single-writer locks.
+pub(crate) fn is_read_only_call(tool_name: &str, args: &Value) -> bool {
+    if tool_name == "recall"
+        && args
+            .get("across")
+            .and_then(|v| v.as_array())
+            .is_some_and(|a| !a.is_empty())
+    {
+        return false;
+    }
+    READ_ONLY_TOOLS.contains(&tool_name)
+}
+
 /// Dispatch a tool call to the appropriate handler.
 ///
 /// before the hard-coded match, try every registered
@@ -2079,6 +2123,40 @@ mod tests {
             let rows = body.as_array().expect("expected JSON array");
             assert_eq!(rows.len(), 1, "{clause} must match exactly O'Brien");
             assert_eq!(rows[0]["data"]["name"], "O'Brien");
+        }
+    }
+
+    #[test]
+    fn read_only_classification() {
+        assert!(is_read_only_call("recall", &json!({"query": "q"})));
+        assert!(is_read_only_call("get", &json!({"id": "x"})));
+        // A cross-project fan-out opens sibling databases for writing.
+        assert!(!is_read_only_call("recall", &json!({"query": "q", "across": ["a"]})));
+        assert!(is_read_only_call("recall", &json!({"query": "q", "across": []})));
+        for write in ["store", "link", "delete", "add_vector", "checkpoint", "cache_get"] {
+            assert!(!is_read_only_call(write, &json!({})), "{write} must serialize");
+        }
+        // Unknown (e.g. plugin) tools are serialized by default.
+        assert!(!is_read_only_call("some_plugin_tool", &json!({})));
+    }
+
+    /// Drift guard: every read-only entry names a tool this build can expose,
+    /// so a rename can't leave a stale entry for a future tool to inherit.
+    #[test]
+    fn read_only_tools_name_real_tools() {
+        let mut names: std::collections::HashSet<String> =
+            tool_definitions().into_iter().map(|t| t.name).collect();
+        for surface in axil_bundle::builtin_mcp_surfaces(&axil_core::AxilConfig::default()) {
+            names.extend(surface.tools.into_iter().map(|t| t.name));
+        }
+        for name in READ_ONLY_TOOLS {
+            let feature_gated = (*name == "recall_delta" && !cfg!(feature = "event-log"))
+                || (*name == "checkpoint_show" && !cfg!(feature = "checkpoint"))
+                || (*name == "aggregate" && !cfg!(feature = "ql"));
+            assert!(
+                feature_gated || names.contains(*name),
+                "READ_ONLY_TOOLS lists `{name}`, which is not an MCP tool"
+            );
         }
     }
 
