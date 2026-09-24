@@ -21,7 +21,21 @@ $tmp = Join-Path $env:Temp ("axil-install-" + [guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Path $tmp | Out-Null
 try {
     $zip = Join-Path $tmp "axildb.zip"
-    Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
+    try {
+        Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
+    } catch {
+        # A new Release exists before its archives are uploaded (they build for
+        # ~20 minutes after the tag), so `latest` can 404 for a while. Fall back
+        # to the newest release that already carries this platform's archive.
+        Write-Host "axil-install: latest release has no axildb-$triple.zip yet; trying the newest release that does"
+        $releases = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases?per_page=20" -UseBasicParsing
+        $asset = $releases | ForEach-Object { $_.assets } |
+            Where-Object { $_.name -eq "axildb-$triple.zip" } | Select-Object -First 1
+        if (-not $asset) { throw "axil-install: no published release has axildb-$triple.zip yet" }
+        $url = $asset.browser_download_url
+        Write-Host "axil-install: downloading $url"
+        Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
+    }
     Expand-Archive -Path $zip -DestinationPath $tmp -Force
 
     $axilHome = if ($env:AXIL_HOME) { $env:AXIL_HOME } else { Join-Path $HOME ".axil" }

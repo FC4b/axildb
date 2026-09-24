@@ -37,7 +37,20 @@ main() {
     trap 'rm -rf "$tmp"' EXIT
 
     info "downloading $url"
-    curl -fsSL "$url" | tar xzf - -C "$tmp"
+    if ! curl -fsSL "$url" -o "$tmp/$archive"; then
+        # A new Release exists before its archives are uploaded (they build for
+        # ~20 minutes after the tag), so `latest` can 404 for a while. Fall back
+        # to the newest release that already carries this platform's archive.
+        info "latest release has no $archive yet; trying the newest release that does"
+        url="$(curl -fsSL "https://api.github.com/repos/$REPO/releases?per_page=20" \
+            | grep -o "\"browser_download_url\": *\"[^\"]*/$archive\"" \
+            | head -n 1 \
+            | sed 's/.*"\(https[^"]*\)"$/\1/')" || url=""
+        [ -n "$url" ] || err "no published release has $archive yet"
+        info "downloading $url"
+        curl -fsSL "$url" -o "$tmp/$archive"
+    fi
+    tar xzf "$tmp/$archive" -C "$tmp"
 
     install_dir="$PREFIX/bin"
     mkdir -p "$install_dir"

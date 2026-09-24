@@ -7,6 +7,8 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  # Dispatching release.yml (see "build release archives" below).
+  actions: write
 
 jobs:
   # Publish crates + create tags/GitHub releases once the release PR is merged.
@@ -19,6 +21,7 @@ jobs:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
       - name: release-plz release
+        id: release-plz
         uses: release-plz/action@v0.5
         with:
           command: release
@@ -27,6 +30,22 @@ jobs:
           # Required for `cargo publish`. Set this repo secret, or switch to
           # crates.io Trusted Publishing (OIDC) and drop this line.
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      # The tag release-plz just pushed with GITHUB_TOKEN cannot trigger
+      # release.yml's `on: push: tags` (GitHub's loop prevention), which left
+      # new Releases with no archives and the one-line installers 404ing.
+      # workflow_dispatch is exempt from that rule, so start the archive build
+      # for the `axildb` tag explicitly.
+      - name: build release archives
+        if: steps.release-plz.outputs.releases_created == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASES: ${{ steps.release-plz.outputs.releases }}
+        run: |
+          tag="$(printf '%s' "$RELEASES" | jq -r '.[] | select(.package_name == "axildb") | .tag')"
+          if [ -n "$tag" ]; then
+            gh workflow run release.yml --repo "$GITHUB_REPOSITORY" -f tag="$tag"
+            echo "dispatched release.yml for $tag"
+          fi
 
   # Open/update the aggregated "release" PR (version bumps + changelog).
   release-pr:
