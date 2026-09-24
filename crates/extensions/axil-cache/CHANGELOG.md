@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.1.4](https://github.com/FC4b/axildb/compare/axil-cache-v2.1.3...axil-cache-v2.1.4) - 2026-09-24
+
+### Fixed
+
+- *(cache)* evict expired then least-recently-used, never the new entry
+- *(core,vector,mcp,memory)* land phase 27 codex-review hardening
+
 ## [2.1.3](https://github.com/FC4b/axildb/compare/axil-cache-v2.1.2...axil-cache-v2.1.3) - 2026-07-18
 
 ### Other

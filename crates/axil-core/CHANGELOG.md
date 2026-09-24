@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.3.0](https://github.com/FC4b/axildb/compare/axil-core-v2.2.0...axil-core-v2.3.0) - 2026-09-24
+
+### Added
+
+- *(core,ql,graph)* surface the two ABI-gated phase-27 follow-ups
+- *(lifecycle)* per-table lifecycle policy + wire dead healing knobs
+
+### Fixed
+
+- *(core)* sort every vector/FTS candidate before paging an ordered query
+- *(core,cli)* report a broken axil.toml instead of silently using defaults
+- *(core,mcp)* one supersede path, fail-safe lifecycle config, history-safe compaction
+- *(core)* collect every traversal endpoint before an ordered sort
+- *(vector,core)* stop HNSW panics on extreme vectors, build graph lazily, purge unloadable rows
+- *(core,vector,mcp,memory)* land phase 27 codex-review hardening
+
+### Other
+
+- *(core,vector)* delete from unopened vector spaces without loading them
+- *(core,memory)* Axil::vector_count for recall's index-size check
+
 ## [2.2.0](https://github.com/FC4b/axildb/compare/axil-core-v2.1.2...axil-core-v2.2.0) - 2026-07-18
 
 ### Added

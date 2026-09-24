@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.1](https://github.com/FC4b/axildb/compare/axil-mcp-v2.2.0...axil-mcp-v2.2.1) - 2026-09-24
+
+### Fixed
+
+- *(core,mcp)* one supersede path, fail-safe lifecycle config, history-safe compaction
+- *(cli,mcp)* apply axil.toml handle settings on every open path
+- *(mcp)* keep pipelined requests ordered and answer panicking handlers
+- *(cli,mcp)* parse --where conditions positionally
+- *(core,vector,mcp,memory)* land phase 27 codex-review hardening
+
+### Other
+
+- *(cli,mcp)* drop the build_configured wrapper now that the builder applies config
+- *(mcp)* recall_delta resumes from next_cursor
+- *(mcp)* drop the never-constructed Incoming::Eof variant
+
 ## [2.2.0](https://github.com/FC4b/axildb/compare/axil-mcp-v2.1.2...axil-mcp-v2.2.0) - 2026-07-18
 
 ### Added

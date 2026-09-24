@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.3.0](https://github.com/FC4b/axildb/compare/axil-ql-v2.2.0...axil-ql-v2.3.0) - 2026-09-24
+
+### Added
+
+- *(core,ql,graph)* surface the two ABI-gated phase-27 follow-ups
+
+### Fixed
+
+- *(ql)* keep Query::Traverse's published shape; honour KNOWN AT on table seeds
+- *(ql)* make AGG, GROUP, KNOWN and AT contextual keywords
+- *(ql)* fold every matching row in AGG and filtered COUNT
+
 ## [2.2.0](https://github.com/FC4b/axildb/compare/axil-ql-v2.1.2...axil-ql-v2.2.0) - 2026-07-18
 
 ### Added
