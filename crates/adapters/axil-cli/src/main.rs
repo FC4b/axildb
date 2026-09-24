@@ -9132,13 +9132,22 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             // Keep a copy for cascade fallbacks — the primary recall consumes `cfg`.
             let cfg_for_cascade = cfg.clone();
 
-            // --table / --type drop rows after the recall, so over-fetch to let
-            // matches ranked just below the cut still fill top_k; the result is
-            // truncated back to top_k once filtered. Same factor as the MCP
-            // `recall` tool's `TABLE_FILTER_INFLATION`, so both surfaces return
-            // the same rows for the same filtered query.
+            // Every post-filter below (--table, --type, --after, --before,
+            // --agent, --min-importance, --fresh-only) drops rows after the
+            // recall, so over-fetch to let matches ranked just below the cut
+            // still fill top_k; the result is truncated back to top_k once
+            // filtered. Same factor as the MCP `recall` tool's
+            // `TABLE_FILTER_INFLATION`, so both surfaces return the same rows
+            // for the same filtered query.
             const FILTER_INFLATION: usize = 5;
-            let fetch_k = if table_filter.is_some() || type_filter.is_some() {
+            let post_filtered = table_filter.is_some()
+                || type_filter.is_some()
+                || after_dt.is_some()
+                || before_dt.is_some()
+                || agent_filter.is_some()
+                || min_importance.is_some()
+                || (fresh_only && !stale_paths.is_empty());
+            let fetch_k = if post_filtered {
                 top_k.saturating_mul(FILTER_INFLATION)
             } else {
                 top_k
