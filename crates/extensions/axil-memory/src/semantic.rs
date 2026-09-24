@@ -108,7 +108,9 @@ impl<'a> SemanticMemory<'a> {
                     Direction::Both,
                 ) {
                     for neighbor in neighbors {
-                        if neighbor.table == TABLE_ENTITIES {
+                        if neighbor.table == TABLE_ENTITIES
+                            && crate::agent_visible(self.agent.as_deref(), &neighbor.data)
+                        {
                             if let Some(name) = neighbor.data.get("entity").and_then(|v| v.as_str())
                             {
                                 if name != entity && !related.contains(&name.to_string()) {
@@ -173,9 +175,13 @@ impl<'a> SemanticMemory<'a> {
     }
 
     /// Get the history of an entity — all versions including superseded.
+    ///
+    /// Agent-scoped handles see only the versions they may read.
     pub fn history(&self, entity: &str) -> Result<Vec<Record>> {
         let supersede = crate::supersede::SupersedeEngine::new(self.db);
-        supersede.history(entity, TABLE_ENTITIES)
+        let mut versions = supersede.history(entity, TABLE_ENTITIES)?;
+        versions.retain(|r| crate::agent_visible(self.agent.as_deref(), &r.data));
+        Ok(versions)
     }
 
     /// Register an alias for an entity.
@@ -289,7 +295,10 @@ impl<'a> SemanticMemory<'a> {
         let mut seen = std::collections::HashSet::new();
         let mut canonical_names: Vec<String> = Vec::new();
 
-        for r in &entities {
+        for r in entities
+            .iter()
+            .filter(|r| crate::agent_visible(self.agent.as_deref(), &r.data))
+        {
             if let Some(entity_name) = r.data.get("entity").and_then(|v| v.as_str()) {
                 let lower = entity_name.to_lowercase();
                 if seen.insert(lower) {
@@ -371,6 +380,11 @@ impl<'a> SemanticMemory<'a> {
     /// Merge two entities: move all facts from `source` to `target`,
     /// transfer aliases, and register `source` as an alias of `target`.
     ///
+    /// Only facts in this handle's own scope move: an agent re-points its own
+    /// facts, an unscoped handle the global ones; other scopes' facts keep
+    /// their entity name. Aliases are a shared namespace and are updated for
+    /// everyone.
+    ///
     /// Returns the number of facts moved.
     pub fn merge(&self, target: &str, source: &str) -> Result<usize> {
         validate_entity_name(target)?;
@@ -386,7 +400,9 @@ impl<'a> SemanticMemory<'a> {
         let all = self.db.list(TABLE_ENTITIES)?;
         let mut moved = 0usize;
         for record in &all {
-            if record.data.get("entity").and_then(|v| v.as_str()) == Some(source) {
+            if record.data.get("entity").and_then(|v| v.as_str()) == Some(source)
+                && crate::agent_owns(self.agent.as_deref(), &record.data)
+            {
                 let mut data = record.data.clone();
                 data["entity"] = json!(target);
                 self.db.update(&record.id, data)?;
@@ -431,7 +447,8 @@ impl<'a> SemanticMemory<'a> {
 
         if opts.strategy != DisambiguationStrategy::Default {
             // Single fetch: load entities once for all strategy methods.
-            let all_entities = self.db.list(TABLE_ENTITIES)?;
+            let mut all_entities = self.db.list(TABLE_ENTITIES)?;
+            all_entities.retain(|r| crate::agent_visible(self.agent.as_deref(), &r.data));
 
             match opts.strategy {
                 DisambiguationStrategy::Default => unreachable!(),
@@ -622,6 +639,11 @@ impl<'a> SemanticMemory<'a> {
     ///
     /// Single-pass: fetches all entity records once, builds a lookup map,
     /// then checks for substring matches in the new fact.
+    ///
+    /// Only facts that everyone able to read the new fact can also read are
+    /// linked — global facts, or facts in the new fact's own scope. An edge
+    /// into another agent's private fact would surface its entity name to
+    /// readers of this one.
     fn auto_discover_relationships(&self, new_record: &Record, entity: &str) -> Result<()> {
         if !self.db.has_graph_index() {
             return Ok(());
@@ -641,9 +663,13 @@ impl<'a> SemanticMemory<'a> {
 
         // Single fetch: build lowercase_entity_name → (original_name, record) map.
         let all_records = self.db.list(TABLE_ENTITIES)?;
+        let owner = new_record.data.get("_agent").and_then(|v| v.as_str());
         let mut entity_map: HashMap<String, (String, Record)> = HashMap::new();
         for record in all_records {
             if crate::ttl::is_record_superseded(&record) {
+                continue;
+            }
+            if !crate::agent_owns(None, &record.data) && !crate::agent_owns(owner, &record.data) {
                 continue;
             }
             if let Some(name) = record.data.get("entity").and_then(|v| v.as_str()) {

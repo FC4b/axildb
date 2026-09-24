@@ -3,6 +3,8 @@
 //! Stores approaches that worked (or failed), with confidence scores
 //! that strengthen on success and weaken on failure.
 
+use std::collections::HashSet;
+
 use serde_json::json;
 
 use axil_core::{Axil, Op, Record, RecordId, Result};
@@ -39,6 +41,11 @@ impl<'a> ProceduralMemory<'a> {
     }
 
     /// Store a learned procedure/pattern.
+    ///
+    /// Re-learning a known procedure reinforces it. The procedure is resolved
+    /// by exact scope: an agent-scoped handle reinforces its own copy — forking
+    /// one from the global procedure on first contact — and never the global
+    /// or another agent's; an unscoped handle reinforces only the global one.
     pub fn learn(
         &self,
         pattern_name: &str,
@@ -48,10 +55,16 @@ impl<'a> ProceduralMemory<'a> {
         validate_text(pattern_name, "pattern_name")?;
         validate_text(description, "description")?;
 
-        // Check if a procedure with this name already exists.
-        if let Some(existing) = self.find_by_name(pattern_name)? {
+        // Check if a procedure with this name already exists in our scope.
+        if let Some(existing) = self.find_in_scope(pattern_name, self.agent.as_deref())? {
             // Update existing procedure — boost confidence.
             return self.reinforce(&existing.id, description);
+        }
+        if self.agent.is_some() {
+            if let Some(global) = self.find_in_scope(pattern_name, None)? {
+                let own = self.fork(&global)?;
+                return self.reinforce(&own.id, description);
+            }
         }
 
         let mut data = json!({
@@ -122,11 +135,31 @@ impl<'a> ProceduralMemory<'a> {
     }
 
     /// Record the outcome of applying a procedure.
+    ///
+    /// An agent-scoped handle only writes its own records: an outcome for a
+    /// global procedure lands on the agent's own copy (forked on first use and
+    /// returned), and another agent's private procedure is `NotFound`. An
+    /// unscoped handle updates the record it is given.
     pub fn record_outcome(&self, id: &RecordId, outcome: Outcome) -> Result<Record> {
-        let record = self
-            .db
-            .get(id)?
-            .ok_or_else(|| axil_core::AxilError::NotFound(format!("procedure {id}")))?;
+        let not_found = || axil_core::AxilError::NotFound(format!("procedure {id}"));
+        let record = self.db.get(id)?.ok_or_else(not_found)?;
+        let record = match self.agent.as_deref() {
+            None => record,
+            Some(agent) if crate::agent_owns(Some(agent), &record.data) => record,
+            Some(_) if crate::agent_owns(None, &record.data) => {
+                let name = record
+                    .data
+                    .get("pattern_name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+                match self.find_in_scope(name, self.agent.as_deref())? {
+                    Some(own) => own,
+                    None => self.fork(&record)?,
+                }
+            }
+            Some(_) => return Err(not_found()),
+        };
+        let id = &record.id;
 
         let mut data = record.data.clone();
         let confidence = data
@@ -163,17 +196,72 @@ impl<'a> ProceduralMemory<'a> {
     }
 
     /// Find a procedure by name.
+    ///
+    /// An agent-scoped handle resolves to its own procedure when it has one,
+    /// else the global one. An unscoped handle prefers the global procedure
+    /// and falls back to any agent's.
     pub fn find_by_name(&self, name: &str) -> Result<Option<Record>> {
-        let records = self
-            .db
+        let mut fallback = None;
+        for record in self.rows_for_name(name)? {
+            if crate::agent_owns(self.agent.as_deref(), &record.data) {
+                return Ok(Some(record));
+            }
+            if fallback.is_none() && crate::agent_visible(self.agent.as_deref(), &record.data) {
+                fallback = Some(record);
+            }
+        }
+        Ok(fallback)
+    }
+
+    /// Every stored procedure named `name`, across all scopes.
+    fn rows_for_name(&self, name: &str) -> Result<Vec<Record>> {
+        self.db
             .query()
             .table(TABLE_PROCEDURES)
             .where_field("pattern_name", Op::Eq, json!(name))
-            .exec()?;
+            .exec()
+    }
 
-        Ok(records
+    /// The procedure named `name` owned by exactly `scope` (`None` = global).
+    fn find_in_scope(&self, name: &str, scope: Option<&str>) -> Result<Option<Record>> {
+        Ok(self
+            .rows_for_name(name)?
             .into_iter()
-            .find(|r| crate::agent_visible(self.agent.as_deref(), &r.data)))
+            .find(|r| crate::agent_owns(scope, &r.data)))
+    }
+
+    /// Give this agent-scoped handle its own copy of a global procedure,
+    /// carrying the global's track record so the agent's view of it is
+    /// unchanged until the agent's own feedback moves it.
+    fn fork(&self, global: &Record) -> Result<Record> {
+        let mut data = global.data.clone();
+        set_bitemporal(&mut data, None);
+        crate::stamp_agent(&mut data, self.agent.as_deref());
+        let record = self.db.insert(TABLE_PROCEDURES, data)?;
+
+        if self.db.has_vector_index() {
+            let field = |key: &str| record.data.get(key).and_then(|v| v.as_str()).unwrap_or("");
+            let embed_text = format!("{}: {}", field("pattern_name"), field("description"));
+            let _ = self.db.embed_text(&record.id, &embed_text);
+        }
+        Ok(record)
+    }
+
+    /// Names of the procedures this agent-scoped handle owns (empty when
+    /// unscoped).
+    fn own_names(&self) -> Result<HashSet<String>> {
+        let Some(agent) = self.agent.as_deref() else {
+            return Ok(HashSet::new());
+        };
+        Ok(self
+            .db
+            .query()
+            .table(TABLE_PROCEDURES)
+            .where_field("_agent", Op::Eq, json!(agent))
+            .exec()?
+            .iter()
+            .filter_map(|r| pattern_name(r).map(String::from))
+            .collect())
     }
 
     /// Find relevant procedures for a task (vector search).
@@ -183,13 +271,18 @@ impl<'a> ProceduralMemory<'a> {
         }
 
         let results = self.db.similar_to(task, top_k * 3)?;
-        let mut filtered: Vec<(Record, f32)> = results
+        let filtered: Vec<(Record, f32)> = results
             .into_iter()
             .filter(|(r, _)| r.table == TABLE_PROCEDURES)
             .filter(|(r, _)| !crate::ttl::is_record_expired(r))
             .filter(|(r, _)| !crate::ttl::is_record_superseded(r))
             .filter(|(r, _)| crate::agent_visible(self.agent.as_deref(), &r.data))
             .collect();
+        let own_names = self.own_names()?;
+        let mut filtered =
+            crate::drop_shadowed(self.agent.as_deref(), filtered, &own_names, |(r, _)| {
+                (&r.data, pattern_name(r))
+            });
 
         // Sort by confidence-weighted similarity.
         filtered.sort_by(|a, b| {
@@ -213,13 +306,24 @@ impl<'a> ProceduralMemory<'a> {
     }
 
     /// List all procedures, sorted by confidence descending.
+    ///
+    /// For an agent-scoped handle, a global procedure the agent has its own
+    /// copy of is not listed.
     pub fn list(&self) -> Result<Vec<Record>> {
-        let mut records: Vec<Record> = self
+        let records: Vec<Record> = self
             .db
             .list(TABLE_PROCEDURES)?
             .into_iter()
             .filter(|r| crate::agent_visible(self.agent.as_deref(), &r.data))
             .collect();
+        let own_names: HashSet<String> = records
+            .iter()
+            .filter(|r| crate::agent_owns(self.agent.as_deref(), &r.data))
+            .filter_map(|r| pattern_name(r).map(String::from))
+            .collect();
+        let mut records = crate::drop_shadowed(self.agent.as_deref(), records, &own_names, |r| {
+            (&r.data, pattern_name(r))
+        });
         records.sort_by(|a, b| {
             let ca = a
                 .data
@@ -282,6 +386,11 @@ impl<'a> ProceduralMemory<'a> {
         let record = self.learn(&pattern_name, &description, Some(&episode.id))?;
         Ok(Some(record))
     }
+}
+
+/// The `pattern_name` a stored procedure is filed under.
+fn pattern_name(record: &Record) -> Option<&str> {
+    record.data.get("pattern_name").and_then(|v| v.as_str())
 }
 
 /// Generate a concise pattern name from a summary.

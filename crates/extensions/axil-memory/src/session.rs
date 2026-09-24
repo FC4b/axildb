@@ -19,8 +19,7 @@ const SESSION_ENDED: &str = "ended";
 pub struct WorkingMemory<'a> {
     db: &'a Axil,
     /// Agent name for per-agent session isolation. If set, sessions are
-    /// scoped to this agent. Shared memory types (semantic, procedural,
-    /// preference) are NOT affected by agent scoping.
+    /// scoped to this agent.
     agent: Option<String>,
 }
 
@@ -32,8 +31,7 @@ impl<'a> WorkingMemory<'a> {
     /// Create a working memory scoped to a specific agent.
     ///
     /// Per-agent sessions are isolated: each agent sees only its own
-    /// sessions and working memory. Shared memory types (semantic,
-    /// procedural, preference) remain accessible to all agents.
+    /// sessions and working memory, and may only write to its own sessions.
     pub fn for_agent(db: &'a Axil, agent: &str) -> Self {
         Self {
             db,

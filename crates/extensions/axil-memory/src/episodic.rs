@@ -112,6 +112,8 @@ impl<'a> EpisodicMemory<'a> {
     }
 
     /// Manually create an episode (not from a session).
+    ///
+    /// An agent-scoped handle stamps the episode as the agent's own.
     pub fn create(
         &self,
         summary: &str,
@@ -127,6 +129,7 @@ impl<'a> EpisodicMemory<'a> {
         });
 
         set_bitemporal(&mut data, None);
+        crate::stamp_agent(&mut data, self.agent.as_deref());
 
         let episode = self.db.insert(TABLE_EPISODES, data)?;
 
@@ -176,6 +179,9 @@ impl<'a> EpisodicMemory<'a> {
     }
 
     /// Find similar past episodes using vector search.
+    ///
+    /// If this episodic memory is agent-scoped, only that agent's episodes
+    /// are returned (the same rule as [`EpisodicMemory::list`]).
     pub fn similar(&self, query: &str, top_k: usize) -> Result<Vec<(Record, f32)>> {
         if !self.db.has_vector_index() {
             return Ok(Vec::new());
@@ -187,6 +193,9 @@ impl<'a> EpisodicMemory<'a> {
             .filter(|(r, _)| r.table == TABLE_EPISODES)
             .filter(|(r, _)| !crate::ttl::is_record_expired(r))
             .filter(|(r, _)| !crate::ttl::is_record_superseded(r))
+            .filter(|(r, _)| {
+                self.agent.is_none() || crate::agent_owns(self.agent.as_deref(), &r.data)
+            })
             .collect();
 
         filtered.truncate(top_k);
@@ -194,6 +203,10 @@ impl<'a> EpisodicMemory<'a> {
     }
 
     /// Link an episode to entities mentioned in its text.
+    ///
+    /// Only facts the episode's owner can see are linked (its own and global
+    /// ones): an edge into another agent's private fact would surface that
+    /// fact to anyone traversing from the episode.
     fn link_to_entities(&self, episode: &Record, text: &str) -> Result<()> {
         if !self.db.has_graph_index() {
             return Ok(());
@@ -201,10 +214,16 @@ impl<'a> EpisodicMemory<'a> {
 
         let entity_records = self.db.list(TABLE_ENTITIES)?;
         let text_lower = text.to_lowercase();
+        let owner = episode.data.get("_agent").and_then(|v| v.as_str());
 
         for entity_record in &entity_records {
             // Skip superseded entity records to avoid stale graph edges.
             if crate::ttl::is_record_superseded(entity_record) {
+                continue;
+            }
+            if !crate::agent_owns(None, &entity_record.data)
+                && !crate::agent_owns(owner, &entity_record.data)
+            {
                 continue;
             }
             if let Some(name) = entity_record.data.get("entity").and_then(|v| v.as_str()) {
