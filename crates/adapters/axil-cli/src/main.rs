@@ -8555,6 +8555,24 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             if space.is_some() && raw_vector.is_none() {
                 anyhow::bail!("--space requires --vector");
             }
+            // The default space belongs to the text embedder: every open
+            // attaches it at the model's dimension, so a store created (or
+            // written) at any other length makes the whole database refuse to
+            // open. Checked before the open, which would create that store.
+            #[cfg(feature = "embed")]
+            if let (Some(v), None) = (&raw_vector, &space) {
+                let model = resolve_embedding_model(&db_path);
+                if v.len() != model.dimensions() {
+                    anyhow::bail!(
+                        "--vector has {} dimensions, but the default vector space holds \
+                         {}-dimension {} text embeddings. Store raw vectors of another \
+                         size in a named space: --space <name>",
+                        v.len(),
+                        model.dimensions(),
+                        model.name()
+                    );
+                }
+            }
 
             // Open path: `--embed` needs the embedder; otherwise the raw-vector
             // policy is shared across feature ladders by `open_for_store` (a
@@ -10825,6 +10843,23 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             let embedding_model = parse_model(&model)?;
             let new_dims = embedding_model.dimensions();
 
+            // The old store sits at `backup_path` while the new one is built.
+            // A backup that already exists was left by a run that died
+            // mid-rebuild: it is the only intact copy of the original vectors
+            // (the live store is the half-built one), so it is restored before
+            // anything reads or moves the store — never deleted.
+            let vec_path = axil_vector::vector_db_path(&db_path);
+            let backup_path = vec_path.with_extension("reembed-bak");
+            if backup_path.exists() {
+                std::fs::rename(&backup_path, &vec_path).context(
+                    "failed to restore the vector store backup left by an interrupted re-embed",
+                )?;
+                eprintln!(
+                    "axil: restored {} from an interrupted re-embed",
+                    vec_path.display()
+                );
+            }
+
             // Step 1: Open DB without vector to collect record IDs + text.
             let db = Axil::open(&db_path)
                 .build()
@@ -10838,6 +10873,10 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             };
 
             let mut work: Vec<(RecordId, String)> = Vec::new();
+            // Every record of the re-embedded tables, text or not: their
+            // vectors are rebuilt from scratch, so none of them carry over.
+            let mut rebuilt_ids: std::collections::HashSet<RecordId> =
+                std::collections::HashSet::new();
             for tbl in &tables {
                 for record in db.list(tbl).unwrap_or_default() {
                     if let Some(text) = record.data.get(&field).and_then(|v| v.as_str()) {
@@ -10845,6 +10884,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                             work.push((record.id.clone(), text.to_string()));
                         }
                     }
+                    rebuilt_ids.insert(record.id);
                 }
             }
 
@@ -10866,23 +10906,36 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             ));
 
             // A table-scoped re-embed must not silently destroy every other
-            // table's vectors. With unchanged dimensions they can be copied
-            // over raw; with a dimension change only a full re-embed can
-            // rebuild them, so scoping is refused outright.
-            let stored_dims = axil_vector::read_stored_dimensions(&db_path).ok().flatten();
+            // table's vectors. With unchanged dimensions they are carried over
+            // from the old store; with a dimension change only a full re-embed
+            // can rebuild them, so scoping is refused outright. The old vectors
+            // are read through an engine opened on the store itself: `db` has
+            // no vector index attached, so `db.get_vector` sees none.
             let mut preserve: Vec<(RecordId, Vec<f32>)> = Vec::new();
             if table.is_some() {
+                // A full re-embed rebuilds everything, so it can ride over an
+                // unreadable store; a scoped one would silently discard it.
+                let stored_dims = axil_vector::read_stored_dimensions(&db_path).context(
+                    "failed to read the existing vector store; a --table re-embed \
+                     would discard every other table's vectors, so it was not started",
+                )?;
                 match stored_dims {
                     Some(old) if old == new_dims => {
-                        let all_tables = db.tables().context("failed to list tables")?;
-                        for tbl in &all_tables {
-                            if tables.contains(tbl) {
+                        use axil_core::plugin::VectorIndex;
+                        let old_store = axil_vector::VectorEngine::open(&db_path, old)
+                            .context("failed to open the existing vector store")?;
+                        for id in old_store
+                            .all_ids()
+                            .context("failed to list stored vectors")?
+                        {
+                            if rebuilt_ids.contains(&id) {
                                 continue;
                             }
-                            for record in db.list(tbl).unwrap_or_default() {
-                                if let Ok(Some(v)) = db.get_vector(&record.id) {
-                                    preserve.push((record.id, v));
-                                }
+                            if let Some(v) = old_store
+                                .get_vector(&id)
+                                .context("failed to read a stored vector")?
+                            {
+                                preserve.push((id, v));
                             }
                         }
                     }
@@ -10899,87 +10952,109 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             // The backup is deleted only after every record embeds cleanly —
             // any failure restores it, so the command is atomic.
             drop(db);
-            let vec_path = axil_vector::vector_db_path(&db_path);
-            let backup_path = vec_path.with_extension("reembed-bak");
             let had_old_store = vec_path.exists();
             if had_old_store {
-                // Drop a stale backup from a previously crashed run first.
-                let _ = std::fs::remove_file(&backup_path);
                 std::fs::rename(&vec_path, &backup_path).map_err(|e| {
                     anyhow::anyhow!(e).context("failed to back up old vector store")
                 })?;
             }
 
-            let reopened = Axil::open(&db_path)
-                .with_embedder_model(embedding_model.clone())
-                .context("failed to initialize embedder")
-                .and_then(|b| {
-                    b.build()
-                        .context("failed to open database with new vector store")
-                });
-            let db = match reopened {
-                Ok(db) => db,
+            let rebuilt = (|| -> Result<(usize, usize)> {
+                // Seed the fresh store with the untouched tables' vectors in
+                // one batch, before the embedder attaches to it.
+                if !preserve.is_empty() {
+                    use axil_core::plugin::VectorIndex;
+                    let store = axil_vector::VectorEngine::open(&db_path, new_dims)
+                        .context("failed to create the new vector store")?;
+                    let items: Vec<(RecordId, &[f32])> = preserve
+                        .iter()
+                        .map(|(id, v)| (id.clone(), v.as_slice()))
+                        .collect();
+                    store
+                        .add_batch(&items)
+                        .context("failed to carry over the other tables' vectors")?;
+                }
+
+                let db = Axil::open(&db_path)
+                    .with_embedder_model(embedding_model.clone())
+                    .context("failed to initialize embedder")?
+                    .build()
+                    .context("failed to open database with new vector store")?;
+
+                // Verify through the handle doing the rebuild: a short count
+                // would commit as vectors silently lost from other tables.
+                let preserved = preserve
+                    .iter()
+                    .filter(|(id, _)| matches!(db.get_vector(id), Ok(Some(_))))
+                    .count();
+                if preserved != preserve.len() {
+                    anyhow::bail!(
+                        "only {preserved}/{} of the other tables' vectors carried over; \
+                         the previous vector store was restored unchanged",
+                        preserve.len()
+                    );
+                }
+
+                // Step 3: Re-embed all collected records.
+                let mut success = 0usize;
+                let mut errors = 0usize;
+                let mut first_error: Option<String> = None;
+                let total = work.len();
+                for (i, (rid, text)) in work.iter().enumerate() {
+                    match db.embed_text(rid, text) {
+                        Ok(()) => success += 1,
+                        Err(e) => {
+                            eprintln!("  [skip] {rid}: {e}");
+                            errors += 1;
+                            first_error.get_or_insert_with(|| e.to_string());
+                        }
+                    }
+                    if (i + 1) % 100 == 0 {
+                        eprintln!("  [{}/{total}] re-embedded...", i + 1);
+                    }
+                }
+
+                if errors > 0 {
+                    anyhow::bail!(
+                        "re-embed failed for {errors}/{total} record(s) (first error: {}); \
+                         the previous vector store was restored unchanged",
+                        first_error.unwrap_or_default()
+                    );
+                }
+                Ok((success, preserved))
+            })();
+
+            let (success, preserved) = match rebuilt {
+                Ok(counts) => counts,
                 Err(e) => {
+                    // Atomic semantics: restore the previous store instead of
+                    // leaving a partially-populated index behind. The rename
+                    // replaces the partial store in one step; if it fails, the
+                    // backup stays put and the next run restores it.
                     if had_old_store {
-                        let _ = std::fs::remove_file(&vec_path);
                         std::fs::rename(&backup_path, &vec_path).map_err(|restore_err| {
-                            anyhow::anyhow!(restore_err).context(
-                                "re-embed failed AND restoring the old vector store failed",
-                            )
+                            anyhow::anyhow!(restore_err).context(format!(
+                                "re-embed failed ({e:#}) AND restoring the old vector store \
+                                 failed; the original is kept at {}",
+                                backup_path.display()
+                            ))
                         })?;
                     }
                     return Err(e);
                 }
             };
 
-            // Restore untouched tables' vectors (same-dimensions path only).
-            let mut preserved = 0usize;
-            for (id, vector) in &preserve {
-                if db.add_vector(id, vector).is_ok() {
-                    preserved += 1;
-                }
-            }
-
-            // Step 3: Re-embed all collected records.
-            let mut success = 0usize;
-            let mut errors = 0usize;
-            let mut first_error: Option<String> = None;
-            let total = work.len();
-            for (i, (rid, text)) in work.iter().enumerate() {
-                match db.embed_text(rid, text) {
-                    Ok(()) => success += 1,
-                    Err(e) => {
-                        eprintln!("  [skip] {rid}: {e}");
-                        errors += 1;
-                        first_error.get_or_insert_with(|| e.to_string());
-                    }
-                }
-                if (i + 1) % 100 == 0 {
-                    eprintln!("  [{}/{total}] re-embedded...", i + 1);
-                }
-            }
-
-            if errors > 0 {
-                // Atomic semantics: restore the previous store instead of
-                // leaving a partially-populated index behind.
-                drop(db);
-                if had_old_store {
-                    let _ = std::fs::remove_file(&vec_path);
-                    std::fs::rename(&backup_path, &vec_path).map_err(|restore_err| {
-                        anyhow::anyhow!(restore_err).context(
-                            "re-embed failed AND restoring the old vector store failed",
-                        )
-                    })?;
-                }
-                anyhow::bail!(
-                    "re-embed failed for {errors}/{total} record(s) (first error: {}); \
-                     the previous vector store was restored unchanged",
-                    first_error.unwrap_or_default()
-                );
-            }
-
+            // A backup left behind would be restored over this finished
+            // rebuild by the next re-embed, so failing to remove it is an
+            // error, not a shrug.
             if had_old_store {
-                let _ = std::fs::remove_file(&backup_path);
+                std::fs::remove_file(&backup_path).with_context(|| {
+                    format!(
+                        "re-embed succeeded but its backup {} could not be removed; \
+                         delete it before the next re-embed",
+                        backup_path.display()
+                    )
+                })?;
             }
 
             out.print(&json!({
