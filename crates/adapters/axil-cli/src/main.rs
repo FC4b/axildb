@@ -6046,6 +6046,26 @@ fn resolve_embedding_model(db_path: &Path) -> axil_vector::models::EmbeddingMode
     axil_vector::models::EmbeddingModel::BgeSmall
 }
 
+/// Reject a raw vector bound for the *default* vector space unless it has the
+/// text embedder's dimension. The default space belongs to the embedder: every
+/// open attaches it at the model's dimension, so a store created (or written)
+/// at any other length makes the whole database refuse to open. Call before
+/// opening, since the open itself may create that store.
+#[cfg(feature = "embed")]
+fn ensure_default_space_dims(db_path: &Path, len: usize) -> Result<()> {
+    let model = resolve_embedding_model(db_path);
+    if len != model.dimensions() {
+        anyhow::bail!(
+            "vector has {len} dimensions, but the default vector space holds \
+             {}-dimension {} text embeddings. Store raw vectors of another size \
+             in a named space: --space <name>",
+            model.dimensions(),
+            model.name()
+        );
+    }
+    Ok(())
+}
+
 // NOTE: `axil_mcp::attach_detected_engines` is the parallel implementation for
 // the MCP server — keep the engine set + gating in sync (the vector/embed setup
 // differs because the two crates resolve the embedder differently, but the
@@ -8556,23 +8576,11 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             if space.is_some() && raw_vector.is_none() {
                 anyhow::bail!("--space requires --vector");
             }
-            // The default space belongs to the text embedder: every open
-            // attaches it at the model's dimension, so a store created (or
-            // written) at any other length makes the whole database refuse to
-            // open. Checked before the open, which would create that store.
+            // Checked before the open, which would create the default store at
+            // the vector's length.
             #[cfg(feature = "embed")]
             if let (Some(v), None) = (&raw_vector, &space) {
-                let model = resolve_embedding_model(&db_path);
-                if v.len() != model.dimensions() {
-                    anyhow::bail!(
-                        "--vector has {} dimensions, but the default vector space holds \
-                         {}-dimension {} text embeddings. Store raw vectors of another \
-                         size in a named space: --space <name>",
-                        v.len(),
-                        model.dimensions(),
-                        model.name()
-                    );
-                }
+                ensure_default_space_dims(&db_path, v.len())?;
             }
 
             // Open path: `--embed` needs the embedder; otherwise the raw-vector
@@ -10618,8 +10626,12 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                         "space": s,
                     }));
                 }
-                // Default space: unchanged path.
+                // Default space: unchanged path, after the same dimension
+                // guard as `store --vector` (`--dimensions` would otherwise
+                // create the default store at the vector's length).
                 None => {
+                    #[cfg(feature = "embed")]
+                    ensure_default_space_dims(&db_path, vec.len())?;
                     let db = open_with_vector(&db_path, dimensions)?;
                     db.add_vector(&rid, &vec).context("add_vector failed")?;
                     out.print(&json!({

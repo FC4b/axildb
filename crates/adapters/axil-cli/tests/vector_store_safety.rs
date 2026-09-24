@@ -331,3 +331,29 @@ fn raw_vector_for_the_default_space_must_match_the_embedder() {
     assert_eq!(parse_json(&stdout)["vector_dims"], 3);
     store(&db, "t", r#"{"n":"d"}"#, &[]);
 }
+
+#[test]
+fn add_vector_to_the_default_space_must_match_the_embedder() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("memory.axil");
+    let id = store(&db, "t", r#"{"n":"a"}"#, &[]).to_string();
+
+    // `--dimensions` would otherwise size a brand-new default store to fit.
+    let (_, stderr, code) = axil(&db, &["add-vector", &id, "[1,0,0]", "--dimensions", "3"]);
+    assert_ne!(
+        code, 0,
+        "a 3-dim vector must not claim the 384-dim default space"
+    );
+    assert!(
+        stderr.contains("--space"),
+        "error should point at --space: {stderr}"
+    );
+    assert!(!vec_path(&db).exists(), "no default store may be created");
+
+    // The database stays usable, and a named space still takes any length.
+    store(&db, "t", r#"{"n":"b"}"#, &[]);
+    let (stdout, stderr, code) = axil(&db, &["add-vector", &id, "[1,0,0]", "--space", "fp"]);
+    assert_eq!(code, 0, "named-space add-vector failed: {stderr}");
+    assert_eq!(parse_json(&stdout)["dimensions"], 3);
+    store(&db, "t", r#"{"n":"c"}"#, &[]);
+}
