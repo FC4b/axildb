@@ -2,8 +2,9 @@
 //!
 //! AxilQL is a lightweight DSL that compiles to the existing `QueryBuilder` API.
 //! Keywords: `RECALL`, `FIND`, `TRAVERSE`, `GET`, `COUNT`, `AGG`, `WHERE`,
-//! `AND`, `FROM`, `TOP`, `LIMIT`, `OFFSET`, `ORDER BY`, `GROUP BY`, `BOOST`,
-//! `PROFILE`, and `IN`.
+//! `AND`, `FROM`, `TOP`, `LIMIT`, `OFFSET`, `ORDER BY`, `GROUP BY`,
+//! `KNOWN AT`, `BOOST`, `PROFILE`, and `IN`. `AGG`, `GROUP`, `KNOWN`, and
+//! `AT` are contextual: outside those constructs they read as identifiers.
 //!
 //! # Example
 //!

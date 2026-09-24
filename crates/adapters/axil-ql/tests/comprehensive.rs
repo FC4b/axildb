@@ -762,6 +762,160 @@ fn c60_traverse_known_at_filters_by_edge_creation_time() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
+// Soft keywords — AGG / GROUP / KNOWN / AT stay usable as identifiers
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Field name of the first condition of a statement's WHERE, wherever the
+/// statement keeps it.
+fn first_where_field(q: &Query) -> String {
+    match q {
+        Query::Count {
+            where_conditions, ..
+        }
+        | Query::Agg {
+            where_conditions, ..
+        } => where_conditions[0].field.clone(),
+        other => match other.clauses().iter().find_map(|c| match c {
+            Clause::Where(conds) => Some(conds[0].field.clone()),
+            _ => None,
+        }) {
+            Some(f) => f,
+            None => panic!("no WHERE in {other:?}"),
+        },
+    }
+}
+
+#[test]
+fn p70_soft_keywords_as_where_fields() {
+    for name in ["at", "known", "agg", "group", "AT", "Known"] {
+        for q in [
+            format!(r#"COUNT FROM ev WHERE {name} > "2026-01-01""#),
+            format!(r#"COUNT FROM ev WHERE x = 1 AND {name} = 2"#),
+            format!(r#"RECALL "x" TOP 5 WHERE {name} = 1"#),
+            format!(r#"FIND "x" WHERE {name} CONTAINS "y""#),
+            format!(r#"AGG count FROM ev WHERE {name} = 1 GROUP BY family"#),
+            format!(r#"TRAVERSE ->e FROM t WHERE {name} = 1"#),
+        ] {
+            let parsed = parse(&q).unwrap_or_else(|e| panic!("{q}: {e}"));
+            let field = if q.contains(" AND ") {
+                match &parsed {
+                    Query::Count {
+                        where_conditions, ..
+                    } => where_conditions[1].field.clone(),
+                    _ => unreachable!(),
+                }
+            } else {
+                first_where_field(&parsed)
+            };
+            // Identifiers keep the spelling the user wrote.
+            assert_eq!(field, name, "{q}");
+        }
+    }
+}
+
+#[test]
+fn p71_soft_keywords_as_table_names() {
+    for name in ["at", "known", "agg", "group"] {
+        let q = parse(&format!("COUNT FROM {name}")).unwrap();
+        assert!(matches!(&q, Query::Count { table: Some(t), .. } if t == name));
+
+        let q = parse(&format!(r#"RECALL "x" TOP 5 FROM {name}"#)).unwrap();
+        assert!(matches!(&q.clauses()[0], Clause::From(t) if t == name));
+
+        let q = parse(&format!("AGG count FROM {name}")).unwrap();
+        assert!(matches!(&q, Query::Agg { table, .. } if table == name));
+
+        let q = parse(&format!("TRAVERSE ->e FROM {name}")).unwrap();
+        assert!(matches!(&q, Query::Traverse { from: Some(f), .. } if f == name));
+    }
+}
+
+#[test]
+fn p72_soft_keywords_in_order_by_in_and_agg_fields() {
+    for name in ["at", "known", "agg", "group"] {
+        let q = parse(&format!(r#"FIND "x" ORDER BY {name} DESC"#)).unwrap();
+        assert!(
+            matches!(&q.clauses()[0], Clause::OrderBy(f, SortDir::Desc) if f == name),
+            "{q:?}"
+        );
+
+        let q = parse(&format!(r#"FIND "x" IN {name}"#)).unwrap();
+        assert!(matches!(&q, Query::Find { field: Some(f), .. } if f == name));
+
+        let q = parse(&format!(
+            "AGG avg({name}), max({name}) FROM t GROUP BY {name}"
+        ))
+        .unwrap();
+        match &q {
+            Query::Agg {
+                metrics, group_by, ..
+            } => {
+                assert_eq!(
+                    metrics,
+                    &vec![
+                        AggSpec::Avg(name.to_string()),
+                        AggSpec::Max(name.to_string())
+                    ]
+                );
+                assert_eq!(group_by.as_deref(), Some(name));
+            }
+            _ => panic!("expected Agg"),
+        }
+
+        // A bare soft keyword is also a bare string value, like any identifier.
+        let q = parse(&format!("COUNT FROM t WHERE kind = {name}")).unwrap();
+        match &q {
+            Query::Count {
+                where_conditions, ..
+            } => assert_eq!(
+                where_conditions[0].value,
+                ConditionValue::String(name.to_string())
+            ),
+            _ => panic!("expected Count"),
+        }
+    }
+}
+
+#[test]
+fn p73_soft_keywords_still_work_in_keyword_position() {
+    // Statement-leading AGG and GROUP BY, any case.
+    let q = parse("agg count from group where at > 1 group by group").unwrap();
+    match &q {
+        Query::Agg {
+            table,
+            where_conditions,
+            group_by,
+            ..
+        } => {
+            assert_eq!(table, "group");
+            assert_eq!(where_conditions[0].field, "at");
+            assert_eq!(group_by.as_deref(), Some("group"));
+        }
+        _ => panic!("expected Agg"),
+    }
+    assert!(matches!(
+        parse("EXPLAIN AGG count FROM t GROUP BY g").unwrap(),
+        Query::Explain { .. }
+    ));
+    // GROUP must still be followed by BY.
+    assert!(parse("AGG count FROM t GROUP g").is_err());
+}
+
+#[test]
+fn c70_where_on_field_named_at_executes() {
+    let (_dir, db) = setup_db();
+    db.insert("ev", serde_json::json!({"at": "2025-06-01T00:00:00Z"}))
+        .unwrap();
+    db.insert("ev", serde_json::json!({"at": "2026-06-01T00:00:00Z"}))
+        .unwrap();
+    db.insert("ev", serde_json::json!({"at": "2026-07-01T00:00:00Z"}))
+        .unwrap();
+
+    let result = axil_ql::run(&db, r#"COUNT FROM ev WHERE at > "2026-01-01""#).unwrap();
+    assert_eq!(result.count, 2);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 // COUNT / AGG see every matching row, not the first page
 // ═══════════════════════════════════════════════════════════════════════
 

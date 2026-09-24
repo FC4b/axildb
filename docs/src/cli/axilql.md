@@ -98,6 +98,17 @@ EXPLAIN RECALL "auth error" TOP 5
 | `PROFILE` | Include timing | `RECALL "x" TOP 5 PROFILE` |
 | `TRAVERSE` | Chain traversal | `TRAVERSE ->edge` |
 
+## Contextual keywords
+
+`AGG`, `GROUP`, `KNOWN`, and `AT` are keywords only where the grammar expects
+them (a leading `AGG`, `GROUP BY`, `KNOWN AT`). Anywhere else they are
+ordinary identifiers, so fields and tables with those names need no quoting:
+
+```sql
+COUNT FROM events WHERE at > "2026-01-01"
+AGG count FROM group GROUP BY known
+```
+
 ## Operators
 
 `=`, `!=`, `>`, `<`, `>=`, `<=`, `CONTAINS`

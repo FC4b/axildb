@@ -40,11 +40,15 @@ pub enum TokenKind {
     Recall,
     Find,
     Traverse,
+    /// `KNOWN` of `KNOWN AT` — contextual: an identifier everywhere else.
     Known,
+    /// `AT` of `KNOWN AT` — contextual: an identifier everywhere else.
     At,
     Get,
     Count,
+    /// Statement-leading `AGG` — contextual: an identifier everywhere else.
     Agg,
+    /// `GROUP` of `GROUP BY` — contextual: an identifier everywhere else.
     Group,
     Where,
     And,
