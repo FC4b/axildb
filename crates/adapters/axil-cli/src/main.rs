@@ -1610,8 +1610,9 @@ enum Command {
 
     /// Memory lifecycle / repair: rebuild drifted indexes (`--reindex`),
     /// compact (`--compact`), or clean orphans (`--orphans`). A bare `heal`
-    /// also downsamples (purges records past the retention window). Run
-    /// deliberately — check `axil doctor` first.
+    /// also downsamples (purges records past the retention window) unless
+    /// `[healing] auto_compact = false`. Run deliberately — check
+    /// `axil doctor` first.
     Heal {
         /// Just compact (purge expired/superseded).
         #[arg(long)]
@@ -10351,7 +10352,8 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                                     compact
                                 }
                                 "vector_deletion_ratio" | "index_size_mismatch"
-                                | "missing_embeddings" | "missing_fts" => reindex,
+                                | "missing_embeddings" | "missing_fts"
+                                | "vector_load_skips" => reindex,
                                 "orphaned_edges" => orphans,
                                 _ => compact || orphans,
                             };
@@ -10444,7 +10446,11 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                 run_worker_and_report(&db, out);
             }
 
-            // Also run timeseries heal if available
+            // Also run timeseries heal if available. Its retention purge
+            // hard-deletes every record past `full_retention_days`, so it is
+            // automatic compaction and obeys `[healing] auto_compact = false`
+            // like `heal_all` does: skipped, leaving an explicit compact as
+            // the only thing that deletes.
             #[cfg(feature = "timeseries")]
             if !dry_run
                 && !compact
@@ -10453,7 +10459,14 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                 && db.has_timeseries_index()
                 && config.timeseries.auto_downsample
             {
-                let _ = db.heal(&config.timeseries);
+                if config.healing.auto_compact {
+                    let _ = db.heal(&config.timeseries);
+                } else {
+                    out.status(
+                        "timeseries downsample skipped: healing.auto_compact = false \
+                         (its retention purge deletes records)",
+                    );
+                }
             }
 
             Ok(EXIT_OK)

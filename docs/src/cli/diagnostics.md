@@ -106,8 +106,10 @@ axil heal               # also DOWNSAMPLES (see warning below)
 > ⚠️ A bare `axil heal` **downsamples**: it deletes records older than
 > `full_retention_days` (default 90d), replacing each day's rows with a single
 > count summary. This is irreversible. `axil maintain` deliberately never runs
-> it. Don't run `heal --reindex` during an active agent session — it
-> clears/rebuilds index tables and queries can return incomplete results mid-rebuild.
+> it, and `[healing] auto_compact = false` turns it off along with automatic
+> compaction, so a bare `heal` then purges no records. Don't run `heal --reindex`
+> during an active agent session — it clears/rebuilds index tables and queries
+> can return incomplete results mid-rebuild.
 
 ### worker
 
