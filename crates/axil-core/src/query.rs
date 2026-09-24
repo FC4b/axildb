@@ -823,8 +823,13 @@ impl<'a> QueryBuilder<'a> {
                 .graph_index
                 .ok_or_else(|| AxilError::plugin("no graph index configured for traversal"))?;
 
-            results =
-                fan_out_traversal(gi, self.storage, &results, steps, self.limit + self.offset)?;
+            results = fan_out_traversal(
+                gi,
+                self.storage,
+                &results,
+                steps,
+                self.traversal_result_cap(),
+            )?;
         }
 
         // rerank stage. Same shape as exec_unified_profiled —
@@ -912,7 +917,7 @@ impl<'a> QueryBuilder<'a> {
             ));
         };
 
-        let result_cap = self.limit + self.offset;
+        let result_cap = self.traversal_result_cap();
         let mut results = fan_out_traversal(gi, self.storage, &starting, steps, result_cap)?;
 
         self.apply_sort(&mut results);
@@ -1014,8 +1019,13 @@ impl<'a> QueryBuilder<'a> {
             let gi = self
                 .graph_index
                 .ok_or_else(|| AxilError::plugin("no graph index configured for traversal"))?;
-            results =
-                fan_out_traversal(gi, self.storage, &results, steps, self.limit + self.offset)?;
+            results = fan_out_traversal(
+                gi,
+                self.storage,
+                &results,
+                steps,
+                self.traversal_result_cap(),
+            )?;
         }
 
         self.apply_sort(&mut results);
@@ -1169,8 +1179,13 @@ impl<'a> QueryBuilder<'a> {
             let gi = self
                 .graph_index
                 .ok_or_else(|| AxilError::plugin("no graph index configured for traversal"))?;
-            results =
-                fan_out_traversal(gi, self.storage, &results, steps, self.limit + self.offset)?;
+            results = fan_out_traversal(
+                gi,
+                self.storage,
+                &results,
+                steps,
+                self.traversal_result_cap(),
+            )?;
         }
 
         // ── Step 6: Sort + Limit ──
@@ -1345,8 +1360,13 @@ impl<'a> QueryBuilder<'a> {
             let gi = self
                 .graph_index
                 .ok_or_else(|| AxilError::plugin("no graph index configured for traversal"))?;
-            results =
-                fan_out_traversal(gi, self.storage, &results, steps, self.limit + self.offset)?;
+            results = fan_out_traversal(
+                gi,
+                self.storage,
+                &results,
+                steps,
+                self.traversal_result_cap(),
+            )?;
             profile_steps.push(ProfileStep {
                 step: "graph_traverse".to_string(),
                 ms: trav_start.elapsed().as_secs_f64() * 1000.0,
@@ -1404,6 +1424,21 @@ impl<'a> QueryBuilder<'a> {
         let total_ms = total_start.elapsed().as_secs_f64() * 1000.0;
         let profile = build_profile(total_ms, profile_steps);
         Ok((result, profile))
+    }
+
+    /// How many traversal endpoints to collect before sorting and paging.
+    ///
+    /// Without an ordering, the first `offset + limit` endpoints reached are
+    /// the page, so collection can stop there. With `order_by` /
+    /// `order_by_time`, the endpoints reached first are not the top of the
+    /// sort — the true top-n may be reached last — so every endpoint must be
+    /// collected before [`Self::apply_sort`] runs.
+    fn traversal_result_cap(&self) -> usize {
+        if self.order_by.is_some() || self.time_sort.is_some() {
+            usize::MAX
+        } else {
+            self.limit.saturating_add(self.offset)
+        }
     }
 
     /// Apply `order_by` and/or `order_by_time` sorting to a result set.
