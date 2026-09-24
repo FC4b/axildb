@@ -231,6 +231,17 @@ pub trait VectorSpaceFactory: Send + Sync {
     /// index — listings call this per space, so it has to stay proportional
     /// to metadata, not store size. Errors if the space does not exist.
     fn space_meta(&self, main_path: &Path, space: &str) -> Result<(usize, usize)>;
+
+    /// Remove `id`'s vector from a named space that is not currently open,
+    /// if the space holds one.
+    ///
+    /// Record deletes fan out to every named space, so this runs once per
+    /// space per delete. The default opens the space — loading every vector —
+    /// and deletes through the index; engines with a durable store should
+    /// override it to delete the entry directly.
+    fn remove_from_space(&self, main_path: &Path, space: &str, id: &RecordId) -> Result<()> {
+        self.open_space(main_path, space, None)?.on_record_delete(id)
+    }
 }
 
 /// True if `name` is a valid vector-space name (`[a-z0-9_-]{1,32}`).
@@ -1473,21 +1484,30 @@ impl Axil {
             if let Some(ref factory) = self.vector_space_factory {
                 match factory.space_names(&self.path) {
                     Ok(spaces) => {
-                        for space in spaces {
-                            match self.open_or_create_space(&space, None) {
-                                Ok(vi) => {
-                                    if let Err(e) = vi.on_record_delete(id) {
+                        // A space this handle already has open deletes through
+                        // its live index; any other is cleaned in its durable
+                        // store without being loaded. The cache read lock is
+                        // held throughout so no concurrent open can take the
+                        // file between the check and the direct delete.
+                        match self.vector_space_cache.read() {
+                            Ok(cache) => {
+                                for space in spaces {
+                                    let result = match cache.get(&space) {
+                                        Some(vi) => vi.on_record_delete(id),
+                                        None => factory.remove_from_space(&self.path, &space, id),
+                                    };
+                                    if let Err(e) = result {
                                         eprintln!(
                                             "warning: vector space '{space}' cleanup failed \
                                              for {id}: {e}"
                                         );
                                     }
                                 }
-                                Err(e) => eprintln!(
-                                    "warning: could not open vector space '{space}' \
-                                     for delete cleanup: {e}"
-                                ),
                             }
+                            Err(_) => eprintln!(
+                                "warning: named-space delete cleanup skipped: \
+                                 vector space cache lock poisoned"
+                            ),
                         }
                     }
                     Err(e) => {

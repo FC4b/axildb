@@ -62,6 +62,20 @@ impl axil_core::VectorSpaceFactory for RecordingFactory {
             space,
         )
     }
+
+    fn remove_from_space(
+        &self,
+        main_path: &Path,
+        space: &str,
+        id: &RecordId,
+    ) -> axil_core::Result<()> {
+        axil_core::VectorSpaceFactory::remove_from_space(
+            &axil_vector::VectorSpaceFactory,
+            main_path,
+            space,
+            id,
+        )
+    }
 }
 
 fn fingerprint(i: usize) -> [f32; 4] {
@@ -96,15 +110,26 @@ fn record_delete_fan_out_never_builds_space_graphs() {
         .unwrap();
     db.insert("fingerprints", json!({ "n": 1000 })).unwrap();
     assert!(db.delete(&ids[0]).unwrap());
-
-    let opened = factory.opened.lock().unwrap().clone();
-    assert_eq!(opened.len(), 2, "the delete fan-out visits every space");
     assert!(
-        opened.iter().all(|e| !e.is_graph_built()),
-        "a record delete must not build any space's graph"
+        factory.opened.lock().unwrap().is_empty(),
+        "a record delete cleans spaces that aren't open without loading them"
     );
+
+    // Opening the space now shows the delete reached its durable store.
     assert_eq!(db.get_vector_in("fp", &ids[0]).unwrap(), None);
-    assert_eq!(opened.iter().map(|e| e.vector_count()).sum::<usize>(), 200);
+    let opened = factory.opened.lock().unwrap().clone();
+    assert_eq!(opened.len(), 1);
+    assert!(
+        !opened[0].is_graph_built(),
+        "reading a vector must not build the space's graph"
+    );
+    assert_eq!(opened[0].vector_count(), 199);
+
+    // A space this handle already has open deletes through its live index.
+    assert!(db.delete(&ids[2]).unwrap());
+    assert_eq!(factory.opened.lock().unwrap().len(), 1);
+    assert_eq!(db.get_vector_in("fp", &ids[2]).unwrap(), None);
+    assert_eq!(opened[0].vector_count(), 198);
 
     // Searching is what builds a graph — and it no longer sees the deleted id.
     let hits = db.similar_in("fp", &fingerprint(1), 1).unwrap();

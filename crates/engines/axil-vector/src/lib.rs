@@ -556,6 +556,22 @@ impl axil_core::VectorSpaceFactory for VectorSpaceFactory {
         list_vector_space_names(main_path)
     }
 
+    fn remove_from_space(
+        &self,
+        main_path: &Path,
+        space: &str,
+        id: &RecordId,
+    ) -> axil_core::Result<()> {
+        let vec_path = vector_space_db_path(main_path, space);
+        if !vec_path.exists() {
+            return Ok(());
+        }
+        // Straight to the durable store: no vector load, no graph build, and
+        // no write commit unless the space actually holds the id.
+        let db = Database::open(&vec_path).map_err(plugin_err)?;
+        delete_vector(&db, id)
+    }
+
     fn space_meta(&self, main_path: &Path, space: &str) -> axil_core::Result<(usize, usize)> {
         let vec_path = vector_space_db_path(main_path, space);
         if !vec_path.exists() {
