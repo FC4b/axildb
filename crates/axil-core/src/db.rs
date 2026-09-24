@@ -3067,6 +3067,7 @@ impl Axil {
         let vi = self.require_vector_index()?;
         let old_size = vi.count();
         let deleted = vi.deleted_count();
+        self.purge_unloadable_vectors()?;
         let new_size = vi.rebuild()?;
 
         self.audit_heal_action(
@@ -3090,6 +3091,45 @@ impl Axil {
         })
     }
 
+    /// Delete the on-disk vector rows that could not be loaded into their
+    /// index at open (the `vector_load_skips` problem), in the default index
+    /// and every named space. Such rows are invisible to search and can never
+    /// load, so nothing is lost; a live record whose row goes is re-embedded
+    /// by [`reembed_missing`](Self::reembed_missing). Returns rows removed.
+    fn purge_unloadable_vectors(&self) -> Result<usize> {
+        let mut purged = 0;
+        if let Some(ref vi) = self.vector_index {
+            if vi.skipped_at_load() > 0 {
+                purged += vi.purge_unloadable()?;
+            }
+        }
+        // Named spaces are best-effort, like the delete fan-out: one bad
+        // space must not block repairing the rest.
+        if let Some(ref factory) = self.vector_space_factory {
+            for space in factory.space_names(&self.path).unwrap_or_default() {
+                match self.open_or_create_space(&space, None) {
+                    Ok(vi) if vi.skipped_at_load() > 0 => match vi.purge_unloadable() {
+                        Ok(n) => purged += n,
+                        Err(e) => eprintln!(
+                            "warning: vector space '{space}' purge of unloadable rows failed: {e}"
+                        ),
+                    },
+                    Ok(_) => {}
+                    Err(e) => eprintln!(
+                        "warning: could not open vector space '{space}' for repair: {e}"
+                    ),
+                }
+            }
+        }
+        if purged > 0 {
+            self.audit_heal_action(
+                "purge_unloadable_vectors",
+                &format!("removed {purged} unloadable vector row(s)"),
+            );
+        }
+        Ok(purged)
+    }
+
     /// Detect problems in the database.
     pub fn detect_problems(&self) -> Vec<crate::diagnostics::ProblemDetection> {
         // `count_orphaned_edges` and `count_dead_records` are each a full-DB
@@ -3110,7 +3150,8 @@ impl Axil {
 
         // Vectors present on disk but unloadable into the live index (e.g.
         // written by an older version before insert-time validation). They
-        // are invisible to search; heal --reindex re-embeds and replaces them.
+        // are invisible to search and can never load; heal purges them (no
+        // embedder needed) and then re-embeds any live record they belonged to.
         if let Some(ref vi) = self.vector_index {
             let skipped = vi.skipped_at_load();
             if skipped > 0 {
@@ -3118,10 +3159,11 @@ impl Axil {
                     detector: "vector_load_skips".to_string(),
                     severity: Severity::Warning,
                     message: format!(
-                        "{skipped} vector(s) on disk could not be loaded into the index                          (corrupt, wrong dimensions, or non-finite)"
+                        "{skipped} vector(s) on disk could not be loaded into the index \
+                         (corrupt, wrong dimensions, non-finite, or all-zero)"
                     ),
                     recommendation: "Rebuild them: axil heal --reindex".to_string(),
-                    auto_fixable: self.embedder.is_some(),
+                    auto_fixable: true,
                 });
             }
         }
@@ -3375,7 +3417,9 @@ impl Axil {
                     Severity::Ok => "low",
                 };
                 let command = match p.detector.as_str() {
-                    "vector_deletion_ratio" | "index_size_mismatch" => "axil heal --reindex",
+                    "vector_deletion_ratio" | "index_size_mismatch" | "vector_load_skips" => {
+                        "axil heal --reindex"
+                    }
                     "orphaned_edges" => "axil heal --orphans",
                     _ => "axil heal --compact",
                 };
@@ -3541,6 +3585,16 @@ impl Axil {
                     ),
                 });
             }
+        }
+
+        // Drop vector rows that can never load (`vector_load_skips`); step 3
+        // re-embeds any live record they belonged to.
+        let purged = self.purge_unloadable_vectors()?;
+        if purged > 0 {
+            actions.push(crate::diagnostics::HealAction {
+                action: "purge_unloadable_vectors".to_string(),
+                result: format!("removed {purged} unloadable vector row(s)"),
+            });
         }
 
         // 2. Rebuild vector index if needed

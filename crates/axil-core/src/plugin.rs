@@ -136,6 +136,17 @@ pub trait VectorIndex: Engine {
         0
     }
 
+    /// Delete the durable entries counted by
+    /// [`skipped_at_load`](Self::skipped_at_load) and reset that count to 0.
+    ///
+    /// Such entries are invisible to search and can never load, so removing
+    /// them loses nothing; a live record whose entry was removed can be
+    /// re-embedded afterwards. Returns the number of entries removed. Default
+    /// `Ok(0)` for backends that don't track unloadable entries.
+    fn purge_unloadable(&self) -> Result<usize> {
+        Ok(0)
+    }
+
     /// All vector IDs currently in the index.
     fn all_ids(&self) -> Result<Vec<RecordId>> {
         Ok(Vec::new())
