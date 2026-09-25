@@ -20,7 +20,15 @@ main() {
 
     case "$uname_s" in
         Linux)  os="unknown-linux-gnu" ;;
-        Darwin) os="apple-darwin" ;;
+        Darwin)
+            os="apple-darwin"
+            # A shell running under Rosetta reports x86_64 on Apple Silicon;
+            # the native arm64 build is the right one there.
+            if [ "$uname_m" = "x86_64" ] \
+                && [ "$(sysctl -n sysctl.proc_translated 2>/dev/null)" = "1" ]; then
+                uname_m="arm64"
+            fi
+            ;;
         *) err "unsupported OS '$uname_s' — on Windows use scripts/install.ps1 (irm | iex)" ;;
     esac
     case "$uname_m" in
@@ -28,6 +36,9 @@ main() {
         aarch64|arm64)  arch="aarch64" ;;
         *) err "unsupported architecture '$uname_m'" ;;
     esac
+    if [ "$os" = "apple-darwin" ] && [ "$arch" = "x86_64" ]; then
+        err "no prebuilt binary for Intel Macs — build from source instead: cargo install axildb"
+    fi
 
     triple="$arch-$os"
     archive="axildb-$triple.tar.gz"

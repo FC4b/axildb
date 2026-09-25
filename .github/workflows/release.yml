@@ -9,7 +9,7 @@
 # hand-authored. `dist-workspace.toml` is kept only to back the `dist plan`
 # sanity check job.
 #
-# Scope: this builds the six triples (onnxruntime statically linked — the
+# Scope: this builds the five triples (onnxruntime statically linked — the
 # archives are self-contained) and uploads them to the GitHub Release. The
 # one-line `curl|sh` / `irm|iex` installers live in scripts/install.sh and
 # scripts/install.ps1; they consume these archives directly from
@@ -68,7 +68,7 @@ concurrency:
 
 jobs:
   # Enumerate the planned artifacts; a green plan proves the config resolves all
-  # six triples (and surfaces a missing prebuilt `ort` artifact early).
+  # five triples (and surfaces a missing prebuilt `ort` artifact early).
   plan:
     name: plan
     runs-on: ubuntu-latest
@@ -93,11 +93,8 @@ jobs:
             os: windows-latest
           - target: aarch64-pc-windows-msvc
             os: windows-latest
-          - target: x86_64-apple-darwin
-            # The Intel twin of the macos-15 image below. macos-13 was retired
-            # from GitHub's hosted runners, so a job asking for it never gets
-            # a runner and waits in the queue until it times out.
-            os: macos-15-intel
+          # No x86_64-apple-darwin: Intel Macs are not a release target
+          # (install from source there). Its macos-13 runner was also retired.
           - target: aarch64-apple-darwin
             # macos-15, NOT macos-latest: the latter migrated to macOS 26, and
             # we need an image that still ships an Xcode 16.x to select below.

@@ -24,7 +24,9 @@ irm https://raw.githubusercontent.com/FC4b/axildb/main/scripts/install.ps1 | iex
 
 Each script detects the platform, downloads the archive from the latest
 release, and installs into `$AXIL_HOME/bin` (default `~/.axil/bin`), printing
-any PATH step you need. Review the script before piping it into a shell —
+any PATH step you need. Prebuilt archives cover Linux and Windows on x86_64 and
+aarch64, and macOS on Apple Silicon; on an Intel Mac, build
+[from source](#from-source) instead. Review the script before piping it into a shell —
 it is short on purpose.
 
 ### Via cargo-binstall
