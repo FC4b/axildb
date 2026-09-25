@@ -230,19 +230,24 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, LexError> {
                     });
                 }
                 if bytes[pos] == b'\\' && pos + 1 < bytes.len() {
-                    // Escape sequences.
-                    match bytes[pos + 1] {
-                        b'\\' => value.push('\\'),
-                        b'"' => value.push('"'),
-                        b'\'' => value.push('\''),
-                        b'n' => value.push('\n'),
-                        b't' => value.push('\t'),
+                    // Escape sequences. The escaped character is decoded as a
+                    // whole `char` (the backslash is ASCII, so `pos + 1` is a
+                    // char boundary): stepping a fixed two bytes would land
+                    // inside a multi-byte character and panic on the next
+                    // slice, and pushing its first byte would corrupt it.
+                    let escaped = input[pos + 1..].chars().next().unwrap_or('\\');
+                    match escaped {
+                        '\\' => value.push('\\'),
+                        '"' => value.push('"'),
+                        '\'' => value.push('\''),
+                        'n' => value.push('\n'),
+                        't' => value.push('\t'),
                         other => {
                             value.push('\\');
-                            value.push(other as char);
+                            value.push(other);
                         }
                     }
-                    pos += 2;
+                    pos += 1 + escaped.len_utf8();
                     col += 2;
                     continue;
                 }
@@ -496,8 +501,11 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, LexError> {
             continue;
         }
 
+        // Every branch above advances by whole characters, so `pos` is a char
+        // boundary here; name the full character, not its first byte.
+        let unexpected = input[pos..].chars().next().unwrap_or('\u{fffd}');
         return Err(LexError {
-            message: format!("unexpected character: '{}'", bytes[pos] as char),
+            message: format!("unexpected character: '{unexpected}'"),
             span: start_span,
         });
     }

@@ -648,6 +648,43 @@ fn f10_null_bytes_in_string() {
     let _ = parse("RECALL \"hello\x00world\" TOP 5");
 }
 
+#[test]
+fn f11_escaped_multibyte_char_in_string() {
+    // A backslash before a multi-byte character used to skip one byte into
+    // it and panic on the next slice (found by the nightly `ql_parse` fuzz).
+    // Unknown escapes keep the backslash, and the character must survive
+    // intact rather than being decoded byte-wise.
+    let q = parse(r#"RECALL "a\Ɨb" TOP 5"#).unwrap();
+    match &q {
+        Query::Recall { text, .. } => assert_eq!(text, r"a\Ɨb"),
+        _ => panic!("expected Recall"),
+    }
+    let _ = parse("RECALL \"\\🎉\" TOP 5");
+    let _ = parse("RECALL \"unterminated \\Ɨ");
+}
+
+#[test]
+fn f12_fuzz_crash_escape_before_multibyte_char() {
+    // The exact input from the nightly fuzz crash
+    // (crash-2dcac7589eb9d7cbd4bda4f71aa199586aaa009e).
+    let mut bytes = vec![
+        77, 67, 39, 50, 34, 127, 127, 127, 127, 83, 0, 0, 0, 127, 127, 198, 151, 198, 148,
+    ];
+    bytes.extend(std::iter::repeat(92).take(109));
+    bytes.extend([198, 151, 198, 148]);
+    let input = std::str::from_utf8(&bytes).expect("fuzz input is valid UTF-8");
+    let _ = parse(input);
+}
+
+#[test]
+fn f13_unexpected_multibyte_char_is_reported_whole() {
+    let err = parse("RECALL Ɨ").unwrap_err();
+    assert!(
+        err.to_string().contains('Ɨ'),
+        "the error names the character, not its first byte: {err}"
+    );
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // AST utility tests
 // ═══════════════════════════════════════════════════════════════════════
