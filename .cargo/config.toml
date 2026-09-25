@@ -1,0 +1,14 @@
+# Build-wide settings for every cargo invocation in this repo.
+
+[env]
+# Link onnxruntime statically, the way release binaries are built.
+#
+# ort-sys probes pkg-config for `libonnxruntime` before it uses the
+# `download-binaries` static build, so on a machine where a package manager
+# ships a `libonnxruntime.pc` (Homebrew's `onnxruntime`, for one) a local build
+# silently links that system dylib instead: the binary then differs from the
+# release and breaks when the package upgrades and renames the versioned
+# library. CI runners have no system onnxruntime, so this only changes local
+# builds. To link a specific onnxruntime deliberately, set `ORT_LIB_LOCATION`,
+# which ort-sys still honours.
+LIBONNXRUNTIME_NO_PKG_CONFIG = "1"
