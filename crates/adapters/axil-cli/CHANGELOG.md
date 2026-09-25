@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.3.1](https://github.com/FC4b/axildb/compare/axildb-v2.3.0...axildb-v2.3.1) - 2026-09-25
+
+### Other
+
+- update Cargo.lock dependencies
+
 ## [2.3.0](https://github.com/FC4b/axildb/compare/axildb-v2.2.1...axildb-v2.3.0) - 2026-09-24
 
 ### Added
