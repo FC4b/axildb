@@ -45,14 +45,14 @@ allow-dirty = ["ci"]
 # archives directly and need no cargo-dist adoption; `axil-update` remains
 # deferred.
 installers = []
-# Prebuilt targets: x86_64 + aarch64 across the three desktop OSes.
+# Prebuilt targets: x86_64 + aarch64 on Linux and Windows; Apple Silicon only
+# on macOS (Intel Macs install from source).
 # NOTE: aarch64-pc-windows-msvc may lack a prebuilt `ort` download-binaries
 # artifact — if the first `dist plan` dry-run can't resolve onnxruntime for it,
 # drop that single triple here (the rest still ship).
 targets = [
     "x86_64-pc-windows-msvc",
     "aarch64-pc-windows-msvc",
-    "x86_64-apple-darwin",
     "aarch64-apple-darwin",
     "x86_64-unknown-linux-gnu",
     "aarch64-unknown-linux-gnu",
