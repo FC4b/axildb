@@ -1,7 +1,7 @@
 <!-- AXIL:BEGIN -->
 # Axil Agent Memory
 
-This repo uses Axil as persistent agent memory at `/Users/sek/Documents/GitHub/axildb/.axil/memory.axil`.
+This repo uses Axil as persistent agent memory at `/Users/sek/Documents/GitHub/axil-project/axildb/.axil/memory.axil`.
 
 ## Axil-First Rules
 
@@ -24,6 +24,7 @@ Bypass Axil only for a user-named exact file/line, a command/test output you jus
 - Store architecture learned while reading: `axil store context '{"type":"architecture","summary":"<what you learned>","files":["<path>"]}'`
 - Before a final response after substantive work, write a checkpoint: `axil checkpoint '{"state":"<where things stand>","next_steps":["<remaining work>"],"references":[{"kind":"file","ref":"<path>"}]}'`
 <!-- AXIL:END -->
+
 
 ## Contributing to Axil — Task → Guide
 
