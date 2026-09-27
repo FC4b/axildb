@@ -187,6 +187,9 @@ def evaluate(scores, rows, argmax_hits):
         hit[1] += 1
 
     te_argmax = [argmax_hits[i] for i in test]
+    by_source = {}
+    for i in test:
+        by_source.setdefault(rows[i]["source"].split(":")[0], []).append(i)
     return {
         "n_train": len(train), "n_test": len(test),
         "auroc_test": auroc(te_s, te_y),
@@ -197,6 +200,8 @@ def evaluate(scores, rows, argmax_hits):
         "ece_test_raw": ece(te_s, te_y),
         "ece_test_platt": ece(cal, te_y),
         "accuracy_by_kind_test": {k: f"{v[0]}/{v[1]}" for k, v in sorted(by_kind.items())},
+        "auroc_test_by_source": {src: auroc([scores[i] for i in idx], [y[i] for i in idx])
+                                 for src, idx in sorted(by_source.items())},
     }
 
 
@@ -208,7 +213,7 @@ def main():
 
     sets = {
         "U1": load_set("u1_lme.jsonl") + load_set("u1_repo.jsonl"),
-        "U2": load_set("u2_repo.jsonl"),
+        "U2": load_set("u2_repo.jsonl") + load_set("u2_github.jsonl"),
     }
     report = {
         "benchmark": "typed-decisions-bakeoff",

@@ -16,7 +16,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 KEEP = ["n_train", "n_test", "auroc_test", "auroc_all", "threshold_from_train", "at_threshold_test",
         "at_argmax_test", "ece_test_raw", "ece_test_platt", "latency_ms_p50", "latency_ms_p95",
-        "accuracy_by_kind_test"]
+        "accuracy_by_kind_test", "auroc_test_by_source"]
 
 
 def pick(r):
@@ -61,7 +61,8 @@ def main():
         "sets": {
             "U1": f"u1_lme.jsonl ({count(sets / 'u1_lme.jsonl')}, LongMemEval oracle, MIT) + "
                   f"u1_repo.jsonl ({count(sets / 'u1_repo.jsonl')}, dogfood)",
-            "U2": f"u2_repo.jsonl ({count(sets / 'u2_repo.jsonl')}, dogfood)",
+            "U2": f"u2_repo.jsonl ({count(sets / 'u2_repo.jsonl')}, dogfood) + "
+                  f"u2_github.jsonl ({count(sets / 'u2_github.jsonl')}, GitHub issue -> PR links)",
             "labels": "LongMemEval pairs mechanical; repo pairs authored by Claude and blind-validated by "
                       "Codex gpt-6-sol + GLM glm-5.3-flash (validation/2026-09-27-labels.json)",
             "split": "40% train (threshold + Platt fit) / 60% test, sha256(id) based",

@@ -1,0 +1,56 @@
+[
+ {
+  "id": "gh-ort-152-fixed",
+  "kind": "fixed",
+  "link_label": 1,
+  "reason": "codex: The titles do not connect the search path to Android. | glm: Android support fix weakly related to search path"
+ },
+ {
+  "id": "gh-redb-1333-other_fix",
+  "kind": "other_fix",
+  "link_label": 0,
+  "reason": "codex: A repair-panic fix plausibly covers malformed freed-tree entries. | glm: Directly fixes panic during repair"
+ },
+ {
+  "id": "gh-redb-302-fixed",
+  "kind": "fixed",
+  "link_label": 1,
+  "reason": "codex: Adding 32-bit CI does not itself fix compilation. | glm: CI addition is preventative, not a fix"
+ },
+ {
+  "id": "gh-redb-302-other_fix",
+  "kind": "other_fix",
+  "link_label": 0,
+  "reason": "codex: Fixing usize overflows on 32-bit platforms plausibly restores compilation. | glm: 32-bit usize fixes plausibly resolve 32-bit compile failure"
+ },
+ {
+  "id": "gh-redb-538-other_fix",
+  "kind": "other_fix",
+  "link_label": 0,
+  "reason": "codex: Version-three API changes plausibly implement the proposed API changes. | glm: v3 API changes directly addresses the API changes issue"
+ },
+ {
+  "id": "gh-redb-623-fixed",
+  "kind": "fixed",
+  "link_label": 1,
+  "reason": "codex: The assertion text gives no link to a growth failure. | glm: Vague assertion panic; growth failure differs"
+ },
+ {
+  "id": "gh-tokio-6837-other_fix",
+  "kind": "other_fix",
+  "link_label": 0,
+  "reason": "codex: Abstract socket-name handling plausibly fixes the extra prefix. | glm: Adding abstract socket name handling plausibly fixes bind behavior"
+ },
+ {
+  "id": "gh-tokio-7019-fixed",
+  "kind": "fixed",
+  "link_label": 1,
+  "reason": "codex: Preparing a release does not identify the needed test dependency. | glm: Release prep gives no indication dev-dependency was added"
+ },
+ {
+  "id": "gh-uv-21128-fixed",
+  "kind": "fixed",
+  "link_label": 1,
+  "reason": "codex: The interpreter hint is not clearly tied to sdist test failure. | glm: Interpreter hint change unrelated to sdist test"
+ }
+]

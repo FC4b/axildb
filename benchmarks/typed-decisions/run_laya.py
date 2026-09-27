@@ -53,7 +53,7 @@ def main():
 
     sets = {
         "U1": rb.load_set("u1_lme.jsonl") + rb.load_set("u1_repo.jsonl"),
-        "U2": rb.load_set("u2_repo.jsonl"),
+        "U2": rb.load_set("u2_repo.jsonl") + rb.load_set("u2_github.jsonl"),
     }
     name = args.model + (f"/{args.subfolder}" if args.subfolder else "")
     entry = {"model": name, "load_ms": round(load_ms, 1), "device": "cpu", "threads": args.threads}

@@ -5,7 +5,7 @@
   "machine": "arm64 macOS-26.6-arm64-arm-64bit",
   "sets": {
     "U1": "u1_lme.jsonl (209, LongMemEval oracle, MIT) + u1_repo.jsonl (40, dogfood)",
-    "U2": "u2_repo.jsonl (31, dogfood)",
+    "U2": "u2_repo.jsonl (31, dogfood) + u2_github.jsonl (170, GitHub issue -> PR links)",
     "labels": "LongMemEval pairs mechanical; repo pairs authored by Claude and blind-validated by Codex gpt-6-sol + GLM glm-5.3-flash (validation/2026-09-27-labels.json)",
     "split": "40% train (threshold + Platt fit) / 60% test, sha256(id) based"
   },
@@ -20,7 +20,7 @@
       "family": "nli-cross-encoder",
       "runtime": "onnxruntime 1.30.0 CPU, 4 threads",
       "size_mb": 284.2,
-      "load_ms": 1487.0,
+      "load_ms": 1493.3,
       "U1": {
         "n_train": 102,
         "n_test": 147,
@@ -39,8 +39,8 @@
         },
         "ece_test_raw": 0.2086161563406798,
         "ece_test_platt": 0.10020921333508113,
-        "latency_ms_p50": 32.2,
-        "latency_ms_p95": 61.49,
+        "latency_ms_p50": 30.63,
+        "latency_ms_p95": 46.04,
         "accuracy_by_kind_test": {
           "both_hold": "40/42",
           "contradiction": "3/4",
@@ -50,6 +50,10 @@
           "reversal": "3/3",
           "same_topic": "40/43",
           "update": "15/46"
+        },
+        "auroc_test_by_source": {
+          "axil-dogfood": 0.819047619047619,
+          "longmemeval_oracle": 0.7085526315789473
         }
       },
       "U1+sym": {
@@ -70,8 +74,8 @@
         },
         "ece_test_raw": 0.19779046052335325,
         "ece_test_platt": 0.11819345932220264,
-        "latency_ms_p50": 65.23,
-        "latency_ms_p95": 102.7,
+        "latency_ms_p50": 63.3,
+        "latency_ms_p95": 95.62,
         "accuracy_by_kind_test": {
           "both_hold": "40/42",
           "contradiction": "4/4",
@@ -81,37 +85,48 @@
           "reversal": "3/3",
           "same_topic": "39/43",
           "update": "12/46"
+        },
+        "auroc_test_by_source": {
+          "axil-dogfood": 0.8238095238095238,
+          "longmemeval_oracle": 0.7200657894736842
         }
       },
       "U2": {
-        "n_train": 16,
-        "n_test": 15,
-        "auroc_test": 0.44,
-        "auroc_all": 0.49583333333333335,
-        "threshold_from_train": 0.03106699704810535,
+        "n_train": 90,
+        "n_test": 111,
+        "auroc_test": 0.6179337231968811,
+        "auroc_all": 0.5665334665334665,
+        "threshold_from_train": 0.0984182031845915,
         "at_threshold_test": {
-          "tpr": 0.0,
-          "fpr": 0.0,
-          "precision": null
+          "tpr": 0.14814814814814814,
+          "fpr": 0.03508771929824561,
+          "precision": 0.8
         },
         "at_argmax_test": {
-          "tpr": 0.0,
-          "fpr": 0.0,
-          "precision": null
+          "tpr": 0.07407407407407407,
+          "fpr": 0.03508771929824561,
+          "precision": 0.6666666666666666
         },
-        "ece_test_raw": 0.329690552687107,
-        "ece_test_platt": 0.3476533463969818,
-        "latency_ms_p50": 13.53,
-        "latency_ms_p95": 17.09,
+        "ece_test_raw": 0.4503723135194261,
+        "ece_test_platt": 0.13206332185964048,
+        "latency_ms_p50": 11.41,
+        "latency_ms_p95": 18.0,
         "accuracy_by_kind_test": {
-          "fixed": "0/4",
+          "downstream_workaround": "5/6",
+          "fixed": "8/53",
           "fixed_implicit": "0/1",
           "lexical_trap": "1/1",
+          "mentioned_not_fix": "5/5",
           "merged_not_shipped": "1/1",
+          "other_fix": "35/36",
           "other_fix_same_area": "1/1",
           "planned": "1/1",
           "still_broken": "1/1",
           "unrelated_same_area": "5/5"
+        },
+        "auroc_test_by_source": {
+          "axil-dogfood": 0.44,
+          "github": 0.6144159791576205
         }
       }
     },
@@ -119,7 +134,7 @@
       "family": "nli-cross-encoder",
       "runtime": "onnxruntime 1.30.0 CPU, 4 threads",
       "size_mb": 87.4,
-      "load_ms": 1317.9,
+      "load_ms": 1248.1,
       "U1": {
         "n_train": 102,
         "n_test": 147,
@@ -138,8 +153,8 @@
         },
         "ece_test_raw": 0.2094456244656804,
         "ece_test_platt": 0.09137548567071596,
-        "latency_ms_p50": 20.01,
-        "latency_ms_p95": 28.27,
+        "latency_ms_p50": 19.32,
+        "latency_ms_p95": 28.3,
         "accuracy_by_kind_test": {
           "both_hold": "41/42",
           "contradiction": "4/4",
@@ -149,6 +164,10 @@
           "reversal": "2/3",
           "same_topic": "40/43",
           "update": "11/46"
+        },
+        "auroc_test_by_source": {
+          "axil-dogfood": 0.7904761904761904,
+          "longmemeval_oracle": 0.7141447368421052
         }
       },
       "U1+sym": {
@@ -169,8 +188,8 @@
         },
         "ece_test_raw": 0.20043538614774392,
         "ece_test_platt": 0.09145558042420755,
-        "latency_ms_p50": 39.85,
-        "latency_ms_p95": 59.68,
+        "latency_ms_p50": 36.11,
+        "latency_ms_p95": 53.9,
         "accuracy_by_kind_test": {
           "both_hold": "40/42",
           "contradiction": "4/4",
@@ -180,37 +199,48 @@
           "reversal": "3/3",
           "same_topic": "39/43",
           "update": "12/46"
+        },
+        "auroc_test_by_source": {
+          "axil-dogfood": 0.7904761904761904,
+          "longmemeval_oracle": 0.7164473684210526
         }
       },
       "U2": {
-        "n_train": 16,
-        "n_test": 15,
-        "auroc_test": 0.46,
-        "auroc_all": 0.5125,
-        "threshold_from_train": 0.02710825899377159,
+        "n_train": 90,
+        "n_test": 111,
+        "auroc_test": 0.615009746588694,
+        "auroc_all": 0.570929070929071,
+        "threshold_from_train": 0.10834577873789447,
         "at_threshold_test": {
-          "tpr": 0.0,
-          "fpr": 0.0,
-          "precision": null
+          "tpr": 0.12962962962962962,
+          "fpr": 0.03508771929824561,
+          "precision": 0.7777777777777778
         },
         "at_argmax_test": {
-          "tpr": 0.0,
-          "fpr": 0.0,
-          "precision": null
+          "tpr": 0.07407407407407407,
+          "fpr": 0.03508771929824561,
+          "precision": 0.6666666666666666
         },
-        "ece_test_raw": 0.3296851357464355,
-        "ece_test_platt": 0.34451387755277146,
-        "latency_ms_p50": 10.48,
-        "latency_ms_p95": 12.17,
+        "ece_test_raw": 0.4487316512708913,
+        "ece_test_platt": 0.1386727400081121,
+        "latency_ms_p50": 9.08,
+        "latency_ms_p95": 12.35,
         "accuracy_by_kind_test": {
-          "fixed": "0/4",
+          "downstream_workaround": "5/6",
+          "fixed": "7/53",
           "fixed_implicit": "0/1",
           "lexical_trap": "1/1",
+          "mentioned_not_fix": "5/5",
           "merged_not_shipped": "1/1",
+          "other_fix": "35/36",
           "other_fix_same_area": "1/1",
           "planned": "1/1",
           "still_broken": "1/1",
           "unrelated_same_area": "5/5"
+        },
+        "auroc_test_by_source": {
+          "axil-dogfood": 0.46,
+          "github": 0.6109422492401215
         }
       }
     },
@@ -218,7 +248,7 @@
       "family": "nli-cross-encoder",
       "runtime": "onnxruntime 1.30.0 CPU, 4 threads",
       "size_mb": 128.4,
-      "load_ms": 972.5,
+      "load_ms": 924.0,
       "U1": {
         "n_train": 102,
         "n_test": 147,
@@ -237,8 +267,8 @@
         },
         "ece_test_raw": 0.2418093886895967,
         "ece_test_platt": 0.07351657071577332,
-        "latency_ms_p50": 16.12,
-        "latency_ms_p95": 25.76,
+        "latency_ms_p50": 15.43,
+        "latency_ms_p95": 23.38,
         "accuracy_by_kind_test": {
           "both_hold": "40/42",
           "contradiction": "2/4",
@@ -248,6 +278,10 @@
           "reversal": "3/3",
           "same_topic": "41/43",
           "update": "10/46"
+        },
+        "auroc_test_by_source": {
+          "axil-dogfood": 0.6666666666666666,
+          "longmemeval_oracle": 0.6950657894736842
         }
       },
       "U1+sym": {
@@ -268,8 +302,8 @@
         },
         "ece_test_raw": 0.23356329998807235,
         "ece_test_platt": 0.05452807319909534,
-        "latency_ms_p50": 31.5,
-        "latency_ms_p95": 48.49,
+        "latency_ms_p50": 30.84,
+        "latency_ms_p95": 45.92,
         "accuracy_by_kind_test": {
           "both_hold": "42/42",
           "contradiction": "3/4",
@@ -279,37 +313,48 @@
           "reversal": "2/3",
           "same_topic": "42/43",
           "update": "7/46"
+        },
+        "auroc_test_by_source": {
+          "axil-dogfood": 0.6761904761904762,
+          "longmemeval_oracle": 0.7148026315789474
         }
       },
       "U2": {
-        "n_train": 16,
-        "n_test": 15,
-        "auroc_test": 0.52,
-        "auroc_all": 0.5333333333333333,
-        "threshold_from_train": 0.05323641331721847,
+        "n_train": 90,
+        "n_test": 111,
+        "auroc_test": 0.5948667966211826,
+        "auroc_all": 0.5288711288711289,
+        "threshold_from_train": 0.2651774233987526,
         "at_threshold_test": {
-          "tpr": 0.0,
-          "fpr": 0.0,
-          "precision": null
+          "tpr": 0.12962962962962962,
+          "fpr": 0.03508771929824561,
+          "precision": 0.7777777777777778
         },
         "at_argmax_test": {
-          "tpr": 0.0,
-          "fpr": 0.0,
-          "precision": null
+          "tpr": 0.09259259259259259,
+          "fpr": 0.017543859649122806,
+          "precision": 0.8333333333333334
         },
-        "ece_test_raw": 0.3271194726588759,
-        "ece_test_platt": 0.3436380995595215,
-        "latency_ms_p50": 7.48,
-        "latency_ms_p95": 9.89,
+        "ece_test_raw": 0.42143808511824715,
+        "ece_test_platt": 0.1407389632106891,
+        "latency_ms_p50": 6.39,
+        "latency_ms_p95": 9.88,
         "accuracy_by_kind_test": {
-          "fixed": "0/4",
+          "downstream_workaround": "6/6",
+          "fixed": "7/53",
           "fixed_implicit": "0/1",
           "lexical_trap": "1/1",
+          "mentioned_not_fix": "4/5",
           "merged_not_shipped": "1/1",
+          "other_fix": "35/36",
           "other_fix_same_area": "1/1",
           "planned": "1/1",
           "still_broken": "1/1",
           "unrelated_same_area": "5/5"
+        },
+        "auroc_test_by_source": {
+          "axil-dogfood": 0.52,
+          "github": 0.5866261398176292
         }
       }
     },
@@ -317,7 +362,7 @@
       "family": "nli-cross-encoder",
       "runtime": "onnxruntime 1.30.0 CPU, 4 threads",
       "size_mb": 32.4,
-      "load_ms": 878.3,
+      "load_ms": 934.1,
       "U1": {
         "n_train": 102,
         "n_test": 147,
@@ -336,8 +381,8 @@
         },
         "ece_test_raw": 0.2585767647408912,
         "ece_test_platt": 0.05510982386693,
-        "latency_ms_p50": 10.16,
-        "latency_ms_p95": 15.59,
+        "latency_ms_p50": 9.8,
+        "latency_ms_p95": 16.25,
         "accuracy_by_kind_test": {
           "both_hold": "39/42",
           "contradiction": "4/4",
@@ -347,6 +392,10 @@
           "reversal": "2/3",
           "same_topic": "42/43",
           "update": "7/46"
+        },
+        "auroc_test_by_source": {
+          "axil-dogfood": 0.7761904761904762,
+          "longmemeval_oracle": 0.6296052631578948
         }
       },
       "U1+sym": {
@@ -367,8 +416,8 @@
         },
         "ece_test_raw": 0.2721362680906935,
         "ece_test_platt": 0.027490503097853926,
-        "latency_ms_p50": 19.76,
-        "latency_ms_p95": 30.71,
+        "latency_ms_p50": 19.56,
+        "latency_ms_p95": 30.48,
         "accuracy_by_kind_test": {
           "both_hold": "40/42",
           "contradiction": "4/4",
@@ -378,44 +427,55 @@
           "reversal": "2/3",
           "same_topic": "42/43",
           "update": "6/46"
+        },
+        "auroc_test_by_source": {
+          "axil-dogfood": 0.7047619047619048,
+          "longmemeval_oracle": 0.5993421052631579
         }
       },
       "U2": {
-        "n_train": 16,
-        "n_test": 15,
-        "auroc_test": 0.5,
-        "auroc_all": 0.5333333333333333,
-        "threshold_from_train": 1.000000001,
+        "n_train": 90,
+        "n_test": 111,
+        "auroc_test": 0.5321637426900585,
+        "auroc_all": 0.5050949050949051,
+        "threshold_from_train": 0.9588522762277283,
         "at_threshold_test": {
-          "tpr": 0.0,
+          "tpr": 0.037037037037037035,
           "fpr": 0.0,
-          "precision": null
+          "precision": 1.0
         },
         "at_argmax_test": {
-          "tpr": 0.0,
-          "fpr": 0.1,
-          "precision": 0.0
+          "tpr": 0.12962962962962962,
+          "fpr": 0.10526315789473684,
+          "precision": 0.5384615384615384
         },
-        "ece_test_raw": 0.3838545292783473,
-        "ece_test_platt": 0.35847311379954677,
-        "latency_ms_p50": 6.07,
-        "latency_ms_p95": 9.72,
+        "ece_test_raw": 0.39114020323435855,
+        "ece_test_platt": 0.1377299821184566,
+        "latency_ms_p50": 4.22,
+        "latency_ms_p95": 6.72,
         "accuracy_by_kind_test": {
-          "fixed": "0/4",
+          "downstream_workaround": "6/6",
+          "fixed": "2/53",
           "fixed_implicit": "0/1",
           "lexical_trap": "1/1",
+          "mentioned_not_fix": "5/5",
           "merged_not_shipped": "1/1",
+          "other_fix": "36/36",
           "other_fix_same_area": "1/1",
           "planned": "1/1",
           "still_broken": "1/1",
           "unrelated_same_area": "5/5"
+        },
+        "auroc_test_by_source": {
+          "axil-dogfood": 0.5,
+          "github": 0.5193226226660878
         }
       }
     },
     "convaiinnovations/laya": {
       "family": "jev-style (laya 0.3.20)",
       "runtime": "torch CPU, 4 threads",
-      "load_ms": 6482.9,
+      "load_ms": 5355.4,
       "U1": {
         "n_train": 102,
         "n_test": 147,
@@ -434,8 +494,8 @@
         },
         "ece_test_raw": 0.1733312925170068,
         "ece_test_platt": 0.05501462084712494,
-        "latency_ms_p50": 272.77,
-        "latency_ms_p95": 415.87,
+        "latency_ms_p50": 250.6,
+        "latency_ms_p95": 320.14,
         "accuracy_by_kind_test": {
           "both_hold": "40/42",
           "contradiction": "2/4",
@@ -445,37 +505,48 @@
           "reversal": "2/3",
           "same_topic": "42/43",
           "update": "10/46"
+        },
+        "auroc_test_by_source": {
+          "axil-dogfood": 0.9428571428571428,
+          "longmemeval_oracle": 0.5753289473684211
         }
       },
       "U2": {
-        "n_train": 16,
-        "n_test": 15,
-        "auroc_test": 0.86,
-        "auroc_all": 0.9041666666666667,
-        "threshold_from_train": 0.5836,
+        "n_train": 90,
+        "n_test": 111,
+        "auroc_test": 0.6910331384015594,
+        "auroc_all": 0.7132867132867133,
+        "threshold_from_train": 0.6582,
         "at_threshold_test": {
-          "tpr": 0.6,
-          "fpr": 0.1,
-          "precision": 0.75
+          "tpr": 0.16666666666666666,
+          "fpr": 0.07017543859649122,
+          "precision": 0.6923076923076923
         },
         "at_argmax_test": {
-          "tpr": 0.6,
-          "fpr": 0.2,
-          "precision": 0.6
+          "tpr": 0.3148148148148148,
+          "fpr": 0.14035087719298245,
+          "precision": 0.68
         },
-        "ece_test_raw": 0.19119333333333335,
-        "ece_test_platt": 0.2878663860249922,
-        "latency_ms_p50": 180.09,
-        "latency_ms_p95": 259.22,
+        "ece_test_raw": 0.20361891891891887,
+        "ece_test_platt": 0.1420243329555518,
+        "latency_ms_p50": 141.43,
+        "latency_ms_p95": 196.91,
         "accuracy_by_kind_test": {
-          "fixed": "2/4",
+          "downstream_workaround": "5/6",
+          "fixed": "8/53",
           "fixed_implicit": "1/1",
           "lexical_trap": "0/1",
+          "mentioned_not_fix": "5/5",
           "merged_not_shipped": "1/1",
+          "other_fix": "34/36",
           "other_fix_same_area": "1/1",
           "planned": "1/1",
           "still_broken": "1/1",
           "unrelated_same_area": "5/5"
+        },
+        "auroc_test_by_source": {
+          "axil-dogfood": 0.86,
+          "github": 0.683022145028224
         }
       },
       "questions": {
@@ -486,7 +557,7 @@
     "convaiinnovations/laya/multilingual": {
       "family": "jev-style (laya 0.3.20)",
       "runtime": "torch CPU, 4 threads",
-      "load_ms": 6947.3,
+      "load_ms": 5601.3,
       "U1": {
         "n_train": 102,
         "n_test": 147,
@@ -505,8 +576,8 @@
         },
         "ece_test_raw": 0.24260816326530613,
         "ece_test_platt": 0.06332218172878053,
-        "latency_ms_p50": 184.65,
-        "latency_ms_p95": 331.72,
+        "latency_ms_p50": 92.85,
+        "latency_ms_p95": 127.6,
         "accuracy_by_kind_test": {
           "both_hold": "42/42",
           "contradiction": "4/4",
@@ -516,37 +587,48 @@
           "reversal": "1/3",
           "same_topic": "40/43",
           "update": "1/46"
+        },
+        "auroc_test_by_source": {
+          "axil-dogfood": 0.6,
+          "longmemeval_oracle": 0.5756578947368421
         }
       },
       "U2": {
-        "n_train": 16,
-        "n_test": 15,
-        "auroc_test": 0.74,
-        "auroc_all": 0.725,
-        "threshold_from_train": 0.5507,
+        "n_train": 90,
+        "n_test": 111,
+        "auroc_test": 0.6166341780376868,
+        "auroc_all": 0.611988011988012,
+        "threshold_from_train": 0.9873,
         "at_threshold_test": {
-          "tpr": 0.6,
-          "fpr": 0.4,
-          "precision": 0.42857142857142855
+          "tpr": 0.037037037037037035,
+          "fpr": 0.017543859649122806,
+          "precision": 0.6666666666666666
         },
         "at_argmax_test": {
-          "tpr": 0.8,
-          "fpr": 0.4,
-          "precision": 0.5
+          "tpr": 0.7037037037037037,
+          "fpr": 0.5263157894736842,
+          "precision": 0.5588235294117647
         },
-        "ece_test_raw": 0.32542,
-        "ece_test_platt": 0.38191174642370534,
-        "latency_ms_p50": 128.34,
-        "latency_ms_p95": 192.59,
+        "ece_test_raw": 0.23809189189189192,
+        "ece_test_platt": 0.1336185522438472,
+        "latency_ms_p50": 59.15,
+        "latency_ms_p95": 79.0,
         "accuracy_by_kind_test": {
-          "fixed": "3/4",
+          "downstream_workaround": "6/6",
+          "fixed": "2/53",
           "fixed_implicit": "0/1",
-          "lexical_trap": "0/1",
+          "lexical_trap": "1/1",
+          "mentioned_not_fix": "5/5",
           "merged_not_shipped": "1/1",
+          "other_fix": "35/36",
           "other_fix_same_area": "1/1",
-          "planned": "0/1",
+          "planned": "1/1",
           "still_broken": "1/1",
-          "unrelated_same_area": "3/5"
+          "unrelated_same_area": "5/5"
+        },
+        "auroc_test_by_source": {
+          "axil-dogfood": 0.74,
+          "github": 0.6022579244463743
         }
       },
       "questions": {
@@ -557,7 +639,7 @@
     "convaiinnovations/laya/typed-decisions": {
       "family": "jev-style (laya 0.3.20)",
       "runtime": "torch CPU, 4 threads",
-      "load_ms": 6556.3,
+      "load_ms": 4035.8,
       "U1": {
         "n_train": 102,
         "n_test": 147,
@@ -576,8 +658,8 @@
         },
         "ece_test_raw": 0.1447,
         "ece_test_platt": 0.053350274120321665,
-        "latency_ms_p50": 280.66,
-        "latency_ms_p95": 395.99,
+        "latency_ms_p50": 239.84,
+        "latency_ms_p95": 314.04,
         "accuracy_by_kind_test": {
           "both_hold": "38/42",
           "contradiction": "3/4",
@@ -587,37 +669,48 @@
           "reversal": "2/3",
           "same_topic": "41/43",
           "update": "12/46"
+        },
+        "auroc_test_by_source": {
+          "axil-dogfood": 0.9333333333333333,
+          "longmemeval_oracle": 0.6129934210526315
         }
       },
       "U2": {
-        "n_train": 16,
-        "n_test": 15,
-        "auroc_test": 0.76,
-        "auroc_all": 0.8583333333333333,
-        "threshold_from_train": 0.4972,
+        "n_train": 90,
+        "n_test": 111,
+        "auroc_test": 0.7002923976608187,
+        "auroc_all": 0.7038461538461539,
+        "threshold_from_train": 0.5399,
         "at_threshold_test": {
-          "tpr": 0.6,
-          "fpr": 0.2,
-          "precision": 0.6
+          "tpr": 0.12962962962962962,
+          "fpr": 0.05263157894736842,
+          "precision": 0.7
         },
         "at_argmax_test": {
-          "tpr": 0.6,
-          "fpr": 0.2,
-          "precision": 0.6
+          "tpr": 0.25925925925925924,
+          "fpr": 0.07017543859649122,
+          "precision": 0.7777777777777778
         },
-        "ece_test_raw": 0.16720666666666667,
-        "ece_test_platt": 0.2596308611333367,
-        "latency_ms_p50": 178.63,
-        "latency_ms_p95": 212.44,
+        "ece_test_raw": 0.13719459459459457,
+        "ece_test_platt": 0.14269719674937087,
+        "latency_ms_p50": 143.72,
+        "latency_ms_p95": 188.95,
         "accuracy_by_kind_test": {
-          "fixed": "2/4",
+          "downstream_workaround": "6/6",
+          "fixed": "6/53",
           "fixed_implicit": "1/1",
           "lexical_trap": "0/1",
+          "mentioned_not_fix": "5/5",
           "merged_not_shipped": "1/1",
+          "other_fix": "35/36",
           "other_fix_same_area": "1/1",
           "planned": "1/1",
           "still_broken": "1/1",
           "unrelated_same_area": "4/5"
+        },
+        "auroc_test_by_source": {
+          "axil-dogfood": 0.76,
+          "github": 0.7071211463308728
         }
       },
       "questions": {

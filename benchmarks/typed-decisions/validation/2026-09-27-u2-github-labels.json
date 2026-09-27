@@ -1,0 +1,3078 @@
+{
+ "date": "2026-09-27",
+ "set": "sets/u2_github.jsonl (before drops: 179 pairs)",
+ "method": "Labels come from GitHub links (closing PR = fixed). Codex gpt-6-sol and GLM glm-5.3-flash re-annotated every pair blind (anonymized G### ids, shuffled, no labels/kinds/sources). A pair is dropped when both annotators disagree with the link label; split votes keep the link label.",
+ "agreement": {
+  "link_vs_codex": "162/179 (kappa 0.81)",
+  "link_vs_glm": "162/179 (kappa 0.81)",
+  "codex_vs_glm": "163/179 (kappa 0.82)"
+ },
+ "by_kind": {
+  "fixed": {
+   "n": 99,
+   "dropped": 5,
+   "split": 12
+  },
+  "downstream_workaround": {
+   "n": 10,
+   "dropped": 0,
+   "split": 0
+  },
+  "other_fix": {
+   "n": 60,
+   "dropped": 4,
+   "split": 3
+  },
+  "mentioned_not_fix": {
+   "n": 10,
+   "dropped": 0,
+   "split": 1
+  }
+ },
+ "annotation_instructions": "You are an independent annotator for a benchmark. Label each item below. Do NOT use any tools, do NOT read files or run commands, do NOT look anything up; answer only from the text given here.\n\nTASK — error resolved. Each item has an ERROR (a bug report title from a software project) and a LATER note (the title of a later code change).\n  label 1 = the LATER change fixes/resolves this specific ERROR.\n  label 0 = otherwise: it fixes a different problem, is only a workaround/pin/test somewhere else, is unrelated, or the text gives no reason to think it resolves this ERROR.\n\nTitles are terse; use your software-engineering judgement about whether the change plausibly addresses the reported bug. Judge only what the text supports.\n\nOutput ONLY a JSON array (no prose, no markdown fence), one object per item, in the same order:\n{\"id\": \"G001\", \"label\": 0 or 1, \"confidence\": \"high\"|\"medium\"|\"low\", \"reason\": \"<= 15 words\"}\n\n",
+ "items": [
+  {
+   "id": "gh-ort-152-fixed",
+   "blind_id": "G115",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 0,
+    "confidence": "low",
+    "reason": "The titles do not connect the search path to Android."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "low",
+    "reason": "Android support fix weakly related to search path"
+   },
+   "resolution": "dropped"
+  },
+  {
+   "id": "gh-ort-320-downstream_workaround",
+   "blind_id": "G139",
+   "link_label": 0,
+   "kind": "downstream_workaround",
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Adding GPU providers does not fix the missing ort_sys type."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "medium",
+    "reason": "GPU providers unrelated to missing size_t build error"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-ort-320-fixed",
+   "blind_id": "G118",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 1,
+    "confidence": "medium",
+    "reason": "Updating ort plausibly resolves the missing ort_sys type."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "medium",
+    "reason": "Bumped ort version plausibly includes size_t fix"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-ort-609-downstream_workaround",
+   "blind_id": "G155",
+   "link_label": 0,
+   "kind": "downstream_workaround",
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "GPU demux performance work does not fix Environment cleanup."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "GPU demux performance change unrelated to CUDA env cleanup abort"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-ort-609-fixed",
+   "blind_id": "G052",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 0,
+    "confidence": "low",
+    "reason": "The terse Environment title does not establish a fix for freed-memory access."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "low",
+    "reason": "Manual Environment lifetime plausibly avoids exit-time use-after-free"
+   },
+   "resolution": "split, kept link label"
+  },
+  {
+   "id": "gh-redb-1072-fixed",
+   "blind_id": "G064",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 1,
+    "confidence": "medium",
+    "reason": "Keeping the database alive during writes clarifies drop behavior and avoids related risks."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Keeping database open during write txn resolves drop/deadlock semantics"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-redb-1072-other_fix",
+   "blind_id": "G112",
+   "link_label": 0,
+   "kind": "other_fix",
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Write-strategy conversion does not address database drop semantics."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "1PC+C conversion unrelated to drop semantics"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-redb-1086-fixed",
+   "blind_id": "G148",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "The change explicitly implements std::Error for SetDurabilityError."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Implements std::Error exactly as requested"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-redb-1108-fixed",
+   "blind_id": "G119",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 1,
+    "confidence": "medium",
+    "reason": "The fixed-size-key write panic plausibly matches the reported insertion panic."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Directly fixes panic writing fixed size keys"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-redb-1108-other_fix",
+   "blind_id": "G151",
+   "link_label": 0,
+   "kind": "other_fix",
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Repair is distinct from panicking during record insertion."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "medium",
+    "reason": "Repair-path panic fix, not insert-path slice overflow"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-redb-1331-fixed",
+   "blind_id": "G160",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Validating page order prevents the unvalidated allocation size."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Validates page order on read, preventing abort from bad bits"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-redb-1331-other_fix",
+   "blind_id": "G098",
+   "link_label": 0,
+   "kind": "other_fix",
+   "codex": {
+    "label": 0,
+    "confidence": "medium",
+    "reason": "Freed-page reporting does not clearly validate PageNumber order bits before allocation."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "low",
+    "reason": "Freed-page reporting differs from page-order validation"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-redb-1333-fixed",
+   "blind_id": "G090",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Reporting malformed freed-page records prevents the specified repair panic."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Directly reports malformed freed-page records instead of panicking"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-redb-1333-other_fix",
+   "blind_id": "G125",
+   "link_label": 0,
+   "kind": "other_fix",
+   "codex": {
+    "label": 1,
+    "confidence": "medium",
+    "reason": "A repair-panic fix plausibly covers malformed freed-tree entries."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Directly fixes panic during repair"
+   },
+   "resolution": "dropped"
+  },
+  {
+   "id": "gh-redb-302-fixed",
+   "blind_id": "G076",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Adding 32-bit CI does not itself fix compilation."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "medium",
+    "reason": "CI addition is preventative, not a fix"
+   },
+   "resolution": "dropped"
+  },
+  {
+   "id": "gh-redb-302-other_fix",
+   "blind_id": "G152",
+   "link_label": 0,
+   "kind": "other_fix",
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Fixing usize overflows on 32-bit platforms plausibly restores compilation."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "medium",
+    "reason": "32-bit usize fixes plausibly resolve 32-bit compile failure"
+   },
+   "resolution": "dropped"
+  },
+  {
+   "id": "gh-redb-364-fixed",
+   "blind_id": "G153",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Converting an existing database to 2PC supports changing its write strategy."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "medium",
+    "reason": "1PC+C to 2PC conversion enables changing WriteStrategy"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-redb-364-other_fix",
+   "blind_id": "G128",
+   "link_label": 0,
+   "kind": "other_fix",
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Reopening a database does not establish support for changing write strategy."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Crash fix on reopen, not WriteStrategy change support"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-redb-405-fixed",
+   "blind_id": "G054",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "The change explicitly permits opening an existing two-phase database."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Directly allows opening existing 2PC database"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-redb-422-fixed",
+   "blind_id": "G032",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 1,
+    "confidence": "medium",
+    "reason": "Fixing a tree-related integer overflow plausibly resolves the reported panic."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "low",
+    "reason": "u16 overflow fix speculative for unspecified btree panic"
+   },
+   "resolution": "split, kept link label"
+  },
+  {
+   "id": "gh-redb-422-other_fix",
+   "blind_id": "G023",
+   "link_label": 0,
+   "kind": "other_fix",
+   "codex": {
+    "label": 0,
+    "confidence": "medium",
+    "reason": "The reported tree-store panic is not identified as a repair panic."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "low",
+    "reason": "btree_base panic plausibly occurs during repair traversal"
+   },
+   "resolution": "split, kept link label"
+  },
+  {
+   "id": "gh-redb-450-fixed",
+   "blind_id": "G138",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 1,
+    "confidence": "medium",
+    "reason": "Cache poisoning plausibly explains theoretical corruption after fsync failure."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "low",
+    "reason": "Cache poisoning plausibly different from fsync corruption"
+   },
+   "resolution": "split, kept link label"
+  },
+  {
+   "id": "gh-redb-450-mentioned_not_fix",
+   "blind_id": "G085",
+   "link_label": 0,
+   "kind": "mentioned_not_fix",
+   "codex": {
+    "label": 0,
+    "confidence": "medium",
+    "reason": "Caching metadata does not identify an fsync-failure corruption fix."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Metadata caching unrelated to fsync corruption"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-redb-450-other_fix",
+   "blind_id": "G162",
+   "link_label": 0,
+   "kind": "other_fix",
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "A growth-failure panic differs from fsync-failure corruption."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "medium",
+    "reason": "Panic after growth failure differs from fsync corruption"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-redb-471-fixed",
+   "blind_id": "G166",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 1,
+    "confidence": "medium",
+    "reason": "Fixing 32-bit usize overflows plausibly prevents an ARMv7 abort."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "medium",
+    "reason": "Armv7 abort plausibly caused by 32-bit usize overflow"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-redb-538-fixed",
+   "blind_id": "G103",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 0,
+    "confidence": "low",
+    "reason": "The broad API request does not establish that these table methods were requested."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "low",
+    "reason": "Flexible table APIs plausibly part of the API changes"
+   },
+   "resolution": "split, kept link label"
+  },
+  {
+   "id": "gh-redb-538-other_fix",
+   "blind_id": "G113",
+   "link_label": 0,
+   "kind": "other_fix",
+   "codex": {
+    "label": 1,
+    "confidence": "medium",
+    "reason": "Version-three API changes plausibly implement the proposed API changes."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "v3 API changes directly addresses the API changes issue"
+   },
+   "resolution": "dropped"
+  },
+  {
+   "id": "gh-redb-594-fixed",
+   "blind_id": "G114",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Exposing TransactionError directly addresses its accessibility."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Directly exposes TransactionError"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-redb-594-other_fix",
+   "blind_id": "G061",
+   "link_label": 0,
+   "kind": "other_fix",
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "SetDurabilityError is distinct from TransactionError access."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "SetDurabilityError differs from TransactionError access issue"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-redb-623-fixed",
+   "blind_id": "G040",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 0,
+    "confidence": "low",
+    "reason": "The assertion text gives no link to a growth failure."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "low",
+    "reason": "Vague assertion panic; growth failure differs"
+   },
+   "resolution": "dropped"
+  },
+  {
+   "id": "gh-redb-629-fixed",
+   "blind_id": "G037",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Fixing database reopening plausibly resolves crashes on later starts."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Directly fixes crash when reopening database"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-redb-629-other_fix",
+   "blind_id": "G091",
+   "link_label": 0,
+   "kind": "other_fix",
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "A growth-failure panic is not linked to repeated-start crashes."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "low",
+    "reason": "Growth failure panic differs from startup crash"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-redb-642-fixed",
+   "blind_id": "G007",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Repair and checksum verification are distinct panic contexts."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "medium",
+    "reason": "Checksum verification plausibly occurs during repair; same panic"
+   },
+   "resolution": "split, kept link label"
+  },
+  {
+   "id": "gh-redb-642-other_fix",
+   "blind_id": "G005",
+   "link_label": 0,
+   "kind": "other_fix",
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "A growth-failure panic is not linked to checksum verification."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "medium",
+    "reason": "Growth failure panic differs from checksum verification panic"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-redb-715-downstream_workaround",
+   "blind_id": "G100",
+   "link_label": 0,
+   "kind": "downstream_workaround",
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Namespace migration is a different panic context."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Namespace migration differs from delete_table panic"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-redb-715-fixed",
+   "blind_id": "G012",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "The change names the same open-table deletion panic."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Directly fixes delete_table panic for an open table"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-redb-715-other_fix",
+   "blind_id": "G163",
+   "link_label": 0,
+   "kind": "other_fix",
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Fixed-size-key writes differ from deleting an open table."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "medium",
+    "reason": "Writing fixed-size-key panic differs from deleting opened table"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-redb-798-fixed",
+   "blind_id": "G121",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 1,
+    "confidence": "medium",
+    "reason": "The change fixes a compact panic during an active read transaction."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Directly fixes compact panic with read transaction in progress"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-redb-798-other_fix",
+   "blind_id": "G070",
+   "link_label": 0,
+   "kind": "other_fix",
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Strategy conversion is not linked to the compact assertion."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "low",
+    "reason": "Write strategy conversion unrelated to compact assertion"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-redb-812-fixed",
+   "blind_id": "G097",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "The change explicitly fixes ReadTransaction::close."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Directly fixes ReadTransaction::close"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-redb-812-other_fix",
+   "blind_id": "G156",
+   "link_label": 0,
+   "kind": "other_fix",
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Cache poisoning is unrelated to closing a read transaction."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "medium",
+    "reason": "Cache poisoning fix differs from ReadTransactionStillInUse close error"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-redb-980-fixed",
+   "blind_id": "G026",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "The later change implements the planned version-three API changes."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "v3 API changes directly implements planned 3.0 changes"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-ripgrep-2574-fixed",
+   "blind_id": "G096",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "The change explicitly fixes the word-regexp fast path."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Directly fixes word-regexp fast path"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-ripgrep-2574-other_fix",
+   "blind_id": "G099",
+   "link_label": 0,
+   "kind": "other_fix",
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Line buffering is unrelated to incomplete word-regexp matches."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Line-buffered fix unrelated to word-regexp matching"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-ripgrep-2767-fixed",
+   "blind_id": "G013",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Correcting build_parallel documentation addresses the example that fails to compile."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Corrects build_parallel documentation, fixing non-compiling example"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-ripgrep-2767-other_fix",
+   "blind_id": "G019",
+   "link_label": 0,
+   "kind": "other_fix",
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Visitor-panic deadlock is unrelated to a documentation example compiling."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Deadlock fix unrelated to example compilation error"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-ripgrep-2884-fixed",
+   "blind_id": "G031",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Faulty literal extraction can cause the alternation false negatives."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Inner literal extraction fix resolves alternation false negatives"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-ripgrep-2884-other_fix",
+   "blind_id": "G172",
+   "link_label": 0,
+   "kind": "other_fix",
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Line buffering is unrelated to alternation matching."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "medium",
+    "reason": "Line-buffered regression differs from alternation matching regression"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-ripgrep-2956-fixed",
+   "blind_id": "G173",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Dynamic sourcing support directly addresses zsh completion sourcing."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Adds dynamic sourcing support for zsh completions"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-ripgrep-3009-fixed",
+   "blind_id": "G120",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "The change explicitly fixes deadlock when a visitor panics."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Directly fixes deadlock when visitor panics"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-ripgrep-3009-other_fix",
+   "blind_id": "G144",
+   "link_label": 0,
+   "kind": "other_fix",
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Correcting documentation does not fix a visitor-panic hang."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Documentation change only, does not fix hang"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-ripgrep-3076-fixed",
+   "blind_id": "G124",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 1,
+    "confidence": "medium",
+    "reason": "Removing printer max_matches plausibly fixes max-count behavior for multiline matches."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "low",
+    "reason": "Finishing max_matches removal plausibly fixes max-count multiline"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-ripgrep-3076-other_fix",
+   "blind_id": "G094",
+   "link_label": 0,
+   "kind": "other_fix",
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "The later fix concerns files-with-matches, not max-count."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "medium",
+    "reason": "Files-with-matches fix differs from max-count multiline issue"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-ripgrep-3135-fixed",
+   "blind_id": "G107",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Lazy-DFA ID rollover directly explains the invalid state ID."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Directly fixes lazy DFA ID rollover"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-ripgrep-3139-fixed",
+   "blind_id": "G015",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 1,
+    "confidence": "medium",
+    "reason": "The change directly fixes files-with-matches behavior in a specific case."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Directly fixes --files-with-matches with pcre2 multiline"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-ripgrep-3139-other_fix",
+   "blind_id": "G004",
+   "link_label": 0,
+   "kind": "other_fix",
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Hidden-file selection is a different issue from files-with-matches behavior."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "medium",
+    "reason": "Fixes hidden-file searching, not --files-with-matches inconsistency"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-ripgrep-3155-fixed",
+   "blind_id": "G041",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 1,
+    "confidence": "medium",
+    "reason": "Changing how macOS ARM artifacts are built plausibly fixes their packaging."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Adds missing aarch64 macOS release artifacts"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-ripgrep-3173-fixed",
+   "blind_id": "G082",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "The change directly fixes searching whitelisted hidden files."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Directly fixes searching whitelisted hidden files"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-ripgrep-3173-other_fix",
+   "blind_id": "G131",
+   "link_label": 0,
+   "kind": "other_fix",
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Visitor-panic deadlock does not affect whitelisted hidden files."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Deadlock fix, unrelated to hidden file search"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-ripgrep-3179-fixed",
+   "blind_id": "G142",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "The change explicitly fixes global gitignore behavior with absolute paths."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "medium",
+    "reason": "Global gitignore absolute-path fix plausibly covers rooted files"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-ripgrep-3179-other_fix",
+   "blind_id": "G111",
+   "link_label": 0,
+   "kind": "other_fix",
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Whitelisted hidden files differ from global ignore handling for rooted files."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "medium",
+    "reason": "Hidden-file fix differs from git_global rooted files issue"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-ripgrep-3180-fixed",
+   "blind_id": "G149",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "The change fixes a replacement panic in a look-around corner case."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Fixes replacement panic corner case matching rg panic"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-ripgrep-3180-other_fix",
+   "blind_id": "G086",
+   "link_label": 0,
+   "kind": "other_fix",
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "The later fix concerns files-with-matches, not replacement panics."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "medium",
+    "reason": "Files-with-matches fix differs from replace panic"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-ripgrep-3184-fixed",
+   "blind_id": "G050",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "The change explicitly fixes slow searching with large after-context values."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Directly fixes slow stdin searching with large -A"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-ripgrep-3184-mentioned_not_fix",
+   "blind_id": "G020",
+   "link_label": 0,
+   "kind": "mentioned_not_fix",
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Line buffering differs from large after-context windows."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "low",
+    "reason": "Line-buffered regression differs from large -A slowdown"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-ripgrep-3194-fixed",
+   "blind_id": "G133",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "The change explicitly fixes the line-buffered regression."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Fixes --line-buffered regression, matches broken line buffering"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-ripgrep-3419-downstream_workaround",
+   "blind_id": "G043",
+   "link_label": 0,
+   "kind": "downstream_workaround",
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Rubyfmt ignore behavior is a different multi-root issue."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "low",
+    "reason": "rubyfmtignore feature unrelated to walk nondeterminism"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-ripgrep-3419-fixed",
+   "blind_id": "G029",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Scoping parent matchers by root addresses multi-root walk behavior."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "medium",
+    "reason": "Scoping matchers by root plausibly fixes multi-root nondeterminism"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-ripgrep-3419-other_fix",
+   "blind_id": "G018",
+   "link_label": 0,
+   "kind": "other_fix",
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Documentation correction does not resolve walk nondeterminism."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Documentation change doesn't address walk nondeterminism"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-ripgrep-3453-fixed",
+   "blind_id": "G044",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "The change explicitly adds depth to walk errors."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Directly always includes depth in WalkDir errors"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-ripgrep-3453-other_fix",
+   "blind_id": "G021",
+   "link_label": 0,
+   "kind": "other_fix",
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Visitor-panic deadlock does not add error depth."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Deadlock fix unrelated to WithPath error depth"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-tantivy-1278-fixed",
+   "blind_id": "G136",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 1,
+    "confidence": "medium",
+    "reason": "Opening a bytes index with its dynamic codec plausibly fixes the codec mismatch."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Fixes bytes fastfield dynamic codec opening, matches mismatch"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-tantivy-1291-fixed",
+   "blind_id": "G127",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "The change adds aggregation validation and extends invalid-field testing."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Directly improves aggregation validation with invalid field test"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-tantivy-1291-other_fix",
+   "blind_id": "G130",
+   "link_label": 0,
+   "kind": "other_fix",
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "UnknownTokenizer messaging is unrelated to aggregation validation."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "medium",
+    "reason": "Fixes UnknownTokenizer message, not aggregation error handling"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-tantivy-1303-fixed",
+   "blind_id": "G066",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "The change explicitly fixes the UnknownTokenizer error message."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Directly fixes UnknownTokenizer error message"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-tantivy-1303-other_fix",
+   "blind_id": "G141",
+   "link_label": 0,
+   "kind": "other_fix",
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Aggregation validation does not fix the UnknownTokenizer wording."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "medium",
+    "reason": "Aggregation validation work, not error message wording fix"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-tantivy-1366-fixed",
+   "blind_id": "G058",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 1,
+    "confidence": "medium",
+    "reason": "A document deserialization fix plausibly addresses the JSON deserialization error."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Document deserialization bugfix addresses JSON error"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-tantivy-1366-other_fix",
+   "blind_id": "G164",
+   "link_label": 0,
+   "kind": "other_fix",
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "UnknownTokenizer wording does not fix JSON deserialization."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "medium",
+    "reason": "Improves UnknownTokenizer error message, not deserialization"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-tantivy-1440-fixed",
+   "blind_id": "G060",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 1,
+    "confidence": "medium",
+    "reason": "Correcting calculated fast-field values plausibly prevents subtraction overflow."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "low",
+    "reason": "Fastfield value calculation fix plausibly addresses overflow"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-tantivy-1757-fixed",
+   "blind_id": "G053",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 1,
+    "confidence": "medium",
+    "reason": "Input handling in the named range function plausibly corrects GCD-based bounds."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "low",
+    "reason": "Same function touched; plausibly fixes GCD inverse handling"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-tantivy-1859-fixed",
+   "blind_id": "G132",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "The change explicitly names the nonterminating test."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Directly fixes the named flaky test"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-tantivy-1863-fixed",
+   "blind_id": "G024",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 1,
+    "confidence": "medium",
+    "reason": "Range-query performance work plausibly addresses the reported regression."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Directly improves range query performance regression"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-tantivy-1863-other_fix",
+   "blind_id": "G080",
+   "link_label": 0,
+   "kind": "other_fix",
+   "codex": {
+    "label": 0,
+    "confidence": "medium",
+    "reason": "A generic range-query fix does not clearly address the performance regression."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "medium",
+    "reason": "Range query fix plausibly addresses multivalued perf regression"
+   },
+   "resolution": "split, kept link label"
+  },
+  {
+   "id": "gh-tantivy-1967-fixed",
+   "blind_id": "G146",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "The change explicitly fixes aggregation serialization."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Aggregation serialization fix matches json serializability bug"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-tantivy-1967-other_fix",
+   "blind_id": "G009",
+   "link_label": 0,
+   "kind": "other_fix",
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Indexed-object merging is unrelated to aggregation-result serialization."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "medium",
+    "reason": "Fixes merging JSON with positions, not aggregation serialization"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-tantivy-2112-fixed",
+   "blind_id": "G033",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "The change explicitly fixes sorting an index by date."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Directly fixes sorting index by date"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-tantivy-2112-other_fix",
+   "blind_id": "G101",
+   "link_label": 0,
+   "kind": "other_fix",
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Opening a bytes index differs from sorting by date."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "medium",
+    "reason": "Bytes codec fix unrelated to date sort panic"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-tantivy-2153-fixed",
+   "blind_id": "G116",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Missing imports on non-Unix systems directly explain the broken build."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Directly fixes non-unix trait imports"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-tantivy-2180-fixed",
+   "blind_id": "G016",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 0,
+    "confidence": "medium",
+    "reason": "Posting-list encoding does not clearly stop positions being generated for numbers."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "low",
+    "reason": "Posting list -1 encoding plausibly suppresses tf/position for numbers"
+   },
+   "resolution": "split, kept link label"
+  },
+  {
+   "id": "gh-tantivy-2180-other_fix",
+   "blind_id": "G065",
+   "link_label": 0,
+   "kind": "other_fix",
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Aggregation validation does not affect numeric JSON posting positions."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Aggregation validation unrelated to number field tf/positions"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-tantivy-2225-fixed",
+   "blind_id": "G109",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 1,
+    "confidence": "medium",
+    "reason": "A range-query fix plausibly restores missing optional-field results."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Directly fixes range query result correctness"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-tantivy-2225-other_fix",
+   "blind_id": "G022",
+   "link_label": 0,
+   "kind": "other_fix",
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "A performance improvement does not establish a missing-results fix."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "medium",
+    "reason": "Performance improvement, not correctness fix for missing results"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-tantivy-2251-fixed",
+   "blind_id": "G046",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "The change names the same positioned JSON-object merge bug."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Directly fixes merging JSON objects indexed with positions"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-tantivy-2411-fixed",
+   "blind_id": "G035",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 1,
+    "confidence": "medium",
+    "reason": "Catching merge panics can prevent the Rayon thread-pool abort."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Catching merge panics prevents rayon pool abort"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-tantivy-2494-fixed",
+   "blind_id": "G089",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Skipping sentinel facet ordinals explicitly prevents the wrong root."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Directly skips sentinel facet ords preventing wrong root"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-tantivy-2607-fixed",
+   "blind_id": "G042",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 1,
+    "confidence": "medium",
+    "reason": "A compilation-stability fix plausibly addresses tests failing from a fresh clone."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "low",
+    "reason": "Compilation stability fix plausibly addresses build failure"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-tantivy-2607-mentioned_not_fix",
+   "blind_id": "G057",
+   "link_label": 0,
+   "kind": "mentioned_not_fix",
+   "codex": {
+    "label": 0,
+    "confidence": "low",
+    "reason": "The title does not connect UserInputAst serialization to fresh-clone test failure."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Serde addition unrelated to fresh clone failure"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-tantivy-2607-other_fix",
+   "blind_id": "G034",
+   "link_label": 0,
+   "kind": "other_fix",
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Aggregation validation does not explain fresh-clone test failure."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Aggregation validation unrelated to fresh clone test failure"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-tantivy-2788-fixed",
+   "blind_id": "G126",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "The change explicitly fixes the union performance regression."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Directly fixes union performance regression"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-tantivy-2788-other_fix",
+   "blind_id": "G102",
+   "link_label": 0,
+   "kind": "other_fix",
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Range-query performance work does not target union queries."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "medium",
+    "reason": "Range query improvement doesn't address union queries"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-tantivy-2811-fixed",
+   "blind_id": "G001",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 1,
+    "confidence": "medium",
+    "reason": "An intersection fix plausibly stops calls that seek behind the current document."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "low",
+    "reason": "Vague intersection bugfix; no clear link to seek_danger panic"
+   },
+   "resolution": "split, kept link label"
+  },
+  {
+   "id": "gh-tantivy-2811-other_fix",
+   "blind_id": "G158",
+   "link_label": 0,
+   "kind": "other_fix",
+   "codex": {
+    "label": 0,
+    "confidence": "medium",
+    "reason": "The report concerns callers seeking backward, not specifically buffered-union child invalidation."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Disables buffered union seek_danger override causing backward-seek panic"
+   },
+   "resolution": "split, kept link label"
+  },
+  {
+   "id": "gh-tantivy-3086-fixed",
+   "blind_id": "G003",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Disabling the faulty override directly addresses the invalid child state."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Directly disables buffered union seek_danger override causing invalid child"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-tantivy-3086-other_fix",
+   "blind_id": "G011",
+   "link_label": 0,
+   "kind": "other_fix",
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Aggregation validation does not address buffered union seeking."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Aggregation validation change unrelated to union scorer seek"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-tokio-6751-fixed",
+   "blind_id": "G135",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "The change explicitly wakes DelayQueue after removing its last item."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Wakes DelayQueue on last-item removal, exactly the bug"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-tokio-6767-downstream_workaround",
+   "blind_id": "G063",
+   "link_label": 0,
+   "kind": "downstream_workaround",
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Lock-file maintenance does not identify a connect regression fix."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "medium",
+    "reason": "Dependency lock maintenance is not a targeted fix"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-tokio-6767-fixed",
+   "blind_id": "G078",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 0,
+    "confidence": "medium",
+    "reason": "Abstract socket names are not identified as the connect regression."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "medium",
+    "reason": "Abstract socket handling plausibly fixes mio v1 connect regression"
+   },
+   "resolution": "split, kept link label"
+  },
+  {
+   "id": "gh-tokio-6820-fixed",
+   "blind_id": "G075",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 0,
+    "confidence": "medium",
+    "reason": "Recommending OwnedFd is guidance, not a change to AsyncFd drop behavior."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "low",
+    "reason": "Recommending OwnedFd documents resolution of fd-not-closed report"
+   },
+   "resolution": "split, kept link label"
+  },
+  {
+   "id": "gh-tokio-6820-other_fix",
+   "blind_id": "G122",
+   "link_label": 0,
+   "kind": "other_fix",
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Empty file reads are unrelated to AsyncFd descriptor ownership."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Empty-read change unrelated to AsyncFd drop"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-tokio-6837-fixed",
+   "blind_id": "G017",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Leading-zero handling directly addresses the abstract socket prefix."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Directly fixes leading zero byte handling in from_abstract_name"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-tokio-6837-other_fix",
+   "blind_id": "G006",
+   "link_label": 0,
+   "kind": "other_fix",
+   "codex": {
+    "label": 1,
+    "confidence": "medium",
+    "reason": "Abstract socket-name handling plausibly fixes the extra prefix."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "medium",
+    "reason": "Adding abstract socket name handling plausibly fixes bind behavior"
+   },
+   "resolution": "dropped"
+  },
+  {
+   "id": "gh-tokio-6996-fixed",
+   "blind_id": "G025",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 1,
+    "confidence": "medium",
+    "reason": "A lost wakeup plausibly explains the yield and block_on failure."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "medium",
+    "reason": "yield_now lost wakeup fix addresses block_on/yield interaction"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-tokio-7002-fixed",
+   "blind_id": "G145",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "The change explicitly fixes Haiku support."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Fix Haiku directly addresses Haiku build failure"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-tokio-7002-other_fix",
+   "blind_id": "G073",
+   "link_label": 0,
+   "kind": "other_fix",
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Preparing tokio-stream does not fix a Haiku build."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "tokio-stream release prep unrelated to Haiku build"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-tokio-7019-fixed",
+   "blind_id": "G165",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Preparing a release does not identify the needed test dependency."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "medium",
+    "reason": "Release prep gives no indication dev-dependency was added"
+   },
+   "resolution": "dropped"
+  },
+  {
+   "id": "gh-tokio-7019-other_fix",
+   "blind_id": "G179",
+   "link_label": 0,
+   "kind": "other_fix",
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Tracing-test serialization does not add a tokio-stream development dependency."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Serializing tracing tests unrelated to tokio-stream dev-dependency"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-tokio-7036-fixed",
+   "blind_id": "G028",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 1,
+    "confidence": "medium",
+    "reason": "WebAssembly thread parking plausibly causes the timeout hang."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Fixes thread parking causing wasm timeout hangs"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-tokio-7133-fixed",
+   "blind_id": "G137",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "The change directly addresses empty-buffer file reads."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Empty reads no longer start background read, matches bug"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-tokio-7133-other_fix",
+   "blind_id": "G147",
+   "link_label": 0,
+   "kind": "other_fix",
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Preparing tokio-stream does not fix empty-buffer file reads."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Release chore, unrelated to empty-buffer EOF bug"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-tokio-7368-fixed",
+   "blind_id": "G177",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 1,
+    "confidence": "medium",
+    "reason": "Disallowing blocking inside LocalSet plausibly makes block_in_place panic for local tasks."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Disallowing blocking in LocalSet adds missing block_in_place panic"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-tokio-7563-fixed",
+   "blind_id": "G048",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Cleaning AsyncFd registrations on deregistration addresses the leak."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Directly cleans up AsyncFd registration list, fixing leak"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-tokio-7563-other_fix",
+   "blind_id": "G170",
+   "link_label": 0,
+   "kind": "other_fix",
+   "codex": {
+    "label": 0,
+    "confidence": "medium",
+    "reason": "Recommending OwnedFd does not fix registration-list memory leaks."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "medium",
+    "reason": "Recommendation is documentation, not a leak fix"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-tokio-7691-fixed",
+   "blind_id": "G062",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 0,
+    "confidence": "medium",
+    "reason": "An EPERM fallback does not specifically address symlink opening."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "low",
+    "reason": "Disabling io-uring on EPERM plausibly avoids symlink errors"
+   },
+   "resolution": "split, kept link label"
+  },
+  {
+   "id": "gh-tokio-7691-mentioned_not_fix",
+   "blind_id": "G051",
+   "link_label": 0,
+   "kind": "mentioned_not_fix",
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "A test-support change does not fix opening symlinks."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Test helper change only, not the fix"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-tokio-7751-downstream_workaround",
+   "blind_id": "G123",
+   "link_label": 0,
+   "kind": "downstream_workaround",
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "A test and lint correction does not change set_linger blocking."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Clippy test fix doesn't address the blocking issue"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-tokio-7751-fixed",
+   "blind_id": "G036",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Deprecating set_linger leaves its blocking behavior intact."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Deprecating set_linger resolves the blocking concern"
+   },
+   "resolution": "split, kept link label"
+  },
+  {
+   "id": "gh-tokio-7751-other_fix",
+   "blind_id": "G105",
+   "link_label": 0,
+   "kind": "other_fix",
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "LocalSet blocking rules do not change TcpStream::set_linger."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "LocalSet blocking unrelated to set_linger"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-tokio-7764-fixed",
+   "blind_id": "G140",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Macro hygiene directly addresses symbols leaking into caller scope."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Hygiene fix directly addresses symbol leakage in join!"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-tokio-7979-fixed",
+   "blind_id": "G088",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "The change explicitly prevents descriptor leaks on cancelled io-uring opens."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Directly prevents fd leak on cancelled io_uring open"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-tokio-7979-other_fix",
+   "blind_id": "G055",
+   "link_label": 0,
+   "kind": "other_fix",
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Disabling io-uring on EPERM does not fix cancelled-open descriptor leaks."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "EPERM handling unrelated to cancelled-open fd leak"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-tokio-8061-downstream_workaround",
+   "blind_id": "G175",
+   "link_label": 0,
+   "kind": "downstream_workaround",
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Disabling debug assertions masks the panic rather than fixing underflow."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Disabling debug-assertions is a workaround, not a fix"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-tokio-8061-fixed",
+   "blind_id": "G171",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "The change fixes the mpsc length underflow causing the panic."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Fixes underflow in mpsc len, same subtraction overflow"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-tokio-8061-other_fix",
+   "blind_id": "G143",
+   "link_label": 0,
+   "kind": "other_fix",
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Preparing tokio-stream does not fix mpsc arithmetic."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Release chore, unrelated to subtraction overflow panic"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-tokio-8065-fixed",
+   "blind_id": "G056",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 1,
+    "confidence": "medium",
+    "reason": "Reverting task stealing plausibly removes the high-QPS regression."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "medium",
+    "reason": "Reverting LIFO stealing plausibly restores pre-1.51 performance"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-tokio-8065-mentioned_not_fix",
+   "blind_id": "G002",
+   "link_label": 0,
+   "kind": "mentioned_not_fix",
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Preparing a release does not identify a performance fix."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "medium",
+    "reason": "Release preparation commit, not a fix for the regression"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-tokio-8399-fixed",
+   "blind_id": "G154",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "The change explicitly fixes stable all-features compilation."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Fix makes all-features check compile without tokio_unstable on stable"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-tokio-8399-other_fix",
+   "blind_id": "G069",
+   "link_label": 0,
+   "kind": "other_fix",
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Preparing tokio-stream does not fix Tokio compilation."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "tokio-stream release prep unrelated to tokio compile failure"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-tokio-8423-fixed",
+   "blind_id": "G161",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Serializing tracing_task tests addresses their flakiness."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Serializing tracing_task tests directly addresses flakiness"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-tokio-8423-other_fix",
+   "blind_id": "G095",
+   "link_label": 0,
+   "kind": "other_fix",
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Preparing tokio-stream does not stabilize tracing_task tests."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Release prep unrelated to flaky tests"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-tokio-8433-fixed",
+   "blind_id": "G092",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 1,
+    "confidence": "medium",
+    "reason": "A completion marker prevents falsely passing the OOM-interrupted test run."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Completion marker directly detects OOM-killed test guest"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-tokio-8433-other_fix",
+   "blind_id": "G014",
+   "link_label": 0,
+   "kind": "other_fix",
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Serializing tracing tests does not fix the io_uring CI run."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Serializing tracing tests unrelated to io_uring CI false success"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-uv-18809-fixed",
+   "blind_id": "G087",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Pinning the platform directly addresses reproducible trampoline builds."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Directly pins platform during reproducible trampoline builds"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-uv-18809-other_fix",
+   "blind_id": "G081",
+   "link_label": 0,
+   "kind": "other_fix",
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Editable-build data files are unrelated to reproducible trampolines."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Editable builds change unrelated to trampoline builds"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-uv-18890-fixed",
+   "blind_id": "G178",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 1,
+    "confidence": "low",
+    "reason": "Invalid macOS certificates plausibly caused the reported uv breakage."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "TLS certificate filtering unrelated to macOS breakage"
+   },
+   "resolution": "split, kept link label"
+  },
+  {
+   "id": "gh-uv-18890-mentioned_not_fix",
+   "blind_id": "G068",
+   "link_label": 0,
+   "kind": "mentioned_not_fix",
+   "codex": {
+    "label": 0,
+    "confidence": "medium",
+    "reason": "Cleaner TLS errors do not establish a fix for the macOS breakage."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "low",
+    "reason": "Clean TLS error reporting plausibly addresses macOS breakage"
+   },
+   "resolution": "split, kept link label"
+  },
+  {
+   "id": "gh-uv-18916-fixed",
+   "blind_id": "G059",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Removing the doctests resolves the reported doctest issues."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Directly removes problematic doctests from uv-keyring"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-uv-18939-fixed",
+   "blind_id": "G039",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 1,
+    "confidence": "medium",
+    "reason": "Validating upgrade-group targets resolves that part of the reported acceptance bug."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "medium",
+    "reason": "Validates upgrade-group targets against non-existent names"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-uv-18939-other_fix",
+   "blind_id": "G129",
+   "link_label": 0,
+   "kind": "other_fix",
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Iterative resolver errors do not validate upgrade names."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "medium",
+    "reason": "Resolver error handling refactor, not name validation"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-uv-19080-downstream_workaround",
+   "blind_id": "G049",
+   "link_label": 0,
+   "kind": "downstream_workaround",
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Pinning an older uv version is a workaround."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Version pin is a workaround, not a fix"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-uv-19080-fixed",
+   "blind_id": "G110",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 1,
+    "confidence": "medium",
+    "reason": "Correcting trampoline interpreter variables plausibly fixes cross-version Windows wheel builds."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "low",
+    "reason": "Trampoline PYTHONHOME change plausibly resolves interpreter failures"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-uv-19080-other_fix",
+   "blind_id": "G174",
+   "link_label": 0,
+   "kind": "other_fix",
+   "codex": {
+    "label": 0,
+    "confidence": "medium",
+    "reason": "The virtual-environment hint is not clearly tied to Windows wheel builds."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "low",
+    "reason": "Venv hint change weakly related to cibuildwheel wheel failures"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-uv-19137-fixed",
+   "blind_id": "G093",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 1,
+    "confidence": "medium",
+    "reason": "ARMv7 floating-point environment handling plausibly restores self-update on that host."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "low",
+    "reason": "ARMv7 environment handling plausibly fixes self-update"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-uv-19158-fixed",
+   "blind_id": "G159",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "The change explicitly fixes PowerShell activation with UNC paths."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Directly fixes PowerShell activator UNC path handling"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-uv-19258-downstream_workaround",
+   "blind_id": "G084",
+   "link_label": 0,
+   "kind": "downstream_workaround",
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Migrating package management does not fix editable data installation."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Tooling migration unrelated to editable data files"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-uv-19258-fixed",
+   "blind_id": "G010",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "The change explicitly includes data files in editable builds."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Directly includes data files in editable builds"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-uv-19258-other_fix",
+   "blind_id": "G047",
+   "link_label": 0,
+   "kind": "other_fix",
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Suppressing a warning does not install editable-build data files."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Warning change unrelated to data file installation"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-uv-19326-fixed",
+   "blind_id": "G030",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 1,
+    "confidence": "medium",
+    "reason": "Routing final errors through the printer plausibly restores the missing message."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Routes errors through printer respecting quiet flags"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-uv-19326-other_fix",
+   "blind_id": "G168",
+   "link_label": 0,
+   "kind": "other_fix",
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Resolver error handling does not address quiet-mode printing."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "medium",
+    "reason": "Iterative resolver errors not clearly the missing --locked message"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-uv-19534-fixed",
+   "blind_id": "G079",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Case-insensitive HTML parsing directly addresses uppercase tags."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Directly accepts case-insensitive HTML tags in find-links"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-uv-19672-fixed",
+   "blind_id": "G008",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Iterative resolver error handling avoids recursive stack overflow."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Iterative error handling eliminates recursive resolver stack overflow"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-uv-19811-fixed",
+   "blind_id": "G134",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "The change explicitly accepts an empty credential.toml."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Exactly stops failing on empty credential.toml"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-uv-19811-other_fix",
+   "blind_id": "G169",
+   "link_label": 0,
+   "kind": "other_fix",
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Resolver error handling does not accept an empty credential file."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "medium",
+    "reason": "Resolver error handling unrelated to empty credential.toml parsing"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-uv-19832-fixed",
+   "blind_id": "G027",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "The change explicitly allows locking with an invalid environment."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Directly allows locking with invalid project environment"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-uv-19832-mentioned_not_fix",
+   "blind_id": "G074",
+   "link_label": 0,
+   "kind": "mentioned_not_fix",
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Adding a regression test does not itself fix locking."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Regression test only, not a fix"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-uv-19832-other_fix",
+   "blind_id": "G072",
+   "link_label": 0,
+   "kind": "other_fix",
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Error printing does not make locking accept an invalid environment."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Error printer routing unrelated to invalid venv lock error"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-uv-19972-fixed",
+   "blind_id": "G083",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Preserving terminal cycles addresses discarded leaf loops."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Directly preserves terminal cycles in inverted trees"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-uv-19972-mentioned_not_fix",
+   "blind_id": "G038",
+   "link_label": 0,
+   "kind": "mentioned_not_fix",
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "JSON output does not address discarded dependency cycles."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "JSON output feature unrelated to inverted tree leaf-loops"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-uv-19972-other_fix",
+   "blind_id": "G071",
+   "link_label": 0,
+   "kind": "other_fix",
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Build-backend warnings are unrelated to inverted trees."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Warning change unrelated to inverted tree cycles"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-uv-20128-fixed",
+   "blind_id": "G067",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "The change explicitly removes the in-tree backend warning."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Directly removes warning for in-tree uv_build backend"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-uv-20912-fixed",
+   "blind_id": "G117",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 1,
+    "confidence": "medium",
+    "reason": "Workspace-root group selection directly addresses uv export behavior in workspaces."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "low",
+    "reason": "Workspace group selection plausibly addresses export behavior"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-uv-20912-mentioned_not_fix",
+   "blind_id": "G104",
+   "link_label": 0,
+   "kind": "mentioned_not_fix",
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Codex automations are unrelated to uv export."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Codex automation unrelated to uv export"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-uv-20949-fixed",
+   "blind_id": "G167",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "The change explicitly preserves cache compatibility."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Preserves cache compatibility, addressing incompatible cache change"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-uv-20949-mentioned_not_fix",
+   "blind_id": "G150",
+   "link_label": 0,
+   "kind": "mentioned_not_fix",
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "A regression test alone does not restore cache compatibility."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Only adds a regression test, not a fix"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-uv-21128-fixed",
+   "blind_id": "G106",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 0,
+    "confidence": "medium",
+    "reason": "The interpreter hint is not clearly tied to sdist test failure."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "medium",
+    "reason": "Interpreter hint change unrelated to sdist test"
+   },
+   "resolution": "dropped"
+  },
+  {
+   "id": "gh-uv-21128-other_fix",
+   "blind_id": "G045",
+   "link_label": 0,
+   "kind": "other_fix",
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "A settings warning does not explain the sdist test failure."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "medium",
+    "reason": "Backend settings warning unrelated to failing sdist test"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-uv-21692-downstream_workaround",
+   "blind_id": "G157",
+   "link_label": 0,
+   "kind": "downstream_workaround",
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Pinning an earlier uv version is a workaround."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Pinning UV to 0.12.13 is a workaround pin, not a fix"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-uv-21692-fixed",
+   "blind_id": "G077",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Reverting destination rejection restores installation into the symlinked directory."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Directly reverts symlinked destination rejection"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-uv-21846-fixed",
+   "blind_id": "G108",
+   "link_label": 1,
+   "kind": "fixed",
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Correcting BSD platform-tag casing addresses the NetBSD wheel rejection."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Directly fixes BSD and Haiku platform tag casing"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "gh-uv-21846-other_fix",
+   "blind_id": "G176",
+   "link_label": 0,
+   "kind": "other_fix",
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Symlinked installation destinations are unrelated to NetBSD tag casing."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Symlinked destination revert unrelated to NetBSD tag case-sensitivity"
+   },
+   "resolution": "unanimous"
+  }
+ ]
+}

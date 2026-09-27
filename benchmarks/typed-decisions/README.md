@@ -23,6 +23,7 @@ The plan and the go/no-go rules are in `tasks/phase-29-typed-decisions-laya.md`.
 | `u1_lme.jsonl` | 209 | LongMemEval oracle split (MIT, see `NOTICE-longmemeval.md`), rebuilt by `build_sets.py` | Mechanical, from the dataset's evidence flags: 69 knowledge-update pairs (positives); 70 multi-session "both still hold" pairs and 70 "same conversation, nothing changed" pairs (negatives). One pair is excluded; see `EXCLUDE` |
 | `u1_repo.jsonl` | 40 | This repo's own `.axil` decisions / errors / context, shortened (`repo_sets.py`) | Written by Claude, then blind-validated (see below) |
 | `u2_repo.jsonl` | 31 | Same (`repo_sets.py`) | Same. The negatives are deliberate traps: still broken, only planned, merged but not published, a fix for something else |
+| `u2_github.jsonl` | 170 | Bug issues + PR titles from redb, tantivy, ort, ripgrep, uv and tokio (`build_u2_github.py`; needs `gh`) | From GitHub links: **fixed** = the merged PR that closed the issue (94). The 76 negatives are three kinds: **other_fix** = the closing PR of a different bug in the same repo, picked for word overlap; **mentioned_not_fix** = a merged same-repo PR that references the issue but didn't close it; **downstream_workaround** = a merged PR in another repo that references it. Issue numbers, URLs and closing keywords are stripped from the titles. 9 pairs were dropped after validation (`validation/u2_github_drops.json`) |
 
 ### Label validation (`validation/2026-09-27-labels.json`)
 
@@ -43,7 +44,14 @@ How disagreements were resolved:
   - `lme-ku-dfde3500`: the tutor change is only implicit in the clipped text.
 - **Four split votes kept with the majority label.**
 
-Remaining caveat: the annotators are models, not people. U2 is still small (31 pairs).
+The same two models also re-annotated **all 179 GitHub pairs** blind, before any drops (`validation/2026-09-27-u2-github-labels.json`):
+- Codex agreed with the link label on 162/179 (κ 0.81).
+- GLM agreed on 162/179 (κ 0.81).
+- The two agreed with each other on 163/179 (κ 0.82).
+
+Pairs where **both** rejected the link label were dropped: 5 "fixed" pairs whose titles don't show the connection, and 4 "other_fix" negatives that were really near-duplicate fixes. Split votes keep the link label.
+
+Remaining caveat: the annotators are models, not people.
 
 Each pair's `split` is 40% `train` / 60% `test`, derived from sha256 of its id. The train split is used only to fit the decision threshold and the Platt calibration; every reported metric is on test.
 
@@ -83,4 +91,4 @@ Raw outputs go to `out/`, which is gitignored. The committed summary is `benchma
 
 ## Numbers policy
 
-None of these numbers go into README, docs or CLI output until U2 has at least 100 validated pairs. The current U2 set has 31 pairs, so it is directional only. The labels are model-validated (three-way blind agreement); a human spot-check of the disputed items listed in the validation file is still recommended before publishing anything.
+U2 now has 201 validated pairs. Still, none of these numbers go into README, docs or CLI output: they measure a candidate for a feature that isn't built yet. Once a winner is wired into Axil, its end-to-end numbers get their own committed result. The labels are model-validated (blind agreement between models); a human spot-check of the disputed items listed in the validation files is still recommended before publishing anything.
