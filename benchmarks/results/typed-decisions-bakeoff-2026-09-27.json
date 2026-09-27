@@ -1,0 +1,647 @@
+{
+  "benchmark": "typed-decisions-bakeoff",
+  "phase": "29 increment 1: U1 supersession + U2 error-resolved",
+  "date": "2026-09-27",
+  "machine": "arm64 macOS-26.6-arm64-arm-64bit",
+  "sets": {
+    "U1": "u1_lme.jsonl (209, LongMemEval oracle, MIT) + u1_repo.jsonl (40, dogfood)",
+    "U2": "u2_repo.jsonl (31, dogfood)",
+    "labels": "LongMemEval pairs mechanical; repo pairs authored by Claude and blind-validated by Codex gpt-6-sol + GLM glm-5.3-flash (validation/2026-09-27-labels.json)",
+    "split": "40% train (threshold + Platt fit) / 60% test, sha256(id) based"
+  },
+  "metric_notes": {
+    "at_threshold_test": "highest-recall threshold with TRAIN FPR <= 0.05, applied to test",
+    "U1_score": "P(contradiction | old, new) for NLI; noul for Laya",
+    "U2_score": "P(entailment | later, 'This problem has been fixed: {}') for NLI; noul for Laya",
+    "caveat": "U2 is small: directional only. Latency is Python-side, batch 1, model loaded."
+  },
+  "arms": {
+    "nli-deberta-v3-xsmall": {
+      "family": "nli-cross-encoder",
+      "runtime": "onnxruntime 1.30.0 CPU, 4 threads",
+      "size_mb": 284.2,
+      "load_ms": 1487.0,
+      "U1": {
+        "n_train": 102,
+        "n_test": 147,
+        "auroc_test": 0.7450822962665596,
+        "auroc_all": 0.7271769662921348,
+        "threshold_from_train": 0.8495686735206276,
+        "at_threshold_test": {
+          "tpr": 0.39622641509433965,
+          "fpr": 0.0851063829787234,
+          "precision": 0.7241379310344828
+        },
+        "at_argmax_test": {
+          "tpr": 0.5283018867924528,
+          "fpr": 0.0851063829787234,
+          "precision": 0.7777777777777778
+        },
+        "ece_test_raw": 0.2086161563406798,
+        "ece_test_platt": 0.10020921333508113,
+        "latency_ms_p50": 32.2,
+        "latency_ms_p95": 61.49,
+        "accuracy_by_kind_test": {
+          "both_hold": "40/42",
+          "contradiction": "3/4",
+          "negation_other_subject": "2/3",
+          "refinement": "3/4",
+          "restatement": "1/2",
+          "reversal": "3/3",
+          "same_topic": "40/43",
+          "update": "15/46"
+        }
+      },
+      "U1+sym": {
+        "n_train": 102,
+        "n_test": 147,
+        "auroc_test": 0.7460859092733841,
+        "auroc_all": 0.7155898876404494,
+        "threshold_from_train": 0.9485307117141354,
+        "at_threshold_test": {
+          "tpr": 0.3584905660377358,
+          "fpr": 0.09574468085106383,
+          "precision": 0.6785714285714286
+        },
+        "at_argmax_test": {
+          "tpr": 0.5283018867924528,
+          "fpr": 0.0851063829787234,
+          "precision": 0.7777777777777778
+        },
+        "ece_test_raw": 0.19779046052335325,
+        "ece_test_platt": 0.11819345932220264,
+        "latency_ms_p50": 65.23,
+        "latency_ms_p95": 102.7,
+        "accuracy_by_kind_test": {
+          "both_hold": "40/42",
+          "contradiction": "4/4",
+          "negation_other_subject": "2/3",
+          "refinement": "3/4",
+          "restatement": "1/2",
+          "reversal": "3/3",
+          "same_topic": "39/43",
+          "update": "12/46"
+        }
+      },
+      "U2": {
+        "n_train": 16,
+        "n_test": 15,
+        "auroc_test": 0.44,
+        "auroc_all": 0.49583333333333335,
+        "threshold_from_train": 0.03106699704810535,
+        "at_threshold_test": {
+          "tpr": 0.0,
+          "fpr": 0.0,
+          "precision": null
+        },
+        "at_argmax_test": {
+          "tpr": 0.0,
+          "fpr": 0.0,
+          "precision": null
+        },
+        "ece_test_raw": 0.329690552687107,
+        "ece_test_platt": 0.3476533463969818,
+        "latency_ms_p50": 13.53,
+        "latency_ms_p95": 17.09,
+        "accuracy_by_kind_test": {
+          "fixed": "0/4",
+          "fixed_implicit": "0/1",
+          "lexical_trap": "1/1",
+          "merged_not_shipped": "1/1",
+          "other_fix_same_area": "1/1",
+          "planned": "1/1",
+          "still_broken": "1/1",
+          "unrelated_same_area": "5/5"
+        }
+      }
+    },
+    "nli-deberta-v3-xsmall-qint8": {
+      "family": "nli-cross-encoder",
+      "runtime": "onnxruntime 1.30.0 CPU, 4 threads",
+      "size_mb": 87.4,
+      "load_ms": 1317.9,
+      "U1": {
+        "n_train": 102,
+        "n_test": 147,
+        "auroc_test": 0.7438779606583701,
+        "auroc_all": 0.7288623595505618,
+        "threshold_from_train": 0.9466414794366604,
+        "at_threshold_test": {
+          "tpr": 0.32075471698113206,
+          "fpr": 0.07446808510638298,
+          "precision": 0.7083333333333334
+        },
+        "at_argmax_test": {
+          "tpr": 0.5094339622641509,
+          "fpr": 0.09574468085106383,
+          "precision": 0.75
+        },
+        "ece_test_raw": 0.2094456244656804,
+        "ece_test_platt": 0.09137548567071596,
+        "latency_ms_p50": 20.01,
+        "latency_ms_p95": 28.27,
+        "accuracy_by_kind_test": {
+          "both_hold": "41/42",
+          "contradiction": "4/4",
+          "negation_other_subject": "2/3",
+          "refinement": "3/4",
+          "restatement": "1/2",
+          "reversal": "2/3",
+          "same_topic": "40/43",
+          "update": "11/46"
+        }
+      },
+      "U1+sym": {
+        "n_train": 102,
+        "n_test": 147,
+        "auroc_test": 0.7412685668406263,
+        "auroc_all": 0.7151685393258427,
+        "threshold_from_train": 0.9578431720558958,
+        "at_threshold_test": {
+          "tpr": 0.3584905660377358,
+          "fpr": 0.09574468085106383,
+          "precision": 0.6785714285714286
+        },
+        "at_argmax_test": {
+          "tpr": 0.5094339622641509,
+          "fpr": 0.09574468085106383,
+          "precision": 0.75
+        },
+        "ece_test_raw": 0.20043538614774392,
+        "ece_test_platt": 0.09145558042420755,
+        "latency_ms_p50": 39.85,
+        "latency_ms_p95": 59.68,
+        "accuracy_by_kind_test": {
+          "both_hold": "40/42",
+          "contradiction": "4/4",
+          "negation_other_subject": "2/3",
+          "refinement": "3/4",
+          "restatement": "1/2",
+          "reversal": "3/3",
+          "same_topic": "39/43",
+          "update": "12/46"
+        }
+      },
+      "U2": {
+        "n_train": 16,
+        "n_test": 15,
+        "auroc_test": 0.46,
+        "auroc_all": 0.5125,
+        "threshold_from_train": 0.02710825899377159,
+        "at_threshold_test": {
+          "tpr": 0.0,
+          "fpr": 0.0,
+          "precision": null
+        },
+        "at_argmax_test": {
+          "tpr": 0.0,
+          "fpr": 0.0,
+          "precision": null
+        },
+        "ece_test_raw": 0.3296851357464355,
+        "ece_test_platt": 0.34451387755277146,
+        "latency_ms_p50": 10.48,
+        "latency_ms_p95": 12.17,
+        "accuracy_by_kind_test": {
+          "fixed": "0/4",
+          "fixed_implicit": "0/1",
+          "lexical_trap": "1/1",
+          "merged_not_shipped": "1/1",
+          "other_fix_same_area": "1/1",
+          "planned": "1/1",
+          "still_broken": "1/1",
+          "unrelated_same_area": "5/5"
+        }
+      }
+    },
+    "ettinx-nli-xs": {
+      "family": "nli-cross-encoder",
+      "runtime": "onnxruntime 1.30.0 CPU, 4 threads",
+      "size_mb": 128.4,
+      "load_ms": 972.5,
+      "U1": {
+        "n_train": 102,
+        "n_test": 147,
+        "auroc_test": 0.7039341629867523,
+        "auroc_all": 0.7010533707865169,
+        "threshold_from_train": 0.8428348183498677,
+        "at_threshold_test": {
+          "tpr": 0.2830188679245283,
+          "fpr": 0.0851063829787234,
+          "precision": 0.6521739130434783
+        },
+        "at_argmax_test": {
+          "tpr": 0.39622641509433965,
+          "fpr": 0.1702127659574468,
+          "precision": 0.5675675675675675
+        },
+        "ece_test_raw": 0.2418093886895967,
+        "ece_test_platt": 0.07351657071577332,
+        "latency_ms_p50": 16.12,
+        "latency_ms_p95": 25.76,
+        "accuracy_by_kind_test": {
+          "both_hold": "40/42",
+          "contradiction": "2/4",
+          "negation_other_subject": "2/3",
+          "refinement": "2/4",
+          "restatement": "1/2",
+          "reversal": "3/3",
+          "same_topic": "41/43",
+          "update": "10/46"
+        }
+      },
+      "U1+sym": {
+        "n_train": 102,
+        "n_test": 147,
+        "auroc_test": 0.7085507828181453,
+        "auroc_all": 0.6889747191011236,
+        "threshold_from_train": 0.9834167101221182,
+        "at_threshold_test": {
+          "tpr": 0.22641509433962265,
+          "fpr": 0.02127659574468085,
+          "precision": 0.8571428571428571
+        },
+        "at_argmax_test": {
+          "tpr": 0.39622641509433965,
+          "fpr": 0.1702127659574468,
+          "precision": 0.5675675675675675
+        },
+        "ece_test_raw": 0.23356329998807235,
+        "ece_test_platt": 0.05452807319909534,
+        "latency_ms_p50": 31.5,
+        "latency_ms_p95": 48.49,
+        "accuracy_by_kind_test": {
+          "both_hold": "42/42",
+          "contradiction": "3/4",
+          "negation_other_subject": "2/3",
+          "refinement": "4/4",
+          "restatement": "2/2",
+          "reversal": "2/3",
+          "same_topic": "42/43",
+          "update": "7/46"
+        }
+      },
+      "U2": {
+        "n_train": 16,
+        "n_test": 15,
+        "auroc_test": 0.52,
+        "auroc_all": 0.5333333333333333,
+        "threshold_from_train": 0.05323641331721847,
+        "at_threshold_test": {
+          "tpr": 0.0,
+          "fpr": 0.0,
+          "precision": null
+        },
+        "at_argmax_test": {
+          "tpr": 0.0,
+          "fpr": 0.0,
+          "precision": null
+        },
+        "ece_test_raw": 0.3271194726588759,
+        "ece_test_platt": 0.3436380995595215,
+        "latency_ms_p50": 7.48,
+        "latency_ms_p95": 9.89,
+        "accuracy_by_kind_test": {
+          "fixed": "0/4",
+          "fixed_implicit": "0/1",
+          "lexical_trap": "1/1",
+          "merged_not_shipped": "1/1",
+          "other_fix_same_area": "1/1",
+          "planned": "1/1",
+          "still_broken": "1/1",
+          "unrelated_same_area": "5/5"
+        }
+      }
+    },
+    "ettinx-nli-xs-int8": {
+      "family": "nli-cross-encoder",
+      "runtime": "onnxruntime 1.30.0 CPU, 4 threads",
+      "size_mb": 32.4,
+      "load_ms": 878.3,
+      "U1": {
+        "n_train": 102,
+        "n_test": 147,
+        "auroc_test": 0.6682055399437977,
+        "auroc_all": 0.6436095505617978,
+        "threshold_from_train": 0.8731803677657802,
+        "at_threshold_test": {
+          "tpr": 0.24528301886792453,
+          "fpr": 0.06382978723404255,
+          "precision": 0.6842105263157895
+        },
+        "at_argmax_test": {
+          "tpr": 0.39622641509433965,
+          "fpr": 0.1595744680851064,
+          "precision": 0.5833333333333334
+        },
+        "ece_test_raw": 0.2585767647408912,
+        "ece_test_platt": 0.05510982386693,
+        "latency_ms_p50": 10.16,
+        "latency_ms_p95": 15.59,
+        "accuracy_by_kind_test": {
+          "both_hold": "39/42",
+          "contradiction": "4/4",
+          "negation_other_subject": "2/3",
+          "refinement": "4/4",
+          "restatement": "1/2",
+          "reversal": "2/3",
+          "same_topic": "42/43",
+          "update": "7/46"
+        }
+      },
+      "U1+sym": {
+        "n_train": 102,
+        "n_test": 147,
+        "auroc_test": 0.637294259333601,
+        "auroc_all": 0.6071629213483146,
+        "threshold_from_train": 0.9735657889304314,
+        "at_threshold_test": {
+          "tpr": 0.22641509433962265,
+          "fpr": 0.0425531914893617,
+          "precision": 0.75
+        },
+        "at_argmax_test": {
+          "tpr": 0.39622641509433965,
+          "fpr": 0.1595744680851064,
+          "precision": 0.5833333333333334
+        },
+        "ece_test_raw": 0.2721362680906935,
+        "ece_test_platt": 0.027490503097853926,
+        "latency_ms_p50": 19.76,
+        "latency_ms_p95": 30.71,
+        "accuracy_by_kind_test": {
+          "both_hold": "40/42",
+          "contradiction": "4/4",
+          "negation_other_subject": "2/3",
+          "refinement": "4/4",
+          "restatement": "2/2",
+          "reversal": "2/3",
+          "same_topic": "42/43",
+          "update": "6/46"
+        }
+      },
+      "U2": {
+        "n_train": 16,
+        "n_test": 15,
+        "auroc_test": 0.5,
+        "auroc_all": 0.5333333333333333,
+        "threshold_from_train": 1.000000001,
+        "at_threshold_test": {
+          "tpr": 0.0,
+          "fpr": 0.0,
+          "precision": null
+        },
+        "at_argmax_test": {
+          "tpr": 0.0,
+          "fpr": 0.1,
+          "precision": 0.0
+        },
+        "ece_test_raw": 0.3838545292783473,
+        "ece_test_platt": 0.35847311379954677,
+        "latency_ms_p50": 6.07,
+        "latency_ms_p95": 9.72,
+        "accuracy_by_kind_test": {
+          "fixed": "0/4",
+          "fixed_implicit": "0/1",
+          "lexical_trap": "1/1",
+          "merged_not_shipped": "1/1",
+          "other_fix_same_area": "1/1",
+          "planned": "1/1",
+          "still_broken": "1/1",
+          "unrelated_same_area": "5/5"
+        }
+      }
+    },
+    "convaiinnovations/laya": {
+      "family": "jev-style (laya 0.3.20)",
+      "runtime": "torch CPU, 4 threads",
+      "load_ms": 6482.9,
+      "U1": {
+        "n_train": 102,
+        "n_test": 147,
+        "auroc_test": 0.6764351665997591,
+        "auroc_all": 0.6587078651685393,
+        "threshold_from_train": 0.3388,
+        "at_threshold_test": {
+          "tpr": 0.2641509433962264,
+          "fpr": 0.031914893617021274,
+          "precision": 0.8235294117647058
+        },
+        "at_argmax_test": {
+          "tpr": 0.24528301886792453,
+          "fpr": 0.031914893617021274,
+          "precision": 0.8125
+        },
+        "ece_test_raw": 0.1733312925170068,
+        "ece_test_platt": 0.05501462084712494,
+        "latency_ms_p50": 272.77,
+        "latency_ms_p95": 415.87,
+        "accuracy_by_kind_test": {
+          "both_hold": "40/42",
+          "contradiction": "2/4",
+          "negation_other_subject": "3/3",
+          "refinement": "4/4",
+          "restatement": "2/2",
+          "reversal": "2/3",
+          "same_topic": "42/43",
+          "update": "10/46"
+        }
+      },
+      "U2": {
+        "n_train": 16,
+        "n_test": 15,
+        "auroc_test": 0.86,
+        "auroc_all": 0.9041666666666667,
+        "threshold_from_train": 0.5836,
+        "at_threshold_test": {
+          "tpr": 0.6,
+          "fpr": 0.1,
+          "precision": 0.75
+        },
+        "at_argmax_test": {
+          "tpr": 0.6,
+          "fpr": 0.2,
+          "precision": 0.6
+        },
+        "ece_test_raw": 0.19119333333333335,
+        "ece_test_platt": 0.2878663860249922,
+        "latency_ms_p50": 180.09,
+        "latency_ms_p95": 259.22,
+        "accuracy_by_kind_test": {
+          "fixed": "2/4",
+          "fixed_implicit": "1/1",
+          "lexical_trap": "0/1",
+          "merged_not_shipped": "1/1",
+          "other_fix_same_area": "1/1",
+          "planned": "1/1",
+          "still_broken": "1/1",
+          "unrelated_same_area": "5/5"
+        }
+      },
+      "questions": {
+        "U1": "Does the NEW statement replace, update, or contradict the OLD statement, so that the OLD statement is no longer current?",
+        "U2": "Does the LATER note show that the ERROR has actually been fixed?"
+      }
+    },
+    "convaiinnovations/laya/multilingual": {
+      "family": "jev-style (laya 0.3.20)",
+      "runtime": "torch CPU, 4 threads",
+      "load_ms": 6947.3,
+      "U1": {
+        "n_train": 102,
+        "n_test": 147,
+        "auroc_test": 0.6055800883179446,
+        "auroc_all": 0.5927668539325842,
+        "threshold_from_train": 0.8785,
+        "at_threshold_test": {
+          "tpr": 0.11320754716981132,
+          "fpr": 0.05319148936170213,
+          "precision": 0.5454545454545454
+        },
+        "at_argmax_test": {
+          "tpr": 0.22641509433962265,
+          "fpr": 0.1276595744680851,
+          "precision": 0.5
+        },
+        "ece_test_raw": 0.24260816326530613,
+        "ece_test_platt": 0.06332218172878053,
+        "latency_ms_p50": 184.65,
+        "latency_ms_p95": 331.72,
+        "accuracy_by_kind_test": {
+          "both_hold": "42/42",
+          "contradiction": "4/4",
+          "negation_other_subject": "2/3",
+          "refinement": "4/4",
+          "restatement": "1/2",
+          "reversal": "1/3",
+          "same_topic": "40/43",
+          "update": "1/46"
+        }
+      },
+      "U2": {
+        "n_train": 16,
+        "n_test": 15,
+        "auroc_test": 0.74,
+        "auroc_all": 0.725,
+        "threshold_from_train": 0.5507,
+        "at_threshold_test": {
+          "tpr": 0.6,
+          "fpr": 0.4,
+          "precision": 0.42857142857142855
+        },
+        "at_argmax_test": {
+          "tpr": 0.8,
+          "fpr": 0.4,
+          "precision": 0.5
+        },
+        "ece_test_raw": 0.32542,
+        "ece_test_platt": 0.38191174642370534,
+        "latency_ms_p50": 128.34,
+        "latency_ms_p95": 192.59,
+        "accuracy_by_kind_test": {
+          "fixed": "3/4",
+          "fixed_implicit": "0/1",
+          "lexical_trap": "0/1",
+          "merged_not_shipped": "1/1",
+          "other_fix_same_area": "1/1",
+          "planned": "0/1",
+          "still_broken": "1/1",
+          "unrelated_same_area": "3/5"
+        }
+      },
+      "questions": {
+        "U1": "Does the NEW statement replace, update, or contradict the OLD statement, so that the OLD statement is no longer current?",
+        "U2": "Does the LATER note show that the ERROR has actually been fixed?"
+      }
+    },
+    "convaiinnovations/laya/typed-decisions": {
+      "family": "jev-style (laya 0.3.20)",
+      "runtime": "torch CPU, 4 threads",
+      "load_ms": 6556.3,
+      "U1": {
+        "n_train": 102,
+        "n_test": 147,
+        "auroc_test": 0.6897832195905259,
+        "auroc_all": 0.6741221910112359,
+        "threshold_from_train": 0.2612,
+        "at_threshold_test": {
+          "tpr": 0.32075471698113206,
+          "fpr": 0.0851063829787234,
+          "precision": 0.68
+        },
+        "at_argmax_test": {
+          "tpr": 0.1509433962264151,
+          "fpr": 0.0,
+          "precision": 1.0
+        },
+        "ece_test_raw": 0.1447,
+        "ece_test_platt": 0.053350274120321665,
+        "latency_ms_p50": 280.66,
+        "latency_ms_p95": 395.99,
+        "accuracy_by_kind_test": {
+          "both_hold": "38/42",
+          "contradiction": "3/4",
+          "negation_other_subject": "3/3",
+          "refinement": "3/4",
+          "restatement": "1/2",
+          "reversal": "2/3",
+          "same_topic": "41/43",
+          "update": "12/46"
+        }
+      },
+      "U2": {
+        "n_train": 16,
+        "n_test": 15,
+        "auroc_test": 0.76,
+        "auroc_all": 0.8583333333333333,
+        "threshold_from_train": 0.4972,
+        "at_threshold_test": {
+          "tpr": 0.6,
+          "fpr": 0.2,
+          "precision": 0.6
+        },
+        "at_argmax_test": {
+          "tpr": 0.6,
+          "fpr": 0.2,
+          "precision": 0.6
+        },
+        "ece_test_raw": 0.16720666666666667,
+        "ece_test_platt": 0.2596308611333367,
+        "latency_ms_p50": 178.63,
+        "latency_ms_p95": 212.44,
+        "accuracy_by_kind_test": {
+          "fixed": "2/4",
+          "fixed_implicit": "1/1",
+          "lexical_trap": "0/1",
+          "merged_not_shipped": "1/1",
+          "other_fix_same_area": "1/1",
+          "planned": "1/1",
+          "still_broken": "1/1",
+          "unrelated_same_area": "4/5"
+        }
+      },
+      "questions": {
+        "U1": "Does the NEW statement replace, update, or contradict the OLD statement, so that the OLD statement is no longer current?",
+        "U2": "Does the LATER note show that the ERROR has actually been fixed?"
+      }
+    },
+    "axil-check_conflict (production heuristic)": {
+      "family": "heuristic",
+      "runtime": "axil-core check_conflict + bge-small cosine (heuristic/ crate)",
+      "U1": {
+        "pairs": 249,
+        "verdicts": {
+          "novel": 249,
+          "supersedes": 0,
+          "contradicts": 0
+        },
+        "tpr": 0.0,
+        "share_similarity_ge_0.92": 0.02,
+        "note": "gate requires bge-small cosine >= 0.92; the consolidation.rs doc example (deploys 5pm -> 6pm) scores 0.914"
+      },
+      "U2": {
+        "note": "no heuristic exists; errors have no resolved status"
+      }
+    }
+  }
+}

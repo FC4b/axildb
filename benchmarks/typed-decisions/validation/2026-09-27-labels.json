@@ -1,0 +1,1675 @@
+{
+ "date": "2026-09-27",
+ "method": "Blind re-annotation: annotators saw anonymized ids (P001..P102) in shuffled order, no labels, no kinds, no sources; resolution = majority of {Claude (original author), Codex, GLM}, overridden only by dataset evidence; ambiguous items dropped.",
+ "annotators": {
+  "ours": "Claude (claude-opus-5-5), original label author",
+  "codex": "Codex CLI 0.156.1, model gpt-6-sol, reasoning xhigh, read-only sandbox",
+  "glm": "OpenCode, model zai-coding-plan/glm-5.3-flash"
+ },
+ "scope": "all 72 repo pairs (U1 40 + U2 32) + 30 LongMemEval pairs (10 per kind, lowest sha256(id))",
+ "agreement": {
+  "U1_repo_40": {
+   "ours_codex": "40/40",
+   "ours_glm": "40/40",
+   "codex_glm": "40/40"
+  },
+  "U2_repo_32": {
+   "ours_codex": "30/32 (kappa 0.88)",
+   "ours_glm": "29/32 (kappa 0.81)",
+   "codex_glm": "29/32 (kappa 0.81)"
+  },
+  "U1_lme_sample_30": {
+   "ours_codex": "28/30 (kappa 0.84)",
+   "ours_glm": "29/30 (kappa 0.92)",
+   "codex_glm": "29/30 (kappa 0.92)"
+  }
+ },
+ "outcome": {
+  "dropped": [
+   "e0-09",
+   "lme-ku-dfde3500"
+  ],
+  "kept_after_split_vote": [
+   "e0-10",
+   "e0-12",
+   "e1-16",
+   "lme-ku-a2f3aa27"
+  ],
+  "note": "lme-ku-a2f3aa27 kept: dataset question asks follower count 'now' (answer 1300), so 1250 -> ~1300 is an update."
+ },
+ "annotation_instructions": "You are an independent annotator for a benchmark. Label each item below. Do NOT use any tools, do NOT read files or run commands; answer only from the text given here.\n\nThere are two tasks.\n\nTASK U1 — supersession. Given an OLD memory note and a NEW memory note (NEW was written later):\n  label 1 = NEW makes OLD no longer current: a status change, an updated value, a reversed decision, or a correction showing OLD was wrong.\n  label 0 = OLD is still true/current: NEW restates it, refines or adds detail without invalidating it, states a separate fact that can hold at the same time, is merely on the same topic, or negates something other than what OLD says.\n\nTASK U2 — error resolved. Given an ERROR note and a LATER note:\n  label 1 = LATER shows that this specific ERROR has actually been fixed/resolved now.\n  label 0 = otherwise: still broken, only a plan or instruction to fix it, merged but not actually released when the error was about releasing, a fix for a different problem, or unrelated.\n\nJudge only what the text supports. Some texts are long chatty conversation turns; the relevant fact may be buried inside.\n\nOutput ONLY a JSON array (no prose, no markdown fence), one object per item, in the same order:\n{\"id\": \"P001\", \"label\": 0 or 1, \"confidence\": \"high\"|\"medium\"|\"low\", \"reason\": \"<= 20 words\"}\n\n",
+ "items": [
+  {
+   "id": "e0-01",
+   "blind_id": "P004",
+   "ours": 0,
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "The release job still fails with 403."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Crate still unpublished; release job keeps failing with 403"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "e0-02",
+   "blind_id": "P083",
+   "ours": 0,
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "The later note only states a required action."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Only an instruction to mint a token; not yet done"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "e0-03",
+   "blind_id": "P050",
+   "ours": 0,
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "The PR is open; archives have not yet been backfilled."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "PR opened is a plan; archives not yet backfilled"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "e0-04",
+   "blind_id": "P042",
+   "ours": 0,
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "The scorer findings do not show the vector store was repaired."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Research findings, not a vector store repair"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "e0-05",
+   "blind_id": "P035",
+   "ours": 0,
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "A proposed trust PR does not repair the vector store."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Only a planned trust PR; not yet fixed"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "e0-06",
+   "blind_id": "P080",
+   "ours": 0,
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Publishing 2.3.1 says nothing about the lexer fuzz failure."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Release publication unrelated to fuzz panic"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "e0-07",
+   "blind_id": "P076",
+   "ours": 0,
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Merging to main does not publish the backlog release."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Merged but not published; error was about publishing"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "e0-08",
+   "blind_id": "P038",
+   "ours": 0,
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Dropping a release target does not fix local dynamic linking."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Dropping Intel target unrelated to onnxruntime linking"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "e0-09",
+   "blind_id": "P055",
+   "ours": 0,
+   "codex": {
+    "label": 1,
+    "confidence": "medium",
+    "reason": "Rewriting the README hero in a new voice changes the offending lead."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "low",
+    "reason": "Hero and tagline rewrite plausibly removed the unsupported headline, though not explicit"
+   },
+   "resolution": "dropped: ambiguous as written; both annotators = fixed (text supports it)"
+  },
+  {
+   "id": "e0-10",
+   "blind_id": "P008",
+   "ours": 0,
+   "codex": {
+    "label": 0,
+    "confidence": "medium",
+    "reason": "Verification establishes reproducibility but does not show the incorrect docs were fixed."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "medium",
+    "reason": "Verified reproducible from tracked sources, refuting cannot-regenerate claim"
+   },
+   "resolution": "majority kept label 0"
+  },
+  {
+   "id": "e0-11",
+   "blind_id": "P030",
+   "ours": 0,
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Fixing findings does not show the review used the correct commit range."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Fixing review findings is a different problem from the review-scope bug"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "e0-12",
+   "blind_id": "P072",
+   "ours": 0,
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Adding CI does not show the incorrect docs were updated."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "medium",
+    "reason": "CI now exists, making the no-CI claim resolved"
+   },
+   "resolution": "majority kept label 0"
+  },
+  {
+   "id": "e0-13",
+   "blind_id": "P006",
+   "ours": 0,
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "A code rename does not show that this feature combination compiles."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "medium",
+    "reason": "Rename completion doesn't state the feature-combination compile failure is fixed"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "e0-14",
+   "blind_id": "P073",
+   "ours": 0,
+   "codex": {
+    "label": 0,
+    "confidence": "medium",
+    "reason": "A worktree practice does not show the failed patch was recovered."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "medium",
+    "reason": "Worktree workflow doesn't show the lost patch recovered"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "e0-15",
+   "blind_id": "P036",
+   "ours": 0,
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "MCP initialization instructions do not address the code_graph_hint signal."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "MCP instructions work unrelated to code_graph_hint signal"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "e0-16",
+   "blind_id": "P003",
+   "ours": 0,
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "The test still fails intermittently."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Test still failing intermittently in CI"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "e1-01",
+   "blind_id": "P082",
+   "ours": 1,
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Rotating the token and rerunning release-plz resulted in publication."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Published after token rotation and release-plz rerun"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "e1-02",
+   "blind_id": "P059",
+   "ours": 1,
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "The lexer fix merged and main CI is green."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Lexer multi-byte escape fix merged; CI green"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "e1-03",
+   "blind_id": "P079",
+   "ours": 1,
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "The missing release archives were backfilled."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Archives backfilled on all platforms"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "e1-04",
+   "blind_id": "P074",
+   "ours": 1,
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Local builds now link onnxruntime statically."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Config now forces static onnxruntime linking"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "e1-05",
+   "blind_id": "P093",
+   "ours": 1,
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "The vector store was repaired and missing embeddings restored."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Repaired with writable open; embeddings restored"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "e1-06",
+   "blind_id": "P014",
+   "ours": 1,
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Version 1.2.0 was published to crates.io."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "1.2.0 now published; unpublished state resolved"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "e1-07",
+   "blind_id": "P071",
+   "ours": 1,
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "The flagged README numbers-integrity violation was explicitly fixed."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Numbers-integrity violations fixed, resolving credibility risk"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "e1-08",
+   "blind_id": "P065",
+   "ours": 1,
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "The stale benchmark provenance was fixed in the cited documentation."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "medium",
+    "reason": "Stale provenance notes fixed, resolving the false docs claim"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "e1-09",
+   "blind_id": "P019",
+   "ours": 1,
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Running sqlite-compare in CI shows it now builds and runs."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Runs as CI gate, so it now builds"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "e1-10",
+   "blind_id": "P075",
+   "ours": 1,
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "The cfg issue was removed and all feature combinations build."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Stray cfg removed; all four feature combinations build"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "e1-11",
+   "blind_id": "P005",
+   "ours": 1,
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "The signal changed to _scip_aliases and was verified."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Hint now keys off _scip_aliases; fix verified"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "e1-12",
+   "blind_id": "P020",
+   "ours": 1,
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "The test was changed and now passes under load."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Test de-flaked with best-of-5; passes under load"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "e1-13",
+   "blind_id": "P060",
+   "ours": 1,
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "The README command now includes the missing core feature."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "README install command now includes core feature"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "e1-14",
+   "blind_id": "P099",
+   "ours": 1,
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "The docs now describe the CI workflow and recall gate."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Docs reconciled to describe CI"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "e1-15",
+   "blind_id": "P009",
+   "ours": 1,
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Both commands now use generic dispatch."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Both commands now ride run_extension_dispatch; migration done"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "e1-16",
+   "blind_id": "P067",
+   "ours": 1,
+   "codex": {
+    "label": 0,
+    "confidence": "medium",
+    "reason": "A new review procedure does not show the mis-scoped review was corrected."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "medium",
+    "reason": "Review procedure now fast-forwards and verifies commit count"
+   },
+   "resolution": "majority kept label 1"
+  },
+  {
+   "id": "lme-bh-09ba9854",
+   "blind_id": "P062",
+   "ours": 0,
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Train and taxi fares can both be accurate."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Taxi cost is a separate fact; train option not negated"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "lme-bh-2788b940",
+   "blind_id": "P034",
+   "ours": 0,
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "BodyPump on Monday and Zumba on Tuesday and Thursday can coexist."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "medium",
+    "reason": "Zumba classes add to schedule; BodyPump Monday not negated"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "lme-bh-6456829e",
+   "blind_id": "P086",
+   "ours": 0,
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Growing three cucumber plants does not change the five tomato plants."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Cucumbers are separate from tomato facts"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "lme-bh-6c49646a",
+   "blind_id": "P039",
+   "ours": 0,
+   "codex": {
+    "label": 0,
+    "confidence": "medium",
+    "reason": "The Yellowstone trip and the three other road trips can all have occurred."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "low",
+    "reason": "New trips don't explicitly cancel Rushmore plan or Yellowstone facts"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "lme-bh-85fa3a3f",
+   "blind_id": "P081",
+   "ours": 0,
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "The new bowl and toy request do not change the kibble or chew expenses."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "New purchases are additive; kibble and chew facts intact"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "lme-bh-a3332713",
+   "blind_id": "P053",
+   "ours": 0,
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "The coworker's $100 gift can be part of the $500 gift total."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "medium",
+    "reason": "$500 spending total can include the $100 gift; nothing negated"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "lme-bh-b3c15d39",
+   "blind_id": "P087",
+   "ours": 0,
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Ordering the replacement on February 5th fits its February 10th arrival."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "medium",
+    "reason": "Feb 5 order and Feb 10 arrival are compatible; adds context"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "lme-bh-b5ef892d",
+   "blind_id": "P049",
+   "ours": 0,
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "The Yellowstone trip does not invalidate the earlier Big Sur trip."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "medium",
+    "reason": "New trip planning doesn't negate Big Sur trip or boot need"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "lme-bh-dd2973ad",
+   "blind_id": "P023",
+   "ours": 0,
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "The doctor's appointment does not contradict the earlier bedtime."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "medium",
+    "reason": "Cholesterol and meal planning are separate; sluggishness fact not negated"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "lme-bh-gpt4_372c3eed",
+   "blind_id": "P100",
+   "ours": 0,
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "An associate degree before UCLA fits the earlier education history."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "low",
+    "reason": "PCC degree adds timeline detail; UCLA attendance remains consistent"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "lme-ku-2698e78f",
+   "blind_id": "P018",
+   "ours": 1,
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "The stated therapy frequency changed from every two weeks to weekly."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "medium",
+    "reason": "Therapy frequency changed from every two weeks to weekly"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "lme-ku-59524333",
+   "blind_id": "P021",
+   "ours": 1,
+   "codex": {
+    "label": 1,
+    "confidence": "medium",
+    "reason": "The user's usual gym time changed from 7:00 pm to 6:00 pm."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "medium",
+    "reason": "Gym time changed from 7:00 pm to 6:00 pm"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "lme-ku-603deb26",
+   "blind_id": "P102",
+   "ours": 1,
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "The Negroni attempt count increased from five to ten."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "medium",
+    "reason": "Negroni attempt count updated from 5 to 10"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "lme-ku-69fee5aa",
+   "blind_id": "P094",
+   "ours": 1,
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Adding a new coin changes the earlier total of 37."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "medium",
+    "reason": "New coin added to that collection; 37-coin total outdated"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "lme-ku-830ce83f",
+   "blind_id": "P061",
+   "ours": 1,
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Rachel moved back to the suburbs, replacing the earlier city location."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Rachel moved back to suburbs, reversing city apartment fact"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "lme-ku-89941a93",
+   "blind_id": "P056",
+   "ours": 1,
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "The user added a fourth bike, changing the earlier bike count."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "medium",
+    "reason": "Bike count updated from three to four with new hybrid"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "lme-ku-a2f3aa27",
+   "blind_id": "P016",
+   "ours": 1,
+   "codex": {
+    "label": 0,
+    "confidence": "medium",
+    "reason": "Being close to 1300 followers does not clearly contradict having 1250."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "medium",
+    "reason": "Follower count updated from 1250 to about 1300"
+   },
+   "resolution": "majority kept label 1"
+  },
+  {
+   "id": "lme-ku-c7dc5443",
+   "blind_id": "P026",
+   "ours": 1,
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "The volleyball record advanced from 3-2 to 5-2."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "medium",
+    "reason": "Volleyball record updated from 3-2 to 5-2"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "lme-ku-dad224aa",
+   "blind_id": "P051",
+   "ours": 1,
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "The stated Saturday wake time changed from 8:30 am to 7:30 am."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "medium",
+    "reason": "Saturday wake time changed from 8:30 to 7:30"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "lme-ku-dfde3500",
+   "blind_id": "P033",
+   "ours": 1,
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Meeting Maria on Thursday can coexist with seeing Juan on Wednesday."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "medium",
+    "reason": "Meeting Maria Thursday doesn't negate Wednesday class with Juan"
+   },
+   "resolution": "dropped: dataset label correct but clipped text does not show the tutor change; both annotators = 0"
+  },
+  {
+   "id": "lme-st-06db6396",
+   "blind_id": "P091",
+   "ours": 0,
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Setting up an art studio does not change the completed painting projects."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Studio setup is separate from painting progress"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "lme-st-2698e78f",
+   "blind_id": "P013",
+   "ours": 0,
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Having a therapy session this week is consistent with meeting every two weeks."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "medium",
+    "reason": "Session this week consistent with biweekly cadence; nothing invalidated"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "lme-st-59524333",
+   "blind_id": "P037",
+   "ours": 0,
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Sharing client files does not change the gym schedule."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Google Drive sharing unrelated to Todoist or gym reminders"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "lme-st-5a4f22c0",
+   "blind_id": "P031",
+   "ours": 0,
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Plans to contact Alex do not affect the earlier encounter with Rachel."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Reaching out to Alex is unrelated to Rachel or template facts"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "lme-st-6071bd76",
+   "blind_id": "P058",
+   "ours": 0,
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Tea subscription interest does not change the French press ratio."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Tea topic unrelated to coffee facts"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "lme-st-6aeb4375",
+   "blind_id": "P044",
+   "ours": 0,
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Choosing Indian food does not invalidate the Korean restaurant visits."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Indian food topic unrelated to Korean restaurants"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "lme-st-830ce83f",
+   "blind_id": "P032",
+   "ours": 0,
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Interest in Fort Myers Beach does not update Rachel's move."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Beach discussion unrelated to Rachel's apartment"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "lme-st-945e3d21",
+   "blind_id": "P096",
+   "ours": 0,
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "The report deadline and schedule concern do not change the yoga habit."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "medium",
+    "reason": "Report planning talk doesn't negate yoga facts"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "lme-st-d7c942c3",
+   "blind_id": "P052",
+   "ours": 0,
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Adding groceries does not change the recipe or grocery-app facts."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Grocery additions compatible with recipe plan"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "lme-st-dad224aa",
+   "blind_id": "P047",
+   "ours": 0,
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "A route preference does not change the Saturday wake time or exercise routine."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "medium",
+    "reason": "Route request adds detail; doesn't negate routine facts"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "r0-01",
+   "blind_id": "P041",
+   "ours": 0,
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Later polish adds to the already shipped functional Phase 22."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "medium",
+    "reason": "Fully complete adds polish; functionally-complete-and-shipped remains true"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "r0-02",
+   "blind_id": "P007",
+   "ours": 0,
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Shipping Phase 22 is consistent with all three phases having shipped."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "NEW restates Phase 22 shipped; subset of OLD, no invalidation"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "r0-03",
+   "blind_id": "P011",
+   "ours": 0,
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Adding a CI gate does not invalidate the earlier documentation fixes."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "CI gate wiring is a separate fact"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "r0-04",
+   "blind_id": "P054",
+   "ours": 0,
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Rebuilding in each process is consistent with lazy construction on first search."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "medium",
+    "reason": "Non-persistence explains lazy per-process rebuild; consistent with OLD"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "r0-05",
+   "blind_id": "P015",
+   "ours": 0,
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Applying configuration in the builder does not invalidate the supersession path."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "medium",
+    "reason": "Config application complements the single supersede path; not a negation"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "r0-06",
+   "blind_id": "P002",
+   "ours": 0,
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "The automatic 2.3.1 release is consistent with both versions being published."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "NEW adds detail about 2.3.1 auto-release; consistent with pipeline working"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "r0-07",
+   "blind_id": "P017",
+   "ours": 0,
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "The lifecycle decision does not change WASM's scope."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Instruction about 21.6 hooks doesn't negate WASM scope"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "r0-08",
+   "blind_id": "P090",
+   "ours": 0,
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "The ask strategy and reranking are separate decisions."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Reranking guidance is separate from ask-strategy scoring"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "r0-09",
+   "blind_id": "P077",
+   "ours": 0,
+   "codex": {
+    "label": 0,
+    "confidence": "medium",
+    "reason": "A broader maturity analysis can coexist with the harness category mismatch."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "low",
+    "reason": "Gap analysis is a different comparison; mismatch conclusion not explicitly reversed"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "r0-10",
+   "blind_id": "P040",
+   "ours": 0,
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "The archives are still awaiting backfill."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Backfill is only a plan; archives still absent until merge"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "r0-11",
+   "blind_id": "P084",
+   "ours": 0,
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Adding dependency versions does not undo the CLI crate rename."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Path-dep versioning is separate setup work"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "r0-12",
+   "blind_id": "P045",
+   "ours": 0,
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Adding an initialization string does not change tool concurrency."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Instructions string is a separate MCP feature"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "r0-13",
+   "blind_id": "P028",
+   "ours": 0,
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Finding divergent scorers says nothing about whether the vector store was repaired."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Research finding on scorers doesn't say vector store was fixed"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "r0-14",
+   "blind_id": "P001",
+   "ours": 0,
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Both notes describe the table as the record's kind."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "medium",
+    "reason": "NEW reframes categorization as function-based; table-as-kind is consistent, no negation"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "r0-15",
+   "blind_id": "P043",
+   "ours": 0,
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Changing release targets does not undo the published version."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Dropping Intel target is separate from 2.3.0 publication"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "r0-16",
+   "blind_id": "P063",
+   "ours": 0,
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Agents can use separate worktrees while sharing a build cache."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "medium",
+    "reason": "APFS build-cache clone complements worktree isolation; not stated as replacement"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "r0-17",
+   "blind_id": "P057",
+   "ours": 0,
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "An informational nightly benchmark adds to the shipped P0 work."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Nightly benchmarks are a separate addition"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "r0-18",
+   "blind_id": "P068",
+   "ours": 0,
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "The weekday schedule refines the 5pm rule and adds a hotfix exception."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Weekday qualifier refines; 5pm deploy time still holds"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "r0-19",
+   "blind_id": "P024",
+   "ours": 0,
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Editor and printed-document preferences can differ."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Light mode for printed docs is a different context than editor dark mode"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "r0-20",
+   "blind_id": "P064",
+   "ours": 0,
+   "codex": {
+    "label": 0,
+    "confidence": "high",
+    "reason": "Vector and FTS fusion does not establish reliability when vectors are down."
+   },
+   "glm": {
+    "label": 0,
+    "confidence": "medium",
+    "reason": "Architecture statement doesn't negate the conditional reliability claim"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "r1-01",
+   "blind_id": "P012",
+   "ours": 1,
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "All 17 crates are now published."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Publish status changed: 5-of-17 partial to all 17 live"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "r1-02",
+   "blind_id": "P010",
+   "ours": 1,
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "The previously unpublished version was published."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Status changed from unpublished to published"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "r1-03",
+   "blind_id": "P022",
+   "ours": 1,
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "A real WASM component now loads and runs end to end."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "WASM round-trip works end to end; no longer toolchain-blocked"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "r1-04",
+   "blind_id": "P048",
+   "ours": 1,
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "The recommendation to build the explore tool was reversed."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Revised verdict reverses the explore-tool recommendation"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "r1-05",
+   "blind_id": "P089",
+   "ours": 1,
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "The original plan document was deleted and replaced by a merged document."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Original phase-21 doc deleted after merge; path obsolete"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "r1-06",
+   "blind_id": "P070",
+   "ours": 1,
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "The supposedly dead type is used by live commands."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "MemoryType is live code; safe-to-delete claim corrected"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "r1-07",
+   "blind_id": "P098",
+   "ours": 1,
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Tracked benchmark harness files contradict the earlier untracked claim."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Benchmarks now tracked, contradicting untracked claim"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "r1-08",
+   "blind_id": "P092",
+   "ours": 1,
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "The project now has a CI workflow running on every PR."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "CI runs on every PR; no-CI claim now false"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "r1-09",
+   "blind_id": "P085",
+   "ours": 1,
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "The backlog features were published in version 1.2.0."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "1.2.0 published with backlog features; unpublished status ended"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "r1-10",
+   "blind_id": "P097",
+   "ours": 1,
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "The README tagline was replaced."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Tagline text replaced"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "r1-11",
+   "blind_id": "P027",
+   "ours": 1,
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "The publishable CLI crate was renamed to axildb."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Crate renamed axil-cli to axildb"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "r1-12",
+   "blind_id": "P088",
+   "ours": 1,
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "The decision reverses the plan to genericize lifecycle hooks."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Decision reversed: do not genericize hooks"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "r1-13",
+   "blind_id": "P095",
+   "ours": 1,
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "All workspace crates advanced from 1.0.0 to 1.1.0."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Versions bumped from 1.0.0 to 1.1.0"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "r1-14",
+   "blind_id": "P046",
+   "ours": 1,
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "The Intel Mac target was removed, reducing releases to five targets."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Target dropped; six-target fact no longer current"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "r1-15",
+   "blind_id": "P025",
+   "ours": 1,
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Local builds now link onnxruntime statically."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Builds now link statically; dynamic Homebrew linking no longer current"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "r1-16",
+   "blind_id": "P078",
+   "ours": 1,
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "All backlog items were merged to main, replacing the partial branch status."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "medium",
+    "reason": "All backlog items merged to main; 5-of-8 progress superseded"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "r1-17",
+   "blind_id": "P029",
+   "ours": 1,
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "The Phase 29 plan changed its main candidates and made Laya the baseline."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Phase 29 reframed from Laya integration to bake-off; plan reversed"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "r1-18",
+   "blind_id": "P069",
+   "ours": 1,
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "The vector store was repaired and recall uses vectors again."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Store repaired, embeddings restored, recall uses vectors again"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "r1-19",
+   "blind_id": "P066",
+   "ours": 1,
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "The later evaluation reverses the recommendation to use reranking."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Rerankers regressed recall; earlier recommendation reversed"
+   },
+   "resolution": "unanimous"
+  },
+  {
+   "id": "r1-20",
+   "blind_id": "P101",
+   "ours": 1,
+   "codex": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "The deploy time changed from 5pm to 6pm."
+   },
+   "glm": {
+    "label": 1,
+    "confidence": "high",
+    "reason": "Deploy time changed to 6pm"
+   },
+   "resolution": "unanimous"
+  }
+ ]
+}

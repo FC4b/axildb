@@ -54,6 +54,7 @@ exclude = [
     "benchmarks/criterion-suite",
     "benchmarks/vector-latency",
     "benchmarks/sqlite-compare",
+    "benchmarks/typed-decisions/heuristic",
 ]
 resolver = "2"
 
