@@ -701,9 +701,40 @@ fn detect_problems_finds_missing_embedding() {
         .iter()
         .find(|p| p.detector == "missing_embeddings")
         .expect("missing_embeddings problem should be detected");
-    assert_eq!(missing.severity, Severity::Warning);
+    // The only memory record is unembedded: all of memory is invisible to
+    // meaning-based recall, which is an error, not a warning.
+    assert_eq!(missing.severity, Severity::Error);
     // An embedder is configured, so the problem is auto-fixable.
     assert!(missing.auto_fixable);
+}
+
+#[test]
+fn a_small_embedding_gap_is_a_warning() {
+    let (db, _dir) = temp_db_with_mock_vector();
+    for i in 0..20 {
+        db.insert(
+            "sessions",
+            json!({"summary": format!("session number {i}")}),
+        )
+        .unwrap();
+    }
+    torn_insert(
+        &db,
+        "sessions",
+        json!({"summary": "auth timeout in the connection pool"}),
+    );
+
+    let problems = db.detect_problems();
+    let missing = problems
+        .iter()
+        .find(|p| p.detector == "missing_embeddings")
+        .expect("missing_embeddings problem should be detected");
+    assert_eq!(missing.severity, Severity::Warning, "{}", missing.message);
+    assert!(
+        missing.message.starts_with("1 of 21 "),
+        "{}",
+        missing.message
+    );
 }
 
 #[test]
@@ -790,7 +821,13 @@ fn doctor_flags_missing_embedding() {
         .iter()
         .find(|c| c.name == "vector_index")
         .expect("vector_index check present");
-    assert_eq!(check.status, Severity::Warning);
+    // 1 of 1 memory records unembedded is past the error ratio.
+    assert_eq!(check.status, Severity::Error);
+    assert!(
+        check.detail.contains("1 of 1 record(s)"),
+        "{}",
+        check.detail
+    );
     assert_eq!(check.fix.as_deref(), Some("axil heal --reindex"));
 }
 

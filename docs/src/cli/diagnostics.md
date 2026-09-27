@@ -21,9 +21,32 @@ report with fix recommendations, use `health-report`.
 axil doctor
 ```
 
-Checks: companion-file presence/consistency, vector dimension mismatch, SCIP
+Checks: companion-file presence/consistency, vector dimension mismatch, memory
+records missing an embedding (an error once more than 10% of them are), SCIP
 freshness, indexer staleness, orphaned edges/vectors/FTS, recent
-error/healing history.
+error/healing history. Exit code: 0 all ok, 1 warnings, 2 errors.
+
+#### A damaged vector store
+
+A process killed mid-write, such as a hook that hit its timeout, can leave
+`memory.axil.vec` not closed cleanly. Any command that opens the database
+repairs such a file first, running the same crash recovery a write would, and
+prints one line to stderr: `vector store … was not closed cleanly; repaired it`.
+No memories change.
+
+If the file can't be opened at all, Axil keeps working without vector search
+and says so, instead of quietly recalling by keyword only:
+
+- `doctor` reports a `vector_engine` error (exit code 2).
+- `heal --dry-run` lists an `engine_unavailable` problem.
+- `boot` output gains a `degraded` list (also in `boot --schema v1` and the MCP
+  `boot` tool), and narrative boot starts with a `WARNING:` line.
+- The recall context block the prompt hook injects starts with a `# Warning:`
+  line, and MCP `recall` results carry the warning as a second text block.
+
+To rebuild the store, move the file to another directory (a
+`memory.axil.vec.<name>` file next to the database is read as a named vector
+space), then run `axil init <db>` and `axil heal --reindex`.
 
 ### health-report
 

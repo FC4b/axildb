@@ -118,7 +118,7 @@ impl VectorEngine {
         config: VectorConfig,
     ) -> axil_core::Result<Self> {
         let vec_path = vector_db_path(db_path.as_ref());
-        let vector_db = Database::create(&vec_path).map_err(plugin_err)?;
+        let vector_db = Database::create(&vec_path).map_err(open_err)?;
 
         // Ensure tables exist + validate/store dimensions in one write txn.
         let txn = vector_db.begin_write().map_err(plugin_err)?;
@@ -177,7 +177,7 @@ impl VectorEngine {
                 vec_path.display()
             )));
         }
-        let vector_db = Database::create(vec_path).map_err(plugin_err)?;
+        let vector_db = Database::create(vec_path).map_err(open_err)?;
 
         // An existing store's persisted dimension governs; probing it takes a
         // read txn only, so pure-read opens (similar/get_vector/listings) pay
@@ -568,7 +568,7 @@ impl axil_core::VectorSpaceFactory for VectorSpaceFactory {
         }
         // Straight to the durable store: no vector load, no graph build, and
         // no write commit unless the space actually holds the id.
-        let db = Database::open(&vec_path).map_err(plugin_err)?;
+        let db = Database::open(&vec_path).map_err(open_err)?;
         delete_vector(&db, id)
     }
 
@@ -580,36 +580,41 @@ impl axil_core::VectorSpaceFactory for VectorSpaceFactory {
                 vec_path.display()
             )));
         }
-        // Read-only probe: no writable handle, no vector load, no index build —
-        // listings stay proportional to metadata, not store size.
-        let db = ReadOnlyDatabase::open(&vec_path).map_err(plugin_err)?;
-        let txn = db.begin_read().map_err(plugin_err)?;
-        let dimensions = match txn.open_table(META_TABLE) {
-            Ok(meta) => match meta.get("dimensions").map_err(plugin_err)? {
-                Some(guard) => {
-                    let s = std::str::from_utf8(guard.value()).map_err(plugin_err)?;
-                    s.parse::<usize>().map_err(plugin_err)?
-                }
-                None => {
-                    return Err(AxilError::plugin(
-                        "vector space has no stored dimension — file may be corrupt",
-                    ))
-                }
-            },
-            Err(redb::TableError::TableDoesNotExist(_)) => {
+        // Metadata-only probe (writable only to repair an uncleanly closed
+        // store): no vector load, no index build, so listings stay
+        // proportional to metadata, not store size.
+        let (meta, _repaired) = read_repairing(&vec_path, |txn| read_space_meta(&txn))?;
+        Ok(meta)
+    }
+}
+
+/// Dimensions and vector count of a named space, from its metadata alone.
+fn read_space_meta(txn: &redb::ReadTransaction) -> axil_core::Result<(usize, usize)> {
+    let dimensions = match txn.open_table(META_TABLE) {
+        Ok(meta) => match meta.get("dimensions").map_err(plugin_err)? {
+            Some(guard) => {
+                let s = std::str::from_utf8(guard.value()).map_err(plugin_err)?;
+                s.parse::<usize>().map_err(plugin_err)?
+            }
+            None => {
                 return Err(AxilError::plugin(
-                    "vector space has no metadata table — file may be corrupt",
+                    "vector space has no stored dimension — file may be corrupt",
                 ))
             }
-            Err(e) => return Err(plugin_err(e)),
-        };
-        let count = match txn.open_table(VECTORS_TABLE) {
-            Ok(t) => t.len().map_err(plugin_err)? as usize,
-            Err(redb::TableError::TableDoesNotExist(_)) => 0,
-            Err(e) => return Err(plugin_err(e)),
-        };
-        Ok((dimensions, count))
-    }
+        },
+        Err(redb::TableError::TableDoesNotExist(_)) => {
+            return Err(AxilError::plugin(
+                "vector space has no metadata table — file may be corrupt",
+            ))
+        }
+        Err(e) => return Err(plugin_err(e)),
+    };
+    let count = match txn.open_table(VECTORS_TABLE) {
+        Ok(t) => t.len().map_err(plugin_err)? as usize,
+        Err(redb::TableError::TableDoesNotExist(_)) => 0,
+        Err(e) => return Err(plugin_err(e)),
+    };
+    Ok((dimensions, count))
 }
 
 /// Serialize a vector as raw little-endian f32 bytes.
@@ -690,19 +695,118 @@ fn delete_vector(db: &Database, id: &RecordId) -> axil_core::Result<()> {
     Ok(())
 }
 
+/// Map a redb open error. "Held open by another process" becomes the retryable
+/// [`AxilError::Busy`], so callers can wait for the writer instead of treating
+/// the store as broken; anything else is a plugin error.
+fn open_err(e: redb::DatabaseError) -> AxilError {
+    match e {
+        redb::DatabaseError::DatabaseAlreadyOpen => AxilError::Busy,
+        other => plugin_err(other),
+    }
+}
+
+/// Run `read` against a store without taking its writer lock, unless the store
+/// was not closed cleanly. Returns the result and whether a repair ran.
+///
+/// A process that dies mid-write (a hook killed by its timeout, a crash) leaves
+/// the redb file needing repair, and a read-only open refuses such a file. In
+/// that case the store is opened writable once, which runs redb's repair, and
+/// read from that handle. Engine opens are writable anyway, so this writes
+/// nothing that opening the store would not.
+fn read_repairing<T>(
+    path: &Path,
+    read: impl FnOnce(redb::ReadTransaction) -> axil_core::Result<T>,
+) -> axil_core::Result<(T, bool)> {
+    match ReadOnlyDatabase::open(path) {
+        Ok(db) => Ok((read(db.begin_read().map_err(plugin_err)?)?, false)),
+        Err(redb::DatabaseError::RepairAborted) => {
+            let db = Database::open(path).map_err(open_err)?;
+            Ok((read(db.begin_read().map_err(plugin_err)?)?, true))
+        }
+        Err(e) => Err(open_err(e)),
+    }
+}
+
+/// What [`probe_vector_store`] found at a database's default vector store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VectorStoreProbe {
+    /// No `.vec` file exists.
+    Missing,
+    /// The store is readable.
+    Ready {
+        /// Stored vector dimensions.
+        dimensions: usize,
+        /// True when the store had not been closed cleanly and the probe
+        /// repaired it.
+        repaired: bool,
+    },
+}
+
+impl VectorStoreProbe {
+    /// Stored dimensions, or `None` when the store is missing.
+    pub fn dimensions(self) -> Option<usize> {
+        match self {
+            Self::Missing => None,
+            Self::Ready { dimensions, .. } => Some(dimensions),
+        }
+    }
+}
+
+/// Probe the default vector store without loading it, repairing it first if it
+/// was not closed cleanly.
+///
+/// Errors are never "missing": [`AxilError::Busy`] means another process holds
+/// the store open for writing (retry), and a plugin error means the file is
+/// corrupt or unreadable.
+pub fn probe_vector_store(db_path: impl AsRef<Path>) -> axil_core::Result<VectorStoreProbe> {
+    let vec_path = vector_db_path(db_path.as_ref());
+    if !vec_path.exists() {
+        return Ok(VectorStoreProbe::Missing);
+    }
+    let (dimensions, repaired) = read_repairing(&vec_path, |txn| stored_dimensions(&txn))?;
+    Ok(VectorStoreProbe::Ready {
+        dimensions,
+        repaired,
+    })
+}
+
+/// Describe a default vector store that exists but could not be probed, for
+/// [`AxilBuilder::with_degraded_engine`]. Shared by every adapter so the
+/// reason and the remedy read the same everywhere.
+pub fn vector_store_unavailable(
+    db_path: impl AsRef<Path>,
+    err: &AxilError,
+) -> axil_core::DegradedEngine {
+    let db_path = db_path.as_ref();
+    let vec_path = vector_db_path(db_path);
+    axil_core::DegradedEngine {
+        engine: "vector".to_string(),
+        reason: format!(
+            "{} could not be opened ({err}), so recall runs without vectors",
+            vec_path.display()
+        ),
+        // Not "rename it in place": a `<db>.vec.<name>` file next to the
+        // database is read as a named vector space.
+        fix: format!(
+            "move {} to another directory, then run `axil init {}` and \
+             `axil heal --reindex` to re-embed your memory records",
+            vec_path.display(),
+            db_path.display()
+        ),
+    }
+}
+
 /// Read stored dimensions from a vector database without fully opening the plugin.
 ///
 /// Returns `Ok(None)` if the `.vec` file doesn't exist. Returns an error if the
 /// file exists but is corrupt or unreadable (so callers can distinguish "missing"
-/// from "broken").
+/// from "broken"). A store that was not closed cleanly is repaired first; use
+/// [`probe_vector_store`] to learn whether that happened.
 pub fn read_stored_dimensions(db_path: impl AsRef<Path>) -> axil_core::Result<Option<usize>> {
-    let vec_path = vector_db_path(db_path.as_ref());
-    if !vec_path.exists() {
-        return Ok(None);
-    }
-    // Read-only open: never creates files, correct semantic for a probe.
-    let db = ReadOnlyDatabase::open(&vec_path).map_err(plugin_err)?;
-    let txn = db.begin_read().map_err(plugin_err)?;
+    probe_vector_store(db_path).map(VectorStoreProbe::dimensions)
+}
+
+fn stored_dimensions(txn: &redb::ReadTransaction) -> axil_core::Result<usize> {
     let meta = match txn.open_table(META_TABLE) {
         Ok(t) => t,
         // .vec exists but has no meta table — corrupt, not missing.
@@ -720,10 +824,8 @@ pub fn read_stored_dimensions(db_path: impl AsRef<Path>) -> axil_core::Result<Op
         )),
         Some(guard) => {
             let s = std::str::from_utf8(guard.value()).map_err(plugin_err)?;
-            let dims: usize = s
-                .parse()
-                .map_err(|e: std::num::ParseIntError| plugin_err(e))?;
-            Ok(Some(dims))
+            s.parse()
+                .map_err(|e: std::num::ParseIntError| plugin_err(e))
         }
     }
 }
@@ -1197,6 +1299,77 @@ mod tests {
             assert_eq!(results.len(), 1);
             assert_eq!(results[0].0, id);
         }
+    }
+
+    /// A store as a killed writer leaves it: the file is copied while its
+    /// engine still holds it open, so it carries committed data but was never
+    /// closed cleanly. Returns the db path whose `.vec` is the dirty copy.
+    fn needs_repair_store(dir: &Path, id: &RecordId) -> PathBuf {
+        let live = dir.join("live.axil");
+        let dirty = dir.join("dirty.axil");
+        let plugin = VectorEngine::open(&live, 3).unwrap();
+        plugin.add(id.clone(), &[1.0, 0.0, 0.0]).unwrap();
+        std::fs::copy(vector_db_path(&live), vector_db_path(&dirty)).unwrap();
+        drop(plugin);
+        dirty
+    }
+
+    #[test]
+    fn probe_repairs_a_store_that_was_not_closed_cleanly() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = RecordId::new();
+        let path = needs_repair_store(dir.path(), &id);
+        assert!(
+            matches!(
+                ReadOnlyDatabase::open(vector_db_path(&path)),
+                Err(redb::DatabaseError::RepairAborted)
+            ),
+            "fixture must need repair, or this test proves nothing"
+        );
+
+        assert_eq!(
+            probe_vector_store(&path).unwrap(),
+            VectorStoreProbe::Ready {
+                dimensions: 3,
+                repaired: true
+            }
+        );
+        // Repaired for good: the next probe is a plain read, and the data survived.
+        assert_eq!(
+            probe_vector_store(&path).unwrap(),
+            VectorStoreProbe::Ready {
+                dimensions: 3,
+                repaired: false
+            }
+        );
+        let plugin = VectorEngine::open(&path, 3).unwrap();
+        assert_eq!(plugin.search(&[1.0, 0.0, 0.0], 1).unwrap()[0].0, id);
+    }
+
+    #[test]
+    fn probe_reports_a_store_held_by_a_writer_as_busy() {
+        let (plugin, dir) = temp_engine(3);
+        let err = probe_vector_store(dir.path().join("test.axil")).unwrap_err();
+        assert!(err.is_busy(), "expected Busy, got {err}");
+        drop(plugin);
+        assert_eq!(
+            read_stored_dimensions(dir.path().join("test.axil")).unwrap(),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn probe_tells_missing_from_corrupt() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("x.axil");
+        assert_eq!(
+            probe_vector_store(&path).unwrap(),
+            VectorStoreProbe::Missing
+        );
+
+        std::fs::write(vector_db_path(&path), b"not a redb file").unwrap();
+        let err = probe_vector_store(&path).unwrap_err();
+        assert!(!err.is_busy(), "corrupt must not look retryable: {err}");
     }
 
     #[test]

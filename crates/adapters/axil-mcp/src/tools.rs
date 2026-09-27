@@ -726,7 +726,17 @@ fn handle_recall(db: &Axil, args: &Value) -> ToolCallResult {
                 }
                 records.push(entry);
             }
-            ToolCallResult::json(&json!(records))
+            // A separate block keeps the result an array for existing clients
+            // while the agent still learns that recall ran without an Engine.
+            db.degraded_engines()
+                .iter()
+                .fold(ToolCallResult::json(&json!(records)), |result, d| {
+                    result.with_note(format!(
+                        "warning: these results may be incomplete. {}. Fix: {}",
+                        d.summary(),
+                        d.fix
+                    ))
+                })
         }
         Err(e) => ToolCallResult::error(format!("recall failed: {e}")),
     }

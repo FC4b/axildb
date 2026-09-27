@@ -153,6 +153,16 @@ impl ToolCallResult {
         Self::text(serde_json::to_string(value).unwrap_or_else(|_| "{}".into()))
     }
 
+    /// Append a text block after the main content, for notes a client should
+    /// show alongside the result without changing the result's own shape.
+    pub fn with_note(mut self, text: impl Into<String>) -> Self {
+        self.content.push(ContentBlock {
+            content_type: "text".into(),
+            text: text.into(),
+        });
+        self
+    }
+
     /// Build an error result.
     pub fn error(message: impl Into<String>) -> Self {
         Self {

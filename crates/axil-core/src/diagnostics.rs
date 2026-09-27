@@ -21,6 +21,32 @@ impl Severity {
     }
 }
 
+/// An Engine whose companion file exists but could not be attached when the
+/// database was opened. The handle still works, just without that Engine, so
+/// every surface that reports health must say so.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DegradedEngine {
+    /// Which Engine: `vector`, `graph`, `fts` or `timeseries`, or `all` when a
+    /// read-only fallback open attached none.
+    pub engine: String,
+    /// Why it could not be attached.
+    pub reason: String,
+    /// What the operator should do about it.
+    pub fix: String,
+}
+
+impl DegradedEngine {
+    /// One line naming what is unavailable and why, such as
+    /// "vector engine unavailable: <reason>".
+    pub fn summary(&self) -> String {
+        if self.engine == "all" {
+            format!("all engines unavailable: {}", self.reason)
+        } else {
+            format!("{} engine unavailable: {}", self.engine, self.reason)
+        }
+    }
+}
+
 /// Result of a single health check.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CheckResult {

@@ -107,15 +107,11 @@ fn torn_delete(db: &Axil, id: &RecordId) {
 /// drive this to zero.
 fn detect_problems_is_clean(db: &Axil) -> bool {
     let problems = db.detect_problems();
-    // The only forward-orphan detector that surfaces in `detect_problems` is
-    // `orphaned_edges`; vector/FTS orphans surface via `index_size_mismatch`
-    // when the ratio drifts. A consistent DB has none of these.
-    !problems.iter().any(|p| {
-        matches!(
-            p.detector.as_str(),
-            "orphaned_edges" | "index_size_mismatch"
-        )
-    })
+    // Forward orphans that `detect_problems` reports: edges and vectors whose
+    // record is gone. A consistent DB has none of these.
+    !problems
+        .iter()
+        .any(|p| matches!(p.detector.as_str(), "orphaned_edges" | "orphaned_vectors"))
 }
 
 // ── Per-class orphan tests ───────────────────────────────────────────────
@@ -130,6 +126,12 @@ fn orphaned_vector_is_detected_and_healed() {
 
     // Tear: core record gone, vector entry remains.
     torn_delete(&db, &rec.id);
+    assert!(
+        db.detect_problems()
+            .iter()
+            .any(|p| p.detector == "orphaned_vectors" && p.auto_fixable),
+        "the orphaned vector must be reported before it is cleaned"
+    );
 
     // Detected: a clean call removes exactly the one orphan.
     let cleaned = db.clean_orphaned_vectors();
@@ -168,6 +170,8 @@ fn orphaned_fts_is_detected_and_healed() {
         hits.iter().all(|(r, _)| r.id != rec.id),
         "healed FTS orphan must not surface in search"
     );
+    // `insert` also embedded the record, so the tear orphaned its vector too.
+    assert_eq!(db.clean_orphaned_vectors(), 1);
     assert!(detect_problems_is_clean(&db));
 }
 

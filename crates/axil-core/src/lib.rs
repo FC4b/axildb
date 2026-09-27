@@ -94,11 +94,10 @@ pub use db::{
 };
 pub use diagnostics::{
     human_bytes, BenchReport, BenchResult, CheckResult, CompactReport, DataQualitySection,
-    DatabaseMeta, DatabaseStats, DoctorReport, DropEngineReport, HealAction, HealthReport,
-    HealthSections,
-    IndexSection, IndexStats as DiagIndexStats, MetricTrend, MetricsHistoryEntry,
-    PerformanceSection, ProblemDetection, Recommendation, RecordStats, SelfHealReport, Severity,
-    StorageSection, SystemInfo, TrendReport, VectorRebuildReport,
+    DatabaseMeta, DatabaseStats, DegradedEngine, DoctorReport, DropEngineReport, HealAction,
+    HealthReport, HealthSections, IndexSection, IndexStats as DiagIndexStats, MetricTrend,
+    MetricsHistoryEntry, PerformanceSection, ProblemDetection, Recommendation, RecordStats,
+    SelfHealReport, Severity, StorageSection, SystemInfo, TrendReport, VectorRebuildReport,
 };
 pub use error::{AxilError, Result};
 pub use metrics::{

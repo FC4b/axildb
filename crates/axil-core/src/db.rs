@@ -168,6 +168,8 @@ pub struct AxilBuilder {
     /// Open the core store read-only (no single-writer lock), serving committed
     /// records while another process holds the writable handle.
     read_only: bool,
+    /// Engines the adapter found on disk but could not attach.
+    degraded_engines: Vec<crate::diagnostics::DegradedEngine>,
     /// Optional encryption-at-rest cipher for core record bodies, applied to the
     /// `Storage` handle at [`AxilBuilder::build`] time. `None` means cleartext
     /// bodies — the default. Available only under the off-by-default
@@ -453,6 +455,16 @@ impl AxilBuilder {
         self
     }
 
+    /// Record that an Engine's companion file exists but could not be attached.
+    ///
+    /// Adapters call this instead of silently skipping the Engine, so the
+    /// built handle can report it: [`Axil::degraded_engines`], `doctor`, and
+    /// `detect_problems` all surface it.
+    pub fn with_degraded_engine(mut self, engine: crate::diagnostics::DegradedEngine) -> Self {
+        self.degraded_engines.push(engine);
+        self
+    }
+
     /// Attach an encryption-at-rest cipher to the core record store.
     ///
     /// When set, every core record body is sealed with XChaCha20-Poly1305 before
@@ -564,6 +576,7 @@ impl AxilBuilder {
             extensions: std::sync::RwLock::new(self.extensions),
             lifecycle,
             lifecycle_warnings,
+            degraded_engines: self.degraded_engines,
             supersede_threshold,
             #[cfg(feature = "event-log")]
             event_log_enabled: std::sync::atomic::AtomicBool::new(event_log_enabled),
@@ -647,6 +660,10 @@ fn prefix_overlaps(a: &str, b: &str) -> bool {
     a.starts_with(b) || b.starts_with(a)
 }
 
+/// Share of embeddable records missing a vector above which `doctor` and
+/// `detect_problems` report an error rather than a warning.
+const EMBEDDING_GAP_ERROR_RATIO: f64 = 0.10;
+
 /// Maximum audit log entries before auto-rotation.
 const MAX_AUDIT_ENTRIES: usize = 10_000;
 
@@ -696,6 +713,8 @@ pub struct Axil {
     /// Problems found in the `[lifecycle]` section this handle loaded (empty
     /// for an explicit [`AxilBuilder::with_lifecycle`]). Surfaced by `doctor`.
     lifecycle_warnings: Vec<String>,
+    /// Engines found on disk that the adapter could not attach.
+    degraded_engines: Vec<crate::diagnostics::DegradedEngine>,
     /// Auto-supersede similarity threshold, resolved at build time from
     /// `healing.supersede_similarity_threshold` (default 0.92).
     supersede_threshold: f32,
@@ -731,6 +750,7 @@ impl Axil {
             supersede_threshold: None,
             needs_fts_reindex: false,
             read_only: false,
+            degraded_engines: Vec::new(),
             #[cfg(feature = "encryption")]
             cipher: None,
         }
@@ -916,7 +936,7 @@ impl Axil {
     ///
     /// Mirrors the auto-embed gate in [`Axil::insert_record`] **exactly**
     /// (non-internal table, `searchable_text` non-empty, length > 5). The
-    /// reverse-orphan reconciliation in [`Axil::count_missing_embeddings`] /
+    /// reverse-orphan reconciliation in [`Axil::embedding_gap`] /
     /// [`Axil::reembed_missing`] depends on this matching the insert gate, or it
     /// false-positives on records that were never meant to be embedded. Kept next
     /// to the insert path so any drift is immediately visible.
@@ -943,24 +963,55 @@ impl Axil {
         !record.table.starts_with('_')
     }
 
-    /// Count records that should have a vector embedding but don't.
+    /// Records that should have a vector embedding but don't, as
+    /// `(missing, embeddable)`.
     ///
     /// Takes an already-scanned record slice so the caller can share one full
-    /// scan across reconciliation checks. Returns 0 unless both a vector index
-    /// and an embedder are configured — a user who only ever calls `add_vector`
-    /// manually (no embedder) must not be flagged as missing embeddings.
-    fn count_missing_embeddings(&self, records: &[Record]) -> usize {
+    /// scan across reconciliation checks. Returns `(0, 0)` unless both a vector
+    /// index and an embedder are configured — a user who only ever calls
+    /// `add_vector` manually (no embedder) must not be flagged as missing
+    /// embeddings.
+    fn embedding_gap(&self, records: &[Record]) -> (usize, usize) {
         if !self.has_vector_index() || self.embedder.is_none() {
-            return 0;
+            return (0, 0);
         }
         let Some(ref vi) = self.vector_index else {
-            return 0;
+            return (0, 0);
         };
         let indexed: std::collections::HashSet<RecordId> =
             vi.all_ids().unwrap_or_default().into_iter().collect();
-        records
+        records.iter().filter(|r| Self::is_embeddable(r)).fold(
+            (0, 0),
+            |(missing, embeddable), r| {
+                (
+                    missing + usize::from(!indexed.contains(&r.id)),
+                    embeddable + 1,
+                )
+            },
+        )
+    }
+
+    /// How bad an embedding gap is. A torn insert here and there is a warning;
+    /// past [`EMBEDDING_GAP_ERROR_RATIO`] of memory records, recall is failing
+    /// to find a real share of what the agent stored, which is an error.
+    fn embedding_gap_severity(missing: usize, embeddable: usize) -> Severity {
+        if missing as f64 > embeddable as f64 * EMBEDDING_GAP_ERROR_RATIO {
+            Severity::Error
+        } else {
+            Severity::Warning
+        }
+    }
+
+    /// Count vectors in the default index whose record no longer exists.
+    fn count_orphaned_vectors(&self, records: &[Record]) -> usize {
+        let Some(ref vi) = self.vector_index else {
+            return 0;
+        };
+        let live: std::collections::HashSet<&RecordId> = records.iter().map(|r| &r.id).collect();
+        vi.all_ids()
+            .unwrap_or_default()
             .iter()
-            .filter(|r| Self::is_embeddable(r) && !indexed.contains(&r.id))
+            .filter(|id| !live.contains(id))
             .count()
     }
 
@@ -3293,26 +3344,18 @@ impl Axil {
             }
         }
 
-        // Index size mismatch (vectors vs records)
+        for d in &self.degraded_engines {
+            problems.push(crate::diagnostics::ProblemDetection {
+                detector: "engine_unavailable".to_string(),
+                severity: Severity::Error,
+                message: d.summary(),
+                recommendation: d.fix.clone(),
+                auto_fixable: false,
+            });
+        }
+
         if let Some(ref vi) = self.vector_index {
             let vec_count = vi.count();
-            let total = self.total_records().unwrap_or(0);
-            // Only flag if vectors exist but count is very different
-            if vec_count > 0 && total > 0 {
-                let ratio = vec_count as f64 / total as f64;
-                if !(0.5..=2.0).contains(&ratio) {
-                    problems.push(crate::diagnostics::ProblemDetection {
-                        detector: "index_size_mismatch".to_string(),
-                        severity: Severity::Warning,
-                        message: format!(
-                            "Vector count ({}) doesn't match record count ({})",
-                            vec_count, total
-                        ),
-                        recommendation: "Consider reindexing: axil heal --reindex".to_string(),
-                        auto_fixable: true,
-                    });
-                }
-            }
 
             // Vector deletion ratio
             let deleted = vi.deleted_count();
@@ -3343,20 +3386,37 @@ impl Axil {
         // One scan feeds both the embedding and FTS reconciliation.
         if self.vector_index.is_some() || self.fts_index.is_some() {
             if let Ok(records) = self.storage.scan_all_records() {
-                let missing_embeddings = self.count_missing_embeddings(&records);
+                let (missing_embeddings, embeddable) = self.embedding_gap(&records);
                 if missing_embeddings > 0 {
                     // Only auto-fixable when an embedder can regenerate them; a
                     // manual `add_vector` user with no embedder is already gated
-                    // out by `count_missing_embeddings`, but guard the flag too.
+                    // out by `embedding_gap`, but guard the flag too.
                     problems.push(crate::diagnostics::ProblemDetection {
                         detector: "missing_embeddings".to_string(),
-                        severity: Severity::Warning,
+                        severity: Self::embedding_gap_severity(missing_embeddings, embeddable),
                         message: format!(
-                            "{} record(s) committed without a vector embedding",
-                            missing_embeddings
+                            "{missing_embeddings} of {embeddable} record(s) committed without \
+                             a vector embedding"
                         ),
                         recommendation: "Re-embed missing records: axil heal --reindex".to_string(),
                         auto_fixable: self.embedder.is_some(),
+                    });
+                }
+
+                // The forward direction: vectors whose record is gone. Counting
+                // against live ids, not a vectors/records ratio, because many
+                // records are never embedded and some `_` tables (code
+                // proxies, dep docs) are.
+                let orphaned_vectors = self.count_orphaned_vectors(&records);
+                if orphaned_vectors > 0 {
+                    problems.push(crate::diagnostics::ProblemDetection {
+                        detector: "orphaned_vectors".to_string(),
+                        severity: Severity::Warning,
+                        message: format!(
+                            "{orphaned_vectors} vector(s) belong to records that no longer exist"
+                        ),
+                        recommendation: "Remove them: axil heal --orphans".to_string(),
+                        auto_fixable: true,
                     });
                 }
 
@@ -3514,10 +3574,11 @@ impl Axil {
                     Severity::Ok => "low",
                 };
                 let command = match p.detector.as_str() {
-                    "vector_deletion_ratio" | "index_size_mismatch" | "vector_load_skips" => {
-                        "axil heal --reindex"
-                    }
-                    "orphaned_edges" => "axil heal --orphans",
+                    "vector_deletion_ratio"
+                    | "vector_load_skips"
+                    | "missing_embeddings"
+                    | "missing_fts" => "axil heal --reindex",
+                    "orphaned_edges" | "orphaned_vectors" => "axil heal --orphans",
                     _ => "axil heal --compact",
                 };
                 recommendations.push(crate::diagnostics::Recommendation {
@@ -4237,6 +4298,17 @@ impl Axil {
             });
         }
 
+        // An Engine found on disk but not attached means some retrieval runs
+        // without it (recall without vectors), which a green report would hide.
+        for d in &self.degraded_engines {
+            checks.push(CheckResult {
+                name: format!("{}_engine", d.engine),
+                status: Severity::Error,
+                detail: d.summary(),
+                fix: Some(d.fix.clone()),
+            });
+        }
+
         // Reconcile the vector and FTS indexes against live records once: a
         // torn insert can commit a record but skip its embedding/FTS document,
         // leaving the memory invisible to recall. Scan a single time and share
@@ -4250,10 +4322,10 @@ impl Axil {
         // 3. Vector index sync
         if let Some(ref vi) = self.vector_index {
             let vec_count = vi.count();
-            let missing = index_scan
+            let (missing, embeddable) = index_scan
                 .as_ref()
-                .map(|recs| self.count_missing_embeddings(recs))
-                .unwrap_or(0);
+                .map(|recs| self.embedding_gap(recs))
+                .unwrap_or((0, 0));
             if missing == 0 {
                 checks.push(CheckResult {
                     name: "vector_index".to_string(),
@@ -4267,9 +4339,10 @@ impl Axil {
             } else {
                 checks.push(CheckResult {
                     name: "vector_index".to_string(),
-                    status: Severity::Warning,
+                    status: Self::embedding_gap_severity(missing, embeddable),
                     detail: format!(
-                        "{vec_count} vectors indexed, dimensions={}; {missing} record(s) missing an embedding",
+                        "{vec_count} vectors indexed, dimensions={}; {missing} of {embeddable} \
+                         record(s) missing an embedding, so recall can find them only by keyword",
                         vi.dimensions()
                     ),
                     fix: Some("axil heal --reindex".to_string()),
@@ -4973,6 +5046,13 @@ impl Axil {
     /// [`AxilBuilder::with_lifecycle`].
     pub fn lifecycle_warnings(&self) -> &[String] {
         &self.lifecycle_warnings
+    }
+
+    /// Engines whose companion file exists but could not be attached at open
+    /// (see [`AxilBuilder::with_degraded_engine`]). Non-empty means some
+    /// retrieval paths are running without them, e.g. recall without vectors.
+    pub fn degraded_engines(&self) -> &[crate::diagnostics::DegradedEngine] {
+        &self.degraded_engines
     }
 
     /// The auto-supersede similarity threshold in effect for this handle.

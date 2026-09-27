@@ -86,24 +86,60 @@ pub(crate) fn attach_detected_engines(
         // default store is absent. Additive — existing vector paths unchanged.
         builder = axil_vector::with_vector_spaces(builder);
         if !config.is_engine_disabled("vec") {
-            if let Ok(Some(_)) = axil_vector::read_stored_dimensions(&path) {
-                // When `embed` is on, load the embedder so `db.recall()` and
-                // auto-embed-on-insert work end-to-end. Resolve the model from
-                // the same `axil.toml` the CLI uses so MCP and CLI agree on
-                // which model to load — hard-coding BgeSmall would break any
-                // DB built with nomic/bge-base/bge-m3/custom.
-                #[cfg(feature = "embed")]
-                {
-                    let model = resolve_embedding_model(&path);
-                    let with_embed = axil_core::Axil::open(&path).with_embedder_model(model);
-                    builder = match with_embed {
-                        Ok(b) => b,
-                        Err(_) => axil_core::Axil::open(&path).with_vector_auto()?,
-                    };
+            // Same probe contract as the CLI: a dirty store is repaired, a busy
+            // one is an error the caller can retry, and anything else is
+            // recorded as degraded instead of silently skipped.
+            match axil_vector::probe_vector_store(&path) {
+                Ok(axil_vector::VectorStoreProbe::Missing) => {}
+                Ok(axil_vector::VectorStoreProbe::Ready { repaired, .. }) => {
+                    if repaired {
+                        eprintln!(
+                            "axil-mcp: vector store {} was not closed cleanly; repaired it",
+                            axil_vector::vector_db_path(&path).display()
+                        );
+                    }
+                    // When `embed` is on, load the embedder so `db.recall()` and
+                    // auto-embed-on-insert work end-to-end. Resolve the model from
+                    // the same `axil.toml` the CLI uses so MCP and CLI agree on
+                    // which model to load — hard-coding BgeSmall would break any
+                    // DB built with nomic/bge-base/bge-m3/custom.
+                    #[cfg(feature = "embed")]
+                    {
+                        // `with_embedder_model` consumes the builder, so the
+                        // raw-vector fallback starts from a fresh one; both
+                        // re-register the named-space factory added above.
+                        let model = resolve_embedding_model(&path);
+                        let with_embed =
+                            axil_vector::with_vector_spaces(axil_core::Axil::open(&path))
+                                .with_embedder_model(model);
+                        builder = match with_embed {
+                            Ok(b) => b,
+                            Err(e) => {
+                                eprintln!(
+                                    "axil-mcp: warning: embedder not attached ({e}); \
+                                     recall cannot embed queries and runs keyword-only"
+                                );
+                                axil_vector::with_vector_spaces(axil_core::Axil::open(&path))
+                                    .with_vector_auto()?
+                            }
+                        };
+                    }
+                    #[cfg(not(feature = "embed"))]
+                    {
+                        builder = builder.with_vector_auto()?;
+                    }
                 }
-                #[cfg(not(feature = "embed"))]
-                {
-                    builder = builder.with_vector_auto()?;
+                Err(e) if e.is_busy() => {
+                    return Err(anyhow::Error::new(e).context("vector store is busy"));
+                }
+                Err(e) => {
+                    let degraded = axil_vector::vector_store_unavailable(&path, &e);
+                    eprintln!(
+                        "axil-mcp: warning: {}. Fix: {}",
+                        degraded.summary(),
+                        degraded.fix
+                    );
+                    builder = builder.with_degraded_engine(degraded);
                 }
             }
         }
@@ -998,5 +1034,77 @@ mod serve_tests {
                 "read-only request {id} ran alone"
             );
         }
+    }
+}
+
+#[cfg(all(test, feature = "vector"))]
+mod vector_store_health_tests {
+    use super::*;
+    use axil_core::VectorIndex;
+    use serde_json::json;
+
+    /// A core DB with one record whose vector sits in a `.vec` copied while its
+    /// engine was still open: the state a killed writer leaves behind.
+    fn db_with_needs_repair_vectors(dir: &Path) -> (std::path::PathBuf, axil_core::RecordId) {
+        let path = dir.join("m.axil");
+        let id = Axil::open(&path)
+            .build()
+            .unwrap()
+            .insert("decisions", json!({"summary": "pool size is 32"}))
+            .unwrap()
+            .id;
+        let live = dir.join("live.axil");
+        let engine = axil_vector::VectorEngine::open(&live, 4).unwrap();
+        engine.add(id.clone(), &[1.0, 0.0, 0.0, 0.0]).unwrap();
+        std::fs::copy(
+            axil_vector::vector_db_path(&live),
+            axil_vector::vector_db_path(&path),
+        )
+        .unwrap();
+        drop(engine);
+        (path, id)
+    }
+
+    #[test]
+    fn open_repairs_a_vector_store_that_was_not_closed_cleanly() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, _) = db_with_needs_repair_vectors(dir.path());
+
+        let server = McpServer::open(&path).unwrap();
+        let db = server.db_for_tests();
+        assert_eq!(db.vector_count(), Some(1), "repair must keep the vector");
+        assert!(db.degraded_engines().is_empty());
+    }
+
+    #[test]
+    fn corrupt_vector_store_is_reported_not_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("m.axil");
+        Axil::open(&path)
+            .build()
+            .unwrap()
+            .insert("decisions", json!({"summary": "pool size is 32"}))
+            .unwrap();
+        std::fs::write(axil_vector::vector_db_path(&path), b"not a redb file").unwrap();
+
+        let server = McpServer::open(&path).unwrap();
+        let db = server.db_for_tests();
+        assert!(!db.has_vector_index());
+        assert_eq!(db.degraded_engines()[0].engine, "vector");
+
+        let result = crate::tools::dispatch(db, "recall", &json!({"query": "pool size"}));
+        assert!(result.is_error.is_none());
+        let notes: Vec<&str> = result.content[1..]
+            .iter()
+            .map(|c| c.text.as_str())
+            .collect();
+        assert!(
+            notes
+                .iter()
+                .any(|n| n.contains("vector engine unavailable")),
+            "recall must say it ran without vectors: {notes:?}"
+        );
+        // The results themselves keep their array shape.
+        assert!(serde_json::from_str::<Vec<Value>>(&result.content[0].text).is_ok());
     }
 }

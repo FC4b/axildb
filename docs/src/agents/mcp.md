@@ -95,7 +95,7 @@ updating this table fails the build.
 
 | Tool | Params | When to use |
 |------|--------|-------------|
-| `boot` | `budget?` int, `topic?` string, `scope?` string[] | **First call of a session.** Returns a stable `BootContext` (schema v1): current scope, constraints, recent decisions, active failures, open threads, preferences, confidence notes. Token-budget aware — lower-priority sections drop when over budget. |
+| `boot` | `budget?` int, `topic?` string, `scope?` string[] | **First call of a session.** Returns a stable `BootContext` (schema v1): current scope, constraints, recent decisions, active failures, open threads, preferences, confidence notes. Token-budget aware — lower-priority sections drop when over budget. A `degraded` list appears when an Engine found on disk could not be attached. |
 | `inspect` | (none) | Read-only overview of what kinds of memory this brain holds and whether it is healthy. Returns a per-record-type census (e.g. `decisions`, `errors`, `sessions`; all internal bookkeeping tables collapse into one `_internal` bucket) plus a light health verdict (`ok`/`warning`/`error`) drawn from the same checks as `axil doctor`. Performs zero writes — the MCP-only equivalent of glancing at `axil tables` + `axil doctor`. |
 
 ### Intent-native writes — store cognition, not rows
@@ -122,7 +122,7 @@ an error, or a preference: they auto-embed, auto-supersede, and dedupe.
 
 | Tool | Params | When to use |
 |------|--------|-------------|
-| `recall` | `query` string (req), `top_k?` int (default 5), `table?`, `type?`, `across?` string[], `strict_consent?` bool | Semantic + graph + time-based recall. Ranks by vector similarity blended with recency. `across` fans out to sibling workspace DBs with per-sibling read consent and provenance tags. |
+| `recall` | `query` string (req), `top_k?` int (default 5), `table?`, `type?`, `across?` string[], `strict_consent?` bool | Semantic + graph + time-based recall. Ranks by vector similarity blended with recency. `across` fans out to sibling workspace DBs with per-sibling read consent and provenance tags. If the vector engine could not be attached, a second text block says so. |
 | `store` | `table` string (req), `data` object (req), `embed_fields?` string[] | Insert an arbitrary record, optionally auto-embedding named fields. Use the intent-native writes above when the record is a decision/error/preference. |
 | `search` | `query` string (req), `limit?` int (default 10) | Full-text search across all indexed fields. Use when you want lexical matches, not semantic similarity. |
 | `query_history` | `after?` ISO-8601, `before?` ISO-8601, `table?`, `limit?` int (default 50) | Time-based query of past records by date range and table. |

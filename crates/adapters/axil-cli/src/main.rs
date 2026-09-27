@@ -6076,19 +6076,45 @@ fn attach_detected_engines(mut builder: axil_core::AxilBuilder) -> Result<axil_c
         // unit that leaves every existing vector path byte-identical.
         builder = axil_vector::with_vector_spaces(builder);
         if !config.is_engine_disabled("vec") {
-            if let Ok(Some(_)) = axil_vector::read_stored_dimensions(&path) {
-                // Attach vector index + embedder together so auto-embed on insert works.
-                #[cfg(feature = "embed")]
-                {
-                    builder = builder
-                        .with_embedder_model(resolve_embedding_model(&path))
-                        .context("failed to open vector store with embedder")?;
+            // The probe repairs a store left dirty by a killed writer. Any
+            // other failure must stay visible: skipping the engine quietly
+            // turns recall keyword-only with nothing in the output to say so.
+            match axil_vector::probe_vector_store(&path) {
+                Ok(axil_vector::VectorStoreProbe::Missing) => {}
+                Ok(axil_vector::VectorStoreProbe::Ready { repaired, .. }) => {
+                    if repaired {
+                        eprintln!(
+                            "axil: vector store {} was not closed cleanly; repaired it",
+                            axil_vector::vector_db_path(&path).display()
+                        );
+                    }
+                    // Attach vector index + embedder together so auto-embed on insert works.
+                    #[cfg(feature = "embed")]
+                    {
+                        builder = builder
+                            .with_embedder_model(resolve_embedding_model(&path))
+                            .context("failed to open vector store with embedder")?;
+                    }
+                    #[cfg(not(feature = "embed"))]
+                    {
+                        builder = builder
+                            .with_vector_auto()
+                            .context("failed to open vector store")?;
+                    }
                 }
-                #[cfg(not(feature = "embed"))]
-                {
-                    builder = builder
-                        .with_vector_auto()
-                        .context("failed to open vector store")?;
+                // Another process holds the store. Returning `Busy` lets the
+                // caller's busy-retry wait for it rather than open without vectors.
+                Err(e) if e.is_busy() => {
+                    return Err(anyhow::Error::new(e).context("vector store is busy"));
+                }
+                Err(e) => {
+                    let degraded = axil_vector::vector_store_unavailable(&path, &e);
+                    eprintln!(
+                        "axil: warning: {}. Fix: {}",
+                        degraded.summary(),
+                        degraded.fix
+                    );
+                    builder = builder.with_degraded_engine(degraded);
                 }
             }
         }
@@ -6208,6 +6234,13 @@ fn open_read_command(path: &Path) -> Result<Axil> {
             );
             Axil::open(path)
                 .read_only(true)
+                .with_degraded_engine(axil_core::DegradedEngine {
+                    engine: "all".into(),
+                    reason: "another axil process holds the writer lock, so this read-only \
+                             open attached no engines (no vector, graph or full-text search)"
+                        .into(),
+                    fix: "retry once the other axil process has finished".into(),
+                })
                 .build()
                 .context("failed to open database read-only")
         }
@@ -9536,7 +9569,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                     // nothing may be printed after it (a trailing line would land
                     // outside the wrapper). Each line already carries `(id=…)`, so the
                     // expand path is discoverable without an extra footer here.
-                    let block = format_context_block(&values, budget);
+                    let block = format_context_block(&values, budget, &degraded_warnings(&db));
                     if !block.is_empty() {
                         print!("{block}");
                     }
@@ -10318,10 +10351,11 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                                 "expired_records" | "superseded_records" | "storage_bloat" => {
                                     compact
                                 }
-                                "vector_deletion_ratio" | "index_size_mismatch"
-                                | "missing_embeddings" | "missing_fts"
+                                "vector_deletion_ratio"
+                                | "missing_embeddings"
+                                | "missing_fts"
                                 | "vector_load_skips" => reindex,
-                                "orphaned_edges" => orphans,
+                                "orphaned_edges" | "orphaned_vectors" => orphans,
                                 _ => compact || orphans,
                             };
                             if dominated {
@@ -10397,16 +10431,20 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                     }
                 }
 
-                out.print(&json!({
+                let mut output = json!({
                     "healed": !dry_run && !actions.is_empty(),
                     "actions": actions,
-                }));
+                });
+                insert_degraded(&mut output, &db);
+                out.print(&output);
             } else {
                 // Full heal
                 let report = db
                     .heal_all(&config.healing, dry_run)
                     .context("heal failed")?;
-                out.print(&serde_json::to_value(&report).unwrap());
+                let mut output = serde_json::to_value(&report).unwrap();
+                insert_degraded(&mut output, &db);
+                out.print(&output);
             }
 
             if !dry_run {
@@ -13688,7 +13726,16 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
 
             match boot_format {
                 BootFormat::Narrative => {
-                    let narrative = boot_to_narrative(&boot_data);
+                    let mut narrative = boot_to_narrative(&boot_data);
+                    // Right under the header, so a byte budget cuts from the
+                    // other end and never drops it.
+                    let warnings: String = degraded_warnings(&db)
+                        .iter()
+                        .map(|w| format!("WARNING: {w}\n"))
+                        .collect();
+                    if let Some(pos) = narrative.find("\n\n") {
+                        narrative.insert_str(pos + 2, &warnings);
+                    }
                     let output = if let Some(max_tokens) = budget {
                         let max_bytes = max_tokens * 4;
                         if narrative.len() > max_bytes {
@@ -13703,11 +13750,13 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                 }
                 BootFormat::Compact => {
                     let compact = compact_boot_json(&boot_data);
-                    let output = apply_token_budget(&compact, budget);
+                    let mut output = apply_token_budget(&compact, budget);
+                    insert_degraded(&mut output, &db);
                     out.print(&output);
                 }
                 BootFormat::Json => {
-                    let output = apply_token_budget(&boot_data, budget);
+                    let mut output = apply_token_budget(&boot_data, budget);
+                    insert_degraded(&mut output, &db);
                     out.print(&output);
                 }
             }
@@ -18940,8 +18989,12 @@ fn chunk_text(text: &str, max_bytes: usize) -> Vec<String> {
 /// Escapes XML-special characters (`<`, `>`, `&`) in recalled text so a stored
 /// memory containing `</context>` or XML-like instructions cannot break out of
 /// the wrapper and act as injected instructions on the next turn.
-fn format_context_block(values: &[Value], budget: Option<usize>) -> String {
-    if values.is_empty() {
+///
+/// `warnings` (see [`degraded_warnings`]) lead the block, outside the budget,
+/// and keep it from being empty: a recall that ran without an Engine must say
+/// so even when it found nothing.
+fn format_context_block(values: &[Value], budget: Option<usize>, warnings: &[String]) -> String {
+    if values.is_empty() && warnings.is_empty() {
         return String::new();
     }
     // Split proxy hits into a "Relevant code" section so the pointer-first
@@ -19001,10 +19054,15 @@ fn format_context_block(values: &[Value], budget: Option<usize>) -> String {
         lines = kept;
     }
 
-    if lines.is_empty() {
+    if lines.is_empty() && warnings.is_empty() {
         return String::new();
     }
     let mut out = String::from("<context source=\"axil\">\n");
+    for warning in warnings {
+        out.push_str("  # Warning: ");
+        out.push_str(&xml_escape_for_context(warning));
+        out.push('\n');
+    }
     for line in &lines {
         out.push_str(line);
         out.push('\n');
@@ -19330,6 +19388,24 @@ fn truncate_record_json(record: &axil_core::Record, max_field_len: usize) -> Val
         }
     }
     v
+}
+
+/// One line per Engine this open could not attach, for agent-facing output.
+/// Empty when every Engine found on disk is attached.
+fn degraded_warnings(db: &Axil) -> Vec<String> {
+    db.degraded_engines()
+        .iter()
+        .map(|d| format!("{}. Fix: {}", d.summary(), d.fix))
+        .collect()
+}
+
+/// Add `degraded` warnings to a JSON object output. Applied after any token
+/// budget so trimming can never drop them.
+fn insert_degraded(output: &mut Value, db: &Axil) {
+    let warnings = degraded_warnings(db);
+    if let (false, Some(obj)) = (warnings.is_empty(), output.as_object_mut()) {
+        obj.insert("degraded".into(), json!(warnings));
+    }
 }
 
 /// Apply a token budget to a JSON value by serializing and truncating.

@@ -122,6 +122,10 @@ pub struct BootContext {
     /// Kinds that were dropped to fit the budget. Empty when the full
     /// boot fit.
     pub dropped_sections: Vec<String>,
+    /// Engines found on disk that this handle could not attach (see
+    /// [`Axil::degraded_engines`]). Omitted when every Engine is attached.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub degraded: Vec<crate::diagnostics::DegradedEngine>,
 }
 
 impl Axil {
@@ -197,6 +201,7 @@ impl Axil {
             token_budget_used: used,
             sections,
             dropped_sections,
+            degraded: self.degraded_engines().to_vec(),
         })
     }
 
