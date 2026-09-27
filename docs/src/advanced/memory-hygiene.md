@@ -17,7 +17,7 @@ documents the maintenance toolkit and when to use each piece.
 | `axil snapshot` | Capture current metrics for trend tracking | Cron'd hourly/daily for trends |
 | `axil trends [--days N]` | Show metric history | When investigating regressions |
 | `axil detect` | Run deferred problem detectors | Anytime — surfaces issues `doctor` doesn't |
-| `axil session-heal` | End-of-session: replay captured failures, auto-fix | Stop hook, after every session |
+| `axil session-heal` | End-of-session: replay captured failures, auto-fix | Session-close hook job, after every session |
 | `axil branch create <name>` | Atomic point-in-time copy | Before risky operations |
 
 ## `axil doctor` — read-only health check
@@ -54,7 +54,7 @@ those facts, and belief-revision explanations follow them — not garbage
 most cleanup paths short-circuit when there's nothing to do.
 
 Compaction also runs *automatically*: the end-of-session heal pass
-(`axil session-heal`, run by the Stop hook) and bare `axil heal` both
+(`axil session-heal`, run when the brain hook closes a session) and bare `axil heal` both
 compact whenever any expired or superseded records exist. Set
 `[healing] auto_compact = false` to make compaction strictly manual —
 automatic healing then reports what is pending instead of purging, and
@@ -166,8 +166,9 @@ heal.
 
 ## `axil session-heal` — end-of-session auto-fix loop
 
-The Stop hook captures axil command failures and empty-result misses
-to a per-session JSONL file. `axil session-heal` reads that file,
+The brain hook captures axil command failures and empty-result misses
+to a per-session JSONL file, and runs `session-heal` on it when the
+session closes. `axil session-heal` reads that file,
 runs `detect_problems()`, applies auto-fixable repairs (compact /
 reindex / orphans), classifies misses (e.g. empty `code-search` →
 suggests reindex), and writes a `_heal_log` row so the next session
@@ -213,7 +214,7 @@ so it's cheap to fire on every session start:
 | `health-report --save` | `health_report_every` | `7d` |
 
 The brain hook fires `axil maintain --if-stale --in-background --quiet`
-on the first tool call of a session, so the cadence is **automated for
+when a session starts, so the cadence is **automated for
 agent use with no cron**. `--in-background` re-execs a detached child —
 the lock at `.axil/maintain.lock` is claimed atomically (`O_CREAT|O_EXCL`)
 so two concurrent fires can't double-spawn — and it never blocks the
@@ -231,7 +232,7 @@ opportunistic trigger entirely with `[maintenance] auto = false` (then
 
 For a working agent memory DB:
 
-- **Every session end**: `axil session-heal` (wire into the Stop hook)
+- **Every session end**: `axil session-heal` (the brain hook queues it when a session closes)
 - **Opportunistic (automatic via the brain hook)**: `axil maintain
   --if-stale` covers the daily `snapshot` and weekly `health-report
   --save` below — no cron needed when the hook is installed

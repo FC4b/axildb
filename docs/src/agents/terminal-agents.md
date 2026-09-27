@@ -27,8 +27,14 @@ before search  → axil-first gate (code-search / fts before rg/grep)
 before edit    → recall-for-file surfaces past memories
 after edit     → file manifest captured
 after shell    → heartbeat, git-commit capture, failed-command capture
-stop           → narrative guard, then session close (worker, beliefs, heal)
+stop           → narrative guard (runs every turn)
+session end    → session close queued (record, worker, beliefs, heal)
 ```
+
+Hooks never write to the database themselves: each write is a job file in
+`.axil/hook-queue/`, run by one detached `axil hook drain`, so an agent's
+hook timeout can't cut a write off halfway. Agents with no session-end
+event close the session at each stop instead, through the same queue.
 
 Because it's one loop, a memory stored under Codex is recalled under Claude
 Code, Droid, or any other — **the `.axil` database is shared across every

@@ -62,6 +62,34 @@
       "event": null,
       "payload": { "hook_event_name": "Stop", "session_id": "s1", "stop_hook_active": false },
       "expect": { "event": "Stop", "tool": null }
+    },
+    {
+      "name": "PostToolUseFailure Bash -> shell failure, exit code from tool_error",
+      "event": null,
+      "payload": {
+        "hook_event_name": "PostToolUseFailure", "session_id": "s1", "cwd": "/repo", "tool_name": "Bash",
+        "tool_input": { "command": "cargo test" }, "tool_use_id": "toolu_1",
+        "tool_error": "Exit code 101\nerror: test failed"
+      },
+      "expect": { "event": "PostTool", "tool": { "kind": "shell", "command": "cargo test", "exit_code": 101 } }
+    },
+    {
+      "name": "PostToolUse TaskUpdate completed -> task_completed",
+      "event": null,
+      "payload": {
+        "hook_event_name": "PostToolUse", "session_id": "s1", "cwd": "/repo", "tool_name": "TaskUpdate",
+        "tool_input": { "taskId": "3", "status": "completed" }, "tool_response": {}
+      },
+      "expect": { "event": "PostTool", "tool": { "kind": "task_completed", "task_id": "3" } }
+    },
+    {
+      "name": "PostToolUse TaskUpdate in_progress -> other",
+      "event": null,
+      "payload": {
+        "hook_event_name": "PostToolUse", "session_id": "s1", "cwd": "/repo", "tool_name": "TaskUpdate",
+        "tool_input": { "taskId": "3", "status": "in_progress" }, "tool_response": {}
+      },
+      "expect": { "event": "PostTool", "tool": { "kind": "other" } }
     }
   ]
 }

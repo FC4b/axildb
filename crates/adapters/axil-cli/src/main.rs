@@ -3406,6 +3406,12 @@ enum HookCommand {
         #[arg(long)]
         event: Option<String>,
     },
+    /// Run the database writes hooks have queued in `<db dir>/hook-queue/`.
+    /// Hooks start this detached after queuing a write; it is safe to run by
+    /// hand. A job cut off mid-run is moved to `hook-queue/interrupted/`
+    /// and never retried.
+    #[command(hide = true)]
+    Drain,
 }
 
 /// Scheduled task operations (12.3).
@@ -4213,7 +4219,15 @@ fn add_to_gitignore(path: &Path, pattern: &str) -> bool {
 }
 
 /// Claude Code hook events Axil owns. New events must land here so install / uninstall / dry-run stay in sync.
-const AXIL_HOOK_EVENTS: &[&str] = &["UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"];
+const AXIL_HOOK_EVENTS: &[&str] = &[
+    "SessionStart",
+    "UserPromptSubmit",
+    "PreToolUse",
+    "PostToolUse",
+    "PostToolUseFailure",
+    "Stop",
+    "SessionEnd",
+];
 /// Legacy hook scripts earlier installs wrote to `.claude/hooks/`. The brain
 /// now lives in the binary (`axil hook run`); these names remain only so
 /// install/sync/uninstall can clean old copies up.
@@ -4733,6 +4747,18 @@ fn install_hooks_to_settings(path: &Path) -> Result<bool> {
     let cmd_owned = hook_run_command();
     let cmd = cmd_owned.as_str();
     let axil_hooks = [
+        // Boot context, injected where the model sees it. Also fires after
+        // a compaction or /clear, when re-injecting it is the point.
+        (
+            "SessionStart",
+            json!([{
+                "hooks": [{
+                    "type": "command",
+                    "command": cmd,
+                    "timeout": 10
+                }]
+            }]),
+        ),
         // 12.1: inject <context> block on every user prompt. Tight 3s cap —
         // the brain enforces its own 1.8s deadline inside `axil recall`.
         (
@@ -4790,11 +4816,11 @@ fn install_hooks_to_settings(path: &Path) -> Result<bool> {
                     }]
                 },
                 {
-                    // Store reminder when a todo flips to completed. Matches
-                    // TodoWrite — the tool stock Claude Code actually emits
-                    // (the old TaskUpdate matcher never fired). Synchronous:
-                    // the reminder must land before the agent moves on.
-                    "matcher": "TodoWrite",
+                    // Store reminder when a task is completed: one TaskUpdate
+                    // per task on current Claude Code, TodoWrite on older
+                    // versions. Synchronous: the reminder must land before the
+                    // agent moves on.
+                    "matcher": "TodoWrite|TaskUpdate",
                     "hooks": [{
                         "type": "command",
                         "command": cmd,
@@ -4802,6 +4828,20 @@ fn install_hooks_to_settings(path: &Path) -> Result<bool> {
                     }]
                 }
             ]),
+        ),
+        // A failed tool call skips PostToolUse and arrives here; the brain
+        // captures errors from failed shell commands.
+        (
+            "PostToolUseFailure",
+            json!([{
+                "matcher": "Bash",
+                "hooks": [{
+                    "type": "command",
+                    "command": cmd,
+                    "async": true,
+                    "timeout": 10
+                }]
+            }]),
         ),
         // Stop must be SYNCHRONOUS — the hook returns {"decision":"block"}
         // when files were edited but no narrative was stored, which only
@@ -4814,6 +4854,18 @@ fn install_hooks_to_settings(path: &Path) -> Result<bool> {
                     "type": "command",
                     "command": cmd,
                     "timeout": 15
+                }]
+            }]),
+        ),
+        // The session close. The harness allows this event very little
+        // time, so the brain only queues the close for a detached drainer.
+        (
+            "SessionEnd",
+            json!([{
+                "hooks": [{
+                    "type": "command",
+                    "command": cmd,
+                    "timeout": 5
                 }]
             }]),
         ),
@@ -10799,6 +10851,9 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
         Command::Hook {
             command: HookCommand::Capture { dialect, event },
         } => hook_brain::capture(&dialect, event.as_deref()),
+        Command::Hook {
+            command: HookCommand::Drain,
+        } => hook_brain::drain(&require_db(&db_opt)?),
 
         // ── Model management ────────────────────────────────────────
         #[cfg(feature = "vector")]
@@ -20436,6 +20491,39 @@ mod upgrade_helper_tests {
 #[cfg(test)]
 mod installer_tests {
     use super::*;
+
+    #[test]
+    fn claude_settings_route_the_whole_session_lifecycle() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        // A user's own hook on an event Axil also uses must survive.
+        let user_stop = json!({"hooks": {"Stop": [{"hooks": [
+            {"type": "command", "command": "notify-me"}
+        ]}]}});
+        std::fs::write(&path, user_stop.to_string()).unwrap();
+
+        install_hooks_to_settings(&path).unwrap();
+        let settings: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let hooks = &settings["hooks"];
+        for event in AXIL_HOOK_EVENTS {
+            assert!(
+                hooks[event].to_string().contains(" hook run"),
+                "{event} is not routed to the brain: {hooks}"
+            );
+        }
+        assert!(hooks["Stop"].to_string().contains("notify-me"));
+        // Stop's block decision is read from stdout, so it must not be async.
+        assert!(!hooks["Stop"].to_string().contains("async"));
+        let matchers: Vec<&str> = hooks["PostToolUse"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|group| group["matcher"].as_str())
+            .collect();
+        assert!(matchers.contains(&"TodoWrite|TaskUpdate"), "{matchers:?}");
+        assert_eq!(hooks["PostToolUseFailure"][0]["matcher"], "Bash");
+    }
 
     // A stale released binary on PATH predates `hook run`; wiring bare `axil`
     // for it would exit clap's usage code 2 on every hook fire, which agents

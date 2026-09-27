@@ -81,8 +81,8 @@ axil --db <path> deps refresh [--path <dir>] [--if-stale] [--transitive]
 ```
 
 `--if-stale` is a fast no-op when nothing changed — cheap enough to run
-routinely. The brain hook fires `deps refresh --if-stale` in the
-background whenever you edit a manifest or lockfile, so docs stay fresh
+routinely. The brain hook queues `deps refresh --if-stale` for its
+background drainer whenever you edit a manifest or lockfile, so docs stay fresh
 without an explicit call.
 
 ### `axil deps ingest`

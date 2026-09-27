@@ -120,6 +120,27 @@ impl VectorEngine {
         let vec_path = vector_db_path(db_path.as_ref());
         let vector_db = Database::create(&vec_path).map_err(open_err)?;
 
+        // An existing store with matching dimensions needs no write: a read
+        // txn confirms it, so read-only commands (recall, fts, hook lookups)
+        // never hold a write txn a timeout could kill mid-commit.
+        let stored = {
+            let txn = vector_db.begin_read().map_err(plugin_err)?;
+            match txn.open_table(META_TABLE) {
+                Ok(meta) => match meta.get("dimensions").map_err(plugin_err)? {
+                    Some(guard) => {
+                        let s = std::str::from_utf8(guard.value()).map_err(plugin_err)?;
+                        Some(s.parse::<usize>().map_err(plugin_err)?)
+                    }
+                    None => None,
+                },
+                Err(redb::TableError::TableDoesNotExist(_)) => None,
+                Err(e) => return Err(plugin_err(e)),
+            }
+        };
+        if stored == Some(config.dimensions) {
+            return Self::load(vector_db, config, &vec_path);
+        }
+
         // Ensure tables exist + validate/store dimensions in one write txn.
         let txn = vector_db.begin_write().map_err(plugin_err)?;
         {
@@ -146,10 +167,13 @@ impl VectorEngine {
                 .map_err(plugin_err)?;
         }
         txn.commit().map_err(plugin_err)?;
+        Self::load(vector_db, config, &vec_path)
+    }
 
-        // Load existing vectors from storage.
+    /// Load a store's persisted vectors into a fresh in-memory index.
+    fn load(vector_db: Database, config: VectorConfig, vec_path: &Path) -> axil_core::Result<Self> {
         let (vectors, skipped_at_load) = load_all_vectors(&vector_db, config.dimensions)?;
-        warn_unloadable(skipped_at_load, &vec_path);
+        warn_unloadable(skipped_at_load, vec_path);
         let index = HnswIndex::from_vectors(config.dimensions, vectors);
 
         Ok(Self {

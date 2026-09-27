@@ -41,7 +41,7 @@ When you need code or docs context:
 
 Bypass Axil only for a user-named exact file/line, command output from the current turn, or a tiny local edit that needs no project context.
 
-The PreToolUse hook runs `axil boot` automatically on your first tool call, injecting recent decisions, errors, and session history into your context.
+The SessionStart hook runs `axil boot` automatically when the session starts (and after a compaction), injecting recent decisions, errors, and session history into your context.
 
 ```bash
 # For deeper context on a specific topic:

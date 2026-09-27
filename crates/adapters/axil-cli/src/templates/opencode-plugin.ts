@@ -11,8 +11,9 @@
 //                        `chat.message` (and appended to tool output at
 //                        `tool.execute.after`) — whichever fires first
 //   session close      → `session.idle` forwards a Stop event; the brain
-//                        runs the narrative guard + worker/heal/session
-//                        record; a guard reason is queued as a nudge
+//                        runs the narrative guard and queues the session
+//                        record + worker/heal for its detached drainer; a
+//                        guard reason is queued as a nudge
 //   compaction         → `experimental.session.compacting` injects the
 //                        boot context so resume state survives compaction
 //

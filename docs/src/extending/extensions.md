@@ -174,7 +174,7 @@ Look at `crates/axil-docs/` for a production-grade Extension that exercises the 
 | Crate layout (modules per concern) | `manifest.rs`, `resolve.rs`, `local.rs`, `ingest.rs`, `refresh.rs`, `query.rs`, `web.rs` |
 | Owned tables | `_dep_manifests`, `_deps`, `_dep_docs` (defined as constants in `ingest.rs`) |
 | Drift detection | `refresh.rs` — content-hash the manifest + lockfile, store in `_dep_manifests`, re-ingest when the hash changes |
-| Background refresh via brain hook | PostToolUse hook in `.claude/settings.json` calls `axil deps refresh --if-stale` on manifest edits |
+| Background refresh via brain hook | The brain hook (`axil hook run`) queues `axil deps refresh --if-stale` when a manifest or lockfile is edited |
 | `axil boot` integration | The `dep_docs_freshness` block surfaces stale-doc warnings on agent boot |
 | `recall-for-file` integration | A per-file pass surfaces dep docs for the file's imports |
 | MCP parity | The `dep_docs` and `deps_status` tools mirror the CLI surface |

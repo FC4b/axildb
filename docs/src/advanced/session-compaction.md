@@ -223,7 +223,7 @@ axil unpin <ID>     # re-enable decay
 ```
 
 Decay, consolidation, and inference also run as background worker tasks
-(`axil worker run`), typically fired from a session Stop hook. For the
+(`axil worker run`), which the brain hook runs when a session closes. For the
 full importance/decay/belief model see
 [Cognitive Memory](./cognitive.md).
 

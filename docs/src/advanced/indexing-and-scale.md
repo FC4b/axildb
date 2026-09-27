@@ -46,7 +46,7 @@ The other two indexes have background refresh; source code doesn't.
 ### SCIP code-graph
 
 `axil scip refresh --if-stale --in-background --quiet` runs from the
-PreToolUse brain hook on the agent's first tool call. Mechanics:
+brain hook when a session starts. Mechanics:
 
 - Lockfile at `.axil/scip-refresh.lock` so concurrent agents don't
   collide
@@ -65,8 +65,8 @@ third call.
 
 ### Dep-doc index
 
-The PostToolUse brain hook fires a detached `axil deps refresh --if-stale`
-whenever the agent edits a manifest or lockfile (Cargo.toml,
+The PostToolUse brain hook queues `axil deps refresh --if-stale` (run by
+its detached drainer) whenever the agent edits a manifest or lockfile (Cargo.toml,
 package.json, pyproject.toml, go.mod, pom.xml, plus their lockfiles).
 
 Drift is gated on a content-hash of the manifest stored in

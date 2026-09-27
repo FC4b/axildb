@@ -550,7 +550,15 @@ impl AxilBuilder {
         let supersede_threshold = self
             .supersede_threshold
             .unwrap_or(file_config.healing.supersede_similarity_threshold as f32);
-        let slow_query_threshold_ms = file_config.debug.slow_query_threshold_ms as f64;
+        // `AXIL_SLOW_QUERY_LOG=0` turns the log off for this process. Agent
+        // hooks set it on their lookups: logging a slow read is a write, and
+        // a hook's reads must never write under the harness's kill timeout.
+        let slow_query_threshold_ms =
+            if std::env::var("AXIL_SLOW_QUERY_LOG").is_ok_and(|v| v == "0") {
+                f64::INFINITY
+            } else {
+                file_config.debug.slow_query_threshold_ms as f64
+            };
         #[cfg(feature = "event-log")]
         let event_log_enabled = file_config.healing.event_log;
         let db = Axil {

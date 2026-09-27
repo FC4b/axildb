@@ -137,7 +137,7 @@ axil heal               # also DOWNSAMPLES (see warning below)
 ### worker
 
 Run background cognitive maintenance: importance **decay**, consolidation, and
-connection inference. Fired automatically by the Stop hook each session.
+connection inference. Run automatically when the brain hook closes a session.
 
 ```bash
 axil worker run                                    # single run
@@ -190,6 +190,6 @@ for the full list.
 
 Polyglot repos are swept in one run. Detection walks subfolders (depth ≤ 4; `node_modules`, `target`, dot-dirs, and gitignored dirs skipped), so a monorepo with `frontend/package.json` and `backend/pyproject.toml` — even with no marker at the root — gets each indexer run from its own project directory. Single-project repos keep writing `.axil/index.scip`; polyglot repos write one `.axil/index-<lang>-<dir>-<hash>.scip` per project (the short hash keeps lossy-slug siblings like `web-ui` / `web.ui` from sharing a file), and a leftover single-file `index.scip` is retired automatically once a full sweep covers every project. A missing indexer binary skips that project with an install hint instead of failing the sweep; an explicit `--language` keeps the old hard-error contract. `--if-stale` is checked per project, and a project whose indexer isn't installed counts as non-actionable so it can't defeat the fast path. A failed ingest removes its `.scip` so the next refresh retries instead of being masked by freshness.
 
-The brain hook (`.claude/hooks/axil-brain.sh`) calls `axil scip refresh --if-stale --in-background --quiet` on first PreToolUse, so SCIP stays fresh transparently — in polyglot repos this now keeps *every* language's index fresh, not just the first detected one. Lock file at `.axil/scip-refresh.lock` prevents concurrent spawns; child runs under `nohup` to survive parent shell exit. Staleness threshold (14 days by default) matches `axil doctor`'s SCIP warning.
+The brain hook (`axil hook run`) calls `axil scip refresh --if-stale --in-background --quiet` when a session starts, so SCIP stays fresh transparently — in polyglot repos this now keeps *every* language's index fresh, not just the first detected one. Lock file at `.axil/scip-refresh.lock` prevents concurrent spawns; child runs under `nohup` to survive parent shell exit. Staleness threshold (14 days by default) matches `axil doctor`'s SCIP warning.
 
 > To refresh the structural proxy index (`axil index`) **and** the SCIP graph in a single call, use [`axil reindex`](./code-search.md#refresh-everything-axil-reindex) — the proxy layer rebuilds in the foreground and the SCIP refresh is spawned in the background, the same machinery described here.

@@ -27,8 +27,8 @@ axil scip status         # what's detected, which indexers are on PATH, file age
 **Is it automatic?** Mostly, yes:
 
 - `axil install --claude-code --bootstrap` builds the initial index at install time.
-- The brain hook then runs `axil scip refresh --if-stale --in-background --quiet` on
-  the first tool call each session — opportunistic, non-blocking, and a no-op
+- The brain hook then runs `axil scip refresh --if-stale --in-background --quiet` when
+  each session starts — opportunistic, non-blocking, and a no-op
   (<50ms) when the index is fresh (≤14 days old).
 
 **The one prerequisite:** `scip refresh` orchestrates an *external* indexer that

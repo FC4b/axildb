@@ -17,15 +17,25 @@
 //!
 //! The shared loop:
 //!   user prompt      — inject a <context> block from recall
-//!   session start    — boot push (Claude Code has no such event, so the
-//!                      first pre-tool call emulates it via a sentinel)
+//!   session start    — boot push, and queue the close of this project's
+//!                      sessions that went quiet without a session end
+//!                      (installs without a session-start event emulate it
+//!                      on the first pre-tool call via a sentinel)
 //!   pre file-edit    — recall-for-file + store nudge
 //!   pre shell        — axil-first search gate / paired search
 //!   post file-edit   — manifest + snippet accumulation
 //!   post shell       — heartbeat, commit capture, error capture
 //!   post file-read   — fallback capture after empty recalls
-//!   post todo-update — store reminder when a todo completes
-//!   stop             — narrative guard, session close, worker
+//!   post todo-update — store reminder when a task completes
+//!   stop             — narrative guard. Stop fires every turn, so it keeps
+//!                      the session's state; dialects with no session-end
+//!                      event also queue the session close here
+//!   session end      — queue the session close, clean up
+//!
+//! Hooks never write to the database themselves. Each write becomes a job
+//! file in `<db dir>/hook-queue/` (the intent log) and one detached
+//! `axil hook drain` runs them, so a harness timeout can never kill a write
+//! mid-commit. Lookups run with the slow-query log off for the same reason.
 //!
 //! Every path is best-effort: a memory hook must never break the agent
 //! loop, so child failures are swallowed and the process always exits 0
@@ -34,9 +44,16 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+
+/// A session whose state files have been idle this long ended without a
+/// session-end event (closed terminal, crash); the next session start in the
+/// same project queues its close.
+const STALE_SESSION_SECS: u64 = 6 * 3600;
 
 /// Narrative tables that satisfy the Stop guard. If you add a new
 /// narrative table, update both constants (list + human text).
@@ -126,6 +143,11 @@ enum ToolAction {
     },
     Todo {
         completed_count: i64,
+    },
+    /// One task marked completed (Claude Code's `TaskUpdate`), identified so
+    /// the reminder fires once per task.
+    TaskCompleted {
+        task_id: String,
     },
     Other,
 }
@@ -270,6 +292,9 @@ fn tool_summary(tool: &ToolAction) -> Value {
         ToolAction::Todo { completed_count } => {
             json!({"kind": "todo", "completed_count": completed_count})
         }
+        ToolAction::TaskCompleted { task_id } => {
+            json!({"kind": "task_completed", "task_id": task_id})
+        }
         ToolAction::Other => json!({"kind": "other"}),
     }
 }
@@ -357,13 +382,18 @@ fn parse_claude(input: &Value, event_override: Option<&str>) -> Option<HookEvent
         "UserPromptSubmit" => EventKind::UserPrompt,
         "SessionStart" => EventKind::SessionStart,
         "PreToolUse" => EventKind::PreTool,
-        "PostToolUse" => EventKind::PostTool,
+        "PostToolUse" | "PostToolUseFailure" => EventKind::PostTool,
         "Stop" => EventKind::Stop,
         "SessionEnd" => EventKind::SessionEnd,
         _ => return None,
     };
     let tool_name = str_field(input, "tool_name").unwrap_or_default();
     let tool = match kind {
+        // A failed tool call arrives as its own event, with the failure text
+        // in `tool_error` instead of a `tool_response`.
+        EventKind::PostTool if raw_event == "PostToolUseFailure" => {
+            Some(claude_failed_tool_action(input, &tool_name))
+        }
         EventKind::PreTool | EventKind::PostTool => Some(claude_tool_action(input, &tool_name)),
         _ => None,
     };
@@ -425,7 +455,46 @@ fn claude_tool_action(input: &Value, tool_name: &str) -> ToolAction {
                 })
                 .unwrap_or(0),
         },
+        // The task tools replaced TodoWrite; a completion is one TaskUpdate.
+        "TaskUpdate" => {
+            let input = input.get("tool_input");
+            let completed =
+                input.and_then(|t| t.get("status")).and_then(Value::as_str) == Some("completed");
+            let task_id = ["taskId", "task_id", "id"]
+                .iter()
+                .find_map(|k| input.and_then(|t| t.get(*k)))
+                .map(|v| v.as_str().map_or_else(|| v.to_string(), str::to_string));
+            match (completed, task_id) {
+                (true, Some(task_id)) => ToolAction::TaskCompleted { task_id },
+                _ => ToolAction::Other,
+            }
+        }
         _ => ToolAction::Other,
+    }
+}
+
+/// A `PostToolUseFailure` payload. Only shell failures matter to the brain
+/// (error capture); the text is `tool_error`, usually led by "Exit code N".
+fn claude_failed_tool_action(input: &Value, tool_name: &str) -> ToolAction {
+    if tool_name != "Bash" {
+        return ToolAction::Other;
+    }
+    let error = match input.get("tool_error") {
+        Some(Value::String(s)) => s.clone(),
+        Some(other) => other.to_string(),
+        None => String::new(),
+    };
+    let exit_code = error
+        .strip_prefix("Exit code ")
+        .and_then(|rest| rest.split_whitespace().next())
+        .and_then(|n| n.parse::<i64>().ok())
+        .filter(|n| *n != 0)
+        .unwrap_or(1);
+    ToolAction::Shell {
+        command: nested_str(input, &["tool_input", "command"]).unwrap_or_default(),
+        exit_code,
+        stdout: error,
+        stderr: String::new(),
     }
 }
 
@@ -844,6 +913,82 @@ struct HookCtx {
     exe: PathBuf,
     db: Option<PathBuf>,
     tmp: PathBuf,
+    files: SessionFiles,
+}
+
+/// One session's state: `axil-session-<sid>.<suffix>` files in the temp
+/// dir. They live for the whole session, not one turn, and are removed when
+/// the session is closed.
+struct SessionFiles {
+    tmp: PathBuf,
+    sid: String,
+}
+
+impl SessionFiles {
+    fn path(&self, suffix: &str) -> PathBuf {
+        self.tmp
+            .join(format!("axil-session-{}.{}", self.sid, suffix))
+    }
+
+    fn prefix(&self) -> String {
+        format!("axil-session-{}.", self.sid)
+    }
+
+    fn own(&self) -> Vec<PathBuf> {
+        let prefix = self.prefix();
+        std::fs::read_dir(&self.tmp)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter(|e| e.file_name().to_string_lossy().starts_with(prefix.as_str()))
+                    .map(|e| e.path())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Sweep every per-session temp file, including the one-per-file/query
+    /// sentinel files (`.recalled-<hash>`, `.searched-<hash>`, …).
+    fn cleanup(&self) {
+        for path in self.own() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    /// Seconds since any of this session's files last changed.
+    fn idle_secs(&self) -> u64 {
+        self.own()
+            .iter()
+            .filter_map(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok())
+            .filter_map(|t| t.elapsed().ok())
+            .map(|d| d.as_secs())
+            .min()
+            .unwrap_or(u64::MAX)
+    }
+
+    /// Lines of the edit manifest (one per edit, repeats included).
+    fn manifest_lines(&self) -> Vec<String> {
+        std::fs::read_to_string(self.path("manifest"))
+            .map(|m| {
+                m.lines()
+                    .filter(|l| !l.is_empty())
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// A line-count mark into the manifest (`turn`, `flushed`).
+    fn mark(&self, name: &str) -> usize {
+        std::fs::read_to_string(self.path(name))
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(0)
+    }
+
+    fn set_mark(&self, name: &str, lines: usize) {
+        let _ = std::fs::write(self.path(name), lines.to_string());
+    }
 }
 
 impl HookCtx {
@@ -859,6 +1004,11 @@ impl HookCtx {
             .or_else(|| std::env::current_dir().ok())?;
         let exe = std::env::current_exe().ok()?;
         let db = find_db(&project_dir);
+        let tmp = std::env::temp_dir();
+        let files = SessionFiles {
+            tmp: tmp.clone(),
+            sid: sid.clone(),
+        };
         Some(Self {
             dialect,
             event,
@@ -866,7 +1016,8 @@ impl HookCtx {
             project_dir,
             exe,
             db,
-            tmp: std::env::temp_dir(),
+            tmp,
+            files,
         })
     }
 
@@ -874,19 +1025,19 @@ impl HookCtx {
         match self.event.kind {
             EventKind::UserPrompt => self.on_user_prompt(),
             EventKind::SessionStart => {
-                // A real session-start event: mark booted so a Claude-style
-                // first-pre-tool emulation never double-boots.
+                // A real session-start event (also after a compaction or
+                // /clear, when the boot is worth re-injecting): mark booted
+                // so the first-pre-tool emulation never double-boots.
                 let _ = std::fs::write(self.sfile("booted"), "");
+                self.start_session();
                 self.boot_push();
                 Ok(())
             }
             EventKind::PreModel => self.on_pre_model(),
             EventKind::PreTool => self.on_pre_tool(),
             EventKind::PostTool => self.on_post_tool(),
-            // SessionEnd can't block, so it skips the narrative guard but
-            // still closes the session (summary, worker, heal, cleanup).
-            EventKind::Stop => self.on_stop(true),
-            EventKind::SessionEnd => self.on_stop(false),
+            EventKind::Stop => self.on_stop(),
+            EventKind::SessionEnd => self.on_session_end(),
         }
     }
 
@@ -945,7 +1096,17 @@ impl HookCtx {
     // ── Session temp files ────────────────────────────────────────────
 
     fn sfile(&self, suffix: &str) -> PathBuf {
-        self.tmp.join(format!("axil-session-{}.{}", self.sid, suffix))
+        self.files.path(suffix)
+    }
+
+    /// Claim a one-shot sentinel. `create_new` is atomic, so of two hooks
+    /// racing for the same first call exactly one gets `true`.
+    fn claim(&self, suffix: &str) -> bool {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(self.sfile(suffix))
+            .is_ok()
     }
 
     /// Previous-session manifest, scoped per project so one repo's edited
@@ -955,23 +1116,6 @@ impl HookCtx {
     fn prev_manifest(&self) -> PathBuf {
         let scope = fnv1a(&self.project_dir.to_string_lossy());
         self.tmp.join(format!("axil-prev-{scope}.manifest"))
-    }
-
-    /// Sweep every per-session temp file, including the one-per-file/query
-    /// sentinel files (`.recalled-<hash>`, `.searched-<hash>`, …).
-    fn cleanup_session_files(&self) {
-        let prefix = format!("axil-session-{}.", self.sid);
-        if let Ok(entries) = std::fs::read_dir(&self.tmp) {
-            for entry in entries.flatten() {
-                if entry
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with(prefix.as_str())
-                {
-                    let _ = std::fs::remove_file(entry.path());
-                }
-            }
-        }
     }
 
     fn log_problem(&self, line: &str) {
@@ -985,25 +1129,17 @@ impl HookCtx {
     }
 
     // ── Heartbeat counters ────────────────────────────────────────────
-    // One JSON file per session: { stores, recalls, tools, errors }.
-    // Races on concurrent hook runs at worst drop a count; never corrupt.
+    // One line per event in `<sid>.events` (`tools`, `recalls`, `stores`,
+    // `errors`). A short append is a single write, so hooks running in
+    // parallel never lose a count, as a read-modify-write file did.
 
     fn bump_count(&self, key: &str) {
-        let path = self.sfile("counts");
-        let mut counts: Value = std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_else(|| json!({}));
-        let next = counts.get(key).and_then(Value::as_i64).unwrap_or(0) + 1;
-        counts[key] = json!(next);
-        let _ = std::fs::write(&path, counts.to_string());
+        append_line(&self.sfile("events"), key);
     }
 
     fn read_count(&self, key: &str) -> i64 {
-        std::fs::read_to_string(self.sfile("counts"))
-            .ok()
-            .and_then(|s| serde_json::from_str::<Value>(&s).ok())
-            .and_then(|v| v.get(key).and_then(Value::as_i64))
+        std::fs::read_to_string(self.sfile("events"))
+            .map(|s| s.lines().filter(|l| *l == key).count() as i64)
             .unwrap_or(0)
     }
 
@@ -1018,12 +1154,22 @@ impl HookCtx {
 
     // ── Child-process helpers (the brain shells out to its own binary) ─
 
-    /// Run an axil subcommand against the resolved DB; Some(stdout) on
-    /// success. Child stderr is discarded — hook noise must not leak.
+    /// The brain's own binary for a lookup, with the slow-query log off:
+    /// logging a slow read is a write, and a hook's reads must not write
+    /// under the harness's kill timeout.
+    fn axil_cmd(&self) -> Command {
+        let mut cmd = Command::new(&self.exe);
+        cmd.env("AXIL_SLOW_QUERY_LOG", "0");
+        cmd
+    }
+
+    /// Run an axil lookup against the resolved DB; Some(stdout) on success.
+    /// Child stderr is discarded — hook noise must not leak. Writes go
+    /// through [`HookCtx::enqueue`] instead.
     fn axil_db_out(&self, args: &[&str]) -> Option<String> {
         let db = self.db.as_ref()?;
         run_capture(
-            Command::new(&self.exe)
+            self.axil_cmd()
                 .arg("--db")
                 .arg(db)
                 .args(args)
@@ -1037,28 +1183,124 @@ impl HookCtx {
     /// hook pipe, so the agent's turn never blocks waiting on it.
     fn spawn_fire_and_forget(&self, args: &[&str]) {
         let Some(db) = self.db.as_ref() else { return };
-        let _ = Command::new(&self.exe)
-            .arg("--db")
+        let mut cmd = Command::new(&self.exe);
+        cmd.arg("--db")
             .arg(db)
             .args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn();
+            .stderr(Stdio::null());
+        own_process_group(&mut cmd);
+        let _ = cmd.spawn();
     }
 
-    /// Same but feeding bytes to the child's stdin (`auto-capture -` etc.).
-    fn axil_db_out_stdin(&self, args: &[&str], stdin_bytes: &[u8]) -> Option<String> {
-        let db = self.db.as_ref()?;
-        run_capture_stdin(
-            Command::new(&self.exe).arg("--db").arg(db).args(args),
-            stdin_bytes,
-        )
+    // ── Write queue ───────────────────────────────────────────────────
+
+    /// Queue a database write and make sure a drainer is running. False
+    /// when there is no database or the job file can't be written.
+    fn enqueue(&self, job: &Job) -> bool {
+        let Some(db) = self.db.as_ref() else {
+            return false;
+        };
+        if !write_job(db, job) {
+            return false;
+        }
+        spawn_drainer(&self.exe, db, &self.project_dir);
+        true
     }
 
-    /// DB-less axil call (e.g. `extract-entities -`).
-    fn axil_out_stdin(&self, args: &[&str], stdin_bytes: &[u8]) -> Option<String> {
-        run_capture_stdin(Command::new(&self.exe).args(args), stdin_bytes)
+    // ── Session lifecycle ─────────────────────────────────────────────
+
+    /// Record which project this session belongs to, and queue the close of
+    /// this project's sessions that went quiet without a session-end event
+    /// (a closed terminal, a crash) so their edits still reach `_sessions`.
+    fn start_session(&self) {
+        let project = self.project_dir.to_string_lossy().into_owned();
+        let _ = std::fs::write(self.sfile("project"), &project);
+        let Ok(entries) = std::fs::read_dir(&self.tmp) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let Some(sid) = name
+                .strip_prefix("axil-session-")
+                .and_then(|rest| rest.strip_suffix(".project"))
+            else {
+                continue;
+            };
+            if sid == self.sid
+                || std::fs::read_to_string(entry.path()).ok().as_deref() != Some(project.as_str())
+            {
+                continue;
+            }
+            let other = SessionFiles {
+                tmp: self.tmp.clone(),
+                sid: sid.to_string(),
+            };
+            if other.idle_secs() >= STALE_SESSION_SECS {
+                self.flush_session(&other);
+                other.cleanup();
+            }
+        }
+    }
+
+    /// Queue the close of everything a session recorded since its last
+    /// flush: the `_sessions` row and its links, then worker, beliefs and
+    /// session-heal, all run by the drainer. The snippet and problem logs
+    /// are consumed; the manifest stays (the edit nudge counts it) with a
+    /// mark past the flushed lines.
+    fn flush_session(&self, files: &SessionFiles) {
+        if self.db.is_none() {
+            return;
+        }
+        let manifest = files.manifest_lines();
+        let new_files: BTreeSet<String> = manifest
+            .iter()
+            .skip(files.mark("flushed"))
+            .cloned()
+            .collect();
+        let problems = std::fs::read_to_string(files.path("problems"))
+            .ok()
+            .filter(|p| !p.trim().is_empty());
+        if new_files.is_empty() && problems.is_none() {
+            return;
+        }
+        let content = std::fs::read_to_string(files.path("content")).unwrap_or_default();
+        let job = Job::CloseSession {
+            session: files.sid.clone(),
+            project_dir: self.project_dir.clone(),
+            files: new_files.into_iter().collect(),
+            content: truncate_utf8(&content, 4000).to_string(),
+            problems,
+            ended_at: now_iso(),
+        };
+        if !self.enqueue(&job) {
+            return;
+        }
+        files.set_mark("flushed", manifest.len());
+        let _ = std::fs::remove_file(files.path("content"));
+        let _ = std::fs::remove_file(files.path("problems"));
+        if !manifest.is_empty() {
+            // The next session's boot seeds `--files` from this.
+            let _ = std::fs::copy(files.path("manifest"), self.prev_manifest());
+        }
+    }
+
+    /// Whether the harness will send a session-end event. Without one
+    /// (Codex, Antigravity, Claude Code projects installed before Axil
+    /// registered it), the session is flushed at every Stop instead.
+    fn has_session_end_event(&self) -> bool {
+        match self.dialect {
+            Dialect::Copilot | Dialect::Droid | Dialect::Gemini => true,
+            Dialect::Codex | Dialect::Antigravity => false,
+            // Only Claude Code itself sends SessionEnd, and it sets
+            // CLAUDE_PROJECT_DIR for its hooks; other harnesses speaking this
+            // dialect (the OpenCode plugin) don't.
+            Dialect::Claude => {
+                std::env::var_os("CLAUDE_PROJECT_DIR").is_some()
+                    && claude_registers_session_end(&self.project_dir)
+            }
+        }
     }
 
     /// Count narrative records stored in the last hour.
@@ -1160,12 +1402,11 @@ impl HookCtx {
     fn on_pre_tool(&self) -> Result<()> {
         self.bump_count("tools");
 
-        // Claude Code has no session-start hook event: the first tool call
-        // of the session carries the boot. Dialects with a real
-        // SessionStart already wrote the sentinel in dispatch().
-        let booted = self.sfile("booted");
-        if !booted.exists() {
-            let _ = std::fs::write(&booted, "");
+        // Installs without a session-start event (older Claude Code
+        // installs, some dialects) boot on the session's first tool call.
+        // A real SessionStart already wrote the sentinel in dispatch().
+        if self.claim("booted") {
+            self.start_session();
             self.boot_push();
             // Fall through: if the session's first tool is a file edit the
             // file-recall context must still be injected below.
@@ -1216,14 +1457,6 @@ impl HookCtx {
             }
         }
 
-        // Banner to stderr: hook stdout is parsed as JSON, and mixing prose
-        // into it corrupts the parse (the old bash hook printed the banner
-        // to stdout — a latent bug).
-        if let Some(banner) = self.axil_db_out(&["brain-banner"]) {
-            if !banner.trim().is_empty() {
-                eprint!("{banner}");
-            }
-        }
         let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
         let boot = self.axil_db_out(&arg_refs);
 
@@ -1419,6 +1652,12 @@ impl HookCtx {
             Some(ToolAction::Todo { completed_count }) => {
                 self.post_todo_store_reminder(*completed_count)
             }
+            Some(ToolAction::TaskCompleted { task_id }) => {
+                if self.claim(&format!("task-{}", fnv1a(task_id))) {
+                    self.emit_context(STORE_REMINDER);
+                }
+                Ok(())
+            }
             _ => Ok(()),
         }
     }
@@ -1483,12 +1722,14 @@ impl HookCtx {
             "_origin": "fallback_capture",
             "_importance": 0.2,
         });
-        if self
-            .axil_db_out(&["store", "context", &payload.to_string()])
-            .is_some()
-        {
+        if self.enqueue(&Job::axil(
+            &["store", "context", &payload.to_string()],
+            None,
+        )) {
             let _ = std::fs::write(&sentinel, "");
-            eprintln!("🧠 Axil captured fallback: '{missed_query}' → {rel}:{line_start}-{line_end}");
+            eprintln!(
+                "🧠 Axil queued fallback capture: '{missed_query}' → {rel}:{line_start}-{line_end}"
+            );
         }
         Ok(())
     }
@@ -1496,6 +1737,15 @@ impl HookCtx {
     /// Track the edit manifest and accumulate content snippets for the
     /// end-of-session entity extraction.
     fn post_edit_log(&self, file_path: &str, snippet: Option<&str>) -> Result<()> {
+        // An edited manifest or lockfile can change dependency versions:
+        // re-ingest the docs of whatever changed (a no-op when nothing did).
+        // Checked before the skip below, which drops lockfiles.
+        if is_dependency_manifest(file_path) {
+            self.enqueue(&Job::axil(
+                &["deps", "refresh", "--if-stale", "--quiet"],
+                None,
+            ));
+        }
         if is_skipped_path(file_path) {
             return Ok(());
         }
@@ -1509,12 +1759,15 @@ impl HookCtx {
     }
 
     fn post_shell(&self, cmd: &str, exit_code: i64, stdout: &str, stderr: &str) -> Result<()> {
+        let subcommands = axil_subcommands(cmd);
+        let runs_any = |set: &[&str]| subcommands.iter().any(|s| set.contains(&s.as_str()));
         if exit_code == 0 && !cmd.is_empty() {
             // Heartbeat: the agent just interacted with its own brain.
-            if contains_any(cmd, &["axil store ", "axil observe ", "axil believe "]) {
+            if runs_any(STORE_SUBCOMMANDS) {
                 self.bump_count("stores");
                 eprintln!("🧠 Axil stored (session: {})", self.counts_compact());
-            } else if contains_any(cmd, &["axil recall", "axil boot", "axil recall-for-"]) {
+            }
+            if runs_any(RECALL_SUBCOMMANDS) {
                 self.bump_count("recalls");
             }
 
@@ -1530,14 +1783,14 @@ impl HookCtx {
             self.bump_count("errors");
             if !stdout.is_empty() {
                 // High confidence threshold to avoid noise.
-                let _ = self.axil_db_out_stdin(
+                self.enqueue(&Job::axil(
                     &["auto-capture", "-", "--min-confidence", "0.8", "--source", "bash"],
-                    truncate_utf8(stdout, 2000).as_bytes(),
-                );
+                    Some(truncate_utf8(stdout, 2000)),
+                ));
             }
             // Generic build/test failures already flow through auto-capture;
             // only axil-specific failures feed session-heal.
-            if cmd.contains("axil ") {
+            if !subcommands.is_empty() {
                 let event = json!({
                     "kind": "command_failure",
                     "subcommand": extract_axil_subcmd(cmd),
@@ -1548,16 +1801,13 @@ impl HookCtx {
                 });
                 self.log_problem(&event.to_string());
             }
-        } else if contains_any(
-            cmd,
-            &[
-                "axil recall ",
-                "axil code-search ",
-                "axil fts ",
-                "axil recall-for-file ",
-                "axil recall-for-entity ",
-            ],
-        ) {
+        } else if runs_any(&[
+            "recall",
+            "code-search",
+            "fts",
+            "recall-for-file",
+            "recall-for-entity",
+        ]) {
             // axil read commands return 0 with empty output when nothing
             // matched; a session full of these tells session-heal the index
             // is stale or memory is sparse for the topics being asked.
@@ -1627,20 +1877,20 @@ impl HookCtx {
             "committed_at": committed_at,
             "files": files,
         });
-        if self
-            .axil_db_out(&["store", "commits", &payload.to_string()])
-            .is_some()
-        {
+        if self.enqueue(&Job::axil(
+            &["store", "commits", &payload.to_string()],
+            None,
+        )) {
             self.bump_count("stores");
             let sha7: String = sha.chars().take(7).collect();
-            eprintln!("🧠 Axil captured commit {sha7}: {subject}");
+            eprintln!("🧠 Axil queued commit {sha7}: {subject}");
         }
     }
 
     /// When a todo flips to completed, inject the store reminder BEFORE the
-    /// agent moves on. (The old bash hook matched a `TaskUpdate` tool that
-    /// stock Claude Code never emits — the real todo tool is `TodoWrite`
-    /// with a `todos[]` payload, so it never fired.)
+    /// agent moves on. Dialects with a whole-list todo tool (`TodoWrite`
+    /// and kin) report a completed count; Claude Code's task tools report
+    /// one `TaskUpdate` per task instead (see `TaskCompleted`).
     fn post_todo_store_reminder(&self, completed: i64) -> Result<()> {
         let sentinel = self.sfile("todos");
         let last: i64 = std::fs::read_to_string(&sentinel)
@@ -1650,109 +1900,54 @@ impl HookCtx {
         let _ = std::fs::write(&sentinel, completed.to_string());
 
         if completed > last {
-            self.emit_context(
-                "You just marked a task completed. BEFORE doing anything else, run axil store with a summary of what you did and why. This is mandatory for every completed task.",
-            );
+            self.emit_context(STORE_REMINDER);
         }
         Ok(())
     }
 
-    // ── Stop: narrative guard, then session close ─────────────────────
+    // ── Stop and session end ──────────────────────────────────────────
 
-    fn on_stop(&self, can_block: bool) -> Result<()> {
-        let manifest_path = self.sfile("manifest");
-        if !manifest_path.exists() {
-            // Read-only session: still replay accumulated misses/failures so
-            // recall-only sessions drive auto-fix and _heal_log entries.
-            if self.sfile("problems").exists() && self.db.is_some() {
-                self.run_session_heal_with_autofix();
-            }
-            self.cleanup_session_files();
-            return Ok(());
-        }
-        if self.db.is_none() {
-            self.cleanup_session_files();
-            return Ok(());
-        }
-
-        let manifest = std::fs::read_to_string(&manifest_path).unwrap_or_default();
-        let files: Vec<&str> = manifest
-            .lines()
-            .filter(|l| !l.is_empty())
-            .collect::<BTreeSet<_>>()
-            .into_iter()
+    /// Stop fires at the end of every turn, so it only guards: when this
+    /// turn edited several files and nothing narrative was stored, block
+    /// the stop and ask for a store. Session state carries over to the next
+    /// turn. Without a session-end event, the session is flushed here too.
+    fn on_stop(&self) -> Result<()> {
+        let manifest = self.files.manifest_lines();
+        let turn: BTreeSet<&str> = manifest
+            .iter()
+            .skip(self.files.mark("turn"))
+            .map(String::as_str)
             .collect();
-        let file_count = files.len();
-        let files_json = serde_json::to_string(&files).unwrap_or_else(|_| "[]".into());
+        let file_count = turn.len();
 
-        // Guard: block the stop when substantive work (>2 distinct files)
-        // happened with no narrative row and no fresh commit. The JSON
-        // {"decision":"block"} on stdout is the only channel the harness
-        // re-injects into the model — stderr is invisible to it.
-        if can_block
-            && !self.event.stop_hook_active
+        // The JSON {"decision":"block"} on stdout is the only channel the
+        // harness re-injects into the model — stderr is invisible to it.
+        if !self.event.stop_hook_active
             && file_count > 2
+            && self.db.is_some()
             && self.count_recent_narrative() == 0
             && !self.has_recent_git_commit()
         {
+            let files_json = serde_json::to_string(&turn).unwrap_or_else(|_| "[]".into());
             let reason = format!(
                 "Axil brain: {file_count} files were edited this turn but no {NARRATIVE_TABLES_TEXT} row was stored in the last hour (and no git commit). Before stopping, either: (a) commit the work — the commit message is captured as narrative — or (b) run: axil checkpoint '{{\"state\":\"<where things stand>\",\"next_steps\":[\"<remaining work>\"],\"references\":[{{\"kind\":\"file\",\"ref\":\"<path>\"}}]}}' (files touched this turn: {files_json}). After storing, you may stop."
             );
             self.emit_stop_block(&reason);
-            // Return WITHOUT closing or cleaning up: the session is still
-            // live. Running the close here would write a premature _sessions
-            // record + worker/beliefs, and deleting the temp files (booted,
-            // counts, manifest) would make the next tool call spuriously
-            // re-boot mid-session. When the agent stores and stops again,
-            // that Stop passes the guard (narrative present or
-            // stop_hook_active) and does the real close + cleanup. If a
-            // stale async config ignores the block, the small per-session
-            // temp-file set is orphaned until the OS clears the temp dir —
-            // an acceptable trade for not corrupting a live session.
+            // Keep the turn mark: the retried stop must see the same files.
             return Ok(());
         }
+        self.files.set_mark("turn", manifest.len());
 
-        // Entity extraction from accumulated edit snippets.
-        let entities: Value = std::fs::read_to_string(self.sfile("content"))
-            .ok()
-            .filter(|c| !c.is_empty())
-            .and_then(|c| {
-                self.axil_out_stdin(&["extract-entities", "-"], truncate_utf8(&c, 4000).as_bytes())
-            })
-            .and_then(|out| serde_json::from_str(out.trim()).ok())
-            .unwrap_or_else(|| json!([]));
-        let entity_count = entities.as_array().map(|a| a.len()).unwrap_or(0);
-
-        let session_record = json!({
-            "session": self.sid,
-            "files_changed": files,
-            "file_count": file_count,
-            "entities": entities,
-            "entity_count": entity_count,
-            "ended_at": now_iso(),
-        });
-        let store_result = self
-            .axil_db_out(&["store", "_sessions", &session_record.to_string()])
-            .unwrap_or_default();
-        if let Some(id) = serde_json::from_str::<Value>(store_result.trim())
-            .ok()
-            .and_then(|v| v.get("id").and_then(Value::as_str).map(str::to_string))
-        {
-            let _ = self.axil_db_out(&["auto-link", &id]);
+        if !self.has_session_end_event() {
+            self.flush_session(&self.files);
         }
+        Ok(())
+    }
 
-        // Consolidation, connections, inference, decay — then beliefs.
-        let _ = self.axil_db_out(&["worker", "run"]);
-        let _ = self.axil_db_out(&["beliefs", "--generate"]);
-
-        // session-heal always inspects detect_problems() even without an
-        // explicit problems file, so every session gets a heal pass.
-        self.run_session_heal_with_autofix();
-
-        // Save the manifest for the next session's context-aware boot
-        // (cleanup below would remove it).
-        let _ = std::fs::copy(&manifest_path, self.prev_manifest());
-
+    /// The session is over: queue its close and remove its temp files. The
+    /// harness gives this event very little time, so it only writes a job.
+    fn on_session_end(&self) -> Result<()> {
+        self.flush_session(&self.files);
         let (stores, recalls) = (self.read_count("stores"), self.read_count("recalls"));
         if stores != 0 || recalls != 0 {
             eprintln!(
@@ -1761,74 +1956,407 @@ impl HookCtx {
                 self.read_count("errors")
             );
         }
-
-        self.cleanup_session_files();
+        self.files.cleanup();
         Ok(())
     }
+}
 
-    /// Run session-heal and act on its hints. The one user-visible auto-fix
-    /// today: `stale_structural_index` spawns a detached `axil index` so the
-    /// next session's queries hit a fresh index. The lock file throttles
-    /// back-to-back stops within the 5-minute stale window.
-    fn run_session_heal_with_autofix(&self) {
-        let problems = self.sfile("problems");
-        let mut args: Vec<&str> = vec!["session-heal", "--session", &self.sid];
-        let problems_str;
-        if problems.exists() {
-            problems_str = problems.to_string_lossy().into_owned();
-            args.push("--problems-file");
-            args.push(&problems_str);
-        }
-        let Some(out) = self.axil_db_out(&args) else {
-            return;
-        };
-        let Ok(report) = serde_json::from_str::<Value>(out.trim()) else {
-            return;
-        };
-        let stale = report
-            .get("hints")
-            .and_then(Value::as_array)
-            .map(|hints| {
-                hints.iter().any(|h| {
-                    h.get("kind").and_then(Value::as_str) == Some("stale_structural_index")
-                })
-            })
-            .unwrap_or(false);
-        if !stale {
-            return;
-        }
+const STORE_REMINDER: &str = "You just marked a task completed. BEFORE doing anything else, run axil store with a summary of what you did and why. This is mandatory for every completed task.";
 
-        let axil_dir = self.project_dir.join(".axil");
-        let lock = axil_dir.join("index-refresh.lock");
-        let log = axil_dir.join("index-refresh.log");
-        if let Ok(meta) = std::fs::metadata(&lock) {
-            let age = meta
-                .modified()
-                .ok()
-                .and_then(|m| m.elapsed().ok())
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-            if age < 300 {
-                return;
+/// True when this project's Claude Code settings route SessionEnd to the
+/// brain, which `axil install` does from this version on.
+fn claude_registers_session_end(project_dir: &Path) -> bool {
+    ["settings.json", "settings.local.json"].iter().any(|name| {
+        std::fs::read_to_string(project_dir.join(".claude").join(name))
+            .ok()
+            .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+            .and_then(|v| v.pointer("/hooks/SessionEnd").map(Value::to_string))
+            .is_some_and(|hooks| hooks.contains(" hook run"))
+    })
+}
+
+// ── Write queue and drainer ──────────────────────────────────────────
+
+/// How long the drainer waits, in total, for another process to release the
+/// writer lock before giving a job up.
+const BUSY_WAIT_MAX: Duration = Duration::from_secs(120);
+
+/// A drain lock untouched this long belonged to a drainer that died.
+const DRAIN_LOCK_STALE_SECS: u64 = 30 * 60;
+
+/// Bound on `drain.log`; past it the log starts over.
+const DRAIN_LOG_MAX_BYTES: u64 = 1_048_576;
+
+/// A database write a hook asked for, run later by `axil hook drain`.
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "op", rename_all = "snake_case")]
+enum Job {
+    /// One axil command, such as `store commits '{…}'`.
+    Axil {
+        args: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stdin: Option<String>,
+    },
+    /// A session's close: the `_sessions` row and its links, then worker,
+    /// beliefs and session-heal.
+    CloseSession {
+        session: String,
+        project_dir: PathBuf,
+        files: Vec<String>,
+        content: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        problems: Option<String>,
+        ended_at: String,
+    },
+}
+
+impl Job {
+    fn axil(args: &[&str], stdin: Option<&str>) -> Self {
+        Self::Axil {
+            args: args.iter().map(|a| a.to_string()).collect(),
+            stdin: stdin.map(str::to_string),
+        }
+    }
+}
+
+/// Hook jobs wait next to the database they change: `<db dir>/hook-queue/`.
+fn queue_dir(db: &Path) -> PathBuf {
+    db.parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("hook-queue")
+}
+
+/// Write `job` to the queue atomically (temp file, then rename), so the
+/// drainer never reads half a job. Names sort by creation time, which is the
+/// order jobs run in.
+fn write_job(db: &Path, job: &Job) -> bool {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static SEQ: AtomicU32 = AtomicU32::new(0);
+    let dir = queue_dir(db);
+    let Ok(body) = serde_json::to_vec(job) else {
+        return false;
+    };
+    if std::fs::create_dir_all(&dir).is_err() {
+        return false;
+    }
+    let name = format!(
+        "{}-{}-{}",
+        chrono::Utc::now().format("%Y%m%dT%H%M%S%.9fZ"),
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    );
+    let tmp = dir.join(format!("{name}.tmp"));
+    std::fs::write(&tmp, body).is_ok()
+        && std::fs::rename(&tmp, dir.join(format!("{name}.job"))).is_ok()
+}
+
+fn spawn_drainer(exe: &Path, db: &Path, cwd: &Path) {
+    let args = [
+        "--db".to_string(),
+        db.to_string_lossy().into_owned(),
+        "hook".into(),
+        "drain".into(),
+    ];
+    spawn_detached(exe, &args, cwd, &queue_dir(db).join("drain.log"));
+}
+
+/// `axil hook drain`: run the queued hook writes in order, one drainer at a
+/// time. Every enqueue starts one detached; a drainer that finds the lock
+/// held exits at once, since the running one will reach the new job.
+pub(crate) fn drain(db: &Path) -> Result<i32> {
+    let exe = std::env::current_exe()?;
+    let dir = queue_dir(db);
+    loop {
+        let Some(lock) = DrainLock::acquire(&dir) else {
+            return Ok(0);
+        };
+        set_aside_interrupted(&dir);
+        while let Some(job) = next_job(&dir) {
+            lock.touch();
+            run_job_file(&exe, db, &dir, &job);
+        }
+        drop(lock);
+        // A job queued after the last scan but before the lock dropped saw a
+        // live drainer and left it to us: look once more.
+        if next_job(&dir).is_none() {
+            return Ok(0);
+        }
+    }
+}
+
+/// `hook-queue/drain.lock`, created exclusively and refreshed per job.
+struct DrainLock(PathBuf);
+
+impl DrainLock {
+    fn acquire(dir: &Path) -> Option<Self> {
+        let path = dir.join("drain.lock");
+        for _ in 0..2 {
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(_) => {
+                    let lock = Self(path);
+                    lock.touch();
+                    return Some(lock);
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    let stale = std::fs::metadata(&path)
+                        .and_then(|m| m.modified())
+                        .ok()
+                        .and_then(|t| t.elapsed().ok())
+                        .is_some_and(|age| age.as_secs() > DRAIN_LOCK_STALE_SECS);
+                    if !stale {
+                        return None;
+                    }
+                    let _ = std::fs::remove_file(&path);
+                }
+                Err(_) => return None,
             }
         }
-        let _ = std::fs::create_dir_all(&axil_dir);
-        let _ = std::fs::write(&lock, chrono::Utc::now().timestamp().to_string());
+        None
+    }
 
-        let Some(db) = self.db.as_ref() else { return };
-        let args: Vec<String> = vec![
-            "--db".into(),
-            db.to_string_lossy().into_owned(),
-            "index".into(),
-            self.project_dir.to_string_lossy().into_owned(),
-        ];
-        if spawn_detached(&self.exe, &args, &self.project_dir, &log) {
-            eprintln!(
-                "🧠 Axil session-heal: stale structural index → spawned 'axil index' in background (log: .axil/index-refresh.log)"
+    fn touch(&self) {
+        let _ = std::fs::write(&self.0, std::process::id().to_string());
+    }
+}
+
+impl Drop for DrainLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+fn queue_files(dir: &Path, ext: &str) -> Vec<PathBuf> {
+    let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.extension().is_some_and(|x| x == ext))
+                .collect()
+        })
+        .unwrap_or_default();
+    files.sort();
+    files
+}
+
+fn next_job(dir: &Path) -> Option<PathBuf> {
+    queue_files(dir, "job").into_iter().next()
+}
+
+/// With the lock held, a `.running` job belonged to a drainer that died
+/// mid-job, so some of its writes may have landed. It is never retried
+/// (that could write twice): it moves to `interrupted/` for a person to
+/// look at.
+fn set_aside_interrupted(dir: &Path) {
+    for path in queue_files(dir, "running") {
+        let dest = dir.join("interrupted");
+        let _ = std::fs::create_dir_all(&dest);
+        if let Some(name) = path.file_name() {
+            let _ = std::fs::rename(&path, dest.join(name));
+            drain_log(
+                dir,
+                &format!(
+                    "set aside interrupted job {}, not retried",
+                    name.to_string_lossy()
+                ),
             );
-        } else {
-            let _ = std::fs::remove_file(&lock);
         }
+    }
+}
+
+fn drain_log(dir: &Path, line: &str) {
+    let path = dir.join("drain.log");
+    if std::fs::metadata(&path).is_ok_and(|m| m.len() > DRAIN_LOG_MAX_BYTES) {
+        let _ = std::fs::remove_file(&path);
+    }
+    append_line(&path, &format!("{} {line}", now_iso()));
+}
+
+/// Claim a job (rename to `.running`, the in-flight mark), run it, and
+/// remove it. A failed job is logged and dropped, not retried.
+fn run_job_file(exe: &Path, db: &Path, dir: &Path, job_path: &Path) {
+    let running = job_path.with_extension("running");
+    if std::fs::rename(job_path, &running).is_err() {
+        return;
+    }
+    let name = running
+        .file_stem()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let result = std::fs::read(&running)
+        .ok()
+        .and_then(|body| serde_json::from_slice::<Job>(&body).ok())
+        .ok_or_else(|| "unreadable job file".to_string())
+        .and_then(|job| run_job(exe, db, &job));
+    if let Err(e) = result {
+        drain_log(dir, &format!("job {name} failed: {e}"));
+    }
+    let _ = std::fs::remove_file(&running);
+}
+
+fn run_job(exe: &Path, db: &Path, job: &Job) -> std::result::Result<(), String> {
+    match job {
+        Job::Axil { args, stdin } => run_write(exe, db, args, stdin.as_deref()).map(drop),
+        Job::CloseSession {
+            session,
+            project_dir,
+            files,
+            content,
+            problems,
+            ended_at,
+        } => {
+            if !files.is_empty() {
+                let entities: Value = Some(content.as_str())
+                    .filter(|c| !c.is_empty())
+                    .and_then(|c| {
+                        run_capture_stdin(
+                            Command::new(exe).args(["extract-entities", "-"]),
+                            c.as_bytes(),
+                        )
+                    })
+                    .and_then(|out| serde_json::from_str(out.trim()).ok())
+                    .unwrap_or_else(|| json!([]));
+                let entity_count = entities.as_array().map_or(0, Vec::len);
+                let record = json!({
+                    "session": session,
+                    "files_changed": files,
+                    "file_count": files.len(),
+                    "entities": entities,
+                    "entity_count": entity_count,
+                    "ended_at": ended_at,
+                });
+                let stored = run_write(
+                    exe,
+                    db,
+                    &["store".into(), "_sessions".into(), record.to_string()],
+                    None,
+                )?;
+                if let Some(id) = serde_json::from_str::<Value>(stored.trim())
+                    .ok()
+                    .and_then(|v| v.get("id").and_then(Value::as_str).map(str::to_string))
+                {
+                    let _ = run_write(exe, db, &["auto-link".into(), id], None);
+                }
+                // Consolidation, connections, inference, decay — then beliefs.
+                let _ = run_write(exe, db, &["worker".into(), "run".into()], None);
+                let _ = run_write(exe, db, &["beliefs".into(), "--generate".into()], None);
+            }
+            session_heal(exe, db, session, project_dir, problems.as_deref());
+            Ok(())
+        }
+    }
+}
+
+/// Run one axil command against `db`, waiting while another process holds
+/// the writer lock. Retrying a busy open is safe: it fails before anything
+/// is written.
+fn run_write(
+    exe: &Path,
+    db: &Path,
+    args: &[String],
+    stdin: Option<&str>,
+) -> std::result::Result<String, String> {
+    use std::io::Write as _;
+    let mut delay = Duration::from_millis(250);
+    let mut waited = Duration::ZERO;
+    loop {
+        let child = Command::new(exe)
+            .arg("--db")
+            .arg(db)
+            .args(args)
+            .stdin(if stdin.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn();
+        let mut child = child.map_err(|e| e.to_string())?;
+        if let (Some(text), Some(mut pipe)) = (stdin, child.stdin.take()) {
+            let _ = pipe.write_all(text.as_bytes());
+        }
+        let out = child.wait_with_output().map_err(|e| e.to_string())?;
+        if out.status.success() {
+            return Ok(String::from_utf8_lossy(&out.stdout).into_owned());
+        }
+        let err = String::from_utf8_lossy(&out.stderr);
+        if err.contains("database busy") && waited < BUSY_WAIT_MAX {
+            std::thread::sleep(delay);
+            waited += delay;
+            delay = (delay * 2).min(Duration::from_secs(8));
+            continue;
+        }
+        let command = args.first().map(String::as_str).unwrap_or("");
+        let reason = err
+            .lines()
+            .rfind(|l| !l.trim().is_empty())
+            .unwrap_or("")
+            .trim();
+        return Err(format!("`axil {command}` failed: {reason}"));
+    }
+}
+
+/// Run session-heal and act on its hints. The one auto-fix today:
+/// `stale_structural_index` spawns a detached `axil index` so the next
+/// session's queries hit a fresh index. The lock file throttles repeats
+/// within the 5-minute stale window.
+fn session_heal(exe: &Path, db: &Path, session: &str, project_dir: &Path, problems: Option<&str>) {
+    let mut args: Vec<String> = vec!["session-heal".into(), "--session".into(), session.into()];
+    let problems_file = problems.map(|text| {
+        let path = queue_dir(db).join(format!("{}.problems", sanitize_id(session)));
+        let _ = std::fs::write(&path, text);
+        path
+    });
+    if let Some(path) = &problems_file {
+        args.push("--problems-file".into());
+        args.push(path.to_string_lossy().into_owned());
+    }
+    let out = run_write(exe, db, &args, None);
+    if let Some(path) = &problems_file {
+        let _ = std::fs::remove_file(path);
+    }
+    let Ok(out) = out else { return };
+    let Ok(report) = serde_json::from_str::<Value>(out.trim()) else {
+        return;
+    };
+    let stale = report
+        .get("hints")
+        .and_then(Value::as_array)
+        .is_some_and(|hints| {
+            hints
+                .iter()
+                .any(|h| h.get("kind").and_then(Value::as_str) == Some("stale_structural_index"))
+        });
+    if !stale {
+        return;
+    }
+
+    let axil_dir = project_dir.join(".axil");
+    let lock = axil_dir.join("index-refresh.lock");
+    let log = axil_dir.join("index-refresh.log");
+    let recent = std::fs::metadata(&lock)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|m| m.elapsed().ok())
+        .is_some_and(|age| age.as_secs() < 300);
+    if recent {
+        return;
+    }
+    let _ = std::fs::create_dir_all(&axil_dir);
+    let _ = std::fs::write(&lock, chrono::Utc::now().timestamp().to_string());
+    let args = [
+        "--db".to_string(),
+        db.to_string_lossy().into_owned(),
+        "index".into(),
+        project_dir.to_string_lossy().into_owned(),
+    ];
+    if !spawn_detached(exe, &args, project_dir, &log) {
+        let _ = std::fs::remove_file(&lock);
     }
 }
 
@@ -1959,48 +2487,280 @@ fn is_skipped_path(path: &str) -> bool {
         || p.contains("/.git/")
 }
 
-/// Detect broad repo-search commands and best-effort extract their query.
-/// Returns (is_repo_search, query). `ls`/`tree` count as repo search but
-/// never carry a query; for the others the query is the first quoted arg,
-/// falling back to the first non-flag token after the search word.
+/// Detect a broad repo search and extract what it is looking for.
+/// Returns (is_repo_search, query).
+///
+/// Only a command in its own right counts: the first command of a pipeline,
+/// or one joined by `&&`, `||`, `;` or `&`. A `grep` that filters another
+/// command's output is not repo discovery, and heredoc bodies are ignored.
+/// The query is the search tool's own pattern argument, never whatever
+/// string happens to be quoted first in the command. `ls` and `tree` count
+/// as discovery but carry no query.
 fn detect_repo_search(cmd: &str) -> (bool, String) {
-    let tokens: Vec<&str> = cmd.split_whitespace().collect();
-    let mut search_tool = None;
-    for (i, tok) in tokens.iter().enumerate() {
-        match *tok {
-            "git" if tokens.get(i + 1) == Some(&"grep") => {
-                search_tool = Some((i + 1, "grep"));
-                break;
+    let mut discovery = false;
+    for words in primary_commands(&strip_heredoc_bodies(cmd)) {
+        let words = skip_wrappers(&words);
+        let Some(first) = words.first() else {
+            continue;
+        };
+        let tool = first.rsplit('/').next().unwrap_or(first);
+        let args = &words[1..];
+        let query = match tool {
+            "git" if args.first().map(String::as_str) == Some("grep") => {
+                grep_pattern(&args[1..], GREP_VALUE_FLAGS)
             }
-            "rg" | "grep" | "fd" | "find" => {
-                search_tool = Some((i, *tok));
-                break;
+            "grep" | "egrep" | "fgrep" => grep_pattern(args, GREP_VALUE_FLAGS),
+            "rg" => grep_pattern(args, RG_VALUE_FLAGS),
+            "fd" | "fdfind" => args.iter().find(|a| !a.starts_with('-')).cloned(),
+            "find" => find_name(args),
+            "ls" | "tree" => {
+                discovery = true;
+                continue;
             }
-            // Directory listings count as repo discovery but carry no query.
-            "ls" | "tree" => return (true, String::new()),
-            _ => {}
-        }
+            _ => continue,
+        };
+        let query = query.map(|p| pattern_to_query(&p)).unwrap_or_default();
+        return (true, query);
     }
-    let Some((tool_idx, _)) = search_tool else {
-        return (false, String::new());
-    };
+    (discovery, String::new())
+}
 
-    // Quoted args win — they're unambiguous.
-    if let Some(q) = first_quoted_arg(cmd) {
-        return (true, q);
-    }
-    // Otherwise: first non-flag token after the tool, minus shell operators.
-    for tok in tokens.iter().skip(tool_idx + 1) {
-        if tok.starts_with('-') || *tok == "." || *tok == "./" {
+/// Options that take a separate value argument, per search tool. A value
+/// is never the pattern (`grep -A 3 foo` searches for `foo`).
+const GREP_VALUE_FLAGS: &[&str] = &[
+    "-e",
+    "-f",
+    "-m",
+    "-A",
+    "-B",
+    "-C",
+    "-d",
+    "-D",
+    "--regexp",
+    "--file",
+    "--max-count",
+    "--context",
+    "--after-context",
+    "--before-context",
+    "--include",
+    "--exclude",
+    "--exclude-dir",
+    "--label",
+];
+const RG_VALUE_FLAGS: &[&str] = &[
+    "-e",
+    "-f",
+    "-g",
+    "-t",
+    "-T",
+    "-A",
+    "-B",
+    "-C",
+    "-m",
+    "-M",
+    "-j",
+    "-r",
+    "-E",
+    "-d",
+    "--regexp",
+    "--file",
+    "--glob",
+    "--iglob",
+    "--type",
+    "--type-not",
+    "--type-add",
+    "--max-count",
+    "--max-columns",
+    "--threads",
+    "--replace",
+    "--encoding",
+    "--sort",
+    "--sortr",
+    "--colors",
+    "--context",
+    "--after-context",
+    "--before-context",
+    "--max-depth",
+];
+
+/// The pattern of a grep-like command: an explicit `-e`/`--regexp`, or else
+/// the first argument that is neither an option nor an option's value.
+fn grep_pattern(args: &[String], value_flags: &[&str]) -> Option<String> {
+    let mut iter = args.iter();
+    let mut first_positional = None;
+    while let Some(arg) = iter.next() {
+        if arg == "--" {
+            return first_positional.or_else(|| iter.next().cloned());
+        }
+        if arg == "-e" || arg == "--regexp" {
+            return iter.next().cloned();
+        }
+        if let Some(p) = arg.strip_prefix("--regexp=") {
+            return Some(p.to_string());
+        }
+        if arg.starts_with('-') && arg.len() > 1 {
+            if value_flags.contains(&arg.as_str()) {
+                iter.next();
+            }
             continue;
         }
-        let clean = tok
-            .split(|c| matches!(c, ';' | '&' | '|'))
-            .next()
-            .unwrap_or("");
-        return (true, clean.to_string());
+        first_positional.get_or_insert_with(|| arg.clone());
     }
-    (true, String::new())
+    first_positional
+}
+
+/// `find -name <glob>` (or `-iname`/`-path`), when the glob names something
+/// more specific than a file extension.
+fn find_name(args: &[String]) -> Option<String> {
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        if matches!(arg.as_str(), "-name" | "-iname" | "-path" | "-ipath") {
+            let name = iter.next()?.replace(['*', '?'], " ");
+            let name = name.trim();
+            return (!name.is_empty() && !name.starts_with('.')).then(|| name.to_string());
+        }
+    }
+    None
+}
+
+/// Turn a search pattern into search words: alternatives (`a\|b`, `a|b`)
+/// become separate words, regex syntax becomes spaces, and at most three
+/// alternatives are kept.
+fn pattern_to_query(pattern: &str) -> String {
+    let alternatives = pattern.split("\\|").flat_map(|a| a.split('|'));
+    let words: Vec<String> = alternatives
+        .map(|alt| {
+            let mut out = String::new();
+            let mut chars = alt.chars().peekable();
+            while let Some(c) = chars.next() {
+                match c {
+                    // An escape: `\b`, `\w`, `\(` and friends are regex syntax,
+                    // but an escaped `.`, `_`, `-`, `/` or `:` is part of a name.
+                    '\\' => match chars.next() {
+                        Some(e @ ('.' | '_' | '-' | '/' | ':')) => out.push(e),
+                        Some(_) => out.push(' '),
+                        None => {}
+                    },
+                    '^' | '$' | '*' | '+' | '?' | '(' | ')' | '[' | ']' | '{' | '}' => {
+                        out.push(' ')
+                    }
+                    '.' if matches!(chars.peek(), Some('*' | '+' | '?')) => out.push(' '),
+                    _ => out.push(c),
+                }
+            }
+            out.split_whitespace().collect::<Vec<_>>().join(" ")
+        })
+        .filter(|w| !w.is_empty())
+        .take(3)
+        .collect();
+    words.join(" ")
+}
+
+/// Cut heredoc bodies: everything after the line holding the `<<` belongs
+/// to that command's stdin, not to the shell command line.
+fn strip_heredoc_bodies(cmd: &str) -> String {
+    match cmd.find("<<") {
+        Some(at) => match cmd[at..].find('\n') {
+            Some(nl) => cmd[..at + nl].to_string(),
+            None => cmd.to_string(),
+        },
+        None => cmd.to_string(),
+    }
+}
+
+/// Split a command line into its commands, as word lists, keeping only the
+/// ones that are not the receiving end of a pipe. Quotes and backslash
+/// escapes are honoured; `(`/`)` also separate commands (subshells).
+fn primary_commands(cmd: &str) -> Vec<Vec<String>> {
+    let mut commands = Vec::new();
+    let mut words: Vec<String> = Vec::new();
+    let mut word = String::new();
+    let mut in_word = false;
+    let mut piped = false;
+    let mut quote: Option<char> = None;
+    let mut chars = cmd.chars().peekable();
+
+    let mut end_command = |words: &mut Vec<String>, piped: bool| {
+        if !piped && !words.is_empty() {
+            commands.push(std::mem::take(words));
+        }
+        words.clear();
+    };
+
+    while let Some(c) = chars.next() {
+        if let Some(q) = quote {
+            match c {
+                c if c == q => quote = None,
+                // In double quotes a backslash escapes only these; before
+                // anything else it is kept, as the shell keeps it.
+                '\\' if q == '"' => match chars.peek() {
+                    Some('$' | '`' | '"' | '\\' | '\n') => word.push(chars.next().unwrap_or('\\')),
+                    _ => word.push('\\'),
+                },
+                _ => word.push(c),
+            }
+            continue;
+        }
+        match c {
+            '\'' | '"' => {
+                quote = Some(c);
+                in_word = true;
+            }
+            '\\' => {
+                if let Some(n) = chars.next() {
+                    word.push(n);
+                    in_word = true;
+                }
+            }
+            c if c.is_whitespace() && c != '\n' => {
+                if in_word {
+                    words.push(std::mem::take(&mut word));
+                    in_word = false;
+                }
+            }
+            '|' | '&' | ';' | '\n' | '(' | ')' => {
+                if in_word {
+                    words.push(std::mem::take(&mut word));
+                    in_word = false;
+                }
+                // `||` and `&&` are one operator; a lone `|` pipes into the
+                // next command, which then isn't primary.
+                let doubled = matches!(c, '|' | '&') && chars.peek() == Some(&c);
+                if doubled {
+                    chars.next();
+                }
+                end_command(&mut words, piped);
+                piped = c == '|' && !doubled;
+            }
+            _ => {
+                word.push(c);
+                in_word = true;
+            }
+        }
+    }
+    if in_word {
+        words.push(word);
+    }
+    end_command(&mut words, piped);
+    commands
+}
+
+/// Drop `VAR=value` prefixes and command wrappers (`rtk proxy`, `time`,
+/// `sudo`, …) so the real command comes first.
+fn skip_wrappers(words: &[String]) -> Vec<String> {
+    let mut rest = words;
+    loop {
+        match rest.first().map(String::as_str) {
+            Some(w) if w.contains('=') && !w.starts_with('-') && !w.starts_with('=') => {
+                rest = &rest[1..];
+            }
+            Some("rtk") if rest.get(1).map(String::as_str) == Some("proxy") => rest = &rest[2..],
+            Some("rtk" | "command" | "time" | "sudo" | "nice" | "nohup" | "env") => {
+                rest = &rest[1..];
+            }
+            _ => return rest.to_vec(),
+        }
+    }
 }
 
 /// First double-quoted arg, then first single-quoted arg.
@@ -2046,26 +2806,84 @@ fn is_empty_axil_output(out: &str) -> bool {
         || t.starts_with("(no matches)")
 }
 
-/// Best-effort axil-subcommand extractor: the token after `axil` (or a
-/// path ending in axil) that isn't a flag.
-fn extract_axil_subcmd(cmd: &str) -> String {
-    let tokens: Vec<&str> = cmd.split_whitespace().collect();
-    for (i, tok) in tokens.iter().enumerate() {
-        let base = tok.rsplit(['/', '\\']).next().unwrap_or(tok);
-        if base == "axil" || base == "axil.exe" {
-            for next in tokens.iter().skip(i + 1) {
-                if !next.starts_with('-') {
-                    return next.to_string();
+/// The axil subcommands a command line runs, in order: for each `axil`
+/// word (or a path ending in it), the first word after it that is neither
+/// an option nor a global option's value (`axil --db x store` is `store`).
+fn axil_subcommands(cmd: &str) -> Vec<String> {
+    const VALUE_OPTIONS: &[&str] = &["--db", "--format", "--agent"];
+    let mut found = Vec::new();
+    for words in primary_commands(&strip_heredoc_bodies(cmd)) {
+        let words = skip_wrappers(&words);
+        let mut iter = words.iter();
+        while let Some(word) = iter.next() {
+            let base = word.rsplit(['/', '\\']).next().unwrap_or(word);
+            if base != "axil" && base != "axil.exe" {
+                continue;
+            }
+            while let Some(next) = iter.next() {
+                if VALUE_OPTIONS.contains(&next.as_str()) {
+                    iter.next();
+                } else if !next.starts_with('-') {
+                    found.push(next.clone());
+                    break;
                 }
             }
         }
     }
-    String::new()
+    found
 }
 
-fn contains_any(haystack: &str, needles: &[&str]) -> bool {
-    needles.iter().any(|n| haystack.contains(n))
+/// Manifests and lockfiles `axil deps` reads, across its five ecosystems.
+fn is_dependency_manifest(path: &str) -> bool {
+    const NAMES: &[&str] = &[
+        "Cargo.toml",
+        "Cargo.lock",
+        "package.json",
+        "package-lock.json",
+        "yarn.lock",
+        "pnpm-lock.yaml",
+        "pyproject.toml",
+        "uv.lock",
+        "poetry.lock",
+        "Pipfile.lock",
+        "go.mod",
+        "pom.xml",
+    ];
+    let p = path.replace('\\', "/");
+    let vendored = p.contains("/node_modules/") || p.contains("/target/") || p.contains("/.git/");
+    let name = p.rsplit('/').next().unwrap_or(&p);
+    !vendored && NAMES.contains(&name)
 }
+
+/// The first axil subcommand of a command line, or "".
+fn extract_axil_subcmd(cmd: &str) -> String {
+    axil_subcommands(cmd).into_iter().next().unwrap_or_default()
+}
+
+/// Subcommands that write the agent's knowledge (the store heartbeat).
+const STORE_SUBCOMMANDS: &[&str] = &[
+    "store",
+    "observe",
+    "believe",
+    "checkpoint",
+    "remember",
+    "resolve",
+    "know",
+];
+/// Subcommands that read memory; any of them satisfies the search gate.
+const RECALL_SUBCOMMANDS: &[&str] = &[
+    "recall",
+    "boot",
+    "recall-for-file",
+    "recall-for-entity",
+    "code-search",
+    "code-context",
+    "fts",
+    "ask",
+    "search",
+    "know-about",
+    "dep-docs",
+];
 
 /// Truncate to at most `max` bytes without splitting a UTF-8 char.
 fn truncate_utf8(s: &str, max: usize) -> &str {
@@ -2093,11 +2911,25 @@ fn now_iso() -> String {
     chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()
 }
 
+/// Append one line with a single write, so concurrent appenders (parallel
+/// hooks bumping a counter) never interleave or lose each other's lines.
 fn append_line(path: &Path, line: &str) {
     use std::io::Write as _;
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
-        let _ = writeln!(f, "{line}");
+        let _ = f.write_all(format!("{line}\n").as_bytes());
     }
+}
+
+/// Put a background child in its own process group, so a harness that kills
+/// the hook's whole group on timeout doesn't take the child with it.
+fn own_process_group(cmd: &mut Command) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    #[cfg(not(unix))]
+    let _ = cmd;
 }
 
 fn run_capture(cmd: &mut Command) -> Option<String> {
@@ -2139,16 +2971,15 @@ fn spawn_detached(exe: &Path, args: &[String], cwd: &Path, log: &Path) -> bool {
         parts.extend(args.iter().map(|a| sh_quote(a)));
         parts.push(format!(">> {} 2>&1", sh_quote(&log.to_string_lossy())));
         parts.push("</dev/null &".into());
-        Command::new("sh")
-            .arg("-c")
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c")
             .arg(parts.join(" "))
             .current_dir(cwd)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .and_then(|mut c| c.wait())
-            .is_ok()
+            .stderr(Stdio::null());
+        own_process_group(&mut cmd);
+        cmd.spawn().and_then(|mut c| c.wait()).is_ok()
     }
     #[cfg(windows)]
     {
@@ -2209,32 +3040,77 @@ mod tests {
 
     #[test]
     fn repo_search_detection_and_query_extraction() {
-        let (is, q) = detect_repo_search(r#"rg "hnsw recall" src/"#);
-        assert!(is);
-        assert_eq!(q, "hnsw recall");
-
-        let (is, q) = detect_repo_search("grep -r 'adaptive_ef' crates/");
-        assert!(is);
-        assert_eq!(q, "adaptive_ef");
-
-        let (is, q) = detect_repo_search("git grep install_agent_integrations");
-        assert!(is);
-        assert_eq!(q, "install_agent_integrations");
-
-        let (is, q) = detect_repo_search("find . -name *.rs");
-        assert!(is);
-        assert_eq!(q, "*.rs");
-
-        let (is, q) = detect_repo_search("ls -la src/");
-        assert!(is);
-        assert!(q.is_empty());
-
-        let (is, _) = detect_repo_search("cargo test --workspace");
-        assert!(!is);
-
+        let search = |cmd: &str| detect_repo_search(cmd);
+        assert_eq!(
+            search(r#"rg "hnsw recall" src/"#),
+            (true, "hnsw recall".into())
+        );
+        assert_eq!(
+            search("grep -r 'adaptive_ef' crates/"),
+            (true, "adaptive_ef".into())
+        );
+        assert_eq!(
+            search("git grep install_agent_integrations"),
+            (true, "install_agent_integrations".into())
+        );
+        assert_eq!(search("ls -la src/"), (true, String::new()));
+        assert!(!search("cargo test --workspace").0);
         // Token-aware: substrings of other words must not trigger.
-        let (is, _) = detect_repo_search("cargo run --example energy");
-        assert!(!is);
+        assert!(!search("cargo run --example energy").0);
+        assert!(!search("pgrep axil").0);
+    }
+
+    /// The query is the search tool's own pattern, never the first quoted
+    /// string anywhere in the command.
+    #[test]
+    fn repo_search_query_is_the_tools_pattern() {
+        let query = |cmd: &str| detect_repo_search(cmd).1;
+        // A label echoed before the search.
+        assert_eq!(
+            query(r#"echo "== BGE prefix" && rg -n "embed_query" crates/"#),
+            "embed_query"
+        );
+        // Option values are not the pattern.
+        assert_eq!(query("grep -A 3 -m 5 fn_name src/lib.rs"), "fn_name");
+        assert_eq!(query("rg -g '*.rs' -t rust HookCtx"), "HookCtx");
+        assert_eq!(query("grep -e needle -r ."), "needle");
+        // Wrappers and absolute paths.
+        assert_eq!(
+            query(r#"rtk proxy grep -n "record_slow_query" crates/"#),
+            "record_slow_query"
+        );
+        assert_eq!(query("/usr/bin/grep -rn open_err crates/"), "open_err");
+        // Alternations become words; regex syntax is dropped.
+        assert_eq!(
+            query(r#"grep -n "fn attach_detected_engines\|fn open_with_all_detected" main.rs"#),
+            "fn attach_detected_engines fn open_with_all_detected"
+        );
+        assert_eq!(query(r#"rg "^pub fn \w+_probe\(" src"#), "pub fn _probe");
+        // find: a specific name counts; an extension glob does not.
+        assert_eq!(query("find . -name '*hook_brain*'"), "hook_brain");
+        assert_eq!(
+            detect_repo_search("find . -name '*.rs'"),
+            (true, String::new())
+        );
+    }
+
+    #[test]
+    fn repo_search_ignores_filters_and_heredocs() {
+        // grep filtering another command's output is not repo discovery.
+        assert!(!detect_repo_search("cargo test 2>&1 | grep FAILED").0);
+        assert!(!detect_repo_search("git log --oneline | head -5").0);
+        // A heredoc body can hold anything; only the command line counts.
+        let heredoc = "python3 - <<'EOF'\np = \"crates/axil-core/src/db.rs\"\nrg foo\nEOF";
+        assert!(!detect_repo_search(heredoc).0);
+        // A search after `&&` or `;` is still a command of its own.
+        assert_eq!(
+            detect_repo_search("cd crates && rg -l Busy"),
+            (true, "Busy".into())
+        );
+        assert_eq!(
+            detect_repo_search("cargo check; grep -rn DrainLock src"),
+            (true, "DrainLock".into())
+        );
     }
 
     #[test]
@@ -2270,8 +3146,18 @@ mod tests {
             extract_axil_subcmd("./target/release/axil code-search q"),
             "code-search"
         );
-        assert_eq!(extract_axil_subcmd("axil --db x.axil store errors '{}'"), "x.axil");
+        // Global options and their values are skipped.
+        assert_eq!(
+            extract_axil_subcmd("axil --db x.axil store errors '{}'"),
+            "store"
+        );
         assert_eq!(extract_axil_subcmd("cargo build"), "");
+        assert_eq!(
+            axil_subcommands("axil store decisions '{}' && axil recall \"x\""),
+            vec!["store".to_string(), "recall".to_string()]
+        );
+        // A heredoc body is data, not commands.
+        assert!(axil_subcommands("cat <<'EOF'\naxil store x\nEOF").is_empty());
     }
 
     #[test]

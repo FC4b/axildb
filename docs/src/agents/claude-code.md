@@ -29,7 +29,7 @@ This creates:
 
 ## How it works
 
-1. **Boot**: `axil boot` runs automatically on first tool call, injecting recent decisions, errors, and session history
+1. **Boot**: `axil boot` runs automatically when the session starts (and again after a compaction), injecting recent decisions, errors, and session history
 2. **Auto-capture**: Hooks detect file changes and store them automatically
 3. **Manual store**: The agent stores decisions, errors, and summaries via `axil store`
 4. **Recall**: `axil recall` retrieves relevant context using vector + graph + recency scoring
@@ -40,7 +40,7 @@ This creates:
 Session starts → axil boot (auto via hook)
 Working...     → axil store decisions/errors/context
 Need context?  → axil recall "topic" --top-k 5
-Session ends   → axil store context (session summary)
+Session ends   → session record + maintenance (auto via hook)
 ```
 
 ## Skill integration
