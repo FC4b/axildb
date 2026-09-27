@@ -2322,6 +2322,26 @@ enum Command {
         id: String,
     },
 
+    /// Mark an error as resolved, or reopen it.
+    ///
+    /// Sets `resolved: true` on an `errors` record, so open-error views such
+    /// as the "Resume Here" block in `axil boot` stop listing it. The error
+    /// itself stays recallable: a resolved error with its fix is a lesson.
+    Resolve {
+        /// ID of the `errors` record.
+        id: String,
+        /// ID of the record that fixed it (a decision, commit, or context
+        /// note). Linked `->resolves->` when the graph engine is on.
+        #[arg(long)]
+        by: Option<String>,
+        /// How it was resolved, when the fixing record doesn't say.
+        #[arg(long)]
+        note: Option<String>,
+        /// Reopen a resolved error instead.
+        #[arg(long, conflicts_with_all = ["by", "note"])]
+        reopen: bool,
+    },
+
     /// Analyze text and auto-capture errors/decisions/context.
     ///
     /// Reads text from stdin or argument, classifies it, and stores
@@ -13861,6 +13881,37 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             Ok(EXIT_OK)
         }
 
+        Command::Resolve {
+            id,
+            by,
+            note,
+            reopen,
+        } => {
+            let db_path = require_db(&db_opt)?;
+            let db = open_with_all_detected(&db_path)?;
+            let error_id = RecordId::from_string(&id).context("invalid error record ID")?;
+            let by_id = by
+                .as_deref()
+                .map(RecordId::from_string)
+                .transpose()
+                .context("invalid --by record ID")?;
+            let result = db
+                .resolve_error(axil_core::ResolveInput {
+                    error_id: &error_id,
+                    by: by_id.as_ref(),
+                    note: note.as_deref(),
+                    reopen,
+                })
+                .context("failed to resolve error")?;
+            out.print(&json!({
+                "id": id,
+                "resolved": result.resolved,
+                "changed": result.changed,
+                "resolved_by": result.resolved_by,
+            }));
+            Ok(EXIT_OK)
+        }
+
         // ── Auto-capture ──────────────────────────────────────────
         Command::AutoCapture {
             text,
@@ -19505,6 +19556,7 @@ Bypass Axil only for a user-named exact file/line, a command/test output you jus
 
 - Store design choices immediately: `axil store decisions '{{"summary":"<what>","reason":"<why>","files":["<path>"]}}'`
 - Store bugs/gotchas immediately: `axil store errors '{{"error":"<what>","root_cause":"<why>","fix":"<how>"}}'`
+- Close an error once it is fixed: `axil resolve <error-id> --by <fix-record-id>`
 - Store architecture learned while reading: `axil store context '{{"type":"architecture","summary":"<what you learned>","files":["<path>"]}}'`
 - Before a final response after substantive work, write a checkpoint: `axil checkpoint '{{"state":"<where things stand>","next_steps":["<remaining work>"],"references":[{{"kind":"file","ref":"<path>"}}]}}'`
 "#,

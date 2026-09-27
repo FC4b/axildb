@@ -379,6 +379,20 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
             }),
         },
         ToolDefinition {
+            name: "resolve_error".into(),
+            description: "Mark an error (from remember_error) resolved so open-error views stop listing it, or reopen it. Pass the record that fixed it as `by`.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "error_id": {"type": "string", "description": "ID of the errors record"},
+                    "by":       {"type": "string", "description": "ID of the record that fixed it"},
+                    "note":     {"type": "string", "description": "How it was resolved"},
+                    "reopen":   {"type": "boolean", "default": false}
+                },
+                "required": ["error_id"]
+            }),
+        },
+        ToolDefinition {
             name: "set_preference".into(),
             description: "Set a user preference. Overwrites by key; previous value is kept on the new record as _previous_value for lightweight audit.".into(),
             input_schema: json!({
@@ -557,6 +571,7 @@ pub fn dispatch(db: &Axil, tool_name: &str, args: &Value) -> ToolCallResult {
         "delete" => handle_delete(db, args),
         "remember_decision" => handle_remember_decision(db, args),
         "remember_error" => handle_remember_error(db, args),
+        "resolve_error" => handle_resolve_error(db, args),
         "set_preference" => handle_set_preference(db, args),
         "close_session" => handle_close_session(db, args),
         "boot" => handle_boot(db, args),
@@ -1624,6 +1639,37 @@ fn handle_remember_error(db: &Axil, args: &Value) -> ToolCallResult {
     }
 }
 
+fn handle_resolve_error(db: &Axil, args: &Value) -> ToolCallResult {
+    let Some(error_id) = args.get("error_id").and_then(|v| v.as_str()) else {
+        return ToolCallResult::error("missing required parameter: error_id");
+    };
+    let Ok(error_id) = RecordId::from_string(error_id) else {
+        return ToolCallResult::error(format!("invalid record id: {error_id}"));
+    };
+    let by = match args.get("by").and_then(|v| v.as_str()) {
+        Some(raw) => match RecordId::from_string(raw) {
+            Ok(id) => Some(id),
+            Err(_) => return ToolCallResult::error(format!("invalid record id: {raw}")),
+        },
+        None => None,
+    };
+    let reopen = args.get("reopen").and_then(|v| v.as_bool()).unwrap_or(false);
+    match db.resolve_error(axil_core::ResolveInput {
+        error_id: &error_id,
+        by: by.as_ref(),
+        note: args.get("note").and_then(|v| v.as_str()),
+        reopen,
+    }) {
+        Ok(r) => ToolCallResult::json(&json!({
+            "id": r.id.to_string(),
+            "resolved": r.resolved,
+            "resolved_by": r.resolved_by,
+            "changed": r.changed,
+        })),
+        Err(e) => ToolCallResult::error(format!("resolve_error failed: {e}")),
+    }
+}
+
 fn handle_set_preference(db: &Axil, args: &Value) -> ToolCallResult {
     let Some(key) = args.get("key").and_then(|v| v.as_str()) else {
         return ToolCallResult::error("missing required parameter: key");
@@ -1804,6 +1850,52 @@ mod tests {
     fn parse_json_payload(result: &ToolCallResult) -> Value {
         let block = &result.content[0];
         serde_json::from_str(&block.text).expect("MCP tool result text must be valid JSON")
+    }
+
+    #[test]
+    fn resolve_error_tool_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Axil::open(dir.path().join("mcp.axil")).build().unwrap();
+        let err = parse_json_payload(&dispatch(
+            &db,
+            "remember_error",
+            &json!({"error": "release job fails with crates.io 403"}),
+        ))["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let fix = parse_json_payload(&dispatch(
+            &db,
+            "remember_decision",
+            &json!({"summary": "rotated the registry token"}),
+        ))["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let resolved = dispatch(
+            &db,
+            "resolve_error",
+            &json!({"error_id": err, "by": fix, "note": "token expired"}),
+        );
+        assert!(resolved.is_error.is_none(), "tool returned error");
+        let body = parse_json_payload(&resolved);
+        assert_eq!(body["resolved"], true);
+        assert_eq!(body["changed"], true);
+        assert_eq!(body["resolved_by"], fix);
+
+        let reopened = parse_json_payload(&dispatch(
+            &db,
+            "resolve_error",
+            &json!({"error_id": err, "reopen": true}),
+        ));
+        assert_eq!(reopened["resolved"], false);
+
+        // A decision has no resolved/open lifecycle.
+        let refused = dispatch(&db, "resolve_error", &json!({"error_id": fix}));
+        assert_eq!(refused.is_error, Some(true));
+        let missing = dispatch(&db, "resolve_error", &json!({}));
+        assert_eq!(missing.is_error, Some(true));
     }
 
     #[test]

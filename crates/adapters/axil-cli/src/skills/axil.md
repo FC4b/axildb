@@ -232,10 +232,10 @@ axil link $NEW_ID "supersedes" $OLD_DECISION_ID
 
 ### Error → Fix chain
 ```bash
-ERR_ID=$(axil store errors '{"error":"TimeoutError in auth middleware","stacktrace":"..."}' | jq -r '.id')
+ERR_ID=$(axil store errors '{"error":"TimeoutError in auth middleware","root_cause":"..."}' | jq -r '.id')
 # ... fix the bug ...
-FIX_ID=$(axil store fixes '{"summary":"Added retry logic to auth middleware","files":["auth.rs"]}' | jq -r '.id')
-axil link $FIX_ID "fixes" $ERR_ID
+FIX_ID=$(axil store decisions '{"summary":"Added retry logic to auth middleware","files":["auth.rs"]}' | jq -r '.id')
+axil resolve $ERR_ID --by $FIX_ID   # drops it from boot's open errors and links the fix
 ```
 
 ### Context-aware recall

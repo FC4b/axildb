@@ -37,7 +37,7 @@ const SERVER_INSTRUCTIONS: &str = "\
 Axil is the agent's persistent memory + code index for this project. Routing:
 - Code: \"where/how is X\", or before editing a file/symbol → `code_context` (task-scoped bundle) or `code_search` (locate symbols). Prefer these over recall for code.
 - Memory: past decisions, errors, or context → `recall`; expand one hit with `get <id>`. Time-scoped history → `query_history`.
-- Write knowledge (do this after each unit of work): a decision → `remember_decision`; a bug+fix → `remember_error`; a preference → `set_preference`; anything else → `store`.
+- Write knowledge (do this after each unit of work): a decision → `remember_decision`; a bug+fix → `remember_error`, then `resolve_error` once it is fixed; a preference → `set_preference`; anything else → `store`.
 - Resume a session → `boot` (recent decisions, errors, checkpoint). Graph link between records → `link`.";
 
 /// Resolve the embedding model for `db_path` from the project's `axil.toml`,
@@ -699,6 +699,7 @@ mod adapter_tests {
             "query_history",
             "remember_decision",
             "remember_error",
+            "resolve_error",
             "set_preference",
             "store",
             "boot",

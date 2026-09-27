@@ -20,6 +20,7 @@ Bypass Axil only for a user-named exact file/line, a command/test output you jus
 
 - Store design choices immediately: `axil store decisions '{"summary":"<what>","reason":"<why>","files":["<path>"]}'`
 - Store bugs/gotchas immediately: `axil store errors '{"error":"<what>","root_cause":"<why>","fix":"<how>"}'`
+- Close an error once it is fixed: `axil resolve <error-id> --by <fix-record-id>`
 - Store architecture learned while reading: `axil store context '{"type":"architecture","summary":"<what you learned>","files":["<path>"]}'`
 - Before a final response after substantive work, write a checkpoint: `axil checkpoint '{"state":"<where things stand>","next_steps":["<remaining work>"],"references":[{"kind":"file","ref":"<path>"}]}'`
 <!-- AXIL:END -->

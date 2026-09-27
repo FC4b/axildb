@@ -127,7 +127,9 @@ pub use query::{
 };
 pub use query_class::{classify_query, IdentifierKind, QueryClass};
 pub use record::{Record, RecordId};
-pub use remember::{DecisionInput, ErrorInput, RememberResult, WriteSource};
+pub use remember::{
+    DecisionInput, ErrorInput, RememberResult, ResolveInput, ResolveResult, WriteSource,
+};
 pub use scoring::{
     DedupConfig, QtcConfig, RecallConfig, RecallResult, ScoreExplanation, ScoreWeights,
     SignalValues,

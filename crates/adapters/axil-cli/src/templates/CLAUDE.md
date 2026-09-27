@@ -69,6 +69,11 @@ axil store decisions '{"summary":"<what>","reason":"<why>","files":["<affected>"
 axil store errors '{"error":"<what broke>","root_cause":"<why>","fix":"<how>"}'
 ```
 
+**When a stored error is fixed** (so `axil boot` stops listing it as open):
+```bash
+axil resolve <error-id> --by <id-of-the-record-that-fixed-it>
+```
+
 **After learning how the codebase works:**
 ```bash
 axil store context '{"type":"architecture","summary":"<what you learned>","files":["<key files>"]}'

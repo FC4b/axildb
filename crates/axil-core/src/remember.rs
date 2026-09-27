@@ -39,7 +39,7 @@ use chrono::{DateTime, Duration, Utc};
 use serde_json::{json, Value};
 
 use crate::db::Axil;
-use crate::error::Result;
+use crate::error::{AxilError, Result};
 use crate::record::{Record, RecordId};
 
 /// Which surface invoked the write. Used to tag records for
@@ -115,6 +115,40 @@ pub struct RememberResult {
     /// write. The superseding machinery is shared with normal inserts —
     /// we don't run additional semantic checks on top.
     pub superseded: Vec<RecordId>,
+}
+
+/// Table that carries the resolved/open lifecycle.
+const ERRORS_TABLE: &str = "errors";
+
+/// Detail fields `resolve_error` writes next to `resolved`; reopening clears them.
+const RESOLUTION_DETAILS: [&str; 3] = ["resolved_at", "resolved_by", "resolution"];
+
+/// Input to `resolve_error`.
+#[derive(Debug, Clone)]
+pub struct ResolveInput<'a> {
+    /// The `errors` record to resolve or reopen.
+    pub error_id: &'a RecordId,
+    /// The record that fixed it (a decision, commit, context note…). Linked
+    /// `by ->resolves-> error` when a graph is attached.
+    pub by: Option<&'a RecordId>,
+    /// How it was resolved, when the fixing record doesn't say.
+    pub note: Option<&'a str>,
+    /// Reopen instead: clear the resolution and drop its `resolves` edges.
+    pub reopen: bool,
+}
+
+/// Result from `resolve_error`.
+#[derive(Debug, Clone)]
+pub struct ResolveResult {
+    /// The error record's id.
+    pub id: RecordId,
+    /// Whether the error is resolved after the call.
+    pub resolved: bool,
+    /// The stored `resolved_by` after the call, if any.
+    pub resolved_by: Option<String>,
+    /// `false` when the call was a no-op: the error was already in the
+    /// requested state and there was nothing new to record.
+    pub changed: bool,
 }
 
 impl Axil {
@@ -209,6 +243,131 @@ impl Axil {
             is_new: true,
             superseded,
         })
+    }
+
+    /// Mark an `errors` record resolved, or reopen it.
+    ///
+    /// Sets `resolved: true` and `resolved_at` (kept from the first
+    /// resolution), plus `resolved_by` / `resolution` when given, and links
+    /// `by ->resolves-> error` when a graph is attached. `reopen` sets
+    /// `resolved: false`, clears the detail fields and drops the edges.
+    /// Open-error views (the derived "Resume Here" block) filter on
+    /// `resolved`, so this is the one write path for that lifecycle.
+    ///
+    /// Resolution is an explicit act on purpose: none of the models measured
+    /// in `benchmarks/typed-decisions` could tell from text alone, reliably
+    /// enough to act on, whether a later record fixed an error — the agent
+    /// that did the fix can.
+    pub fn resolve_error(&self, input: ResolveInput<'_>) -> Result<ResolveResult> {
+        let id = input.error_id;
+        let record = self
+            .get(id)?
+            .ok_or_else(|| AxilError::NotFound(format!("record {id}")))?;
+        if record.table != ERRORS_TABLE {
+            return Err(AxilError::InvalidQuery(format!(
+                "record {id} is in table '{}'; only '{ERRORS_TABLE}' records can be resolved",
+                record.table
+            )));
+        }
+        if let Some(by) = input.by {
+            if by == id {
+                return Err(AxilError::InvalidQuery(
+                    "an error cannot be resolved by itself".into(),
+                ));
+            }
+            if self.get(by)?.is_none() {
+                return Err(AxilError::NotFound(format!("record {by}")));
+            }
+        }
+
+        let was_resolved = record.data.get("resolved").and_then(Value::as_bool) == Some(true);
+        let prior_by = record
+            .data
+            .get("resolved_by")
+            .and_then(Value::as_str)
+            .map(String::from);
+        let mut data = record.data;
+        let Some(obj) = data.as_object_mut() else {
+            return Err(AxilError::InvalidQuery(format!(
+                "record {id} data is not a JSON object"
+            )));
+        };
+
+        if input.reopen {
+            if !was_resolved {
+                return Ok(ResolveResult {
+                    id: id.clone(),
+                    resolved: false,
+                    resolved_by: None,
+                    changed: false,
+                });
+            }
+            obj.insert("resolved".into(), json!(false));
+            for field in RESOLUTION_DETAILS {
+                obj.remove(field);
+            }
+            self.update(id, data)?;
+            self.drop_resolves_edges(id);
+            return Ok(ResolveResult {
+                id: id.clone(),
+                resolved: false,
+                resolved_by: None,
+                changed: true,
+            });
+        }
+
+        let new_by = input.by.map(|b| b.to_string());
+        let by_changed = new_by.is_some() && new_by != prior_by;
+        if was_resolved && !by_changed && input.note.is_none() {
+            return Ok(ResolveResult {
+                id: id.clone(),
+                resolved: true,
+                resolved_by: prior_by,
+                changed: false,
+            });
+        }
+        obj.insert("resolved".into(), json!(true));
+        if !was_resolved {
+            obj.insert("resolved_at".into(), json!(Utc::now().to_rfc3339()));
+        }
+        if let Some(by) = &new_by {
+            obj.insert("resolved_by".into(), json!(by));
+        }
+        if let Some(note) = input.note {
+            obj.insert("resolution".into(), json!(note));
+        }
+        self.update(id, data)?;
+
+        // The resolved fields are the source of truth; the edge is a
+        // navigation aid, so a graph failure doesn't fail the resolve
+        // (same contract as `mark_superseded`).
+        if let (Some(by), true) = (input.by, by_changed && self.has_graph_index()) {
+            self.drop_resolves_edges(id);
+            let _ = self.relate(by, crate::util::edge_types::RESOLVES, id, None);
+        }
+        Ok(ResolveResult {
+            id: id.clone(),
+            resolved: true,
+            resolved_by: new_by.or(prior_by),
+            changed: true,
+        })
+    }
+
+    /// Remove every `->resolves->` edge pointing at `error_id`. Best-effort,
+    /// and a no-op without a graph.
+    fn drop_resolves_edges(&self, error_id: &RecordId) {
+        if !self.has_graph_index() {
+            return;
+        }
+        if let Ok(edges) = self.edges(
+            error_id,
+            Some(crate::util::edge_types::RESOLVES),
+            crate::plugin::Direction::In,
+        ) {
+            for edge in edges {
+                let _ = self.unrelate(&edge.id);
+            }
+        }
     }
 
     /// Set a user preference. Writes to `preferences`, overwriting any
@@ -509,6 +668,152 @@ mod tests {
         assert_eq!(stored.table, "errors");
         assert_eq!(stored.data["error"], "connection refused");
         assert_eq!(stored.data["fix"], "ran docker compose up");
+    }
+
+    fn error_and_fix(db: &Axil) -> (RecordId, RecordId) {
+        let error = db
+            .remember_error(ErrorInput {
+                error: "release job fails with crates.io 403",
+                root_cause: None,
+                fix: None,
+                files: None,
+                agent_id: None,
+                external_id: None,
+                force_new: false,
+                source: WriteSource::Cli,
+            })
+            .unwrap()
+            .id;
+        let fix = db
+            .remember_decision(DecisionInput {
+                summary: "rotated CARGO_REGISTRY_TOKEN and re-ran the release",
+                reason: None,
+                files: None,
+                agent_id: None,
+                external_id: None,
+                force_new: false,
+                source: WriteSource::Cli,
+            })
+            .unwrap()
+            .id;
+        (error, fix)
+    }
+
+    fn resolve(
+        db: &Axil,
+        id: &RecordId,
+        by: Option<&RecordId>,
+        note: Option<&str>,
+        reopen: bool,
+    ) -> Result<ResolveResult> {
+        db.resolve_error(ResolveInput {
+            error_id: id,
+            by,
+            note,
+            reopen,
+        })
+    }
+
+    #[test]
+    fn resolve_error_records_resolution_fields() {
+        let (db, _dir) = temp_db();
+        let (error, fix) = error_and_fix(&db);
+
+        let result = resolve(&db, &error, Some(&fix), Some("token had expired"), false).unwrap();
+        assert!(result.resolved);
+        assert!(result.changed);
+
+        let stored = db.get(&error).unwrap().unwrap();
+        assert_eq!(stored.data["resolved"], true);
+        assert_eq!(stored.data["resolved_by"], fix.to_string());
+        assert_eq!(stored.data["resolution"], "token had expired");
+        assert!(stored.data["resolved_at"].is_string());
+        assert_eq!(stored.data["error"], "release job fails with crates.io 403");
+    }
+
+    #[test]
+    fn resolve_error_again_is_a_no_op_and_keeps_first_timestamp() {
+        let (db, _dir) = temp_db();
+        let (error, fix) = error_and_fix(&db);
+        resolve(&db, &error, Some(&fix), None, false).unwrap();
+        let first_at = db.get(&error).unwrap().unwrap().data["resolved_at"].clone();
+
+        let again = resolve(&db, &error, None, None, false).unwrap();
+        assert!(again.resolved);
+        assert!(!again.changed);
+        assert_eq!(again.resolved_by, Some(fix.to_string()));
+
+        // A note added later updates the record but not the resolution time.
+        let noted = resolve(&db, &error, None, Some("documented in RELEASING.md"), false).unwrap();
+        assert!(noted.changed);
+        let stored = db.get(&error).unwrap().unwrap();
+        assert_eq!(stored.data["resolved_at"], first_at);
+        assert_eq!(stored.data["resolution"], "documented in RELEASING.md");
+    }
+
+    #[test]
+    fn resolve_error_without_a_fixing_record() {
+        let (db, _dir) = temp_db();
+        let (error, _) = error_and_fix(&db);
+        resolve(&db, &error, None, None, false).unwrap();
+        let stored = db.get(&error).unwrap().unwrap();
+        assert_eq!(stored.data["resolved"], true);
+        assert!(stored.data.get("resolved_by").is_none());
+    }
+
+    #[test]
+    fn reopen_clears_the_resolution() {
+        let (db, _dir) = temp_db();
+        let (error, fix) = error_and_fix(&db);
+        resolve(&db, &error, Some(&fix), Some("rotated token"), false).unwrap();
+
+        let reopened = resolve(&db, &error, None, None, true).unwrap();
+        assert!(!reopened.resolved);
+        assert!(reopened.changed);
+        let stored = db.get(&error).unwrap().unwrap();
+        assert_eq!(stored.data["resolved"], false);
+        for field in RESOLUTION_DETAILS {
+            assert!(
+                stored.data.get(field).is_none(),
+                "{field} should be cleared"
+            );
+        }
+
+        let again = resolve(&db, &error, None, None, true).unwrap();
+        assert!(!again.changed);
+    }
+
+    #[test]
+    fn resolve_error_rejects_bad_targets() {
+        let (db, _dir) = temp_db();
+        let (error, fix) = error_and_fix(&db);
+
+        let missing = RecordId::new();
+        assert!(matches!(
+            resolve(&db, &missing, None, None, false),
+            Err(AxilError::NotFound(_))
+        ));
+        // Only errors carry the lifecycle: a decision cannot be "resolved".
+        assert!(matches!(
+            resolve(&db, &fix, None, None, false),
+            Err(AxilError::InvalidQuery(_))
+        ));
+        assert!(matches!(
+            resolve(&db, &error, Some(&missing), None, false),
+            Err(AxilError::NotFound(_))
+        ));
+        assert!(matches!(
+            resolve(&db, &error, Some(&error), None, false),
+            Err(AxilError::InvalidQuery(_))
+        ));
+        // A refused call leaves the error open.
+        assert!(db
+            .get(&error)
+            .unwrap()
+            .unwrap()
+            .data
+            .get("resolved")
+            .is_none());
     }
 
     #[test]

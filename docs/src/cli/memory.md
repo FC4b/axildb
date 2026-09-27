@@ -70,6 +70,29 @@ axil --db <DB> doubt <BELIEF_ID>
 axil --db <DB> beliefs
 ```
 
+## resolve
+
+Mark a recorded error as fixed, or reopen it.
+
+```bash
+axil resolve <ERROR_ID>                                   # mark resolved
+axil resolve <ERROR_ID> --by <FIX_RECORD_ID>              # link the record that fixed it
+axil resolve <ERROR_ID> --note "token had expired"        # say how, when the fix record doesn't
+axil resolve <ERROR_ID> --reopen                          # it came back
+```
+
+This sets `resolved: true` (with `resolved_at`, and `resolved_by` / `resolution`
+when given) on an `errors` record. Open-error views, such as the "Resume Here"
+block in `axil boot`, then stop listing it. The error itself stays in recall and in
+boot's error lessons, because an error together with its fix is still worth
+remembering. `--by` also adds a `resolves` graph edge from the fixing record.
+`--reopen` clears all of this, including the edge. Only `errors` records can be
+resolved, and repeating a call that changes nothing is a no-op (`"changed": false`).
+
+Resolution is an explicit step on purpose: in the typed-decisions benchmark
+(`benchmarks/typed-decisions`), no model could tell reliably from text alone that
+a later note fixed an error. The agent that did the fix can.
+
 ## boot
 
 Get startup context for an agent session.

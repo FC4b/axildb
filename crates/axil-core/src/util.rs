@@ -207,6 +207,9 @@ pub mod edge_types {
     pub const SUPERSEDES: &str = "supersedes";
     /// Two facts contradict each other.
     pub const CONTRADICTS: &str = "contradicts";
+    /// A record (the fix) resolves an `errors` record. Written only by
+    /// `Axil::resolve_error`, which also removes it when the error is reopened.
+    pub const RESOLVES: &str = "resolves";
     /// Source facts consolidated into a summary record.
     pub const CONSOLIDATED_INTO: &str = "consolidated_into";
     /// A record was derived from another (lineage chains). Create with
