@@ -718,6 +718,170 @@
         "U2": "Does the LATER note show that the ERROR has actually been fixed?"
       }
     },
+    "fastino/GLiNER2.5-Decide-1B": {
+      "family": "jev-style (gliner2 typed decision)",
+      "runtime": "torch CPU, 4 threads",
+      "load_ms": 171400.5,
+      "U1": {
+        "n_train": 102,
+        "n_test": 147,
+        "auroc_test": 0.5309112806101967,
+        "auroc_all": 0.5001404494382022,
+        "threshold_from_train": 0.555716872215271,
+        "at_threshold_test": {
+          "tpr": 0.07547169811320754,
+          "fpr": 0.0425531914893617,
+          "precision": 0.5
+        },
+        "at_argmax_test": {
+          "tpr": 0.09433962264150944,
+          "fpr": 0.06382978723404255,
+          "precision": 0.45454545454545453
+        },
+        "ece_test_raw": 0.16108905052652167,
+        "ece_test_platt": 0.004365242478069242,
+        "latency_ms_p50": 555.12,
+        "latency_ms_p95": 2148.88,
+        "accuracy_by_kind_test": {
+          "both_hold": "41/42",
+          "contradiction": "1/4",
+          "negation_other_subject": "3/3",
+          "refinement": "3/4",
+          "restatement": "1/2",
+          "reversal": "2/3",
+          "same_topic": "42/43",
+          "update": "1/46"
+        },
+        "auroc_test_by_source": {
+          "axil-dogfood": 0.49523809523809526,
+          "longmemeval_oracle": 0.5141447368421053
+        }
+      },
+      "U2": {
+        "n_train": 90,
+        "n_test": 111,
+        "auroc_test": 0.5256660168940871,
+        "auroc_all": 0.5576423576423576,
+        "threshold_from_train": 0.9388303756713867,
+        "at_threshold_test": {
+          "tpr": 0.05555555555555555,
+          "fpr": 0.08771929824561403,
+          "precision": 0.375
+        },
+        "at_argmax_test": {
+          "tpr": 0.6296296296296297,
+          "fpr": 0.6140350877192983,
+          "precision": 0.4927536231884058
+        },
+        "ece_test_raw": 0.21990704321646476,
+        "ece_test_platt": 0.12978810234536245,
+        "latency_ms_p50": 304.81,
+        "latency_ms_p95": 2754.08,
+        "accuracy_by_kind_test": {
+          "downstream_workaround": "6/6",
+          "fixed": "3/53",
+          "fixed_implicit": "0/1",
+          "lexical_trap": "0/1",
+          "mentioned_not_fix": "5/5",
+          "merged_not_shipped": "0/1",
+          "other_fix": "36/36",
+          "other_fix_same_area": "0/1",
+          "planned": "1/1",
+          "still_broken": "1/1",
+          "unrelated_same_area": "3/5"
+        },
+        "auroc_test_by_source": {
+          "axil-dogfood": 0.5,
+          "github": 0.5384281372123317
+        }
+      },
+      "questions": {
+        "U1": "head 'old_note_outdated' in ['yes', 'no']",
+        "U2": "head 'error_fixed' in ['yes', 'no']"
+      }
+    },
+    "fastino/GLiNER2.5-Decide": {
+      "family": "jev-style (gliner2 typed decision)",
+      "runtime": "torch CPU, 4 threads",
+      "load_ms": 15192.2,
+      "U1": {
+        "n_train": 102,
+        "n_test": 147,
+        "auroc_test": 0.6890806904857487,
+        "auroc_all": 0.6211376404494382,
+        "threshold_from_train": 0.39385974407196045,
+        "at_threshold_test": {
+          "tpr": 0.22641509433962265,
+          "fpr": 0.07446808510638298,
+          "precision": 0.631578947368421
+        },
+        "at_argmax_test": {
+          "tpr": 0.1320754716981132,
+          "fpr": 0.02127659574468085,
+          "precision": 0.7777777777777778
+        },
+        "ece_test_raw": 0.06983437181330047,
+        "ece_test_platt": 0.0417846618093993,
+        "latency_ms_p50": 434.63,
+        "latency_ms_p95": 834.71,
+        "accuracy_by_kind_test": {
+          "both_hold": "41/42",
+          "contradiction": "2/4",
+          "negation_other_subject": "2/3",
+          "refinement": "1/4",
+          "restatement": "2/2",
+          "reversal": "3/3",
+          "same_topic": "41/43",
+          "update": "7/46"
+        },
+        "auroc_test_by_source": {
+          "axil-dogfood": 0.638095238095238,
+          "longmemeval_oracle": 0.6825657894736842
+        }
+      },
+      "U2": {
+        "n_train": 90,
+        "n_test": 111,
+        "auroc_test": 0.624106562703054,
+        "auroc_all": 0.6246753246753247,
+        "threshold_from_train": 0.9476941823959351,
+        "at_threshold_test": {
+          "tpr": 0.018518518518518517,
+          "fpr": 0.017543859649122806,
+          "precision": 0.5
+        },
+        "at_argmax_test": {
+          "tpr": 0.5555555555555556,
+          "fpr": 0.3684210526315789,
+          "precision": 0.5882352941176471
+        },
+        "ece_test_raw": 0.10685640573501588,
+        "ece_test_platt": 0.11425883747437829,
+        "latency_ms_p50": 279.43,
+        "latency_ms_p95": 617.6,
+        "accuracy_by_kind_test": {
+          "downstream_workaround": "6/6",
+          "fixed": "1/53",
+          "fixed_implicit": "0/1",
+          "lexical_trap": "0/1",
+          "mentioned_not_fix": "5/5",
+          "merged_not_shipped": "1/1",
+          "other_fix": "36/36",
+          "other_fix_same_area": "1/1",
+          "planned": "1/1",
+          "still_broken": "1/1",
+          "unrelated_same_area": "5/5"
+        },
+        "auroc_test_by_source": {
+          "axil-dogfood": 0.6,
+          "github": 0.6343899261832393
+        }
+      },
+      "questions": {
+        "U1": "head 'old_note_outdated' in ['yes', 'no']",
+        "U2": "head 'error_fixed' in ['yes', 'no']"
+      }
+    },
     "axil-check_conflict (production heuristic)": {
       "family": "heuristic",
       "runtime": "axil-core check_conflict + bge-small cosine (heuristic/ crate)",

@@ -12,7 +12,10 @@ today?
 There are three arms:
 - the **production heuristic** (`heuristic/`, a Rust crate that calls the real `axil_core::check_conflict`);
 - **small NLI cross-encoders** via ONNX Runtime (`run_bakeoff.py`);
-- **Laya**, an open Jev-style typed-decision model (`run_laya.py`).
+- **Jev-style typed-decision models:**
+  - Laya (`run_laya.py`).
+  - Fastino GLiNER2.5-Decide, 340M and 1B (`run_gliner_decide.py`).
+  - TypeSafe Jev itself, via its hosted API (`run_jev.py`). This one is opt-in: it needs `TYPESAFE_API_KEY` and `--confirm-external`, because it uploads every pair to TypeSafe.
 
 The plan and the go/no-go rules are in `tasks/phase-29-typed-decisions-laya.md`. That file is local-only.
 
@@ -73,6 +76,9 @@ python run_bakeoff.py --threads 4
 python run_laya.py                              # English root checkpoint
 python run_laya.py --subfolder multilingual
 python run_laya.py --subfolder typed-decisions
+python run_gliner_decide.py                                   # fastino/GLiNER2.5-Decide
+python run_gliner_decide.py --model fastino/GLiNER2.5-Decide-1B
+TYPESAFE_API_KEY=... python run_jev.py --confirm-external     # hosted Jev; sends data to TypeSafe
 
 # Production-heuristic arm
 cat sets/u1_lme.jsonl sets/u1_repo.jsonl > out/u1_all.jsonl

@@ -41,6 +41,16 @@ def main():
         arms[e["model"]] = {"family": "jev-style (laya 0.3.20)", "runtime": f"torch CPU, {e['threads']} threads",
                             "load_ms": e["load_ms"], "U1": pick(e["U1"]), "U2": pick(e["U2"]),
                             "questions": {"U1": e["U1"]["question"], "U2": e["U2"]["question"]}}
+    for f in sorted(glob.glob(str(HERE / "out" / f"bakeoff-jevstyle-*-{date}.json"))):
+        e = json.load(open(f))
+        arms[e["model"]] = {"family": "jev-style (gliner2 typed decision)", "runtime": f"torch CPU, {e['threads']} threads",
+                            "load_ms": e["load_ms"], "U1": pick(e["U1"]), "U2": pick(e["U2"]),
+                            "questions": {"U1": e["U1"]["question"], "U2": e["U2"]["question"]}}
+    for f in sorted(glob.glob(str(HERE / "out" / f"bakeoff-jev-*-{date}.json"))):
+        e = json.load(open(f))
+        arms[e["model"]] = {"family": "jev (TypeSafe hosted API)", "runtime": "hosted API; latency includes network",
+                            "U1": pick(e["U1"]), "U2": pick(e["U2"]),
+                            "questions": {"U1": e["U1"]["question"], "U2": e["U2"]["question"]}}
     h = [json.loads(line) for line in open(HERE / "out" / "heuristic-u1.jsonl")]
     arms["axil-check_conflict (production heuristic)"] = {
         "family": "heuristic",
