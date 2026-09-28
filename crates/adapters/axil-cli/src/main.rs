@@ -11004,6 +11004,19 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                         use axil_core::plugin::VectorIndex;
                         let old_store = axil_vector::VectorEngine::open(&db_path, old)
                             .context("failed to open the existing vector store")?;
+                        // The rebuilt store embeds with the model's prompts, so
+                        // carrying over vectors written without them would mix
+                        // the two in one index.
+                        if !old_store.uses_text_prefixes()
+                            && !embedding_model.document_prefix().is_empty()
+                        {
+                            anyhow::bail!(
+                                "this vector store was written without {}'s query/document \
+                                 prompts, which a re-embed now applies; re-embedding one table \
+                                 would mix the two. Run without --table to re-embed every table.",
+                                embedding_model.name()
+                            );
+                        }
                         for id in old_store
                             .all_ids()
                             .context("failed to list stored vectors")?

@@ -407,9 +407,11 @@ fn ranked_candidates(db: &Axil, question: &str) -> Result<Vec<(Record, f32)>> {
     // exact cosine against its own stored question text. No non-cache row can
     // displace a cache entry because none is ever scored, and the score stays
     // consistent with the index (same deterministic embedder, same cosine metric
-    // the threshold is calibrated against).
+    // the threshold is calibrated against). The question is embedded as a
+    // passage, like the stored questions: two questions compare as equals, and a
+    // query prompt on one side only would move scores off that calibration.
     if db.has_vector_index() && db.has_embedder() {
-        if let Ok(query_vec) = db.embed_query(question) {
+        if let Ok(query_vec) = db.embed_passage(question) {
             let mut out: Vec<(Record, f32)> = Vec::new();
             for record in db.list(TABLE_CACHE_ENTRIES)? {
                 let Some(entry_question) = record.data.get(FIELD_QUESTION).and_then(|v| v.as_str())
@@ -422,7 +424,7 @@ fn ranked_candidates(db: &Axil, question: &str) -> Result<Vec<(Record, f32)>> {
                 // exactly one, on the query itself).
                 let entry_vec = match db.get_vector(&record.id) {
                     Ok(Some(v)) if !v.is_empty() && v.iter().all(|f| f.is_finite()) => v,
-                    _ => match db.embed_query(entry_question) {
+                    _ => match db.embed_passage(entry_question) {
                         // Legacy entry stored before embeddings were persisted.
                         Ok(v) => v,
                         // Skip an entry we cannot embed rather than fail the read.

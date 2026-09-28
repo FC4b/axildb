@@ -64,7 +64,7 @@ impl<'a> SupersedeEngine<'a> {
 
         // Search for similar records — fetch extra to account for
         // same-record match and cross-table filtering.
-        let candidates = self.db.similar_to(
+        let candidates = self.db.similar_to_passage(
             &extract_text_content(new_record),
             DEFAULT_SUPERSEDE_CANDIDATES,
         );

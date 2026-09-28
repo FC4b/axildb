@@ -1888,21 +1888,36 @@ impl Axil {
         Ok(())
     }
 
-    /// Embed arbitrary text into a vector using the configured embedder.
-    ///
-    /// Unlike [`Axil::embed_text`] (which embeds *and stores* a record's field
-    /// in the vector index), this returns the raw embedding for `text` without
-    /// touching any record — used by host callers that need an embedding on its
-    /// own (e.g. a WASM plugin's `embed-text` import). Errors if no embedder is
-    /// configured.
+    /// Embed a search query, with the embedding model's query prompt if it
+    /// has one. Use it for a vector to search stored records with; for text
+    /// compared with stored text as a peer, use [`Axil::embed_passage`].
+    /// Errors if no embedder is configured.
     pub fn embed_query(&self, text: &str) -> Result<Vec<f32>> {
+        self.require_embedder()?.embed_query(text)
+    }
+
+    /// Embed text the way stored records are embedded, without touching any
+    /// record (unlike [`Axil::embed_text`], which also stores the vector).
+    /// Use it for a vector that will be stored, or to compare a text with
+    /// stored ones as equals (duplicates, a cached question). Errors if no
+    /// embedder is configured.
+    pub fn embed_passage(&self, text: &str) -> Result<Vec<f32>> {
         self.require_embedder()?.embed(text)
     }
 
-    /// Semantic search: embed text and find similar records.
+    /// Semantic search: embed text as a query and find similar records.
     pub fn similar_to(&self, text: &str, top_k: usize) -> Result<Vec<(Record, f32)>> {
         let embedder = self.require_embedder()?;
-        let vector = embedder.embed(text)?;
+        let vector = embedder.embed_query(text)?;
+        self.similar_to_vector(&vector, top_k)
+    }
+
+    /// Find the stored records closest to a passage: text compared with
+    /// stored text as an equal, as duplicate and supersession checks do. Its
+    /// scores are on the scale their thresholds were set on, which a query's
+    /// ([`Axil::similar_to`]) are not when the model prompts queries.
+    pub fn similar_to_passage(&self, text: &str, top_k: usize) -> Result<Vec<(Record, f32)>> {
+        let vector = self.embed_passage(text)?;
         self.similar_to_vector(&vector, top_k)
     }
 
@@ -4757,7 +4772,7 @@ impl Axil {
         let query_vec = if let (Some(embedder), Some(vi)) =
             (self.embedder.as_ref(), self.vector_index.as_ref())
         {
-            match embedder.embed(&effective_query) {
+            match embedder.embed_query(&effective_query) {
                 Ok(query_vec) => {
                     let vector_results = vi.search(&query_vec, fetch_k.saturating_mul(2))?;
                     (Some(query_vec), vector_results)

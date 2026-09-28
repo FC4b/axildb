@@ -145,7 +145,7 @@ fn record_to_op(
         if text.is_empty() {
             None
         } else {
-            Some(db.embed_query(&text)?)
+            Some(db.embed_passage(&text)?)
         }
     } else {
         None

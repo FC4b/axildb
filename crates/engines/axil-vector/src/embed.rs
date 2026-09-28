@@ -49,6 +49,15 @@ pub struct Embedder {
     accepts_token_type_ids: bool,
 }
 
+/// `prefix` then `text`, without a copy when there is no prefix.
+fn prefixed<'a>(prefix: &str, text: &'a str) -> std::borrow::Cow<'a, str> {
+    if prefix.is_empty() {
+        std::borrow::Cow::Borrowed(text)
+    } else {
+        std::borrow::Cow::Owned(format!("{prefix}{text}"))
+    }
+}
+
 impl Embedder {
     /// Create a new embedder for the given model.
     ///
@@ -188,6 +197,33 @@ impl Embedder {
     /// Model name.
     pub fn model_name(&self) -> &str {
         self.model.name()
+    }
+
+    /// The model this embedder runs.
+    pub fn model(&self) -> &EmbeddingModel {
+        &self.model
+    }
+
+    /// Embed a search query, with the model's query prefix.
+    pub fn embed_query(&self, text: &str) -> Result<Vec<f32>, String> {
+        self.embed(&prefixed(self.model.query_prefix(), text))
+    }
+
+    /// Embed stored text, with the model's document prefix.
+    pub fn embed_document(&self, text: &str) -> Result<Vec<f32>, String> {
+        self.embed(&prefixed(self.model.document_prefix(), text))
+    }
+
+    /// Batch form of [`Embedder::embed_document`].
+    #[cfg(feature = "embed")]
+    pub fn embed_documents_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, String> {
+        let prefix = self.model.document_prefix();
+        if prefix.is_empty() {
+            return self.embed_batch_impl(texts);
+        }
+        let owned: Vec<String> = texts.iter().map(|t| format!("{prefix}{t}")).collect();
+        let refs: Vec<&str> = owned.iter().map(String::as_str).collect();
+        self.embed_batch_impl(&refs)
     }
 
     /// Embed a single text string into a vector.

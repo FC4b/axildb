@@ -58,6 +58,24 @@ impl EmbeddingModel {
         }
     }
 
+    /// What the model card says to put before a search query, if anything.
+    /// Must match [`EmbeddingModel::document_prefix`]: the model was trained
+    /// with both.
+    pub fn query_prefix(&self) -> &'static str {
+        match self {
+            Self::Nomic => "search_query: ",
+            _ => "",
+        }
+    }
+
+    /// What the model card says to put before stored text, if anything.
+    pub fn document_prefix(&self) -> &'static str {
+        match self {
+            Self::Nomic => "search_document: ",
+            _ => "",
+        }
+    }
+
     /// Human-readable model name.
     pub fn name(&self) -> &str {
         match self {
@@ -315,6 +333,19 @@ pub fn list_custom_models() -> Vec<(String, EmbeddingModel)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nomic_has_paired_prompts_and_bge_documents_have_none() {
+        assert_eq!(EmbeddingModel::Nomic.query_prefix(), "search_query: ");
+        assert_eq!(EmbeddingModel::Nomic.document_prefix(), "search_document: ");
+        for m in [
+            EmbeddingModel::BgeSmall,
+            EmbeddingModel::BgeBase,
+            EmbeddingModel::BgeM3,
+        ] {
+            assert_eq!(m.document_prefix(), "", "{} stores plain text", m.name());
+        }
+    }
 
     #[test]
     fn bge_m3_metadata() {

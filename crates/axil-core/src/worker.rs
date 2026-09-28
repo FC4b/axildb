@@ -594,7 +594,7 @@ impl<'a> AxilWorker<'a> {
                     continue;
                 }
 
-                if let Ok(similar) = self.db.similar_to(&text, 3) {
+                if let Ok(similar) = self.db.similar_to_passage(&text, 3) {
                     for (other, score) in &similar {
                         if other.id == record.id || other.table != record.table {
                             continue;

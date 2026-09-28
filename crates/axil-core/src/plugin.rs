@@ -174,8 +174,16 @@ pub trait VectorIndex: Engine {
 /// Separated from [`VectorIndex`] so that ANN-only plugins don't need
 /// to stub out embedding, and so embedding can be configured independently.
 pub trait TextEmbedder: Send + Sync {
-    /// Embed text into a vector.
+    /// Embed text into a vector. This is the passage side: text that is
+    /// stored and searched over.
     fn embed(&self, text: &str) -> Result<Vec<f32>>;
+
+    /// Embed a search query. Models trained with different prompts for
+    /// queries and passages (nomic's `search_query:` / `search_document:`)
+    /// override this; the default treats a query like any other text.
+    fn embed_query(&self, text: &str) -> Result<Vec<f32>> {
+        self.embed(text)
+    }
 
     /// Embed multiple texts in a single batch.
     ///

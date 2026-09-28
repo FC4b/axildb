@@ -1066,7 +1066,9 @@ mod abi {
         ) -> Result<Vec<f32>, wit::PluginError> {
             (|| {
                 self.require(self.caps.embed, "embed")?;
-                self.db.embed_query(&text).map_err(to_wit_err)
+                // Stored-text side: what a plugin keeps or compares with its
+                // own texts. Searching memory goes through `recall`.
+                self.db.embed_passage(&text).map_err(to_wit_err)
             })()
         }
 

@@ -749,7 +749,7 @@ impl ResolveResult {
 /// a supersedable older value.
 fn resolve_against_existing(db: &Axil, text: &str, table: &str) -> ResolveResult {
     // Find similar records via vector search.
-    let similar = match db.similar_to(text, 5) {
+    let similar = match db.similar_to_passage(text, 5) {
         Ok(results) => results,
         Err(_) => return ResolveResult::Novel,
     };

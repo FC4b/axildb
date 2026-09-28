@@ -24,7 +24,11 @@ pub trait VectorIndex: Engine {
 }
 
 pub trait TextEmbedder: Send + Sync {
+    /// Stored text, and text compared with stored text as an equal.
     fn embed(&self, text: &str) -> Result<Vec<f32>>;
+    /// A search query. Defaults to `embed`; models trained with separate
+    /// query and passage prompts override it.
+    fn embed_query(&self, text: &str) -> Result<Vec<f32>> { self.embed(text) }
 }
 
 pub trait GraphIndex: Engine {

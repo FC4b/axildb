@@ -205,7 +205,8 @@ pub trait VectorIndex: Engine {
 }
 
 pub trait TextEmbedder: Send + Sync {
-    fn embed(&self, text: &str) -> Result<Vec<f32>>;
+    fn embed(&self, text: &str) -> Result<Vec<f32>>;       // stored text / peer comparison
+    fn embed_query(&self, text: &str) -> Result<Vec<f32>>; // search query; defaults to embed
 }
 
 pub trait GraphIndex: Engine {

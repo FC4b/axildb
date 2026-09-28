@@ -767,7 +767,7 @@ impl<'a> QueryBuilder<'a> {
             let embedder = self
                 .embedder
                 .ok_or_else(|| AxilError::plugin("no embedder configured for text search"))?;
-            let vec = embedder.embed(text)?;
+            let vec = embedder.embed_query(text)?;
             let mut fetch_k = (top_k + self.offset).saturating_mul(over_fetch_factor);
             if self.reranker.is_some() {
                 // rerank window must dominate fetch sizing or
@@ -1128,7 +1128,7 @@ impl<'a> QueryBuilder<'a> {
                 let embedder = self
                     .embedder
                     .ok_or_else(|| AxilError::plugin("no embedder configured for text search"))?;
-                let vec = embedder.embed(text)?;
+                let vec = embedder.embed_query(text)?;
                 let fetch_k = (top_k + self.offset).saturating_mul(4).max(min_fetch);
                 vi.search(&vec, fetch_k)?
             } else if let Some((ref vec, top_k)) = self.vector_query {
@@ -1285,7 +1285,7 @@ impl<'a> QueryBuilder<'a> {
                 let embedder = self
                     .embedder
                     .ok_or_else(|| AxilError::plugin("no embedder configured for text search"))?;
-                let vec = embedder.embed(text)?;
+                let vec = embedder.embed_query(text)?;
                 let fetch_k = (top_k + self.offset).saturating_mul(4).max(min_fetch);
                 vi.search(&vec, fetch_k)?
             } else if let Some((ref vec, top_k)) = self.vector_query {
