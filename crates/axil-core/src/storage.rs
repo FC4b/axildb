@@ -143,20 +143,36 @@ impl Storage {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let db = Database::create(path.as_ref())?;
 
-        // Ensure tables exist.
-        let txn = db.begin_write()?;
-        {
-            let _ = txn.open_table(RECORDS)?;
-            let _ = txn.open_table(TABLE_INDEX)?;
-            let _ = txn.open_table(SLOW_QUERIES)?;
-            let _ = txn.open_table(AUDIT_LOG)?;
-            let _ = txn.open_table(METRICS_HISTORY)?;
-            #[cfg(feature = "cdc")]
-            let _ = txn.open_table(CHANGELOG)?;
-            #[cfg(feature = "event-log")]
-            let _ = txn.open_table(EVENT_LOG)?;
+        #[allow(unused_mut)]
+        let mut tables = vec![RECORDS, TABLE_INDEX, SLOW_QUERIES, AUDIT_LOG, METRICS_HISTORY];
+        #[cfg(feature = "cdc")]
+        tables.push(CHANGELOG);
+        #[cfg(feature = "event-log")]
+        tables.push(EVENT_LOG);
+        // Only a store missing a table needs a write. Opening an existing one
+        // commits nothing, so a read-only command leaves the file untouched.
+        let complete = {
+            let txn = db.begin_read()?;
+            let mut complete = true;
+            for table in &tables {
+                match txn.open_table(*table) {
+                    Ok(_) => {}
+                    Err(redb::TableError::TableDoesNotExist(_)) => {
+                        complete = false;
+                        break;
+                    }
+                    Err(e) => return Err(e.into()),
+                }
+            }
+            complete
+        };
+        if !complete {
+            let txn = db.begin_write()?;
+            for table in &tables {
+                let _ = txn.open_table(*table)?;
+            }
+            txn.commit()?;
         }
-        txn.commit()?;
 
         Ok(Self {
             db: StorageDb::Writable(db),

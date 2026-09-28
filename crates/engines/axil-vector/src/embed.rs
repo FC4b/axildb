@@ -37,16 +37,101 @@ const EMBED_POOL_ENV: &str = "AXIL_EMBED_SESSIONS";
 pub struct Embedder {
     model: EmbeddingModel,
     #[cfg(feature = "embed")]
+    files: ModelFiles,
+    /// Sessions and tokenizer, loaded by the first embed. Most processes that
+    /// attach the vector engine (fts, boot, get, the hooks' counts) never
+    /// embed, and building an ONNX session costs ~150 ms.
+    #[cfg(feature = "embed")]
+    runtime: std::sync::OnceLock<Result<Runtime, String>>,
+}
+
+/// Where a model's files are, checked to exist when the embedder is created.
+#[cfg(feature = "embed")]
+struct ModelFiles {
+    model: std::path::PathBuf,
+    tokenizer: std::path::PathBuf,
+    pool_size: usize,
+}
+
+/// A model's loaded ONNX sessions and tokenizer.
+#[cfg(feature = "embed")]
+struct Runtime {
     sessions: Vec<parking_lot::Mutex<ort::session::Session>>,
-    #[cfg(feature = "embed")]
     next_session: AtomicUsize,
-    #[cfg(feature = "embed")]
     tokenizer: tokenizers::Tokenizer,
     /// Whether the loaded ONNX model declares a `token_type_ids` input.
     /// BERT-family models (BGE) do; ModernBERT (gte-modernbert-base) does
     /// not — binding an undeclared input causes `Invalid input name`.
-    #[cfg(feature = "embed")]
     accepts_token_type_ids: bool,
+}
+
+#[cfg(feature = "embed")]
+impl Runtime {
+    fn load(model: &EmbeddingModel, files: &ModelFiles) -> Result<Self, String> {
+        // Build `pool_size` independent sessions. Each owns its own GPU
+        // memory, so multiple workers can run forward passes concurrently
+        // without contending on a shared mutex.
+        //
+        // The first session logs whether CUDA was available; subsequent
+        // ones re-use the same decision path silently. If CUDA fails on
+        // session 1 we fall back to CPU for the whole pool to avoid a
+        // half-GPU half-CPU surprise at runtime.
+        let mut sessions: Vec<parking_lot::Mutex<ort::session::Session>> =
+            Vec::with_capacity(files.pool_size);
+        let mut accepts_token_type_ids = false;
+        for i in 0..files.pool_size {
+            let session = build_session(&files.model, i == 0)?;
+            if i == 0 {
+                accepts_token_type_ids = session
+                    .inputs
+                    .iter()
+                    .any(|input| input.name == "token_type_ids");
+            }
+            sessions.push(parking_lot::Mutex::new(session));
+        }
+
+        let mut tokenizer = tokenizers::Tokenizer::from_file(&files.tokenizer)
+            .map_err(|e| format!("failed to load tokenizer: {e}"))?;
+
+        // Enforce truncation to the model's max sequence length.
+        let truncation = tokenizers::TruncationParams {
+            max_length: model.max_seq_len(),
+            ..Default::default()
+        };
+        tokenizer
+            .with_truncation(Some(truncation))
+            .map_err(|e| format!("failed to set truncation: {e}"))?;
+
+        if files.pool_size > 1 {
+            eprintln!("[axil-vector] session pool size = {}", files.pool_size);
+        }
+
+        Ok(Self {
+            sessions,
+            next_session: AtomicUsize::new(0),
+            tokenizer,
+            accepts_token_type_ids,
+        })
+    }
+
+    /// Return one of the pooled sessions with exclusive access. Tries each
+    /// slot with `try_lock` once; if every slot is busy, blocks on the
+    /// round-robin target so the pool degrades gracefully under contention
+    /// rather than starving.
+    fn acquire_session(&self) -> parking_lot::MutexGuard<'_, ort::session::Session> {
+        if self.sessions.len() == 1 {
+            return self.sessions[0].lock();
+        }
+        let start = self.next_session.fetch_add(1, Ordering::Relaxed) % self.sessions.len();
+        for i in 0..self.sessions.len() {
+            let idx = (start + i) % self.sessions.len();
+            if let Some(guard) = self.sessions[idx].try_lock() {
+                return guard;
+            }
+        }
+        // All busy — block on the round-robin target.
+        self.sessions[start].lock()
+    }
 }
 
 /// `prefix` then `text`, without a copy when there is no prefix.
@@ -61,8 +146,9 @@ fn prefixed<'a>(prefix: &str, text: &'a str) -> std::borrow::Cow<'a, str> {
 impl Embedder {
     /// Create a new embedder for the given model.
     ///
-    /// With `embed` feature: loads the ONNX session(s) and tokenizer.
-    /// Without: succeeds immediately (embed() will return a clear error at call time).
+    /// With `embed` feature: checks the model and tokenizer files exist; the
+    /// first embed loads them. Without: succeeds immediately (embed() will
+    /// return a clear error at call time).
     ///
     /// The session pool size is controlled by the `AXIL_EMBED_SESSIONS` env
     /// var (default 1). Set to N > 1 to allow N concurrent embeds at the
@@ -121,72 +207,26 @@ impl Embedder {
             ));
         }
 
-        // Build `pool_size` independent sessions. Each owns its own GPU
-        // memory, so multiple workers can run forward passes concurrently
-        // without contending on a shared mutex.
-        //
-        // The first session logs whether CUDA was available; subsequent
-        // ones re-use the same decision path silently. If CUDA fails on
-        // session 1 we fall back to CPU for the whole pool to avoid a
-        // half-GPU half-CPU surprise at runtime.
-        let mut sessions: Vec<parking_lot::Mutex<ort::session::Session>> =
-            Vec::with_capacity(pool_size);
-        let mut accepts_token_type_ids = false;
-        for i in 0..pool_size {
-            let session = build_session(&model_file, i == 0)?;
-            if i == 0 {
-                accepts_token_type_ids = session
-                    .inputs
-                    .iter()
-                    .any(|input| input.name == "token_type_ids");
-            }
-            sessions.push(parking_lot::Mutex::new(session));
-        }
-
-        let mut tokenizer = tokenizers::Tokenizer::from_file(&tokenizer_file)
-            .map_err(|e| format!("failed to load tokenizer: {e}"))?;
-
-        // Enforce truncation to the model's max sequence length.
-        let max_len = model.max_seq_len();
-        let truncation = tokenizers::TruncationParams {
-            max_length: max_len,
-            ..Default::default()
-        };
-        tokenizer
-            .with_truncation(Some(truncation))
-            .map_err(|e| format!("failed to set truncation: {e}"))?;
-
-        if pool_size > 1 {
-            eprintln!("[axil-vector] session pool size = {pool_size}");
-        }
-
         Ok(Self {
             model,
-            sessions,
-            next_session: AtomicUsize::new(0),
-            tokenizer,
-            accepts_token_type_ids,
+            files: ModelFiles {
+                model: model_file,
+                tokenizer: tokenizer_file,
+                pool_size,
+            },
+            runtime: std::sync::OnceLock::new(),
         })
     }
 
-    /// Return one of the pooled sessions with exclusive access. Tries each
-    /// slot with `try_lock` once; if every slot is busy, blocks on the
-    /// round-robin target so the pool degrades gracefully under contention
-    /// rather than starving.
+    /// The loaded sessions and tokenizer, loading them on first use.
+    /// Concurrent first callers wait for one load; a failed load is kept, so
+    /// every later embed reports the same error.
     #[cfg(feature = "embed")]
-    fn acquire_session(&self) -> parking_lot::MutexGuard<'_, ort::session::Session> {
-        if self.sessions.len() == 1 {
-            return self.sessions[0].lock();
-        }
-        let start = self.next_session.fetch_add(1, Ordering::Relaxed) % self.sessions.len();
-        for i in 0..self.sessions.len() {
-            let idx = (start + i) % self.sessions.len();
-            if let Some(guard) = self.sessions[idx].try_lock() {
-                return guard;
-            }
-        }
-        // All busy — block on the round-robin target.
-        self.sessions[start].lock()
+    fn runtime(&self) -> Result<&Runtime, String> {
+        self.runtime
+            .get_or_init(|| Runtime::load(&self.model, &self.files))
+            .as_ref()
+            .map_err(Clone::clone)
     }
 
     /// Output vector dimensions for the loaded model.
@@ -246,8 +286,9 @@ impl Embedder {
     fn embed_impl(&self, text: &str) -> Result<Vec<f32>, String> {
         use ort::value::Tensor;
 
+        let runtime = self.runtime()?;
         // Tokenize (truncated to model's max_seq_len).
-        let encoding = self
+        let encoding = runtime
             .tokenizer
             .encode(text, true)
             .map_err(|e| format!("tokenization failed: {e}"))?;
@@ -272,8 +313,8 @@ impl Embedder {
         // models reject `token_type_ids` (no segment embeddings); only
         // bind it when the model declared the input.
         let data: Vec<f32> = {
-            let mut session = self.acquire_session();
-            let outputs = if self.accepts_token_type_ids {
+            let mut session = runtime.acquire_session();
+            let outputs = if runtime.accepts_token_type_ids {
                 let type_ids = Tensor::<i64>::from_array(([1, seq_len], token_type_ids))
                     .map_err(|e| format!("token_type_ids tensor error: {e}"))?;
                 session.run(ort::inputs![
@@ -356,8 +397,9 @@ impl Embedder {
 
         use ort::value::Tensor;
 
+        let runtime = self.runtime()?;
         // Batch tokenize all texts
-        let encodings = self
+        let encodings = runtime
             .tokenizer
             .encode_batch(texts.to_vec(), true)
             .map_err(|e| format!("batch tokenization failed: {e}"))?;
@@ -397,8 +439,8 @@ impl Embedder {
         // models reject `token_type_ids`; only bind it when the model
         // declared the input.
         let data: Vec<f32> = {
-            let mut session = self.acquire_session();
-            let outputs = if self.accepts_token_type_ids {
+            let mut session = runtime.acquire_session();
+            let outputs = if runtime.accepts_token_type_ids {
                 let type_ids = Tensor::<i64>::from_array(([batch_size, max_len], all_types))
                     .map_err(|e| format!("batch token_type_ids tensor error: {e}"))?;
                 session.run(ort::inputs![
@@ -789,5 +831,33 @@ impl MultiEmbedder {
             .get(&inner.active)
             .map(|e| e.dimensions())
             .unwrap_or(0)
+    }
+}
+
+#[cfg(all(test, feature = "embed"))]
+mod tests {
+    use super::*;
+    use crate::models::PoolingStrategy;
+
+    #[test]
+    fn a_model_that_fails_to_load_fails_at_the_first_embed() {
+        let dir = tempfile::tempdir().unwrap();
+        let model_file = dir.path().join("model.onnx");
+        std::fs::write(&model_file, b"not an onnx graph").unwrap();
+        std::fs::write(dir.path().join("tokenizer.json"), b"{}").unwrap();
+        let model = EmbeddingModel::Custom {
+            path: model_file,
+            dimensions: 4,
+            pooling: PoolingStrategy::Mean,
+            max_seq_len: 16,
+        };
+        let embedder =
+            Embedder::new_with_pool(model, 1).expect("creating it only checks the files exist");
+        let first = embedder.embed("hello").unwrap_err();
+        assert_eq!(
+            embedder.embed("again").unwrap_err(),
+            first,
+            "a failed load is reported the same way every time"
+        );
     }
 }
