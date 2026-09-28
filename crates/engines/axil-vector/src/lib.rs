@@ -1181,7 +1181,10 @@ mod tests {
 
         let hits = plugin.search(&items[7].1, 1).unwrap();
         assert_eq!(hits[0].0, items[7].0);
-        assert!(plugin.is_graph_built(), "the first graph-path search builds it");
+        assert!(
+            !plugin.is_graph_built(),
+            "a store this size is searched by exact scan, which builds no graph"
+        );
     }
 
     #[test]

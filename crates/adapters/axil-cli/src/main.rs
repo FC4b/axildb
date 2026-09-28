@@ -6828,7 +6828,28 @@ impl axil_core::Adapter for CliAdapter {
 }
 
 /// Run the CLI command. Returns the exit code.
+/// Whether a command serves many searches from one process (the MCP and HTTP
+/// servers, the worker), which amortizes building the vector graph.
+#[cfg(feature = "vector")]
+fn is_long_lived(command: &Command) -> bool {
+    match command {
+        #[cfg(feature = "mcp")]
+        Command::Mcp { .. } => true,
+        #[cfg(feature = "http")]
+        Command::Serve { .. } => true,
+        Command::Worker { .. } => true,
+        _ => false,
+    }
+}
+
 fn run(cli: Cli, out: &Output) -> Result<i32> {
+    // A command that searches a few times and exits never earns back building
+    // the vector graph, so it scans exactly up to a much larger store.
+    #[cfg(feature = "vector")]
+    if !is_long_lived(&cli.command) {
+        axil_vector::hnsw::set_process_exact_scan_max(axil_vector::hnsw::ONE_SHOT_EXACT_SCAN_MAX);
+    }
+
     let db_opt = cli.db;
 
     // Install the process-wide encryption cipher before any command opens a

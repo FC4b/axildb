@@ -92,7 +92,6 @@ fn record_delete_fan_out_never_builds_space_graphs() {
         let db = axil_vector::with_vector_spaces(Axil::open(&path))
             .build()
             .unwrap();
-        // Above the exact-scan threshold, so a search would need the graph.
         for i in 0..200 {
             let rec = db.insert("fingerprints", json!({ "n": i })).unwrap();
             db.add_vector_in("fp", &rec.id, &fingerprint(i)).unwrap();
@@ -131,10 +130,11 @@ fn record_delete_fan_out_never_builds_space_graphs() {
     assert_eq!(db.get_vector_in("fp", &ids[2]).unwrap(), None);
     assert_eq!(opened[0].vector_count(), 198);
 
-    // Searching is what builds a graph — and it no longer sees the deleted id.
+    // A search no longer sees the deleted id. A space this small is scanned
+    // exactly, so it still builds no graph.
     let hits = db.similar_in("fp", &fingerprint(1), 1).unwrap();
     assert_eq!(hits[0].0.id, ids[1]);
-    assert!(opened.iter().any(|e| e.is_graph_built()));
+    assert!(!opened.iter().any(|e| e.is_graph_built()));
 }
 
 fn load_skips(db: &Axil) -> Option<axil_core::ProblemDetection> {

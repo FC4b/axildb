@@ -14,8 +14,8 @@ retrieved in top-k; recall = fraction of answer sessions retrieved.
 > **Note (re-baselined 2026-06-27):** the headline 500-Q figures were re-measured
 > on the current build to **Recall-QTC 93.5% / Recall-fusion 91.5%** (committed
 > `benchmarks/results/qtc-500.json` / `fusion-500.json`; ±~1pp vs the prior
-> 94.5% / 90.9% — HNSW retrieval is approximate, so recall wobbles ~1pp
-> build-to-build). The **Recall-QTC and Recall-fusion** rows below, the
+> 94.5% / 90.9%, measured when stores above 128 vectors used approximate HNSW
+> search; search is now an exact scan below 20k vectors, so reruns reproduce). The **Recall-QTC and Recall-fusion** rows below, the
 > per-category breakdowns, Comparison, and MemEfficiency sections reflect this
 > run; the Vector / FTS / Oracle strategy rows and the investigation notes are
 > from earlier runs — treat their specific percentages as illustrative.
@@ -183,7 +183,10 @@ Same dataset (100k × 384 dims, top-k=10), same machine, measured with
 
 **Takeaway:** Axil's HNSW index delivers ~173× faster search at 100k and stays
 flat as the corpus grows; sqlite-vec's brute-force scan is O(N) — tolerable at
-10k, painful at 1M. sqlite-vec wins on insert throughput (flat storage vs graph
+10k, painful at 1M. The graph pays off in a long-lived process (the MCP or HTTP
+server, the worker), which builds it once and uses it above 20k vectors. A
+one-shot CLI call would rebuild it every time, so it scans exactly instead, up
+to 100k vectors (~50 ms at 100k; `benchmarks/results/exact-scan-2026-09-28.json`). sqlite-vec wins on insert throughput (flat storage vs graph
 construction) and disk footprint. HNSW is approximate; sqlite-vec vec0 is exact
 — recall-equivalence is measured separately in LongMemEval above.
 

@@ -1,0 +1,112 @@
+{
+  "change": "vector search scans exactly up to a threshold instead of building the HNSW graph per process",
+  "date": "2026-09-28",
+  "machine": "Apple silicon Mac (M-series), release build, warm page cache",
+  "thresholds": {
+    "library_default_and_long_lived": 20000,
+    "one_shot_cli": 100000
+  },
+  "scan_vs_graph_ms_per_query_k80": {
+    "method": "examples/exact_scan_timing.rs, random unit vectors (hardest case for the graph), 20 queries",
+    "dims_384": {
+      "exact_scan": {
+        "4400": 0.69,
+        "20000": 6.43,
+        "50000": 21.46,
+        "100000": 50.18,
+        "200000": 71.82
+      },
+      "graph_build_plus_first_search": {
+        "4400": 7654.5,
+        "20000": 55510.1
+      },
+      "graph_query_after_build": {
+        "4400": 2.46,
+        "20000": 6.65
+      }
+    },
+    "dims_768": {
+      "exact_scan": {
+        "4400": 1.33,
+        "20000": 9.31,
+        "50000": 25.34,
+        "100000": 50.65,
+        "200000": 112.02
+      },
+      "graph_build_plus_first_search": {
+        "4400": 10664.8,
+        "20000": 94928.7
+      },
+      "graph_query_after_build": {
+        "4400": 3.92,
+        "20000": 11.0
+      }
+    }
+  },
+  "cli_ms_median_of_5": {
+    "corpus": "copy of this repo's .axil (121k records, 4.4k vectors, 384-dim bge-small), measured with no other load",
+    "before_graph": {
+      "search": 1954,
+      "recall_hook_block": 2759,
+      "recall_full_k10": 2689,
+      "code_search": 1978,
+      "recall_for_file": 1985
+    },
+    "after_exact_scan": {
+      "search": 660,
+      "recall_hook_block": 1249,
+      "recall_full_k10": 1479,
+      "code_search": 677,
+      "recall_for_file": 675
+    },
+    "store_decision_under_background_load": {
+      "before": 7060,
+      "after": 2528
+    }
+  },
+  "dogfood_recall_k10": {
+    "method": "benchmarks/dogfood-recall/run.py --fetch 10 on snapshot snap-prefix, 57 questions",
+    "graph_run_1": {
+      "hit@1": 0.6491,
+      "hit@5": 0.8772,
+      "hit@10": 0.9123,
+      "mrr@10": 0.758,
+      "recall_all@10": 0.8947,
+      "ndcg@10": 0.779,
+      "hook_hit": 0.8772
+    },
+    "graph_run_2": {
+      "hit@1": 0.6667,
+      "hit@5": 0.8596,
+      "hit@10": 0.8947,
+      "mrr@10": 0.7534,
+      "recall_all@10": 0.8772,
+      "ndcg@10": 0.7707,
+      "hook_hit": 0.8772
+    },
+    "graph_runs_disagree_on_questions": 8,
+    "exact_scan": {
+      "hit@1": 0.6842,
+      "hit@5": 0.9123,
+      "hit@10": 0.9474,
+      "mrr@10": 0.7887,
+      "recall_all@10": 0.9123,
+      "ndcg@10": 0.806,
+      "hook_hit": 0.8772
+    }
+  },
+  "longmemeval_s20_recall_qtc": {
+    "graph_build": {
+      "hit_rate": 0.9,
+      "recall_all": 0.9,
+      "ndcg_at_10": 0.8565
+    },
+    "exact_scan_build": {
+      "hit_rate": 0.9,
+      "recall_all": 0.9,
+      "ndcg_at_10": 0.8565
+    },
+    "note": "identical: each question's store holds ~50 sessions, already under the old 128-vector threshold"
+  },
+  "sqlite_compare": "the harness now forces the graph (its headline compares HNSW with sqlite-vec's scan); CI gate unchanged"
+}

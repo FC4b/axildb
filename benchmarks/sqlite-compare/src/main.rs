@@ -139,6 +139,10 @@ fn run_axil(args: &Args) -> EngineResult {
     eprintln!("[axil] inserting {} vectors...", args.n);
     let dir = TempDir::new().expect("tmpdir");
     let db_path = dir.path().join("bench.axil");
+    // Measure the HNSW graph at every n: below the exact-scan threshold Axil
+    // would scan instead, and this compares the graph a long-lived process
+    // builds against sqlite-vec's scan.
+    axil_vector::hnsw::set_process_exact_scan_max(0);
     let plugin = VectorEngine::open(&db_path, args.dims).expect("open plugin");
 
     let insert_start = Instant::now();

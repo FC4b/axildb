@@ -37,8 +37,8 @@ leaving recall on the table.
 │                                                             │
 │   1a. Timeseries filter    (range/changed_since on _idx_ts) │
 │   1b. FTS search           (Tantivy BM25, code tokenizer)   │
-│   1c. Vector search        (HNSW ANN; SKIPPED if FTS top    │
-│                             hit > 0.95 confidence)          │
+│   1c. Vector search        (exact scan or HNSW; SKIPPED if  │
+│                             FTS top hit > 0.95 confidence)  │
 ├─────────────────────────────────────────────────────────────┤
 │ Step 2 — RRF fusion        (k=60, adaptive)                 │
 ├─────────────────────────────────────────────────────────────┤
@@ -73,7 +73,9 @@ vector have to consider.
 preserves identifiers (`auth_timeout`, `Result::Err`) and applies field
 boosting. Phase 4 added fuzzy matching, snippets, and field scoping.
 
-**Vector** runs HNSW ANN against the embedding index (`*.axil.vec`).
+**Vector** searches the embedding index (`*.axil.vec`): an exact scan up to
+20k vectors (100k in a one-shot CLI call, which would otherwise rebuild the
+graph on every search), and the HNSW graph above that.
 The query is either a pre-embedded `&[f32]` or text that the configured
 embedder converts. Default embedder is BGE-small-en-v1.5 (int8); BGE-base,
 nomic, and gte-modernbert are also registered. Query text is embedded on the

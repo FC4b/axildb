@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::OnceLock;
 
 use hnsw_rs::prelude::{DistCosine, Hnsw};
@@ -17,9 +18,32 @@ const EF_CONSTRUCTION: usize = 200;
 /// Allocation hint for the graph's internal tables. Inserts beyond this still
 /// succeed — it only sizes the initial allocation.
 const ALLOC_HINT: usize = 16_384;
-/// Below this live-vector count an exact scan is cheaper and — unlike the
-/// OS-RNG-seeded HNSW graph — deterministic, so search bypasses the graph.
-const BRUTE_FORCE_MAX: usize = 128;
+/// Up to this many live vectors, a new index searches by exact scan instead of
+/// the graph. The scan is exact and scores a vector the same in every process,
+/// while `hnsw_rs` seeds the graph from the OS RNG. This default suits a process
+/// that searches many times (the MCP server, the HTTP server, the worker): at
+/// this size a scan takes a few milliseconds per query, and above it the graph
+/// earns back its build. A process that searches a few times and exits never
+/// does; see [`ONE_SHOT_EXACT_SCAN_MAX`].
+pub const EXACT_SCAN_MAX: usize = 20_000;
+
+/// The exact-scan threshold for a process that searches a handful of times and
+/// exits, such as a CLI call or a hook. Building the graph cost every vector
+/// command ~1.3 s on this repo's 4.4k-vector store (minutes at 100k), while a
+/// scan of 100k vectors takes about 50 ms
+/// (`benchmarks/results/exact-scan-2026-09-28.json`,
+/// `examples/exact_scan_timing.rs`).
+pub const ONE_SHOT_EXACT_SCAN_MAX: usize = 100_000;
+
+/// The exact-scan threshold new indexes in this process start with.
+static PROCESS_EXACT_SCAN_MAX: AtomicUsize = AtomicUsize::new(EXACT_SCAN_MAX);
+
+/// Set the exact-scan threshold for every index this process creates from now
+/// on (default [`EXACT_SCAN_MAX`]). A one-shot process sets
+/// [`ONE_SHOT_EXACT_SCAN_MAX`] before opening a store.
+pub fn set_process_exact_scan_max(max: usize) {
+    PROCESS_EXACT_SCAN_MAX.store(max, Ordering::Relaxed);
+}
 /// Minimum search-time candidate-list width (HNSW `ef`). Floors recall for
 /// small `top_k` queries where `top_k * 4` alone would be too narrow.
 const EF_SEARCH_MIN: usize = 64;
@@ -172,6 +196,48 @@ fn cosine_sim(a: &[f32], b: &[f32]) -> f32 {
     }
 }
 
+/// Lanes of independent partial sums in [`dot_and_norm`]. One running sum is a
+/// dependency chain the compiler may not reorder (f32 addition is not
+/// associative); separate lanes let it use SIMD.
+const SCAN_LANES: usize = 8;
+
+/// `(a·b, b·b)` in one pass over both slices, summed in a fixed order so a
+/// vector scores the same in every process.
+fn dot_and_norm(a: &[f32], b: &[f32]) -> (f32, f32) {
+    let mut dot = [0.0f32; SCAN_LANES];
+    let mut norm = [0.0f32; SCAN_LANES];
+    let (ca, cb) = (a.chunks_exact(SCAN_LANES), b.chunks_exact(SCAN_LANES));
+    let (ra, rb) = (ca.remainder(), cb.remainder());
+    for (x, y) in ca.zip(cb) {
+        for i in 0..SCAN_LANES {
+            dot[i] += x[i] * y[i];
+            norm[i] += y[i] * y[i];
+        }
+    }
+    let (mut d, mut n) = (dot.iter().sum::<f32>(), norm.iter().sum::<f32>());
+    for (x, y) in ra.iter().zip(rb) {
+        d += x * y;
+        n += y * y;
+    }
+    (d, n)
+}
+
+/// [`cosine_sim`] for the exact scan, with the query's squared norm computed
+/// once. Falls back to [`cosine_sim`] wherever the f32 sums can't be trusted.
+fn scan_cosine(query: &[f32], query_sq: f32, v: &[f32]) -> f32 {
+    let (dot, v_sq) = dot_and_norm(query, v);
+    if dot.is_finite()
+        && query_sq.is_finite()
+        && v_sq.is_finite()
+        && query_sq >= F32_COSINE_MIN_SQ
+        && v_sq >= F32_COSINE_MIN_SQ
+    {
+        dot / (query_sq.sqrt() * v_sq.sqrt())
+    } else {
+        cosine_sim(query, v)
+    }
+}
+
 /// Build an empty live HNSW graph over normalized-or-raw f32 vectors using
 /// cosine distance.
 fn new_graph() -> Hnsw<'static, f32, DistCosine> {
@@ -278,6 +344,8 @@ pub struct HnswIndex {
     deletes_since_rebuild: usize,
     /// Vector count at last rebuild (for deletion ratio computation).
     count_at_last_rebuild: usize,
+    /// Live-vector count up to which search scans instead of using the graph.
+    exact_scan_max: usize,
 }
 
 impl HnswIndex {
@@ -290,7 +358,15 @@ impl HnswIndex {
             tombstones: 0,
             deletes_since_rebuild: 0,
             count_at_last_rebuild: 0,
+            exact_scan_max: PROCESS_EXACT_SCAN_MAX.load(Ordering::Relaxed),
         }
+    }
+
+    /// Scan exactly up to `max` live vectors and use the graph above that,
+    /// overriding the process threshold ([`set_process_exact_scan_max`]).
+    pub fn with_exact_scan_max(mut self, max: usize) -> Self {
+        self.exact_scan_max = max;
+        self
     }
 
     /// Create an index pre-loaded with vectors (e.g. from persistence).
@@ -418,11 +494,7 @@ impl HnswIndex {
             return Ok(Vec::new());
         }
 
-        // hnsw_rs seeds level assignment from the OS RNG, so on a tiny corpus
-        // the navigable graph can occasionally miss a reachable node. Below a
-        // small threshold an exact scan is both cheap and deterministic, so
-        // prefer it there (and as the safety net when the graph under-delivers).
-        if self.vectors.len() <= BRUTE_FORCE_MAX {
+        if self.vectors.len() <= self.exact_scan_max {
             return Ok(self.brute_force(query, top_k));
         }
         // `DistCosine` calls a zero vector distance 0 (similarity 1.0) from
@@ -464,24 +536,33 @@ impl HnswIndex {
         Ok(results)
     }
 
-    /// Exact top-k over the live vectors by cosine similarity. Used for tiny
-    /// corpora and as the safety net when the ANN walk under-delivers.
+    /// Exact top-k over the live vectors by cosine similarity: the search below
+    /// the exact-scan threshold, and the safety net when the ANN walk
+    /// under-delivers.
     fn brute_force(&self, query: &[f32], top_k: usize) -> Vec<(RecordId, f32)> {
-        let mut scored: Vec<(RecordId, f32)> = self
+        let (query_sq, _) = dot_and_norm(query, query);
+        let mut scored: Vec<(&RecordId, f32)> = self
             .vectors
             .iter()
-            .map(|(id, v)| (id.clone(), cosine_sim(query, v)))
+            .map(|(id, v)| (id, scan_cosine(query, query_sq, v)))
             .collect();
         // Tie-break equal similarities by RecordId so results are byte-stable
         // across runs (self.vectors is a HashMap with nondeterministic order) —
         // the same determinism guarantee the fusion path carries.
-        scored.sort_by(|a, b| {
+        let best_first = |a: &(&RecordId, f32), b: &(&RecordId, f32)| {
             b.1.partial_cmp(&a.1)
                 .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.0.cmp(&b.0))
-        });
-        scored.truncate(top_k);
+                .then_with(|| a.0.cmp(b.0))
+        };
+        if top_k < scored.len() {
+            scored.select_nth_unstable_by(top_k - 1, best_first);
+            scored.truncate(top_k);
+        }
+        scored.sort_by(best_first);
         scored
+            .into_iter()
+            .map(|(id, score)| (id.clone(), score))
+            .collect()
     }
 
     /// Matryoshka search: HNSW coarse retrieval, re-rank at full dims.
@@ -667,6 +748,15 @@ mod tests {
             .unwrap_or(default)
     }
 
+    /// The exact-scan threshold the graph-path tests run under, so a few
+    /// hundred vectors exercise the graph.
+    const GRAPH_TEST_MAX: usize = 128;
+
+    /// An index that uses the graph above [`GRAPH_TEST_MAX`] vectors.
+    fn graph_index(dims: usize) -> HnswIndex {
+        HnswIndex::new(dims).with_exact_scan_max(GRAPH_TEST_MAX)
+    }
+
     /// HNSW recall@10 floor. The hnsw_rs graph at N~2k/dims=64 measures ~0.95+;
     /// pinned below first observation to absorb graph-construction variance.
     const RECALL_FLOOR_K10: f32 = 0.90;
@@ -679,7 +769,7 @@ mod tests {
         let queries = 50;
 
         let corpus = make_vectors(n, dims, 0xA11CE);
-        let mut index = HnswIndex::new(dims);
+        let mut index = graph_index(dims);
         for (id, v) in &corpus {
             index.add(id.clone(), v.clone()).unwrap();
         }
@@ -713,7 +803,7 @@ mod tests {
         let queries = 50;
 
         let corpus = make_vectors(n, dims, 0xDE1E7E);
-        let mut index = HnswIndex::new(dims);
+        let mut index = graph_index(dims);
         for (id, v) in &corpus {
             index.add(id.clone(), v.clone()).unwrap();
         }
@@ -929,10 +1019,10 @@ mod tests {
         // With many tombstones interleaved, search must still return the full
         // top_k of *live* results by over-fetching past the tombstones.
         let dims = 16;
-        // Keep > BRUTE_FORCE_MAX live so the graph over-fetch path (not the
+        // Keep > GRAPH_TEST_MAX live so the graph over-fetch path (not the
         // exact-scan fallback) is the thing under test.
         let total = 900usize;
-        let mut index = HnswIndex::new(dims);
+        let mut index = graph_index(dims);
         // Build the (empty) graph up front so every insert and tombstone lands
         // in it; a lazily built graph would hold only the survivors.
         index.graph();
@@ -952,7 +1042,7 @@ mod tests {
                 index.remove(&id);
             }
         }
-        assert!(index.len() > BRUTE_FORCE_MAX, "need graph path, not brute-force");
+        assert!(index.len() > GRAPH_TEST_MAX, "need graph path, not brute-force");
         assert!(index.graph().dead > 0, "expected scattered tombstones");
 
         let top_k = 10;
@@ -1018,11 +1108,11 @@ mod tests {
                 *x *= scale;
             }
         }
-        let mut index = HnswIndex::new(dims);
+        let mut index = graph_index(dims);
         for (id, v) in &corpus {
             index.add(id.clone(), v.clone()).unwrap();
         }
-        assert!(index.len() > BRUTE_FORCE_MAX, "need the graph path");
+        assert!(index.len() > GRAPH_TEST_MAX, "need the graph path");
 
         let mut total = 0.0f32;
         for (id, v) in corpus.iter().step_by(7) {
@@ -1057,11 +1147,11 @@ mod tests {
     #[test]
     fn zero_query_scores_zero_on_graph_path_like_exact_path() {
         let dims = 8;
-        let mut index = HnswIndex::new(dims);
+        let mut index = graph_index(dims);
         for (id, v) in make_vectors(200, dims, 0x2E80) {
             index.add(id, v).unwrap();
         }
-        assert!(index.len() > BRUTE_FORCE_MAX, "need the graph path");
+        assert!(index.len() > GRAPH_TEST_MAX, "need the graph path");
         let hits = index.search_clean(&[0.0; 8], 5).unwrap();
         assert_eq!(hits.len(), 5);
         assert!(
@@ -1082,7 +1172,8 @@ mod tests {
     fn graph_is_built_only_by_a_search_that_needs_it() {
         let dims = 16;
         let corpus = make_vectors(300, dims, 0x1A2B);
-        let mut index = HnswIndex::from_vectors(dims, corpus.iter().cloned().collect());
+        let mut index = HnswIndex::from_vectors(dims, corpus.iter().cloned().collect())
+            .with_exact_scan_max(GRAPH_TEST_MAX);
         assert!(!index.is_graph_built(), "loading must not build the graph");
 
         index
@@ -1103,8 +1194,11 @@ mod tests {
         // A small corpus is served by the exact scan and never needs a graph.
         let small = HnswIndex::from_vectors(
             dims,
-            make_vectors(BRUTE_FORCE_MAX, dims, 0x5A11).into_iter().collect(),
-        );
+            make_vectors(GRAPH_TEST_MAX, dims, 0x5A11)
+                .into_iter()
+                .collect(),
+        )
+        .with_exact_scan_max(GRAPH_TEST_MAX);
         small.search_clean(&corpus[5].1, 5).unwrap();
         assert!(!small.is_graph_built());
     }
@@ -1129,13 +1223,14 @@ mod tests {
         let dims = 24;
         for n in [100usize, 600] {
             let corpus = make_vectors(n, dims, 0x5EED + n as u64);
-            let mut eager = HnswIndex::new(dims);
+            let mut eager = graph_index(dims);
             eager.graph();
             for (id, v) in &corpus {
                 eager.add(id.clone(), v.clone()).unwrap();
             }
             mutate(&mut eager, &corpus);
-            let mut lazy = HnswIndex::from_vectors(dims, corpus.iter().cloned().collect());
+            let mut lazy = HnswIndex::from_vectors(dims, corpus.iter().cloned().collect())
+                .with_exact_scan_max(GRAPH_TEST_MAX);
             mutate(&mut lazy, &corpus);
             assert_eq!(eager.vectors(), lazy.vectors());
             assert_eq!(eager.tombstones(), lazy.tombstones());
@@ -1161,7 +1256,7 @@ mod tests {
                 };
                 let a = eager.search_clean(&query, 10).unwrap();
                 let b = lazy.search_clean(&query, 10).unwrap();
-                if n <= BRUTE_FORCE_MAX {
+                if n <= GRAPH_TEST_MAX {
                     // Exact path: byte-identical, scores included.
                     assert_eq!(a, b);
                     continue;
@@ -1175,7 +1270,7 @@ mod tests {
                     assert!((a[0].1 - 1.0).abs() < 1e-5 && (b[0].1 - 1.0).abs() < 1e-5);
                 }
             }
-            if n > BRUTE_FORCE_MAX {
+            if n > GRAPH_TEST_MAX {
                 assert!(lazy.is_graph_built());
                 assert!(recall_eager / queries as f32 >= RECALL_FLOOR_K10);
                 assert!(recall_lazy / queries as f32 >= RECALL_FLOOR_K10);
@@ -1183,6 +1278,28 @@ mod tests {
                 assert!(!lazy.is_graph_built());
             }
         }
+    }
+
+    #[test]
+    fn default_search_scans_exactly_without_building_a_graph() {
+        // Well above the graph tests' threshold but far below the default: an
+        // ordinary store is searched exactly, scores match `cosine_sim`, and no
+        // graph is built, so every process returns the same answer.
+        let dims = 32;
+        let corpus = make_vectors(3000, dims, 0xE8AC7);
+        let index = HnswIndex::from_vectors(dims, corpus.iter().cloned().collect());
+        let mut rng = Rng::new(0x5CA7);
+        for _ in 0..20 {
+            let q: Vec<f32> = (0..dims).map(|_| rng.next_f32()).collect();
+            let got = index.search_clean(&q, 10).unwrap();
+            let ids: Vec<RecordId> = got.iter().map(|(id, _)| id.clone()).collect();
+            assert_eq!(ids, brute_force_topk(&corpus, &q, 10));
+            for (id, score) in &got {
+                let v = &corpus.iter().find(|(c, _)| c == id).unwrap().1;
+                assert!((score - cosine_sim(&q, v)).abs() < 1e-5);
+            }
+        }
+        assert!(!index.is_graph_built());
     }
 
     #[test]
@@ -1198,7 +1315,7 @@ mod tests {
         let corpus = make_vectors(n, dims, 0x1AC3E5);
 
         // Incremental: add one at a time into a live graph, never compact.
-        let mut incremental = HnswIndex::new(dims);
+        let mut incremental = graph_index(dims);
         incremental.graph();
         for (id, v) in &corpus {
             incremental.add(id.clone(), v.clone()).unwrap();
