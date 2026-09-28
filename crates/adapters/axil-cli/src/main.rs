@@ -1969,7 +1969,10 @@ enum Command {
     IndexStats,
 
     // ── Agent runtime (4e) ─────────────────────────────────────────
-    /// Smart query — auto-routes to vector/graph/FTS/time/rules based on intent.
+    /// Smart query: ranks by relevance (the same scorer as `recall`), then
+    /// adjusts by intent — a time question narrows the window, a graph or
+    /// "why" question adds linked records, a rule question puts matching rules
+    /// first, and an exact-text question uses full-text search.
     #[cfg(feature = "indexer")]
     Ask {
         /// Natural language question.
@@ -1977,10 +1980,12 @@ enum Command {
         /// Number of results.
         #[arg(long, default_value = "5")]
         top_k: usize,
-        /// Run all strategies in parallel with Reciprocal Rank Fusion.
+        /// With `--strategy`, run those strategies in parallel and fuse them by
+        /// rank (Reciprocal Rank Fusion). Without it, the same as plain `ask`.
         #[arg(long)]
         parallel: bool,
-        /// Limit which strategies run (comma-separated: vector,fts,graph,time).
+        /// Strategies for `--parallel` (comma-separated: recall,vector,fts,graph,time).
+        /// `time` narrows the fused results to the query's window.
         #[arg(long)]
         strategy: Option<String>,
         /// Decompose the query into a multi-step plan and execute sequentially.

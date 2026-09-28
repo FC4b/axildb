@@ -10,7 +10,8 @@ embedding competes like the rest. Hits created after the cutoff are dropped,
 so records written since the questions don't compete.
 
 Two views per question:
-  ranked  `axil recall --recall-format full`, for hit@k, MRR, recall_all, NDCG.
+  ranked  `axil recall --recall-format full` (or `axil ask` with --via ask),
+          for hit@k, MRR, recall_all, NDCG.
   hook    `axil recall --recall-format context-block --budget 2000 --top-k 5`,
           exactly what the prompt hook injects: was an answer in it, and how
           many tokens (bytes / 4) did it cost.
@@ -68,10 +69,14 @@ def run_axil(axil: str, db: Path, args: list) -> str:
     return out.stdout
 
 
-def ranked_ids(axil: str, db: Path, question: str, top_k: int) -> list:
-    hits = json.loads(run_axil(axil, db, [
-        "recall", question, "--top-k", str(FETCH), "--recall-format", "full",
-    ]) or "[]")
+def ranked_ids(axil: str, db: Path, question: str, top_k: int, via: str) -> list:
+    if via == "ask":
+        hits = json.loads(run_axil(axil, db, ["ask", question, "--top-k", str(FETCH)]) or "{}")
+        hits = hits.get("results", [])
+    else:
+        hits = json.loads(run_axil(axil, db, [
+            "recall", question, "--top-k", str(FETCH), "--recall-format", "full",
+        ]) or "[]")
     kept = [h["id"] for h in hits if (h.get("created_at") or "") <= CUTOFF]
     return kept[:top_k]
 
@@ -135,6 +140,8 @@ def main() -> int:
     ap.add_argument("--out")
     ap.add_argument("--dump-context")
     ap.add_argument("--snapshot", help="reuse (or create) a frozen, healed copy of the DB here")
+    ap.add_argument("--via", choices=["recall", "ask"], default="recall",
+                    help="command for the ranked view (the hook view is always recall)")
     args = ap.parse_args()
 
     questions = [json.loads(l) for l in open(HERE / "questions.jsonl") if l.strip()]
@@ -154,7 +161,7 @@ def main() -> int:
             db = copy_db(source, Path(tmp))
             run_axil(args.axil, db, ["heal", "--reindex"])
         for i, q in enumerate(questions, 1):
-            ranked = ranked_ids(args.axil, db, q["question"], args.top_k)
+            ranked = ranked_ids(args.axil, db, q["question"], args.top_k, args.via)
             block = hook_block(args.axil, db, q["question"])
             row = {"id": q["id"], "kind": q["kind"], **score(q["expect"], ranked, block, args.top_k)}
             rows.append(row)
@@ -174,6 +181,7 @@ def main() -> int:
         by_kind[r["kind"]].append(r)
     report = {
         "benchmark": "dogfood-recall",
+        "via": args.via,
         "axil": version,
         "cutoff": CUTOFF,
         "top_k": args.top_k,

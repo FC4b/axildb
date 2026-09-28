@@ -1,7 +1,10 @@
 //! Query intent detection and smart routing for `axil ask`.
 //!
-//! Detects what KIND of query an agent is asking and routes to the
-//! appropriate backend(s) — vector, graph, FTS, temporal, or a blend.
+//! Detects what KIND of query an agent is asking and routes it. Every route
+//! starts from relevance, `Axil::recall` (the same scorer, weights and chunk
+//! rescoring as `axil recall`), and then adjusts: a time question narrows the
+//! window, a graph or cause question adds linked records, a rule question puts
+//! matching rules first, and a literal search uses full-text search.
 
 use std::sync::{Arc, LazyLock};
 
@@ -233,12 +236,7 @@ pub fn execute_plan(
 
         match step.query_type.as_str() {
             "vector" => {
-                if let Ok(hits) = db.similar_to(query, top_k) {
-                    strategies.push("vector".to_string());
-                    for (record, score) in hits {
-                        step_results.push(record_to_value(&record, score, "vector"));
-                    }
-                }
+                run_recall(db, query, top_k, &mut step_results, &mut strategies);
             }
             "fts" => {
                 if let Ok(hits) = db.search_text(query, top_k) {
@@ -307,11 +305,13 @@ pub fn execute_plan(
                 }
             }
             "time_filter" => {
-                strategies.push("time_filter".to_string());
-                let duration = parse_duration_from_query(query).unwrap_or(7 * 86400);
-
-                if !seed_ids.is_empty() {
-                    // Filter accumulated results to only those within the time window.
+                // Narrow what earlier steps found to the window, keeping their
+                // order; with nothing earlier, a relevance-ordered time query.
+                if seed_ids.is_empty() && all_results.is_empty() {
+                    run_temporal(db, query, top_k, &mut step_results, &mut strategies);
+                } else {
+                    strategies.push("time_filter".to_string());
+                    let duration = parse_duration_from_query(query).unwrap_or(7 * 86400);
                     let cutoff = chrono::Utc::now() - chrono::Duration::seconds(duration as i64);
                     let cutoff_str = cutoff.to_rfc3339();
                     all_results.retain(|v| {
@@ -320,24 +320,10 @@ pub fn execute_plan(
                             .map(|t| t >= cutoff_str.as_str())
                             .unwrap_or(true)
                     });
-                } else if let Ok(records) = db.since(None, duration) {
-                    for record in records.into_iter().take(top_k) {
-                        step_results.push(record_to_value(&record, 1.0, "temporal"));
-                    }
                 }
-                // Sort all accumulated results by created_at descending.
-                all_results.sort_by(|a, b| {
-                    let ta = a.get("created_at").and_then(|v| v.as_str()).unwrap_or("");
-                    let tb = b.get("created_at").and_then(|v| v.as_str()).unwrap_or("");
-                    tb.cmp(ta)
-                });
             }
             _ => {
-                // Fallback: run combined vector+FTS.
-                let mut dummy_strats = Vec::new();
-                run_vector(db, query, top_k, &mut step_results, &mut dummy_strats);
-                run_text_search(db, query, top_k, &mut step_results, &mut dummy_strats);
-                strategies.extend(dummy_strats);
+                run_recall(db, query, top_k, &mut step_results, &mut strategies);
             }
         }
 
@@ -566,7 +552,7 @@ pub fn ask(db: &Axil, query: &str, top_k: usize) -> axil_core::Result<AskResult>
 
     match intent {
         QueryIntent::VectorSearch => {
-            run_vector(db, query, top_k, &mut results, &mut strategies);
+            run_recall(db, query, top_k, &mut results, &mut strategies);
         }
         QueryIntent::GraphTraversal => {
             run_graph_traversal(db, query, top_k, &mut results, &mut strategies);
@@ -630,6 +616,14 @@ pub async fn ask_parallel(
     allowed_strategies: Option<Vec<String>>,
 ) -> axil_core::Result<AskResult> {
     let q = query.to_string();
+    // No explicit strategy list: the router is the answer. The core scorer
+    // already fuses vector, keyword and graph signals, so running them again
+    // separately and fusing by rank only loses the scores.
+    if allowed_strategies.is_none() {
+        return tokio::task::spawn_blocking(move || ask(&db, &q, top_k))
+            .await
+            .map_err(|e| axil_core::AxilError::plugin(format!("ask task failed: {e}")))?;
+    }
     let should_run = |name: &str| -> bool {
         allowed_strategies
             .as_ref()
@@ -708,20 +702,17 @@ pub async fn ask_parallel(
         }));
     }
 
-    if should_run("time") {
+    if should_run("recall") {
         let db = Arc::clone(&db);
         let q = q.clone();
-        strategy_names.push("time".to_string());
+        strategy_names.push("recall".to_string());
         handles.push(tokio::task::spawn_blocking(move || {
-            let duration = parse_duration_from_query(&q).unwrap_or(7 * 86400);
-            let mut items = Vec::new();
-            if let Ok(records) = db.since(None, duration) {
-                for record in records.into_iter().take(top_k) {
-                    items.push(record_to_value(&record, 1.0, "temporal"));
-                }
-            }
+            let items = recall_hits(&db, &q, top_k)
+                .iter()
+                .map(|(record, score)| record_to_value(record, *score, "recall"))
+                .collect();
             StrategyResult {
-                name: "time".to_string(),
+                name: "recall".to_string(),
                 items,
             }
         }));
@@ -735,14 +726,25 @@ pub async fn ask_parallel(
         }
     }
 
-    // Apply Reciprocal Rank Fusion.
-    let fused = reciprocal_rank_fusion(&strategy_results, top_k);
-
-    let strategies_used: Vec<String> = strategy_results
+    // Apply Reciprocal Rank Fusion. `time` is not a ranked list — the newest
+    // records are not more relevant — so it narrows the fused list instead.
+    let mut fused = reciprocal_rank_fusion(&strategy_results, top_k.saturating_mul(4));
+    let mut strategies_used: Vec<String> = strategy_results
         .iter()
         .filter(|s| !s.items.is_empty())
         .map(|s| s.name.clone())
         .collect();
+    if should_run("time") {
+        let window = parse_duration_from_query(&q).unwrap_or(7 * 86400);
+        let cutoff = (chrono::Utc::now() - chrono::Duration::seconds(window as i64)).to_rfc3339();
+        fused.retain(|v| {
+            v.get("created_at")
+                .and_then(Value::as_str)
+                .is_none_or(|t| t >= cutoff.as_str())
+        });
+        strategies_used.push("time_window".to_string());
+    }
+    fused.truncate(top_k);
 
     let tokens: usize = fused.iter().map(token::estimate_json_tokens).sum();
 
@@ -799,11 +801,16 @@ fn reciprocal_rank_fusion(strategy_results: &[StrategyResult], top_k: usize) -> 
     fused
         .into_iter()
         .map(|(_id, rrf_score, mut item)| {
+            // The fused rank is the result's score: backends score on
+            // different scales, so a consumer that re-sorts by `score` must
+            // get this order back, not one backend's.
             if let Some(o) = item.as_object_mut() {
-                o.insert(
-                    "rrf_score".to_string(),
-                    json!((rrf_score * 10000.0).round() / 10000.0),
-                );
+                let fused = json!((rrf_score * 10000.0).round() / 10000.0);
+                if let Some(backend) = o.remove("score") {
+                    o.insert("backend_score".to_string(), backend);
+                }
+                o.insert("score".to_string(), fused.clone());
+                o.insert("rrf_score".to_string(), fused);
             }
             item
         })
@@ -812,20 +819,87 @@ fn reciprocal_rank_fusion(strategy_results: &[StrategyResult], top_k: usize) -> 
 
 // ── Strategy Runners ────────────────────────────────────────────────
 
-fn run_vector(
+/// Relevance from the core multi-signal scorer: the path, weights and
+/// query-time chunk rescoring `axil recall` uses. Every route starts here.
+fn recall_hits(db: &Axil, query: &str, k: usize) -> Vec<(Record, f32)> {
+    let config = axil_core::RecallConfig {
+        qtc: Some(axil_core::QtcConfig::default()),
+        dedup: axil_core::DedupConfig {
+            enabled: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    db.recall(query, k, Some(config))
+        .map(|results| results.into_iter().map(|r| (r.record, r.score)).collect())
+        .unwrap_or_default()
+}
+
+fn run_recall(
     db: &Axil,
     query: &str,
     top_k: usize,
     results: &mut Vec<Value>,
     strategies: &mut Vec<String>,
 ) {
-    if let Ok(hits) = db.similar_to(query, top_k) {
-        strategies.push("vector".to_string());
-        for (record, score) in hits {
-            results.push(record_to_value(&record, score, "vector"));
+    let hits = recall_hits(db, query, top_k);
+    if !hits.is_empty() {
+        strategies.push("recall".to_string());
+    }
+    results.extend(hits.iter().map(|(r, s)| record_to_value(r, *s, "recall")));
+}
+
+/// Recall hits plus the graph neighbors of the top three, each at 0.8 of its
+/// seed's score, merged by score so a neighbor never outranks a better hit.
+/// `edge_types` limits which edges are followed (all when `None`).
+fn recall_with_neighbors(
+    db: &Axil,
+    query: &str,
+    top_k: usize,
+    edge_types: Option<&[&str]>,
+    results: &mut Vec<Value>,
+    strategies: &mut Vec<String>,
+) {
+    let hits = recall_hits(db, query, top_k);
+    if hits.is_empty() {
+        return;
+    }
+    strategies.push("recall".to_string());
+    let mut seen: std::collections::HashSet<String> =
+        hits.iter().map(|(r, _)| r.id.to_string()).collect();
+    let mut scored: Vec<Value> = hits
+        .iter()
+        .map(|(r, s)| record_to_value(r, *s, "recall"))
+        .collect();
+    let mut linked = false;
+    for (seed, seed_score) in hits.iter().take(3) {
+        let neighbors: Vec<Record> = match edge_types {
+            None => db
+                .neighbors(&seed.id, None, Direction::Both)
+                .unwrap_or_default(),
+            Some(types) => types
+                .iter()
+                .flat_map(|t| {
+                    db.neighbors(&seed.id, Some(t), Direction::Both)
+                        .unwrap_or_default()
+                })
+                .collect(),
+        };
+        for n in neighbors {
+            if seen.insert(n.id.to_string()) {
+                linked = true;
+                scored.push(record_to_value(&n, seed_score * 0.8, "graph_neighbor"));
+            }
         }
     }
+    if linked {
+        strategies.push("graph".to_string());
+    }
+    sort_by_score(&mut scored);
+    scored.truncate(top_k);
+    results.extend(scored);
 }
+
 
 fn run_text_search(
     db: &Axil,
@@ -842,6 +916,9 @@ fn run_text_search(
     }
 }
 
+/// A time question narrows the window; relevance still orders the answer.
+/// When nothing relevant falls inside the window, the relevant records are
+/// returned rather than unrelated recent ones.
 fn run_temporal(
     db: &Axil,
     query: &str,
@@ -849,16 +926,41 @@ fn run_temporal(
     results: &mut Vec<Value>,
     strategies: &mut Vec<String>,
 ) {
-    let duration = parse_duration_from_query(query).unwrap_or(7 * 86400);
-
-    if let Ok(records) = db.since(None, duration) {
-        strategies.push("temporal".to_string());
-        for record in records.into_iter().take(top_k) {
-            results.push(record_to_value(&record, 1.0, "temporal"));
+    let window = parse_duration_from_query(query).unwrap_or(7 * 86400);
+    let cutoff = chrono::Utc::now() - chrono::Duration::seconds(window as i64);
+    // Over-fetch: the window drops the older hits.
+    let hits = recall_hits(db, query, top_k.saturating_mul(4).max(20));
+    let in_window: Vec<&(Record, f32)> = hits
+        .iter()
+        .filter(|(r, _)| r.created_at >= cutoff)
+        .take(top_k)
+        .collect();
+    if hits.is_empty() {
+        // No relevance signal at all (no vector or text engine): the window
+        // is the only thing left to answer with.
+        if let Ok(records) = db.since(None, window) {
+            strategies.push("time_window (no relevance signal)".to_string());
+            results.extend(
+                records
+                    .iter()
+                    .take(top_k)
+                    .map(|r| record_to_value(r, 0.0, "time_window")),
+            );
         }
+    } else if in_window.is_empty() {
+        strategies.push("recall (nothing in the time window)".to_string());
+        results.extend(
+            hits.iter()
+                .take(top_k)
+                .map(|(r, s)| record_to_value(r, *s, "recall")),
+        );
     } else {
-        // Fallback: list all records and filter by created_at.
-        fallback_text_or_vector(db, query, top_k, results, strategies);
+        strategies.push("recall+time_window".to_string());
+        results.extend(
+            in_window
+                .into_iter()
+                .map(|(r, s)| record_to_value(r, *s, "recall+time_window")),
+        );
     }
 }
 
@@ -869,41 +971,7 @@ fn run_graph_traversal(
     results: &mut Vec<Value>,
     strategies: &mut Vec<String>,
 ) {
-    // Step 1: Find the entity the user is asking about via vector or FTS.
-    let seed_records = find_seed_records(db, query, 3);
-
-    if seed_records.is_empty() {
-        // No seeds found — fall back to combined.
-        fallback_text_or_vector(db, query, top_k, results, strategies);
-        return;
-    }
-
-    strategies.push("graph".to_string());
-
-    // Step 2: For each seed, get neighbors.
-    let mut seen = std::collections::HashSet::new();
-    for (seed, seed_score) in &seed_records {
-        // Include the seed itself.
-        if seen.insert(seed.id.to_string()) {
-            results.push(record_to_value(seed, *seed_score, "graph_seed"));
-        }
-        if let Ok(neighbors) = db.neighbors(&seed.id, None, Direction::Both) {
-            for neighbor in neighbors {
-                if seen.insert(neighbor.id.to_string()) {
-                    results.push(record_to_value(
-                        &neighbor,
-                        seed_score * 0.8,
-                        "graph_neighbor",
-                    ));
-                }
-            }
-        }
-        if results.len() >= top_k {
-            break;
-        }
-    }
-
-    results.truncate(top_k);
+    recall_with_neighbors(db, query, top_k, None, results, strategies);
 }
 
 fn run_causality(
@@ -913,44 +981,8 @@ fn run_causality(
     results: &mut Vec<Value>,
     strategies: &mut Vec<String>,
 ) {
-    // Try FTS first for causality queries (keyword-rich).
-    if let Ok(hits) = db.search_text(query, top_k) {
-        if !hits.is_empty() {
-            strategies.push("fts".to_string());
-            for (record, score) in &hits {
-                results.push(record_to_value(record, *score, "fts"));
-            }
-        }
-    }
-
-    // Then traverse causal graph edges from seed records.
-    let seeds = find_seed_records(db, query, 2);
-    for (seed, _score) in &seeds {
-        for edge_type in &["decided_by", "caused_by", "led_to", "supersedes"] {
-            if let Ok(neighbors) = db.neighbors(&seed.id, Some(edge_type), Direction::Both) {
-                if !neighbors.is_empty() {
-                    strategies.push(format!("graph:{edge_type}"));
-                    for neighbor in neighbors {
-                        results.push(record_to_value(
-                            &neighbor,
-                            0.7,
-                            &format!("graph:{edge_type}"),
-                        ));
-                    }
-                }
-            }
-        }
-        if results.len() >= top_k {
-            break;
-        }
-    }
-
-    // If nothing found yet, fall back to vector.
-    if results.is_empty() {
-        run_vector(db, query, top_k, results, strategies);
-    }
-
-    results.truncate(top_k);
+    let causal = ["decided_by", "caused_by", "led_to", "supersedes"];
+    recall_with_neighbors(db, query, top_k, Some(&causal), results, strategies);
 }
 
 fn run_rule_lookup(
@@ -987,13 +1019,22 @@ fn run_rule_lookup(
         }
     }
 
-    // Also try FTS and vector as supplementary.
-    if results.len() < top_k {
-        fallback_text_or_vector(db, query, top_k - results.len(), results, strategies);
-    }
-
+    // Matching rules first (the question asked for one), then relevance.
     sort_by_score(results);
     results.truncate(top_k);
+    if results.len() < top_k {
+        let seen: std::collections::HashSet<String> = results
+            .iter()
+            .filter_map(|v| v.get("id").and_then(Value::as_str).map(str::to_string))
+            .collect();
+        let mut more = Vec::new();
+        run_recall(db, query, top_k, &mut more, strategies);
+        results.extend(
+            more.into_iter()
+                .filter(|v| !seen.contains(v.get("id").and_then(Value::as_str).unwrap_or("")))
+                .take(top_k - results.len()),
+        );
+    }
 }
 
 fn run_combined(
@@ -1003,35 +1044,7 @@ fn run_combined(
     results: &mut Vec<Value>,
     strategies: &mut Vec<String>,
 ) {
-    let mut vector_results = Vec::new();
-    run_vector(db, query, top_k, &mut vector_results, strategies);
-
-    let mut fts_results = Vec::new();
-    run_text_search(db, query, top_k, &mut fts_results, strategies);
-
-    // Merge: deduplicate by id, keep highest score per id.
-    let mut best: std::collections::HashMap<String, (f64, Value)> =
-        std::collections::HashMap::new();
-
-    for item in vector_results.into_iter().chain(fts_results) {
-        let id = item
-            .get("id")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        let score = item.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
-
-        let entry = best.entry(id).or_insert((score, item.clone()));
-        if score > entry.0 {
-            *entry = (score, item);
-        }
-    }
-
-    results.extend(best.into_values().map(|(_, v)| v));
-
-    // Sort by score descending.
-    sort_by_score(results);
-    results.truncate(top_k);
+    run_recall(db, query, top_k, results, strategies);
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────
@@ -1049,31 +1062,6 @@ fn find_seed_records(db: &Axil, query: &str, limit: usize) -> Vec<(Record, f32)>
         return hits;
     }
     Vec::new()
-}
-
-/// Fallback helper: try FTS, then vector.
-fn fallback_text_or_vector(
-    db: &Axil,
-    query: &str,
-    top_k: usize,
-    results: &mut Vec<Value>,
-    strategies: &mut Vec<String>,
-) {
-    if let Ok(hits) = db.search_text(query, top_k) {
-        if !hits.is_empty() {
-            strategies.push("fts_fallback".to_string());
-            for (record, score) in hits {
-                results.push(record_to_value(&record, score, "fts_fallback"));
-            }
-            return;
-        }
-    }
-    if let Ok(hits) = db.similar_to(query, top_k) {
-        strategies.push("vector_fallback".to_string());
-        for (record, score) in hits {
-            results.push(record_to_value(&record, score, "vector_fallback"));
-        }
-    }
 }
 
 /// Convert a `Record` + score into a compact JSON value for the result set.
@@ -1127,6 +1115,45 @@ fn sort_by_score(results: &mut [Value]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// With no strategy list, the parallel entry point is the router.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ask_parallel_without_strategies_matches_ask() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Axil::open(dir.path().join("ask.axil")).build().unwrap());
+        for s in [
+            "auth token refresh retries",
+            "release workflow runner",
+            "auth session expiry",
+        ] {
+            db.insert("decisions", json!({ "summary": s })).unwrap();
+        }
+        let serial = ask(&db, "auth token", 3).unwrap();
+        let parallel = ask_parallel(Arc::clone(&db), "auth token", 3, None)
+            .await
+            .unwrap();
+        let ids = |r: &AskResult| -> Vec<String> {
+            r.results.iter().map(|v| v["id"].to_string()).collect()
+        };
+        assert_eq!(ids(&serial), ids(&parallel));
+    }
+
+    /// Fused results carry the fused rank as `score`, so re-sorting by score
+    /// (the LongMemEval harness does) keeps the fused order.
+    #[test]
+    fn rrf_score_is_the_fused_order() {
+        let a = StrategyResult {
+            name: "vector".into(),
+            items: vec![
+                json!({"id": "x", "score": 0.1}),
+                json!({"id": "y", "score": 0.9}),
+            ],
+        };
+        let fused = reciprocal_rank_fusion(&[a], 2);
+        assert_eq!(fused[0]["id"], "x");
+        assert!(fused[0]["score"].as_f64() > fused[1]["score"].as_f64());
+        assert_eq!(fused[0]["backend_score"], 0.1);
+    }
 
     // ── detect_intent ───────────────────────────────────────────
 

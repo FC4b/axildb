@@ -303,3 +303,61 @@ fn full_agent_session_workflow() {
     let prefetch = axil_indexer::prefetch(&db, "fix auth bug", 1000).unwrap();
     assert!(prefetch.ready);
 }
+
+/// A time question narrows the window; it must not swap relevance for
+/// recency. An unrelated record from today must not beat the relevant one,
+/// and a relevant record from last month is outside "recently".
+#[test]
+fn ask_time_question_keeps_relevance_inside_the_window() {
+    use axil_fts::AxilBuilderFtsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let db = Axil::open(dir.path().join("ask.axil"))
+        .with_fts_engine()
+        .unwrap()
+        .build()
+        .unwrap();
+    let now = chrono::Utc::now();
+    let old = db
+        .insert_at(
+            "decisions",
+            json!({"summary": "auth token refresh moved to a background task"}),
+            now - chrono::Duration::days(40),
+        )
+        .unwrap()
+        .id;
+    let fresh = db
+        .insert_at(
+            "decisions",
+            json!({"summary": "auth token refresh now retries twice before failing"}),
+            now - chrono::Duration::days(2),
+        )
+        .unwrap()
+        .id;
+    let unrelated = db
+        .insert_at(
+            "decisions",
+            json!({"summary": "bumped the release workflow to a newer runner image"}),
+            now - chrono::Duration::hours(1),
+        )
+        .unwrap()
+        .id;
+
+    let result =
+        axil_indexer::ask::ask(&db, "what changed recently in auth token refresh", 3).unwrap();
+    let ids: Vec<&str> = result
+        .results
+        .iter()
+        .filter_map(|v| v["id"].as_str())
+        .collect();
+    assert_eq!(ids.first(), Some(&fresh.as_str()), "{ids:?}");
+    assert!(
+        !ids.contains(&old.as_str()),
+        "last month is outside 'recently': {ids:?}"
+    );
+    assert!(
+        ids.iter()
+            .position(|i| *i == unrelated.as_str())
+            .is_none_or(|p| p > 0),
+        "an unrelated record never leads: {ids:?}"
+    );
+}
