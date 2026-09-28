@@ -4,7 +4,7 @@ pub mod traverse;
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
@@ -220,7 +220,11 @@ const MAX_EDGE_PROPERTY_BYTES: usize = 65_536; // 64 KB
 /// traversal and neighbor queries.
 pub struct GraphEngine {
     graph_db: Database,
-    index: RwLock<AdjacencyIndex>,
+    /// Every edge, indexed by endpoint, loaded by the first graph operation:
+    /// decoding a large graph takes hundreds of milliseconds (~430 ms for
+    /// 161k edges), and most commands that open the database never use it.
+    /// A failed load is kept, so every later operation reports it.
+    index: OnceLock<std::result::Result<RwLock<AdjacencyIndex>, String>>,
 }
 
 impl GraphEngine {
@@ -234,13 +238,45 @@ impl GraphEngine {
             ))))
         })?;
 
-        {
+        // Only a new store needs its table created. Opening an existing one
+        // commits nothing, so a read-only command leaves the file untouched.
+        let has_table = {
+            let txn = graph_db.begin_read()?;
+            match txn.open_table(EDGES_TABLE) {
+                Ok(_) => true,
+                Err(redb::TableError::TableDoesNotExist(_)) => false,
+                Err(e) => return Err(e.into()),
+            }
+        };
+        if !has_table {
             let txn = graph_db.begin_write()?;
             let _ = txn.open_table(EDGES_TABLE)?;
             txn.commit()?;
         }
 
-        // Load existing edges into memory, cleaning corrupt entries.
+        Ok(Self {
+            graph_db,
+            index: OnceLock::new(),
+        })
+    }
+
+    /// The edge index, loading it on first use.
+    fn index(&self) -> Result<&RwLock<AdjacencyIndex>> {
+        self.index
+            .get_or_init(|| {
+                self.load_index().map(RwLock::new).map_err(|e| {
+                    let msg = format!("graph store unavailable: {e}");
+                    eprintln!("axil: {msg}");
+                    msg
+                })
+            })
+            .as_ref()
+            .map_err(|msg| AxilError::Plugin(Box::new(std::io::Error::other(msg.clone()))))
+    }
+
+    /// Read every edge into memory, removing corrupt entries from disk.
+    fn load_index(&self) -> Result<AdjacencyIndex> {
+        let graph_db = &self.graph_db;
         let mut adj = AdjacencyIndex::new();
         let mut corrupt_keys: Vec<String> = Vec::new();
         {
@@ -280,10 +316,7 @@ impl GraphEngine {
             )))));
         }
 
-        Ok(Self {
-            graph_db,
-            index: RwLock::new(adj),
-        })
+        Ok(adj)
     }
 
     /// Create a directed edge between two records.
@@ -315,7 +348,7 @@ impl GraphEngine {
             )));
         }
 
-        let mut idx = self.index.write();
+        let mut idx = self.index()?.write();
 
         // Check count under write lock to prevent concurrent overflow.
         if idx.edge_count() >= MAX_EDGES {
@@ -361,7 +394,7 @@ impl GraphEngine {
             }
         }
 
-        let mut idx = self.index.write();
+        let mut idx = self.index()?.write();
 
         // Enforce MAX_EDGES under the write lock against the post-batch
         // count so a partial batch can't push the index over.
@@ -397,7 +430,7 @@ impl GraphEngine {
     /// deleters cannot both observe the edge as present. Disk is updated
     /// before memory within the lock so a crash leaves a consistent state.
     pub fn delete_edge(&self, edge_id: &RecordId) -> Result<bool> {
-        let mut idx = self.index.write();
+        let mut idx = self.index()?.write();
         if !idx.edges.contains_key(edge_id) {
             return Ok(false);
         }
@@ -406,14 +439,18 @@ impl GraphEngine {
         Ok(true)
     }
 
-    /// Get an edge by ID.
+    /// Get an edge by ID. `None` also when the store can't be loaded (the
+    /// load error is printed once).
     pub fn get_edge(&self, edge_id: &RecordId) -> Option<Edge> {
-        self.index.read().edges.get(edge_id).cloned()
+        self.index().ok()?.read().edges.get(edge_id).cloned()
     }
 
-    /// Get outgoing edges from a record.
+    /// Get outgoing edges from a record (none when the store can't be loaded).
     pub fn get_outgoing(&self, from: &RecordId, edge_type: Option<&str>) -> Vec<Edge> {
-        self.index
+        let Ok(index) = self.index() else {
+            return Vec::new();
+        };
+        index
             .read()
             .get_outgoing(from, edge_type)
             .into_iter()
@@ -421,9 +458,12 @@ impl GraphEngine {
             .collect()
     }
 
-    /// Get incoming edges to a record.
+    /// Get incoming edges to a record (none when the store can't be loaded).
     pub fn get_incoming(&self, to: &RecordId, edge_type: Option<&str>) -> Vec<Edge> {
-        self.index
+        let Ok(index) = self.index() else {
+            return Vec::new();
+        };
+        index
             .read()
             .get_incoming(to, edge_type)
             .into_iter()
@@ -431,14 +471,18 @@ impl GraphEngine {
             .collect()
     }
 
-    /// Get all edges for a record in a given direction, optionally filtered by type.
+    /// Get all edges for a record in a given direction, optionally filtered by
+    /// type (none when the store can't be loaded).
     pub fn get_edges(
         &self,
         id: &RecordId,
         edge_type: Option<&str>,
         direction: Direction,
     ) -> Vec<Edge> {
-        let idx = self.index.read();
+        let Ok(index) = self.index() else {
+            return Vec::new();
+        };
+        let idx = index.read();
         match direction {
             Direction::Out => idx
                 .get_outgoing(id, edge_type)
@@ -467,14 +511,18 @@ impl GraphEngine {
         }
     }
 
-    /// Get neighbor record IDs reachable via edges in the given direction.
+    /// Get neighbor record IDs reachable via edges in the given direction
+    /// (none when the store can't be loaded).
     pub fn neighbor_ids(
         &self,
         id: &RecordId,
         edge_type: Option<&str>,
         direction: Direction,
     ) -> Vec<RecordId> {
-        self.index.read().neighbor_ids(id, edge_type, direction)
+        match self.index() {
+            Ok(index) => index.read().neighbor_ids(id, edge_type, direction),
+            Err(_) => Vec::new(),
+        }
     }
 
     /// Multi-hop traversal following a sequence of steps.
@@ -509,7 +557,7 @@ impl GraphEngine {
             return Ok(vec![start.clone()]);
         }
 
-        let idx = self.index.read();
+        let idx = self.index()?.read();
         let mut current: Vec<RecordId> = vec![start.clone()];
 
         for step in steps {
@@ -552,7 +600,7 @@ impl GraphEngine {
             return Ok(vec![start.clone()]);
         }
 
-        let idx = self.index.read();
+        let idx = self.index()?.read();
         let mut current: Vec<RecordId> = vec![start.clone()];
 
         for step in steps {
@@ -577,9 +625,9 @@ impl GraphEngine {
         Ok(current)
     }
 
-    /// Total edge count.
+    /// Total edge count (0 when the store can't be loaded).
     pub fn edge_count(&self) -> usize {
-        self.index.read().edge_count()
+        self.index().map_or(0, |index| index.read().edge_count())
     }
 
     // ── Persistence helpers ─────────────────────────────────────────
@@ -662,7 +710,7 @@ impl Engine for GraphEngine {
         // Hold the write lock for the entire operation so that no new
         // edges can be added for this record between collection and
         // removal. Disk is updated before memory within the lock.
-        let mut idx = self.index.write();
+        let mut idx = self.index()?.write();
         let to_remove = {
             let mut ids = HashSet::new();
             if let Some(set) = idx.outgoing.get(id) {
@@ -715,7 +763,7 @@ impl GraphIndex for GraphEngine {
         edge_type: Option<&str>,
         direction: Direction,
     ) -> Result<Vec<RecordId>> {
-        Ok(self.neighbor_ids(&id, edge_type, direction))
+        Ok(self.index()?.read().neighbor_ids(&id, edge_type, direction))
     }
 
     fn edges(
@@ -724,6 +772,7 @@ impl GraphIndex for GraphEngine {
         edge_type: Option<&str>,
         direction: Direction,
     ) -> Result<Vec<EdgeInfo>> {
+        self.index()?;
         Ok(self
             .get_edges(&id, edge_type, direction)
             .into_iter()
@@ -743,7 +792,7 @@ impl GraphIndex for GraphEngine {
     }
 
     fn all_edge_ids(&self) -> Result<Vec<(RecordId, RecordId, RecordId)>> {
-        let idx = self.index.read();
+        let idx = self.index()?.read();
         Ok(idx
             .edges
             .values()

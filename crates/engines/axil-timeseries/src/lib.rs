@@ -202,8 +202,17 @@ impl TimeSeriesEngine {
             ))))
         })?;
 
-        // Ensure table exists.
-        {
+        // Only a new store needs its table created. Opening an existing one
+        // commits nothing, so a read-only command leaves the file untouched.
+        let has_table = {
+            let txn = ts_db.begin_read()?;
+            match txn.open_table(TIME_TABLE) {
+                Ok(_) => true,
+                Err(redb::TableError::TableDoesNotExist(_)) => false,
+                Err(e) => return Err(e.into()),
+            }
+        };
+        if !has_table {
             let txn = ts_db.begin_write()?;
             let _ = txn.open_table(TIME_TABLE)?;
             txn.commit()?;

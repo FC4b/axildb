@@ -4777,7 +4777,13 @@ impl Axil {
                     let vector_results = vi.search(&query_vec, fetch_k.saturating_mul(2))?;
                     (Some(query_vec), vector_results)
                 }
-                Err(_) => (None, Vec::new()),
+                // The embedder loads its model on first use, so a broken model
+                // surfaces here: say so rather than quietly recalling without
+                // vectors.
+                Err(e) => {
+                    eprintln!("axil: recall ran without vector search: {e}");
+                    (None, Vec::new())
+                }
             }
         } else {
             (None, Vec::new())
