@@ -101,11 +101,11 @@ updating this table fails the build.
 ### Intent-native writes — store cognition, not rows
 
 Prefer these over raw `store` when the thing you are recording *is* a decision,
-an error, or a preference: they auto-embed, auto-supersede, and dedupe.
+an error, or a preference: they auto-embed, supersede near-duplicates, and dedupe.
 
 | Tool | Params | When to use |
 |------|--------|-------------|
-| `remember_decision` | `summary` string (req), `reason?`, `files?` string[], `agent_id?`, `external_id?`, `force_new?` bool | After choosing approach A over B. Auto-embeds, auto-supersedes prior decisions, and dedupes by `(agent_id, external_id)` or a 5-minute content hash. |
+| `remember_decision` | `summary` string (req), `reason?`, `files?` string[], `agent_id?`, `external_id?`, `force_new?` bool | After choosing approach A over B. Auto-embeds, supersedes near-duplicate prior decisions (similarity ≥ 0.92), and dedupes by `(agent_id, external_id)` or a 5-minute content hash. |
 | `remember_error` | `error` string (req), `root_cause?`, `fix?`, `files?` string[], `agent_id?`, `external_id?`, `force_new?` bool | After hitting a bug or gotcha. Same idempotency rules as `remember_decision`. |
 | `resolve_error` | `error_id` string (req), `by?` record id, `note?` string, `reopen?` bool | Once a recorded error is fixed. Sets `resolved: true` so open-error views (the boot "Resume Here" block) stop listing it; `by` links the fixing record with a `resolves` edge. The error stays recallable. `reopen` undoes it. |
 | `set_preference` | `key` string (req), `value` any (req) | Record a user preference. Overwrites by key; the previous value is kept on the new record as `_previous_value` for a lightweight audit trail. |

@@ -149,7 +149,8 @@ pub use llm_http::HttpLlm;
 
 // Re-exports
 pub use consolidation::{
-    check_conflict, compute_confidence, consolidate_facts, detect_conflict_confidence,
+    check_conflict, compute_confidence, judge_conflict, SUPERSEDE_CANDIDATE_FLOOR,
+    consolidate_facts, detect_conflict_confidence,
     ConfidenceScore, ConflictConfidence, ConflictResult, ConsolidatedFact,
 };
 pub use entity::{extract_entities, Entity, EntityType};

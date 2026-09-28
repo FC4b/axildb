@@ -297,7 +297,7 @@ Unlike raw databases, Axil includes agent-specific memory patterns:
 Records can have a `valid_until` timestamp. Expired records are excluded from queries by default.
 
 ### Memory Superseding
-When a new fact is stored, Axil can auto-detect semantically similar existing facts (via vector similarity > 0.92) and mark the old ones as superseded, linking them via graph edge `->supersedes->`.
+On insert, a same-table record at vector similarity ≥ 0.92 is treated as a near-duplicate and marked superseded, linked via graph edge `->supersedes->`. That collapses restatements; it does **not** catch real updates, which score far lower (median ~0.77 under bge-small on labeled update pairs). `axil detect-conflicts <id>` nominates candidates down to cosine 0.65 (`Axil::supersede_candidates`) and applies a rule-based judge (shared entities + asymmetric negation) that is precise but catches only ~1–10% of real updates; a model judge is planned (Phase 29: 29.6/29.11).
 
 ### Recency-Weighted Recall
 The `recall()` function combines vector similarity with recency scoring, so newer memories rank higher when relevance is equal.
@@ -323,7 +323,7 @@ local, gitignored `tasks/` dir — they are not shipped in the public repo.)
 - MCP server (stdio): recall, store, link, search, query_history, get, list, delete
 
 ### Phase 5: Agent Memory Patterns ✅
-- TTL/expiry (`axil-memory/ttl.rs`), memory superseding (similarity >0.92 + graph edges)
+- TTL/expiry (`axil-memory/ttl.rs`), memory superseding (near-duplicates at similarity ≥0.92 + graph edges; update detection is rule-based and rarely fires, see Memory Superseding above)
 - Recency-weighted recall (per-memory-type alpha blending), session lifecycle (start/log/end → episodic)
 
 ### Phase 5b: Diagnostics & Observability ✅

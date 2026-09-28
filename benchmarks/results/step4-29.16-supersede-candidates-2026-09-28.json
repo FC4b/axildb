@@ -1,0 +1,40 @@
+{
+  "item": "29.16 supersession: candidate generation split from judgement",
+  "date": "2026-09-28",
+  "u1_repo": {
+    "pairs": {
+      "updates": 20,
+      "non_updates": 20
+    },
+    "before_gate_0.92": {
+      "candidate_recall": 0.0,
+      "updates_caught": 0.0,
+      "still_valid_retired": 0.0
+    },
+    "after_full_path_floor_0.65_top5": {
+      "candidate_recall": 0.75,
+      "updates_caught": 0.1,
+      "still_valid_retired": 0.0,
+      "wrong_record_retired": 0,
+      "avg_candidates": 3.025
+    }
+  },
+  "u1_lme": {
+    "pairs": {
+      "updates": 69,
+      "non_updates": 140
+    },
+    "before_gate_0.92": {
+      "candidate_recall": 0.028985507246376812,
+      "updates_caught": 0.0,
+      "still_valid_retired": 0.0
+    },
+    "after_full_path_floor_0.65_top5": {
+      "candidate_recall": 0.8695652173913043,
+      "updates_caught": 0.014492753623188406,
+      "still_valid_retired": 0.0,
+      "wrong_record_retired": 0,
+      "avg_candidates": 4.588516746411483
+    }
+  }
+}

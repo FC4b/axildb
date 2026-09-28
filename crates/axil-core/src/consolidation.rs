@@ -55,6 +55,13 @@ pub struct ConfidenceScore {
 /// Similarity threshold for detecting potential conflicts.
 const CONFLICT_SIMILARITY_THRESHOLD: f32 = 0.92;
 
+/// Cosine floor for supersession *candidates* (see
+/// `Axil::supersede_candidates`). Similarity only nominates: real updates
+/// often score far below 0.92 (median 0.77 under bge-small on labeled
+/// update pairs), so the floor is set for recall — 0.65 lets 80–99% of true
+/// predecessors through on the typed-decisions sets — and a judge decides.
+pub const SUPERSEDE_CANDIDATE_FLOOR: f32 = 0.65;
+
 /// Higher threshold for medium-confidence detection.
 const CONFLICT_MEDIUM_THRESHOLD: f32 = 0.95;
 
@@ -129,7 +136,18 @@ pub fn check_conflict(
     if similarity < CONFLICT_SIMILARITY_THRESHOLD {
         return ConflictResult::Novel;
     }
+    judge_conflict(new_record, existing_record, similarity)
+}
 
+/// The judgement half of [`check_conflict`], without its similarity gate:
+/// shared entities, then asymmetric negation (supersedes) or a changed value
+/// at very high similarity (contradicts). The caller decides which pairs are
+/// similar enough to ask about.
+pub fn judge_conflict(
+    new_record: &Record,
+    existing_record: &Record,
+    similarity: f32,
+) -> ConflictResult {
     let new_text = record_text(new_record);
     let existing_text = record_text(existing_record);
 

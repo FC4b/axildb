@@ -5563,29 +5563,10 @@ impl Axil {
             .get(record_id)?
             .ok_or_else(|| AxilError::NotFound(format!("record {record_id}")))?;
 
-        let vi = self.require_vector_index()?;
-        let embedder = self.require_embedder()?;
-
-        let text = record_text_for_entity(&record);
-        let query_vec = embedder.embed(&text)?;
-
-        // Find similar records
-        let similar = vi.search(&query_vec, 20)?;
         let mut conflicts = Vec::new();
-
-        for (sim_rid, sim_score) in &similar {
-            if sim_rid == record_id {
-                continue;
-            }
-            let Some(existing) = self.storage.get(sim_rid)? else {
-                continue;
-            };
-            // Conflicts are between live claims in the same table; a
-            // superseded record is history, not a competing claim.
-            if existing.table != record.table || is_superseded_record(&existing) {
-                continue;
-            }
-            let mut result = crate::consolidation::check_conflict(&record, &existing, *sim_score);
+        for (existing, sim_score) in &self.supersede_candidates(&record, 10)? {
+            let sim_rid = &existing.id;
+            let mut result = crate::consolidation::judge_conflict(&record, existing, *sim_score);
             if matches!(
                 result,
                 crate::consolidation::ConflictResult::Supersedes { .. }
@@ -5616,6 +5597,45 @@ impl Axil {
         }
 
         Ok(conflicts)
+    }
+
+    /// Live records in `record`'s table that it may have replaced: up to
+    /// `limit` of the most similar by embedding, with cosine at least
+    /// [`crate::consolidation::SUPERSEDE_CANDIDATE_FLOOR`], most similar first.
+    ///
+    /// Similarity only nominates. Deciding whether a candidate really was
+    /// replaced is a judge's job ([`crate::consolidation::judge_conflict`]
+    /// today), because a real update and a same-topic record that still holds
+    /// score alike.
+    pub fn supersede_candidates(
+        &self,
+        record: &Record,
+        limit: usize,
+    ) -> Result<Vec<(Record, f32)>> {
+        let vi = self.require_vector_index()?;
+        let embedder = self.require_embedder()?;
+        let query_vec = embedder.embed(&record_text_for_entity(record))?;
+        // Over-fetch: other tables and superseded records are filtered out.
+        let similar = vi.search(&query_vec, limit.saturating_mul(4).max(20))?;
+        let mut candidates = Vec::new();
+        for (rid, score) in similar {
+            if candidates.len() == limit {
+                break;
+            }
+            if rid == record.id || score < crate::consolidation::SUPERSEDE_CANDIDATE_FLOOR {
+                continue;
+            }
+            let Some(existing) = self.storage.get(&rid)? else {
+                continue;
+            };
+            // Conflicts are between live claims in the same table; a
+            // superseded record is history, not a competing claim.
+            if existing.table != record.table || is_superseded_record(&existing) {
+                continue;
+            }
+            candidates.push((existing, score));
+        }
+        Ok(candidates)
     }
 
     /// Consolidate facts about an entity.

@@ -62,6 +62,23 @@ only an explicit `axil compact` / `axil heal --compact` deletes.
 Orphan cleanup (dangling edges/vectors/FTS entries) still runs either
 way — it repairs referential integrity and never deletes records.
 
+## What supersession catches
+
+On insert, a record at similarity ≥ `healing.supersede_similarity_threshold`
+(default 0.92) to a same-table record marks the older one superseded. That
+collapses near-duplicates and restatements. Real updates ("we dropped the
+Intel Mac target" after "releases ship six targets") score much lower —
+median ~0.77 under bge-small on the labeled update pairs in
+`benchmarks/typed-decisions` — so insert never retires them.
+
+`axil detect-conflicts <id>` looks further: it nominates same-table
+candidates down to cosine 0.65 (`Axil::supersede_candidates`; the true
+predecessor is among the top 5 for 75–87% of labeled update pairs) and a
+rule judge decides — shared entities plus a negation on one side only. The
+rule never retired a still-valid record in those sets, but it catches only
+1–10% of real updates, so treat supersession as near-duplicate collapse
+until a model judge ships (Phase 29).
+
 ## Append-only tables — `[lifecycle.tables.<t>]`
 
 Auto-supersede assumes similar text means *a newer revision of the same
