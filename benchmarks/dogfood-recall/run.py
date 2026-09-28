@@ -44,11 +44,19 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 CUTOFF = "2026-09-28T02:00:00Z"
-FETCH = 25  # over-fetch so dropping post-cutoff hits still leaves top-k
+# Over-fetch so dropping post-cutoff hits still leaves top-k. Recall's
+# candidate pool grows with the requested k, and so can its ranking, so pass
+# --fetch equal to --top-k to score exactly what an agent asking for that
+# many results gets (post-cutoff hits then cost slots).
+FETCH = 25
 
 
 def copy_db(db: Path, dest: Path) -> Path:
-    """Copy the core file and every companion (`memory.axil.*`)."""
+    """Copy the core file, every companion (`memory.axil.*`) and an
+    `axil.toml` beside them, so a snapshot keeps its embedding model."""
+    config = db.parent / "axil.toml"
+    if config.exists():
+        shutil.copy2(config, dest / config.name)
     for src in db.parent.glob(db.name + "*"):
         target = dest / src.name
         if src.is_dir():
@@ -69,13 +77,13 @@ def run_axil(axil: str, db: Path, args: list) -> str:
     return out.stdout
 
 
-def ranked_ids(axil: str, db: Path, question: str, top_k: int, via: str) -> list:
+def ranked_ids(axil: str, db: Path, question: str, top_k: int, via: str, fetch: int) -> list:
     if via == "ask":
-        hits = json.loads(run_axil(axil, db, ["ask", question, "--top-k", str(FETCH)]) or "{}")
+        hits = json.loads(run_axil(axil, db, ["ask", question, "--top-k", str(fetch)]) or "{}")
         hits = hits.get("results", [])
     else:
         hits = json.loads(run_axil(axil, db, [
-            "recall", question, "--top-k", str(FETCH), "--recall-format", "full",
+            "recall", question, "--top-k", str(fetch), "--recall-format", "full",
         ]) or "[]")
     kept = [h["id"] for h in hits if (h.get("created_at") or "") <= CUTOFF]
     return kept[:top_k]
@@ -137,6 +145,8 @@ def main() -> int:
     ap.add_argument("--db", default=".axil/memory.axil")
     ap.add_argument("--axil", default="axil")
     ap.add_argument("--top-k", type=int, default=10)
+    ap.add_argument("--fetch", type=int, default=FETCH,
+                    help="results requested from axil for the ranked view (see FETCH)")
     ap.add_argument("--out")
     ap.add_argument("--dump-context")
     ap.add_argument("--snapshot", help="reuse (or create) a frozen, healed copy of the DB here")
@@ -161,7 +171,7 @@ def main() -> int:
             db = copy_db(source, Path(tmp))
             run_axil(args.axil, db, ["heal", "--reindex"])
         for i, q in enumerate(questions, 1):
-            ranked = ranked_ids(args.axil, db, q["question"], args.top_k, args.via)
+            ranked = ranked_ids(args.axil, db, q["question"], args.top_k, args.via, args.fetch)
             block = hook_block(args.axil, db, q["question"])
             row = {"id": q["id"], "kind": q["kind"], **score(q["expect"], ranked, block, args.top_k)}
             rows.append(row)
@@ -185,6 +195,7 @@ def main() -> int:
         "axil": version,
         "cutoff": CUTOFF,
         "top_k": args.top_k,
+        "fetch": args.fetch,
         "overall": summarize(rows),
         "by_kind": {k: summarize(v) for k, v in sorted(by_kind.items())},
         "per_question": [{k: r[k] for k in ("id", "first_rank", "hook_hit")} for r in rows],
