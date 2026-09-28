@@ -59,8 +59,8 @@ use axil_vector::AxilBuilderVectorExt;
 /// work happen in parallel.
 struct SharedEmbedder(Arc<Embedder>);
 
-// Every question gets a fresh store, so the model's query/document prompts
-// always apply, as they do for a store Axil creates.
+// Queries and stored sessions go through their own sides, as VectorEngine
+// routes them.
 impl TextEmbedder for SharedEmbedder {
     fn embed(&self, text: &str) -> axil_core::Result<Vec<f32>> {
         self.0

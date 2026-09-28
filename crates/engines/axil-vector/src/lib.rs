@@ -60,22 +60,6 @@ pub struct VectorEngine {
     /// index at open (unparsable id, malformed bytes, wrong dimensions,
     /// non-finite or all-zero values). Cleared by a purge.
     skipped_at_load: AtomicUsize,
-    /// Whether this store's vectors were written with the embedding model's
-    /// query/document prompts (see [`EmbeddingModel::document_prefix`]).
-    /// True for every store created since prompts were added; an older store
-    /// keeps embedding without them until it is re-embedded, so it never
-    /// mixes the two.
-    text_prefixes: bool,
-}
-
-/// Meta key marking a store written with the model's query/document prompts.
-const TEXT_PREFIXES_KEY: &str = "text_prefixes";
-
-/// Whether a model's prompts apply to a store. A model with a document
-/// prompt needs a store written with it; a query-only prompt leaves stored
-/// text plain, so it is safe on any store.
-fn prompts_apply(store_has_prefixes: bool, document_prefix: &str) -> bool {
-    store_has_prefixes || document_prefix.is_empty()
 }
 
 impl VectorEngine {
@@ -139,26 +123,22 @@ impl VectorEngine {
         // An existing store with matching dimensions needs no write: a read
         // txn confirms it, so read-only commands (recall, fts, hook lookups)
         // never hold a write txn a timeout could kill mid-commit.
-        let (stored, text_prefixes) = {
+        let stored = {
             let txn = vector_db.begin_read().map_err(plugin_err)?;
             match txn.open_table(META_TABLE) {
-                Ok(meta) => {
-                    let dims = match meta.get("dimensions").map_err(plugin_err)? {
-                        Some(guard) => {
-                            let s = std::str::from_utf8(guard.value()).map_err(plugin_err)?;
-                            Some(s.parse::<usize>().map_err(plugin_err)?)
-                        }
-                        None => None,
-                    };
-                    let prefixes = meta.get(TEXT_PREFIXES_KEY).map_err(plugin_err)?.is_some();
-                    (dims, prefixes)
-                }
-                Err(redb::TableError::TableDoesNotExist(_)) => (None, false),
+                Ok(meta) => match meta.get("dimensions").map_err(plugin_err)? {
+                    Some(guard) => {
+                        let s = std::str::from_utf8(guard.value()).map_err(plugin_err)?;
+                        Some(s.parse::<usize>().map_err(plugin_err)?)
+                    }
+                    None => None,
+                },
+                Err(redb::TableError::TableDoesNotExist(_)) => None,
                 Err(e) => return Err(plugin_err(e)),
             }
         };
         if stored == Some(config.dimensions) {
-            return Self::load(vector_db, config, &vec_path, text_prefixes);
+            return Self::load(vector_db, config, &vec_path);
         }
 
         // Ensure tables exist + validate/store dimensions in one write txn.
@@ -185,22 +165,13 @@ impl VectorEngine {
             meta_w
                 .insert("dimensions", config.dimensions.to_string().as_bytes())
                 .map_err(plugin_err)?;
-            // A new store is written with the model's prompts from the start.
-            meta_w
-                .insert(TEXT_PREFIXES_KEY, b"1".as_slice())
-                .map_err(plugin_err)?;
         }
         txn.commit().map_err(plugin_err)?;
-        Self::load(vector_db, config, &vec_path, true)
+        Self::load(vector_db, config, &vec_path)
     }
 
     /// Load a store's persisted vectors into a fresh in-memory index.
-    fn load(
-        vector_db: Database,
-        config: VectorConfig,
-        vec_path: &Path,
-        text_prefixes: bool,
-    ) -> axil_core::Result<Self> {
+    fn load(vector_db: Database, config: VectorConfig, vec_path: &Path) -> axil_core::Result<Self> {
         let (vectors, skipped_at_load) = load_all_vectors(&vector_db, config.dimensions)?;
         warn_unloadable(skipped_at_load, vec_path);
         let index = HnswIndex::from_vectors(config.dimensions, vectors);
@@ -211,7 +182,6 @@ impl VectorEngine {
             vector_db,
             embedder: None,
             skipped_at_load: AtomicUsize::new(skipped_at_load),
-            text_prefixes,
         })
     }
 
@@ -288,8 +258,6 @@ impl VectorEngine {
             vector_db,
             embedder: None,
             skipped_at_load: AtomicUsize::new(skipped_at_load),
-            // Named spaces hold caller-supplied vectors, never embedded text.
-            text_prefixes: false,
         })
     }
 
@@ -329,27 +297,6 @@ impl VectorEngine {
         }
         let embedder = Embedder::new(model)?;
         Ok(self.with_embedder(embedder))
-    }
-
-    /// Whether this store's vectors were written with the embedding model's
-    /// query/document prompts. A re-embed that carries vectors over from an
-    /// older store must not mix them with prompted ones.
-    pub fn uses_text_prefixes(&self) -> bool {
-        self.text_prefixes
-    }
-
-    /// Whether to use the model's prompts on this store.
-    fn prompts_on(&self, embedder: &Embedder) -> bool {
-        prompts_apply(self.text_prefixes, embedder.model().document_prefix())
-    }
-
-    /// Embed text that will be stored, the way this store's vectors are.
-    fn embed_stored(&self, embedder: &Embedder, text: &str) -> Result<Vec<f32>, String> {
-        if self.prompts_on(embedder) {
-            embedder.embed_document(text)
-        } else {
-            embedder.embed(text)
-        }
     }
 
     /// Number of vectors currently indexed.
@@ -396,8 +343,8 @@ impl Engine for VectorEngine {
         }
 
         let combined = parts.join(" ");
-        let vector = self
-            .embed_stored(embedder, &combined)
+        let vector = embedder
+            .embed_document(&combined)
             .map_err(|e| AxilError::plugin(format!("auto-embed failed: {e}")))?;
         self.validate_vector(&record.id, &vector)?;
 
@@ -526,7 +473,7 @@ impl VectorIndex for VectorEngine {
 impl TextEmbedder for VectorEngine {
     fn embed(&self, text: &str) -> axil_core::Result<Vec<f32>> {
         match &self.embedder {
-            Some(e) => self.embed_stored(e, text).map_err(AxilError::plugin),
+            Some(e) => e.embed_document(text).map_err(AxilError::plugin),
             None => Err(AxilError::plugin(
                 "no embedder configured — use with_embedder() or with_model()",
             )),
@@ -535,8 +482,7 @@ impl TextEmbedder for VectorEngine {
 
     fn embed_query(&self, text: &str) -> axil_core::Result<Vec<f32>> {
         match &self.embedder {
-            Some(e) if self.prompts_on(e) => e.embed_query(text).map_err(AxilError::plugin),
-            Some(e) => e.embed(text).map_err(AxilError::plugin),
+            Some(e) => e.embed_query(text).map_err(AxilError::plugin),
             None => Err(AxilError::plugin(
                 "no embedder configured — use with_embedder() or with_model()",
             )),
@@ -546,15 +492,11 @@ impl TextEmbedder for VectorEngine {
     fn embed_batch(&self, texts: &[&str]) -> axil_core::Result<Vec<Vec<f32>>> {
         match &self.embedder {
             #[cfg(feature = "embed")]
-            Some(e) if self.prompts_on(e) => {
-                e.embed_documents_batch(texts).map_err(AxilError::plugin)
-            }
-            #[cfg(feature = "embed")]
-            Some(e) => e.embed_batch_impl(texts).map_err(AxilError::plugin),
+            Some(e) => e.embed_documents_batch(texts).map_err(AxilError::plugin),
             #[cfg(not(feature = "embed"))]
             Some(e) => texts
                 .iter()
-                .map(|t| e.embed(t).map_err(AxilError::plugin))
+                .map(|t| e.embed_document(t).map_err(AxilError::plugin))
                 .collect(),
             None => Err(AxilError::plugin(
                 "no embedder configured — use with_embedder() or with_model()",
@@ -1447,46 +1389,6 @@ mod tests {
             read_stored_dimensions(dir.path().join("test.axil")).unwrap(),
             Some(3)
         );
-    }
-
-    #[test]
-    fn new_stores_use_prompts_and_old_stores_keep_their_scheme() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("p.axil");
-        assert!(VectorEngine::open(&path, 3).unwrap().text_prefixes);
-        assert!(
-            VectorEngine::open(&path, 3).unwrap().text_prefixes,
-            "kept on reopen"
-        );
-
-        // A store from before prompts existed has no marker and stays as is.
-        {
-            let db = Database::open(vector_db_path(&path)).unwrap();
-            let txn = db.begin_write().unwrap();
-            txn.open_table(META_TABLE)
-                .unwrap()
-                .remove(TEXT_PREFIXES_KEY)
-                .unwrap();
-            txn.commit().unwrap();
-        }
-        assert!(!VectorEngine::open(&path, 3).unwrap().text_prefixes);
-    }
-
-    #[test]
-    fn document_prompts_need_a_store_written_with_them() {
-        use crate::models::EmbeddingModel;
-        let nomic = EmbeddingModel::Nomic.document_prefix();
-        assert!(prompts_apply(true, nomic));
-        assert!(
-            !prompts_apply(false, nomic),
-            "an old store is searched as it was written"
-        );
-        let bge = EmbeddingModel::BgeSmall.document_prefix();
-        assert!(
-            prompts_apply(false, bge),
-            "a query-only prompt is safe on any store"
-        );
-        assert!(prompts_apply(true, bge));
     }
 
     #[test]

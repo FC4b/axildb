@@ -1,0 +1,164 @@
+{
+  "item": "28.10b query/document embedding sides (nomic prompts, BGE query instruction A/B)",
+  "date": "2026-09-28",
+  "decision": "Ship the query/passage split and the passage-side fixes; keep every model unprompted (BGE instruction off, nomic prompts off) until recall's top-20 rescoring window and top_k-dependent candidate pool are fixed, then re-measure nomic prompts.",
+  "method": {
+    "corpus": "dogfood-recall, 57 questions, snapshot benchmarks/dogfood-recall/data/snap-prefix (BGE) and two nomic re-embeds of it (232 memory records)",
+    "search": "exact-scan builds (BRUTE_FORCE_MAX = usize::MAX): the shipped HNSW graph is OS-RNG seeded and rebuilt per process, so HNSW runs vary run to run; the exact build repeated identically",
+    "k": "k10 = --fetch 10 (what an agent asking for 10 results gets); k25 = the harness default, whose ranking differs because recall's candidate pool grows with k",
+    "nomic_off": "store embedded by a pre-28.10b build (no prompts)",
+    "nomic_on": "store embedded with search_document:, queries with search_query:"
+  },
+  "bge_query_instruction": {
+    "dogfood_k10": {
+      "off": {
+        "hit@1": 0.6842,
+        "hit@5": 0.9123,
+        "hit@10": 0.9474,
+        "mrr@10": 0.7887,
+        "recall_all@10": 0.9123,
+        "ndcg@10": 0.806,
+        "hook_hit": 0.8772,
+        "hook_tokens": 279.5702
+      },
+      "on": {
+        "hit@1": 0.6491,
+        "hit@5": 0.9123,
+        "hit@10": 0.9474,
+        "mrr@10": 0.7701,
+        "recall_all@10": 0.9298,
+        "ndcg@10": 0.8029,
+        "hook_hit": 0.8947,
+        "hook_tokens": 285.2675
+      },
+      "on_vs_off_questions": {
+        "better": 3,
+        "worse": 6
+      }
+    },
+    "dogfood_k25": {
+      "off": {
+        "hit@1": 0.6316,
+        "hit@5": 0.807,
+        "hit@10": 0.8246,
+        "mrr@10": 0.717,
+        "recall_all@10": 0.7719,
+        "ndcg@10": 0.7188,
+        "hook_hit": 0.8772,
+        "hook_tokens": 279.5702
+      },
+      "on": {
+        "hit@1": 0.5439,
+        "hit@5": 0.7544,
+        "hit@10": 0.807,
+        "mrr@10": 0.6534,
+        "recall_all@10": 0.7193,
+        "ndcg@10": 0.6594,
+        "hook_hit": 0.8947,
+        "hook_tokens": 285.2675
+      },
+      "on_vs_off_questions": {
+        "better": 1,
+        "worse": 8
+      }
+    },
+    "longmemeval_s20_recall_qtc_hnsw": {
+      "off": {
+        "hit_rate": 0.9,
+        "recall_all": 0.9,
+        "ndcg_at_10": 0.8565,
+        "turn_recall_full": 0.9
+      },
+      "on": {
+        "hit_rate": 0.9,
+        "recall_all": 0.9,
+        "ndcg_at_10": 0.8901,
+        "turn_recall_full": 0.9
+      }
+    }
+  },
+  "nomic_prompts": {
+    "vector_only_exact": {
+      "bge": {
+        "hit@1": 0.6491,
+        "hit@5": 0.9123,
+        "hit@10": 0.9474,
+        "mrr@10": 0.7795
+      },
+      "off": {
+        "hit@1": 0.7018,
+        "hit@5": 0.8947,
+        "hit@10": 0.8947,
+        "mrr@10": 0.7939
+      },
+      "on": {
+        "hit@1": 0.7193,
+        "hit@5": 0.8947,
+        "hit@10": 0.9123,
+        "mrr@10": 0.8002
+      }
+    },
+    "dogfood_k10": {
+      "off": {
+        "hit@1": 0.614,
+        "hit@5": 0.7895,
+        "hit@10": 0.7895,
+        "mrr@10": 0.6839,
+        "recall_all@10": 0.7368,
+        "ndcg@10": 0.6921,
+        "hook_hit": 0.8772,
+        "hook_tokens": 282.6053
+      },
+      "on": {
+        "hit@1": 0.5439,
+        "hit@5": 0.6842,
+        "hit@10": 0.7193,
+        "mrr@10": 0.6091,
+        "recall_all@10": 0.6491,
+        "ndcg@10": 0.6142,
+        "hook_hit": 0.8421,
+        "hook_tokens": 284.443
+      },
+      "on_vs_off_questions": {
+        "better": 2,
+        "worse": 9
+      }
+    },
+    "dogfood_k25": {
+      "off": {
+        "hit@1": 0.4035,
+        "hit@5": 0.4912,
+        "hit@10": 0.5263,
+        "mrr@10": 0.4488,
+        "recall_all@10": 0.5088,
+        "ndcg@10": 0.4606,
+        "hook_hit": 0.8947,
+        "hook_tokens": 283.3553
+      },
+      "on": {
+        "hit@1": 0.3509,
+        "hit@5": 0.4386,
+        "hit@10": 0.4912,
+        "mrr@10": 0.3957,
+        "recall_all@10": 0.4737,
+        "ndcg@10": 0.4135,
+        "hook_hit": 0.8421,
+        "hook_tokens": 284.443
+      },
+      "on_vs_off_questions": {
+        "better": 2,
+        "worse": 5
+      }
+    },
+    "why_fused_recall_loses": "CLI recall rescores only the top 20 pre-QTC candidates (0.7*best_chunk + 0.3*fused); recency fills that window with new commits, and the prompts raise distractor cosines (e.g. 0.623 -> 0.658) enough to push old answers (vector rank 1) out of it",
+    "longmemeval": "not measured: embed_batch_impl pads a whole batch to its longest text, and nomic's 8192-token window OOM-kills the process on a 16 GB machine"
+  },
+  "unchanged_for_shipped_config": "all prefixes are empty, so every embedding is byte-identical to before; needle gate 31/31 recall@5 1.000, retention 1.000",
+  "findings_recorded_in_axil": [
+    "01M3M09EYENQWAT3YGQP2YJDT4 recall non-deterministic across processes (HNSW OS-RNG seed, per-process graph)",
+    "01M3M2MT4XQTF97CTN457RMCQT ranking depends on top_k (candidate pool + graph proximity)",
+    "01M3M4QJE6HKPXCJJ658B8N0F1 QTC top-20 window cliff",
+    "01M3KZ7RSZCF8FY9NQ5YXXAPVW embed_batch_impl OOM with 8192-token models",
+    "01M3KZE35RSN4DGC917XEBVSHB axil init ignores the configured model's dimensions"
+  ]
+}

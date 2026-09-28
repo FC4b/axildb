@@ -146,11 +146,6 @@ Available models:
 | `bge-base-en-v1.5` | 768 | 130MB | Better |
 | `nomic-embed-text-v1.5` | 768 | 130MB | Best |
 
-`nomic-embed-text-v1.5` was trained with prompts, and Axil adds them: a search
-is embedded as `search_query: …` and stored text as `search_document: …`. A
-vector store records whether it was written with them. A store created before
-Axil added them keeps being searched without them, so its vectors never mix.
-
 ## Windows + ONNX
 
 The prebuilt archives (via `cargo binstall` or direct download) **bundle a

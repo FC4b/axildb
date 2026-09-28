@@ -58,22 +58,22 @@ impl EmbeddingModel {
         }
     }
 
-    /// What the model card says to put before a search query, if anything.
-    /// Must match [`EmbeddingModel::document_prefix`]: the model was trained
-    /// with both.
+    /// Text put before a search query. Empty for every model for now.
+    /// nomic-embed-text was trained with `search_query: ` / `search_document: `
+    /// and they lift its vector-only ranking, but fused recall rescores only a
+    /// top-20 window, and the prompts shift which records enter it: on the
+    /// dogfood eval they cost 9 answers and gained 2
+    /// (`benchmarks/results/step4-28.10b-embed-prefixes-2026-09-28.json`).
+    /// A document prompt also needs a store marker, so that stores written
+    /// without it keep being searched without it.
     pub fn query_prefix(&self) -> &'static str {
-        match self {
-            Self::Nomic => "search_query: ",
-            _ => "",
-        }
+        ""
     }
 
-    /// What the model card says to put before stored text, if anything.
+    /// Text put before stored text. Empty for every model; see
+    /// [`EmbeddingModel::query_prefix`].
     pub fn document_prefix(&self) -> &'static str {
-        match self {
-            Self::Nomic => "search_document: ",
-            _ => "",
-        }
+        ""
     }
 
     /// Human-readable model name.
@@ -333,19 +333,6 @@ pub fn list_custom_models() -> Vec<(String, EmbeddingModel)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn nomic_has_paired_prompts_and_bge_documents_have_none() {
-        assert_eq!(EmbeddingModel::Nomic.query_prefix(), "search_query: ");
-        assert_eq!(EmbeddingModel::Nomic.document_prefix(), "search_document: ");
-        for m in [
-            EmbeddingModel::BgeSmall,
-            EmbeddingModel::BgeBase,
-            EmbeddingModel::BgeM3,
-        ] {
-            assert_eq!(m.document_prefix(), "", "{} stores plain text", m.name());
-        }
-    }
 
     #[test]
     fn bge_m3_metadata() {

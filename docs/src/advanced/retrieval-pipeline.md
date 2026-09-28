@@ -76,9 +76,9 @@ boosting. Phase 4 added fuzzy matching, snippets, and field scoping.
 **Vector** runs HNSW ANN against the embedding index (`*.axil.vec`).
 The query is either a pre-embedded `&[f32]` or text that the configured
 embedder converts. Default embedder is BGE-small-en-v1.5 (int8); BGE-base,
-nomic, and gte-modernbert are also registered. Query text is embedded with
-the model's query prompt when it has one (nomic's `search_query:`, paired with
-`search_document:` on stored text).
+nomic, and gte-modernbert are also registered. Query text is embedded on the
+embedder's query side (`TextEmbedder::embed_query`) and stored text on its
+passage side, so a model trained with separate prompts for each can use them.
 
 **Cascade skip rule**: vector search is skipped when FTS already returned
 a high-confidence top hit (score > 0.95). This is the most common reason
