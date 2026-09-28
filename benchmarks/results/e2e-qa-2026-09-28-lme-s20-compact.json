@@ -1,0 +1,129 @@
+{
+  "benchmark": "e2e-qa",
+  "contexts": "lme-s20-contexts.jsonl",
+  "context": "compact",
+  "reader": "haiku",
+  "judge": "sonnet",
+  "transport": "claude -p (Claude Code headless, subscription)",
+  "overall": {
+    "n": 20,
+    "accuracy": 0.0,
+    "context_tokens": 297.15,
+    "accuracy_per_1k_context_tokens": 0.0
+  },
+  "by_type": {
+    "single-session-user": {
+      "n": 20,
+      "accuracy": 0.0,
+      "context_tokens": 297.15,
+      "accuracy_per_1k_context_tokens": 0.0
+    }
+  },
+  "model_tokens_this_run": {
+    "calls": 40,
+    "input": 35818,
+    "output": 5264
+  },
+  "per_question": [
+    {
+      "question_id": "118b2229",
+      "correct": false,
+      "answer": "I don't know."
+    },
+    {
+      "question_id": "1e043500",
+      "correct": false,
+      "answer": "I don't know."
+    },
+    {
+      "question_id": "3b6f954b",
+      "correct": false,
+      "answer": "I don't know."
+    },
+    {
+      "question_id": "51a45a95",
+      "correct": false,
+      "answer": "I don't know."
+    },
+    {
+      "question_id": "58bf7951",
+      "correct": false,
+      "answer": "I don't know."
+    },
+    {
+      "question_id": "58ef2f1c",
+      "correct": false,
+      "answer": "I don't know."
+    },
+    {
+      "question_id": "5d3d2817",
+      "correct": false,
+      "answer": "I don't know."
+    },
+    {
+      "question_id": "66f24dbb",
+      "correct": false,
+      "answer": "I don't know.\n\nThe memory excerpts mention a gift for your brother (a customized phone case with his favorite game's logo for his birthday), but there is no information about a gift for your sister's birthday."
+    },
+    {
+      "question_id": "6ade9755",
+      "correct": false,
+      "answer": "I don't know."
+    },
+    {
+      "question_id": "6f9b354f",
+      "correct": false,
+      "answer": "I don't know."
+    },
+    {
+      "question_id": "726462e0",
+      "correct": false,
+      "answer": "I don't know."
+    },
+    {
+      "question_id": "7527f7e2",
+      "correct": false,
+      "answer": "I don't know."
+    },
+    {
+      "question_id": "94f70d80",
+      "correct": false,
+      "answer": "I don't know."
+    },
+    {
+      "question_id": "ad7109d1",
+      "correct": false,
+      "answer": "I don't know."
+    },
+    {
+      "question_id": "af8d2e46",
+      "correct": false,
+      "answer": "I don't know."
+    },
+    {
+      "question_id": "c5e8278d",
+      "correct": false,
+      "answer": "I don't know.\n\nThe memory excerpt mentions that you recently changed your last name, but it doesn't provide what your previous last name was. The message appears to be cut off before that information was included."
+    },
+    {
+      "question_id": "c960da58",
+      "correct": false,
+      "answer": "I don't know."
+    },
+    {
+      "question_id": "dccbc061",
+      "correct": false,
+      "answer": "Based on the memory excerpts provided, you appeared interested in spirituality, particularly in Buddhism. In Session 17 (2023/05/24), you mentioned that you had been reading a lot about Buddhism and were seeking book recommendations on synchronicity and its connection to spirituality. However, the e"
+    },
+    {
+      "question_id": "e47becba",
+      "correct": false,
+      "answer": "I don't know."
+    },
+    {
+      "question_id": "f8c5f88b",
+      "correct": false,
+      "answer": "I don't know."
+    }
+  ]
+}

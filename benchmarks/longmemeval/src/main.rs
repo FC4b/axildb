@@ -133,6 +133,12 @@ struct Args {
     #[arg(long)]
     expand: bool,
 
+    /// Write each question's retrieved context (compact and full) plus the
+    /// gold answer as JSONL, for end-to-end QA with a reader model
+    /// (`benchmarks/e2e-qa/qa.py`).
+    #[arg(long)]
+    dump_context: Option<PathBuf>,
+
     /// Number of graph neighbors to expand per entity.
     #[arg(long, default_value = "3")]
     expand_neighbors: usize,
@@ -362,6 +368,20 @@ struct QuestionResult {
     precision: f64,
     harder: Harder,
     miss: Option<MissReport>,
+    context: Option<QaContext>,
+}
+
+/// What a reader model gets for one question: the retrieved top-k sessions
+/// as the CLI's compact output shows them and in full.
+#[derive(Debug, Serialize)]
+struct QaContext {
+    question_id: String,
+    question_type: String,
+    question: String,
+    question_date: String,
+    answer: String,
+    compact: String,
+    full: String,
 }
 
 // ── Main ───────────────────────────────────────────────────────────
@@ -459,6 +479,7 @@ fn main() {
     // Aggregate.
     let mut category_stats: HashMap<String, CategoryStats> = HashMap::new();
     let mut category_harder: HashMap<String, HarderSums> = HashMap::new();
+    let mut contexts: Vec<QaContext> = Vec::new();
     let mut overall_harder = HarderSums::default();
     let mut total_recall = 0.0f64;
     let mut total_precision = 0.0f64;
@@ -471,7 +492,11 @@ fn main() {
             precision,
             harder,
             miss,
+            context,
         } = result;
+        if let Some(context) = context {
+            contexts.push(context);
+        }
         overall_harder.add(harder);
         category_harder
             .entry(category.clone())
@@ -531,6 +556,20 @@ fn main() {
             .collect(),
         misses,
     };
+
+    if let Some(path) = &args.dump_context {
+        contexts.sort_by(|a, b| a.question_id.cmp(&b.question_id));
+        let lines: Vec<String> = contexts
+            .iter()
+            .map(|c| serde_json::to_string(c).unwrap())
+            .collect();
+        std::fs::write(path, lines.join("\n") + "\n").expect("write --dump-context file");
+        eprintln!(
+            "       wrote {} contexts to {}",
+            contexts.len(),
+            path.display()
+        );
+    }
 
     println!("{}", serde_json::to_string_pretty(&report).unwrap());
 }
@@ -735,6 +774,11 @@ fn evaluate_question(q: &Question, args: &Args, embedder: &Arc<Embedder>, model:
         &answer_session_tags,
     );
 
+    let context = args
+        .dump_context
+        .is_some()
+        .then(|| qa_context(q, &session_texts, &retrieved_sessions));
+
     // Compute recall and precision
     if answer_session_tags.is_empty() {
         return QuestionResult {
@@ -743,6 +787,7 @@ fn evaluate_question(q: &Question, args: &Args, embedder: &Arc<Embedder>, model:
             precision: 0.0,
             harder,
             miss: None,
+            context,
         };
     }
 
@@ -783,6 +828,45 @@ fn evaluate_question(q: &Question, args: &Args, embedder: &Arc<Embedder>, model:
         precision,
         harder,
         miss,
+        context,
+    }
+}
+
+/// The retrieved sessions in rank order, headed by their date (temporal
+/// questions need it), cut to the compact form and in full.
+fn qa_context(q: &Question, session_texts: &[String], top_k: &[String]) -> QaContext {
+    let mut compact = Vec::new();
+    let mut full = Vec::new();
+    for tag in top_k {
+        let Some(i) = tag
+            .strip_prefix("session_")
+            .and_then(|i| i.parse::<usize>().ok())
+        else {
+            continue;
+        };
+        let Some(text) = session_texts.get(i) else {
+            continue;
+        };
+        let date = q
+            .haystack_dates
+            .get(i)
+            .map(String::as_str)
+            .unwrap_or("unknown date");
+        let end = text.floor_char_boundary(text.len().min(COMPACT_SUMMARY_CHARS));
+        compact.push(format!("[Session {i}, {date}] {}", &text[..end]));
+        full.push(format!("[Session {i}, {date}]\n{text}"));
+    }
+    QaContext {
+        question_id: q.question_id.clone(),
+        question_type: q.question_type.clone(),
+        question: q.question.clone(),
+        question_date: q.question_date.clone(),
+        answer: match &q.answer {
+            Value::String(s) => s.clone(),
+            other => other.to_string(),
+        },
+        compact: compact.join("\n"),
+        full: full.join("\n\n"),
     }
 }
 
@@ -878,6 +962,7 @@ fn question_failure(q: &Question, retrieved_sessions: Vec<String>, answer_sessio
         recall: 0.0,
         precision: 0.0,
         harder: Harder::default(),
+        context: None,
         miss: Some(MissReport {
             question_id: q.question_id.clone(),
             question_type: q.question_type.clone(),

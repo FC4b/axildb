@@ -1,0 +1,338 @@
+{
+  "benchmark": "e2e-qa",
+  "contexts": "dogfood-contexts.jsonl",
+  "context": "hook",
+  "reader": "haiku",
+  "judge": "sonnet",
+  "transport": "claude -p (Claude Code headless, subscription)",
+  "overall": {
+    "n": 57,
+    "accuracy": 0.6666666666666666,
+    "context_tokens": 276.2061403508772,
+    "accuracy_per_1k_context_tokens": 2.41365621278285
+  },
+  "by_type": {
+    "commit": {
+      "n": 4,
+      "accuracy": 1.0,
+      "context_tokens": 251.5,
+      "accuracy_per_1k_context_tokens": 3.976143141153081
+    },
+    "context": {
+      "n": 5,
+      "accuracy": 1.0,
+      "context_tokens": 295.15,
+      "accuracy_per_1k_context_tokens": 3.3881077418261905
+    },
+    "decision": {
+      "n": 27,
+      "accuracy": 0.7777777777777778,
+      "context_tokens": 279.7037037037037,
+      "accuracy_per_1k_context_tokens": 2.7807203389830506
+    },
+    "error": {
+      "n": 19,
+      "accuracy": 0.3684210526315789,
+      "context_tokens": 265.5657894736842,
+      "accuracy_per_1k_context_tokens": 1.3873061487390377
+    },
+    "rule": {
+      "n": 2,
+      "accuracy": 0.5,
+      "context_tokens": 332.125,
+      "accuracy_per_1k_context_tokens": 1.5054572826496049
+    }
+  },
+  "model_tokens_this_run": {
+    "calls": 114,
+    "input": 133554,
+    "output": 21339
+  },
+  "per_question": [
+    {
+      "question_id": "q01",
+      "correct": true,
+      "answer": "According to the memory, the bare `axil` crate name is squatted on crates.io, so the publishable CLI crate was named `axildb` instead. However, the binary is still configured to be called `axil` \u2014 so when you run `cargo install axildb`, it installs the `axil` binary. The name `axildb` also matches t"
+    },
+    {
+      "question_id": "q02",
+      "correct": true,
+      "answer": "Based on the memory excerpts:\n\n**Platforms for release archives:** Releases ship **five triples** \u2014 x86_64 and aarch64 for both Linux and Windows, plus aarch64 macOS.\n\n**Intel Mac build:** The x86_64-apple-darwin (Intel Mac) release target was **dropped** (PR #39). The install.sh script now errors c"
+    },
+    {
+      "question_id": "q03",
+      "correct": true,
+      "answer": "According to the memory excerpts, the repository's `.cargo/config.toml` sets the environment variable `LIBONNXRUNTIME_NO_PKG_CONFIG=1` (from PR #40). This configuration ensures that every local cargo build links onnxruntime statically, just like the release binaries do.\n\nThe `ORT_LIB_LOCATION` envir"
+    },
+    {
+      "question_id": "q04",
+      "correct": true,
+      "answer": "No. According to the decision record, **do NOT genericize engine lifecycle hooks into a single loop**.\n\nThe decision cites two independent reasons:\n\n1. **Non-uniform semantics**: The hooks have different behavior patterns\u2014timeseries hooks gate on `_summaries` tables differently, typed-engine error p"
+    },
+    {
+      "question_id": "q05",
+      "correct": true,
+      "answer": "Based on the memory excerpts, **Axil's strategic moat is a runtime, sandboxed, polyglot PLUGIN ARCHITECTURE for agent memory** \u2014 a gap that no competitor currently fills. \n\nThis differentiation justifies the commitment to Phase 22 (WASM runtime plugins), which appears to be core to Axil's competitiv"
+    },
+    {
+      "question_id": "q06",
+      "correct": true,
+      "answer": "Yes. According to the memory, **WASM is IN scope for Axil 1.0**. Phase 22 (WASM runtime plugins) has been defined, with Phase 21 serving as its foundation. Work has already progressed significantly, including runtime WASM plugin discovery and load-time ABI-version negotiation."
+    },
+    {
+      "question_id": "q07",
+      "correct": true,
+      "answer": "# Compiled WASM Plugin Module Caching\n\nBased on the Phase 22.9 implementation, compiled WASM modules are cached as follows:\n\n- **Storage mechanism**: `WasmHost::load_component_cached` stores the cache\n- **Cache format**: [32-byte source SHA-256][wasmtime-serialized component]\n- **Cache location**: `"
+    },
+    {
+      "question_id": "q08",
+      "correct": true,
+      "answer": "Based on the memory excerpts, the host checks ABI version compatibility through **load-time ABI-version negotiation** (Phase 22.8):\n\nThe `WasmHost::check_abi` method performs this check by:\n\n1. **Reading the guest export** \u2014 It accesses the guest's `axil:plugin/extension@X.Y.Z` export\n2. **Inspectin"
+    },
+    {
+      "question_id": "q09",
+      "correct": false,
+      "answer": "I don't know.\n\nThe memory excerpts provided discuss WASM plugin security fixes, plugin discovery, and end-to-end WASM functionality, but they don't contain information about what mechanisms prevent or stop infinite loops in WASM plugin calls."
+    },
+    {
+      "question_id": "q10",
+      "correct": false,
+      "answer": "Based on the memory excerpts, the code review found **at least 15 findings total**. The security-related issues specifically mentioned are:\n\n1. **Prefix-jail bypass** \u2014 WasmExtension::load was rejecting empty, `_`-only, and non-underscore guest prefixes. Additionally, register_extension now reserves"
+    },
+    {
+      "question_id": "q11",
+      "correct": false,
+      "answer": "I don't know.\n\nThe memory excerpts mention a \"Full README polish pass\" with content rewrites, but they don't specify what the current README tagline is or what it replaced."
+    },
+    {
+      "question_id": "q12",
+      "correct": true,
+      "answer": "No. According to the memory excerpts, the **REVISED verdict was NOT to build** the code explore tool as specified. \n\nThis revised decision explicitly supersedes an earlier consideration to build a \"one-call verbatim-source explore tool\" for Axil. The decision came after an \"adversarial worth-it revi"
+    },
+    {
+      "question_id": "q13",
+      "correct": false,
+      "answer": "Based on the memory excerpts:\n\n**The README claim with no committed source:**\n- A **74-80% token-savings headline** leading the README had no committed source behind it\n- Additionally, this claim contradicted the backing methodology documentation (the Flask half specifically contradicted the methodo"
+    },
+    {
+      "question_id": "q14",
+      "correct": true,
+      "answer": "Based on the memory excerpts, Axil estimates token counts using a **pluggable TokenEstimator trait** defined in axil-core.\n\nThe default implementation is the **CharsPerTokenEstimator**, which estimates tokens as:\n\n```\nceil(byte_length / 4.0)\n```\n\nThere is a static `DEFAULT_TOKEN_ESTIMATOR` instance "
+    },
+    {
+      "question_id": "q15",
+      "correct": false,
+      "answer": "Based on the memory excerpts, recall uses an **identifier-aware query classifier** that applies FTS (Full-Text Search) RRF (Reciprocal Rank Fusion) tilt when it detects queries that look like code identifiers.\n\nHowever, the excerpts don't contain enough detail to explain exactly how this classifier "
+    },
+    {
+      "question_id": "q16",
+      "correct": false,
+      "answer": "I don't know.\n\nThe memory excerpts mention that \"zlib-completeness k-widening\" was implemented on the recall path (version 20.4), but they don't explain what the zlib completeness check actually does or its purpose."
+    },
+    {
+      "question_id": "q17",
+      "correct": true,
+      "answer": "Based on the memory excerpts, **memories should be categorized by function, not by topic**.\n\nSpecifically, the principle used is: **\"what question does this answer?\"** rather than organizing by topic.\n\nThis approach was established during Phase 24 (Memory Taxonomy) after an adversarial review, keepi"
+    },
+    {
+      "question_id": "q18",
+      "correct": true,
+      "answer": "Based on the memory excerpts, the decision code path is:\n\n**`Axil::can_supersede` + `Axil::mark_superseded`**\n\nThese enforce the supersede policy by checking:\n- Same-table constraints\n- Lifecycle supersede policy\n- Pin status\n- Recency\n- Whether already-superseded\n\nThe insert path, detect_conflicts,"
+    },
+    {
+      "question_id": "q19",
+      "correct": true,
+      "answer": "According to the memory excerpts, the HNSW graph is built **lazily on the first search above the 128-vector exact-scan threshold**, not at store open. It uses `OnceLock` to ensure the graph is built only once when needed."
+    },
+    {
+      "question_id": "q20",
+      "correct": true,
+      "answer": "No, AGG and GROUP are not reserved words in AxilQL. According to the memory, they are **soft keywords** \u2014 meaning they can be used as identifiers outside their grammar position. This is in contrast to fully reserved words, which cannot be used as identifiers at all."
+    },
+    {
+      "question_id": "q21",
+      "correct": true,
+      "answer": "According to the memory excerpts, axil.toml settings such as `slow_query_threshold_ms` (along with `event_log`, `supersede threshold`, and `lifecycle`) are applied in **`AxilBuilder::build`**. \n\nThis method also warns once per process if the configuration file is broken, and malformed `[lifecycle]` "
+    },
+    {
+      "question_id": "q22",
+      "correct": true,
+      "answer": "Based on the memory excerpts, **MCP tool calls run concurrently or sequentially depending on the tool type**:\n\n- **Read-only tools** (those in an explicit `READ_ONLY_TOOLS` list) run **concurrently**\n- **All other tools** act as **barriers**, meaning they run **one at a time** in sequence\n\nRequests "
+    },
+    {
+      "question_id": "q23",
+      "correct": false,
+      "answer": "Based on the memory excerpts, there's evidence suggesting yes. The Phase 29 bake-off evaluation (blind-validated 2026-09-27) compared Codex (a larger model) and GLM glm-5.3-flash (a smaller model) on memory judgment tasks. The smaller GLM model achieved strong performance: 40/40 unanimous agreement "
+    },
+    {
+      "question_id": "q24",
+      "correct": true,
+      "answer": "Based on the memory excerpts, **no**. According to a decision made on 2026-09-27, \"Jev-style models do not earn a place in Axil.\"\n\nThe decision was informed by evaluating Jev-style approaches (like laya-ultrafast): they lack reusable code for Axil's architecture and are typically implemented as Pyth"
+    },
+    {
+      "question_id": "q25",
+      "correct": true,
+      "answer": "Based on the memory excerpts, marking an error as fixed works through the **`axil resolve` command**:\n\nThe core mechanism is `Axil::resolve_error(ResolveInput{error_id, by, note, reopen})` located in remember.rs. When called, it:\n\n1. **Takes these inputs:**\n   - `error_id` - which error to mark as f"
+    },
+    {
+      "question_id": "q26",
+      "correct": true,
+      "answer": "Based on the memory excerpts, when the vector store file was not closed cleanly:\n\n**New behavior (28.1 design):** The `axil_vector::probe_vector_store` function **actively repairs the corrupted `.vec` file** instead of failing silently. It:\n- Detects that repair is needed (ReadOnlyDatabase RepairAbo"
+    },
+    {
+      "question_id": "q27",
+      "correct": false,
+      "answer": "According to the memory excerpts, the hook session counters kept resetting every turn because **boot was re-running invisibly every turn**. This happened as part of a broader issue where the `.axil.vec` file kept ending up in a redb needs-repair state.\n\nThe fix involved redesigning the hook system s"
+    },
+    {
+      "question_id": "q28",
+      "correct": true,
+      "answer": "According to the memory excerpts, finished Phase 28 feature branches should be merged as follows:\n\n1. **Merge into local dev** (not main)\n2. **Use fast-forward merge**\n3. **Rebase onto dev first** if the branch has diverged\n4. **No PRs per step** \u2014 save the PR for later\n5. **Open one PR dev \u2192 main o"
+    },
+    {
+      "question_id": "q29",
+      "correct": false,
+      "answer": "I don't know.\n\nThe provided memory excerpts don't contain information specifically about what to do before grepping the repository for context. While there's a reference to setting up the dev build with `cargo install --path crates/adapters/axil-cli` and running `axil sync`, it's not explicitly stat"
+    },
+    {
+      "question_id": "q30",
+      "correct": true,
+      "answer": "No. According to the evaluation from 2026-09-27, laya-ultrafast has **no reusable code for Axil**. It is a Python browser-automation agent (a port of browser-use/jev-ultrafast) that is Apple-MLX only."
+    },
+    {
+      "question_id": "q31",
+      "correct": true,
+      "answer": "Based on the memory excerpts, the Atlas sync crates in the public repository are:\n\n1. **`crates/proto/axil-atlas-proto`** \u2014 shared Atlas sync-protocol wire DTOs (Op, OpKind, Tier, PushBatch, PushResponse, PullQuery, PullResponse, SeqOp, Compound, etc.)\n\n2. **`axil-sync`** \u2014 described as a \"client se"
+    },
+    {
+      "question_id": "q32",
+      "correct": true,
+      "answer": "According to the memory excerpts, the first crates.io publish (2026-06-22) was only partial due to **crates.io's NEW-CRATE rate limit**. The publish hit a 429 error, which limited publishing to approximately 1 new crate per 10 minutes after a burst of publishes. This resulted in only 5 out of 17 cra"
+    },
+    {
+      "question_id": "q33",
+      "correct": true,
+      "answer": "Based on the memory excerpts, the versions of internal crate dependencies are declared in the root `[workspace.dependencies]` section. This was centralized as part of a workspace refactoring (commit d5d01d7, bumping the workspace version from 1.0.0 to 1.1.0)."
+    },
+    {
+      "question_id": "q34",
+      "correct": true,
+      "answer": "According to the memory excerpts, the CLI failed to compile with `--no-default-features --features wasm-host` because the `ExtCommand` enum was **double-gated** on both `#[cfg(feature=deps)]` AND `#[cfg(feature=wasm-host)]` using AND logic.\n\nThis meant that `ExtCommand`, `Command::Ext(ExtCommand)`, "
+    },
+    {
+      "question_id": "q35",
+      "correct": true,
+      "answer": "According to the memory excerpts, the README's install command for a custom feature set was broken because it **omitted the `core` feature**. \n\nThe command `cargo install axil-cli --no-default-features --features \"vector,embed,graph,...\"` was missing the `core` feature when specifying custom feature"
+    },
+    {
+      "question_id": "q36",
+      "correct": true,
+      "answer": "Based on the memory excerpts, the code graph hint misfired on repos without a SCIP index because:\n\nPhase 23's `code_graph_hint` used `_entities` as the signal to detect whether there was no precise graph available. However, `_entities` is not exclusively written by SCIP\u2014it's also written by entity e"
+    },
+    {
+      "question_id": "q37",
+      "correct": true,
+      "answer": "Based on the memory excerpts, the `pipeline_overhead_under_5ms` test fails in a full workspace run but passes in an isolated package run due to **timing test flakiness under resource contention**.\n\nWhen running `cargo test --workspace`, multiple tests execute across different packages concurrently, "
+    },
+    {
+      "question_id": "q38",
+      "correct": false,
+      "answer": "I don't know.\n\nThe memory excerpts contain information about recent releases (axildb 2.3.0 and 2.3.1) and the release-plz pipeline, but they don't mention backlog features or version 1.2.0."
+    },
+    {
+      "question_id": "q39",
+      "correct": false,
+      "answer": "Yes, according to the memory excerpts. Earlier in this session, it was asserted that **axil-core::brain::MemoryType (6-variant enum) + memory_type_to_table() were DEAD code safe to delete**, and this determination was stored in a decision record (01KVZX8SPP2D7R20FZY4J6G41E)."
+    },
+    {
+      "question_id": "q40",
+      "correct": false,
+      "answer": "No, the benchmark harnesses are not tracked in git. According to the project documentation, the benchmark harnesses (sqlite-compare, vector-latency, longmemeval, locomo, criterion-suite) are untracked from git and listed in `.gitignore` under `/benchmarks/`."
+    },
+    {
+      "question_id": "q41",
+      "correct": false,
+      "answer": "According to the memory excerpts, the sqlite-compare benchmark stopped building because there were **two instances of rot that went unnoticed because the harness was never CI-gated** (continuous integration gated).\n\nThis was later addressed with a commit that added CI gates for the sqlite-compare be"
+    },
+    {
+      "question_id": "q42",
+      "correct": false,
+      "answer": "I don't know.\n\nThe memory excerpts note that the code review reviewed 187 commits instead of the expected 6-commit dev\u2192main PR diff, but they don't explain the reason why this occurred."
+    },
+    {
+      "question_id": "q43",
+      "correct": true,
+      "answer": "Based on the memory excerpts:\n\n**Why it returned 404:** Releases v2.1.0 through v2.2.1 had zero archives, which caused the one-line installer to fail when trying to download from `releases/latest/download`.\n\n**Was it fixed:** Yes. There's a commit that fixed it by dispatching archive builds from rel"
+    },
+    {
+      "question_id": "q44",
+      "correct": false,
+      "answer": "Based on the memory excerpt, `git apply` failed with **\"unrecognized input\"** after `git checkout` wiped the change. \n\nThe issue appears to be that the `git checkout` command removed the working changes, and then when attempting to apply the saved patch file, `git apply` could no longer recognize or"
+    },
+    {
+      "question_id": "q45",
+      "correct": false,
+      "answer": "I don't know.\n\nThe memory excerpts provided don't contain any information about a ql_parse fuzz target panic. To answer this question, I would need access to relevant documentation, issue reports, or code comments related to ql_parse fuzzing in the codebase."
+    },
+    {
+      "question_id": "q46",
+      "correct": false,
+      "answer": "I don't know."
+    },
+    {
+      "question_id": "q47",
+      "correct": true,
+      "answer": "Based on the memory excerpts, recall was keyword-only (FTS-only) for three months because the vector store was silently broken. \n\nAccording to the error record, the \"Dogfood DB vector store [was] silently dead since 2026-06-18\" \u2014 it failed with \"Database repair aborted\" and showed zero vectors, yet "
+    },
+    {
+      "question_id": "q48",
+      "correct": false,
+      "answer": "I don't know.\n\nThe memory excerpts mention that `Axil::can_supersede` and `Axil::mark_superseded` enforce supersede policy, and that insert path, detect_conflicts, brain, and axil-memory all route through supersede logic\u2014but they don't explain why no superseded records exist in the database."
+    },
+    {
+      "question_id": "q49",
+      "correct": true,
+      "answer": "Based on the memory excerpts, two main issues occur with rustfmt in this repo:\n\n1. **Selective formatting causes corruption**: Applying rustfmt hunks only to changed lines corrupted `main.rs` by splicing unrelated code (doctor model checks) into the boot section.\n\n2. **Crate isn't rustfmt-clean**: R"
+    },
+    {
+      "question_id": "q50",
+      "correct": false,
+      "answer": "I don't know. The memory excerpts mention that the MCP server tests (mcp_full_lifecycle, mcp_parse_error, mcp_pipelined_requests_are_not_dropped) fail with an \"unknown command mcp\" error after running `cargo test -p axildb --no-default-features --features core`, but they don't explain the root cause"
+    },
+    {
+      "question_id": "q51",
+      "correct": true,
+      "answer": "Based on the memory excerpts, here's how to run several coding agents in parallel on this repo:\n\n1. **Create a git worktree for each agent:**\n   ```bash\n   git worktree add -b fix/x <scratch>/wt/x dev\n   ```\n\n2. **Clone the build cache using APFS copy-on-write** to avoid cold builds:\n   ```bash\n   c"
+    },
+    {
+      "question_id": "q52",
+      "correct": true,
+      "answer": "Based on the memory excerpt provided:\n\nDecisions and errors are invisible to axil-memory's `remember()` search because **`remember()` only searches MEMORY_TABLES (the `_` prefixed tables), while decisions and errors are stored in convention tables** (tables without the `_` prefix).\n\nThis creates a c"
+    },
+    {
+      "question_id": "q53",
+      "correct": true,
+      "answer": "According to the memory excerpts, the first fully automatic release was **axildb 2.3.1 on 2026-09-25**. The release-plz tool published it to crates.io, created the tag and GitHub Release, and dispatched the release.yml workflow, which completed successfully with all 5 platform builds."
+    },
+    {
+      "question_id": "q54",
+      "correct": true,
+      "answer": "Based on the memory excerpts, the commit that added the command to close recorded errors is:\n\n**feat(core,cli,mcp): add axil resolve to close recorded errors** (id=01M3H13AWH8ZK97ZVYNB2B9YEB)\n\nThe command is `axil resolve`."
+    },
+    {
+      "question_id": "q55",
+      "correct": true,
+      "answer": "Based on the memory excerpts, the change was **adaptive HNSW search `ef`** (expansion factor).\n\nThe commit message states: \"fix(vector): adaptive HNSW search ef to hold recall@10 at scale\"\n\nThis means the `ef` parameter of the HNSW algorithm was made adaptive to maintain steady recall@10 performance"
+    },
+    {
+      "question_id": "q56",
+      "correct": true,
+      "answer": "Based on the memory excerpts, release archives are built when **release-plz auto-dispatches the `release.yml` workflow** after publishing.\n\nThe fix referenced in the commits indicates there's a dispatch mechanism where release-plz triggers archive builds from the release workflow, along with an inst"
+    },
+    {
+      "question_id": "q57",
+      "correct": true,
+      "answer": "Based on the memory excerpts, when axil.toml is malformed:\n\n1. **A warning is reported** instead of silently using defaults (this was the fix made in a recent commit)\n2. **AxilBuilder::build warns once per process** on a broken file\n3. **Malformed [lifecycle] entries fail SAFE** (the excerpt is trun"
+    }
+  ]
+}

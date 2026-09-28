@@ -1,0 +1,129 @@
+{
+  "benchmark": "e2e-qa",
+  "contexts": "lme-s20-contexts.jsonl",
+  "context": "full",
+  "reader": "haiku",
+  "judge": "sonnet",
+  "transport": "claude -p (Claude Code headless, subscription)",
+  "overall": {
+    "n": 20,
+    "accuracy": 0.85,
+    "context_tokens": 15563.0125,
+    "accuracy_per_1k_context_tokens": 0.0546166752741476
+  },
+  "by_type": {
+    "single-session-user": {
+      "n": 20,
+      "accuracy": 0.85,
+      "context_tokens": 15563.0125,
+      "accuracy_per_1k_context_tokens": 0.0546166752741476
+    }
+  },
+  "model_tokens_this_run": {
+    "calls": 40,
+    "input": 324137,
+    "output": 5498
+  },
+  "per_question": [
+    {
+      "question_id": "118b2229",
+      "correct": true,
+      "answer": "Based on the memory excerpts, your daily commute takes 45 minutes each way. You mentioned that you've been listening to audiobooks during this time, which is a great use of your commute!"
+    },
+    {
+      "question_id": "1e043500",
+      "correct": true,
+      "answer": "According to the memory excerpts, the playlist you created on Spotify is called **\"Summer Vibes\"**. You mentioned it has all chill tracks that are perfect for relaxing or working out."
+    },
+    {
+      "question_id": "3b6f954b",
+      "correct": true,
+      "answer": "According to the memory excerpts provided, you attended the University of Melbourne for your study abroad program. You mentioned that you visited the Great Ocean Road with friends during that time and had a great experience exploring the coast, hiking, and taking in the views."
+    },
+    {
+      "question_id": "51a45a95",
+      "correct": false,
+      "answer": "I don't know.\n\nThe memory excerpts mention that you redeemed a $5 coupon on coffee creamer that you found in your email inbox, but they don't explicitly state where you redeemed it."
+    },
+    {
+      "question_id": "58bf7951",
+      "correct": true,
+      "answer": "According to the memory excerpts, you attended a production of **\"The Glass Menagerie\"** at the local community theater."
+    },
+    {
+      "question_id": "58ef2f1c",
+      "correct": true,
+      "answer": "Based on the memory excerpts provided, you mentioned volunteering at the \"Love is in the Air\" fundraising dinner back in February, which you referred to as Valentine's Day. That would have been around February 14, 2023.\n\nHowever, I should note that the memory excerpts don't specifically state that t"
+    },
+    {
+      "question_id": "5d3d2817",
+      "correct": false,
+      "answer": "I don't know."
+    },
+    {
+      "question_id": "66f24dbb",
+      "correct": true,
+      "answer": "According to the memory excerpts, you bought your sister a **yellow dress** and a **pair of earrings to match** for her birthday."
+    },
+    {
+      "question_id": "6ade9755",
+      "correct": true,
+      "answer": "Based on the memory excerpts provided, you take yoga classes at **Serenity Yoga**, which is a yoga studio. You also supplement your studio practice with home practice using the Down Dog app. Additionally, you have a Sunday morning yoga routine with your best friend Sarah."
+    },
+    {
+      "question_id": "6f9b354f",
+      "correct": true,
+      "answer": "According to the memory excerpts, you repainted your bedroom walls a **lighter shade of gray**. You mentioned that it's made the room feel so much brighter!"
+    },
+    {
+      "question_id": "726462e0",
+      "correct": false,
+      "answer": "I don't know."
+    },
+    {
+      "question_id": "7527f7e2",
+      "correct": true,
+      "answer": "According to the memory excerpts, you spent $800 on a designer handbag."
+    },
+    {
+      "question_id": "94f70d80",
+      "correct": true,
+      "answer": "According to the memory excerpts, you mentioned that you recently assembled an IKEA bookshelf and it took you **4 hours**, which you noted wasn't too bad."
+    },
+    {
+      "question_id": "ad7109d1",
+      "correct": true,
+      "answer": "Based on the memory excerpts provided, your internet plan is **500 Mbps**. You mentioned that you upgraded to this speed about three weeks ago (from your conversation on 2023/05/24) and that it's been working great for streaming movies on Netflix!"
+    },
+    {
+      "question_id": "af8d2e46",
+      "correct": true,
+      "answer": "According to the memory excerpts, you brought 7 shirts on your trip to Costa Rica, though you only ended up wearing 3 of them."
+    },
+    {
+      "question_id": "c5e8278d",
+      "correct": true,
+      "answer": "According to the memory excerpts, your old last name was Johnson, and you changed it to Winters."
+    },
+    {
+      "question_id": "c960da58",
+      "correct": true,
+      "answer": "According to the memory excerpts, you have 20 playlists on Spotify that you were looking to organize better."
+    },
+    {
+      "question_id": "dccbc061",
+      "correct": true,
+      "answer": "Based on the memory excerpts, your previous stance on spirituality was that you were a **staunch atheist**. You mentioned that exploring Buddhism and spirituality represents a significant shift from that position, as you've been exploring other possibilities and reading extensively about Buddhism."
+    },
+    {
+      "question_id": "e47becba",
+      "correct": true,
+      "answer": "According to the memory excerpts, you graduated with a degree in Business Administration."
+    },
+    {
+      "question_id": "f8c5f88b",
+      "correct": true,
+      "answer": "According to the memory excerpts, you bought your new tennis racket from a sports store downtown."
+    }
+  ]
+}

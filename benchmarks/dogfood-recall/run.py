@@ -15,11 +15,18 @@ Two views per question:
           exactly what the prompt hook injects: was an answer in it, and how
           many tokens (bytes / 4) did it cost.
 
-Recall weighs recency, so compare runs made close together in time.
+Recall weighs recency, so compare runs made close together in time. For a
+before/after pair, pass the same --snapshot directory to both runs: the first
+creates it (a healed copy of the database), and both then read an identical
+corpus, which removes the drift from memories stored between the runs.
+
+With --dump-context, each question's hook block (what the agent actually gets)
+and the text of its expected records are written as JSONL for end-to-end QA
+(benchmarks/e2e-qa/qa.py).
 
 Usage:
   python3 benchmarks/dogfood-recall/run.py [--db .axil/memory.axil]
-      [--axil axil] [--top-k 10] [--out results.json]
+      [--axil axil] [--top-k 10] [--out results.json] [--dump-context qa.jsonl]
 """
 
 import argparse
@@ -100,6 +107,14 @@ def score(expect: list, ranked: list, block: str, top_k: int) -> dict:
     }
 
 
+def reference_text(axil: str, db: Path, record_id: str) -> str:
+    """An expected record as the judge sees it: its main text plus the
+    fields that explain it (why, root cause, fix)."""
+    data = json.loads(run_axil(axil, db, ["get", record_id]))["data"]
+    parts = [data.get(k) for k in ("summary", "error", "rule", "subject", "reason", "root_cause", "fix", "resolution")]
+    return " | ".join(p for p in parts if isinstance(p, str) and p.strip())[:1200]
+
+
 METRICS = ["hit@1", "hit@5", "hit@10", "mrr@10", "recall_all@10", "ndcg@10", "hook_hit", "hook_tokens"]
 
 
@@ -118,20 +133,39 @@ def main() -> int:
     ap.add_argument("--axil", default="axil")
     ap.add_argument("--top-k", type=int, default=10)
     ap.add_argument("--out")
+    ap.add_argument("--dump-context")
+    ap.add_argument("--snapshot", help="reuse (or create) a frozen, healed copy of the DB here")
     args = ap.parse_args()
 
     questions = [json.loads(l) for l in open(HERE / "questions.jsonl") if l.strip()]
     version = subprocess.run([args.axil, "--version"], capture_output=True, text=True).stdout.strip()
 
     rows = []
+    contexts = []
     with tempfile.TemporaryDirectory() as tmp:
-        db = copy_db(Path(args.db).resolve(), Path(tmp))
-        run_axil(args.axil, db, ["heal", "--reindex"])
+        source = Path(args.db).resolve()
+        if args.snapshot:
+            snap = Path(args.snapshot)
+            if not (snap / source.name).exists():
+                snap.mkdir(parents=True, exist_ok=True)
+                run_axil(args.axil, copy_db(source, snap), ["heal", "--reindex"])
+            db = copy_db(snap / source.name, Path(tmp))
+        else:
+            db = copy_db(source, Path(tmp))
+            run_axil(args.axil, db, ["heal", "--reindex"])
         for i, q in enumerate(questions, 1):
             ranked = ranked_ids(args.axil, db, q["question"], args.top_k)
             block = hook_block(args.axil, db, q["question"])
             row = {"id": q["id"], "kind": q["kind"], **score(q["expect"], ranked, block, args.top_k)}
             rows.append(row)
+            if args.dump_context:
+                contexts.append({
+                    "question_id": q["id"],
+                    "question_type": q["kind"],
+                    "question": q["question"],
+                    "reference": [reference_text(args.axil, db, g[0]) for g in q["expect"]],
+                    "hook": block,
+                })
             print(f"\r  {i}/{len(questions)}", end="", file=sys.stderr)
     print(file=sys.stderr)
 
@@ -147,6 +181,8 @@ def main() -> int:
         "by_kind": {k: summarize(v) for k, v in sorted(by_kind.items())},
         "per_question": [{k: r[k] for k in ("id", "first_rank", "hook_hit")} for r in rows],
     }
+    if args.dump_context:
+        Path(args.dump_context).write_text("".join(json.dumps(c) + "\n" for c in contexts))
     text = json.dumps(report, indent=2)
     if args.out:
         Path(args.out).write_text(text + "\n")

@@ -14,6 +14,9 @@ naming the records that answer it. It measures what LongMemEval can't:
 
 ```bash
 python3 benchmarks/dogfood-recall/run.py                 # uses `axil` on PATH
+# before/after a change: both runs read one frozen, healed copy
+python3 benchmarks/dogfood-recall/run.py --snapshot benchmarks/dogfood-recall/data/snap --out before.json
+python3 benchmarks/dogfood-recall/run.py --snapshot benchmarks/dogfood-recall/data/snap --axil ./target/release/axil --out after.json
 python3 benchmarks/dogfood-recall/run.py --axil ./target/release/axil \
     --out benchmarks/results/dogfood-recall-<label>.json
 ```
@@ -46,7 +49,9 @@ is found.
 Only records created before the cutoff in `run.py` count, so memories written
 after the questions don't compete. Recall still weighs recency and decay, which
 move with the clock, so compare runs made close together (a before/after pair
-for one change), not runs weeks apart.
+for one change), not runs weeks apart. Two plain runs an hour apart differed by
+up to ±0.03 on every metric, mostly from memories stored in between; runs that
+share a `--snapshot` see an identical corpus.
 
 ## Metrics
 
