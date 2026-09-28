@@ -43,7 +43,7 @@ Good agent memory has to be four things — navigable, fast, fresh, and compound
 - 🕸️ **Navigable** — not a flat log but a graph you can walk: a knowledge graph of typed edges, a SCIP **code-graph** (real callers/callees, not keyword guesses), and **version-pinned dependency-doc memory** (your *exact* lib versions, zero network) — fused with vector, full-text, and time-series in one `.axil` file. Ask "where is X" and get a pointer in **~100 tokens**, not a stack of file reads.
 - ⚡ **Fast** — a file you embed, not a server you run: no Postgres, no cloud, no daemon. **<100 ms** commands from a ~5–10 MB binary, zero network hop, fully offline.
 - 🔄 **Fresh** — memory that keeps up with the code: background hooks auto-capture decisions and errors as you work, and SCIP + dep-doc **drift detection** refreshes indexes only when they've gone stale (`--if-stale`) — recall tracks the code as it moves.
-- 🧠 **Compounding** — memory that gets *better* across sessions, not just bigger: active forgetting (decay + reinforcement), a belief system, consolidation with contradiction detection, and structured checkpoints — all rule-based, **no LLM required**.
+- 🧠 **Compounding** — memory that gets *better* across sessions, not just bigger: active forgetting (decay + reinforcement), a belief system, consolidation that supersedes near-duplicates and nominates conflicting updates for review, and structured checkpoints — all rule-based, **no LLM required**.
 - 🔗 **One memory, every tool** — the same portable `.axil` brain is read *and* written by Claude Code, OpenAI Codex, GitHub Copilot CLI, Factory Droid, Google Antigravity, Qwen Code, OpenCode, Cursor, any MCP client, or your own Rust. No vendor lock-in.
 
 ## Quick start
@@ -228,7 +228,7 @@ The third hero panel — **"finds the right code"** — is a mechanical check on
 
 Everything below normally means standing up a vector DB **and** Neo4j **and** Elasticsearch **and** an LLM extraction pipeline. Axil is all of it in **one ~5–10 MB binary, no server, no LLM** — with real agent cognition, not just storage:
 
-**🧠 Cognitive memory (no LLM required)** — 5 memory types (working, semantic, episodic, procedural, preference) · auto-importance scoring · active forgetting (decay + reinforcement) · belief system · auto-capture of errors & decisions · consolidation & contradiction detection.
+**🧠 Cognitive memory (no LLM required)** — 5 memory types (working, semantic, episodic, procedural, preference) · auto-importance scoring · active forgetting (decay + reinforcement) · belief system · auto-capture of errors & decisions · near-duplicate superseding & conflict candidates.
 
 **🔎 Multi-model retrieval** — HNSW vector search (local ONNX/BGE) · a **temporal knowledge graph** (typed edges, traversal, entity extraction + inference, time-aware `as_of` queries — no Neo4j) · Tantivy full-text · time-series. One `recall()` fuses them all (RRF) with per-result score explanations.
 
@@ -340,7 +340,7 @@ model = "gpt-4o-mini"                     # api_key via AXIL_LLM_API_KEY env var
 
 ## Status & license
 
-**Usable today.** The core engine, every plugin, agent memory, and diagnostics are implemented and run — it's a single offline binary you can install and point at a real project right now. The in-tree Criterion hot-path suite runs in-repo; the retrieval-quality benchmark harnesses (LoCoMo / LongMemEval / SQLite-compare) are historical and archived out of the repo, so those numbers are not regenerated here. Still in progress: more examples, CI/CD, and a hosted docs site (the docs themselves are linked above).
+**Usable today.** The core engine, every plugin, agent memory, and diagnostics are implemented and run — it's a single offline binary you can install and point at a real project right now. CI builds and tests every PR and gates recall quality (needle retention) and vector-search speed (SQLite-compare); release-plz publishes releases. Every benchmark harness (LoCoMo, LongMemEval, SQLite-compare, Criterion) lives in-tree under [`benchmarks/`](benchmarks/); the LoCoMo and LongMemEval datasets are out-of-tree, so re-run those locally. Still in progress: more examples and a hosted docs site (the docs themselves are linked above).
 
 **Free for noncommercial use.** Axil is source-available under the [PolyForm Noncommercial License 1.0.0](LICENSE):
 
