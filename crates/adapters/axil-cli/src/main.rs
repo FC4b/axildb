@@ -13295,21 +13295,17 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                 sections.insert("rules".into(), json!(rule_vals));
             }
 
-            // Last 3 sessions
-            let sessions = db.storage().list("_sessions", 3, 0).unwrap_or_default();
-            if !sessions.is_empty() {
-                let session_vals: Vec<Value> = sessions
-                    .iter()
-                    .map(|r| {
-                        let mut v = json!({"id": r.id.to_string()});
-                        if let Some(obj) = r.data.as_object() {
-                            for (k, val) in obj {
-                                v[k] = Value::clone(val);
-                            }
-                        }
-                        v
-                    })
-                    .collect();
+            // The newest sessions, one line each: the full file and entity
+            // lists cost tokens, and `axil get <id>` has them.
+            let now = chrono::Utc::now();
+            let session_vals: Vec<Value> = db
+                .storage()
+                .list_newest("_sessions", 3)
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|r| boot_session_line(r, now))
+                .collect();
+            if !session_vals.is_empty() {
                 sections.insert("recent_sessions".into(), json!(session_vals));
             }
 
@@ -17729,29 +17725,27 @@ fn format_recall_results(
 
     let formatted: Vec<Value> = match format {
         RecallFormat::Full | RecallFormat::ContextBlock => values.to_vec(),
+        // A hit with nothing to show costs a slot and tells the agent
+        // nothing, so the summary formats leave it out.
         RecallFormat::Compact => values
             .iter()
-            .map(|v| {
-                let summary = pick_summary(v.get("data"))
-                    .map(|s| truncate_str(s, 200))
-                    .unwrap_or_default();
-                json!({
+            .filter_map(|v| {
+                let summary = truncate_str(pick_summary(v.get("data"))?, 200);
+                Some(json!({
                     "id": v.get("id"),
                     "score": v.get("score"),
                     "table": v.get("table"),
                     "summary": summary,
-                })
+                }))
             })
             .collect(),
         RecallFormat::Oneline => values
             .iter()
-            .map(|v| {
+            .filter_map(|v| {
                 let score = v.get("score").and_then(|s| s.as_f64()).unwrap_or(0.0);
-                let summary = pick_summary(v.get("data"))
-                    .map(|s| truncate_str(s, 120))
-                    .unwrap_or_else(|| "?".into());
+                let summary = truncate_str(pick_summary(v.get("data"))?, 120);
                 let id = v.get("id").and_then(|s| s.as_str()).unwrap_or("?");
-                json!(format!("{:.3} | {} | {}", score, summary, id))
+                Some(json!(format!("{:.3} | {} | {}", score, summary, id)))
             })
             .collect(),
     };
@@ -17786,11 +17780,16 @@ fn pick_summary(data: Option<&Value>) -> Option<&str> {
     let d = data?;
     for key in [
         "summary",
+        "subject",
         "description",
         "statement",
         "error",
         "fix",
+        "fact",
+        "rule",
+        "goal",
         "content",
+        "text",
         "path",
     ] {
         if let Some(s) = d.get(key).and_then(|v| v.as_str()) {
@@ -19067,9 +19066,10 @@ fn format_context_block(values: &[Value], budget: Option<usize>, warnings: &[Str
             code_lines.push(format_code_proxy_line(v));
             continue;
         }
-        let summary = pick_summary(v.get("data"))
-            .map(|s| truncate_str(s, 240))
-            .unwrap_or_else(|| "(no summary)".into());
+        // Nothing displayable: skip rather than inject a "(no summary)" line.
+        let Some(summary) = pick_summary(v.get("data")).map(|s| truncate_str(s, 240)) else {
+            continue;
+        };
         other_lines.push(format!(
             "  [{}] {} (id={})",
             xml_escape_for_context(table),
@@ -19445,6 +19445,62 @@ fn truncate_record_json(record: &axil_core::Record, max_field_len: usize) -> Val
     v
 }
 
+/// Sessions older than this are left out of boot.
+const BOOT_SESSION_MAX_AGE_DAYS: i64 = 90;
+/// Sessions older than this are labelled stale in boot.
+const BOOT_SESSION_STALE_DAYS: i64 = 7;
+
+/// Boot's one-line view of a `_sessions` record: when it ended and what it
+/// touched. `None` when it is too old to be worth showing.
+fn boot_session_line(r: &axil_core::Record, now: chrono::DateTime<chrono::Utc>) -> Option<Value> {
+    let ended = r
+        .data
+        .get("ended_at")
+        .and_then(Value::as_str)
+        .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+        .map(|t| t.with_timezone(&chrono::Utc))
+        .unwrap_or(r.created_at);
+    let age_days = (now - ended).num_days();
+    if age_days > BOOT_SESSION_MAX_AGE_DAYS {
+        return None;
+    }
+    let files: Vec<&str> = r
+        .data
+        .get("files_changed")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    let file_count = r
+        .data
+        .get("file_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(files.len() as u64);
+    let summary = match r.data.get("summary").and_then(Value::as_str) {
+        Some(s) if !s.trim().is_empty() => s.to_string(),
+        _ => {
+            let names: Vec<&str> = files
+                .iter()
+                .take(3)
+                .map(|f| f.rsplit('/').next().unwrap_or(f))
+                .collect();
+            let more = if files.len() > names.len() {
+                ", …"
+            } else {
+                ""
+            };
+            format!("{file_count} files: {}{more}", names.join(", "))
+        }
+    };
+    Some(json!({
+        "id": r.id.to_string(),
+        "ended_at": ended.to_rfc3339(),
+        "age_days": age_days,
+        "stale": age_days > BOOT_SESSION_STALE_DAYS,
+        "summary": summary,
+        "file_count": file_count,
+    }))
+}
+
 /// One line per Engine this open could not attach, for agent-facing output.
 /// Empty when every Engine found on disk is attached.
 fn degraded_warnings(db: &Axil) -> Vec<String> {
@@ -19545,17 +19601,19 @@ fn boot_to_narrative(data: &Value) -> String {
     if let Some(sessions) = data.get("recent_sessions").and_then(|v| v.as_array()) {
         out.push_str("## Recent Sessions\n");
         for s in sessions {
-            if let Some(summary) = s
-                .get("summary")
-                .or_else(|| s.get("files_changed"))
-                .and_then(|v| v.as_str())
-            {
-                out.push_str(&format!("- {}\n", summary));
+            let summary = s.get("summary").and_then(|v| v.as_str()).unwrap_or("?");
+            let age = match s.get("age_days").and_then(|v| v.as_i64()) {
+                Some(0) => "today".to_string(),
+                Some(1) => "1 day ago".to_string(),
+                Some(d) => format!("{d} days ago"),
+                None => "?".to_string(),
+            };
+            let stale = if s.get("stale").and_then(|v| v.as_bool()) == Some(true) {
+                ", stale"
             } else {
-                let id = s.get("id").and_then(|v| v.as_str()).unwrap_or("?");
-                let file_count = s.get("file_count").and_then(|v| v.as_u64()).unwrap_or(0);
-                out.push_str(&format!("- Session {} ({} files)\n", id, file_count));
-            }
+                ""
+            };
+            out.push_str(&format!("- {summary} ({age}{stale})\n"));
         }
         out.push('\n');
     }
@@ -20485,6 +20543,73 @@ mod upgrade_helper_tests {
             .contains("new version refused to load"));
         // The original plugin is restored byte-for-byte; the broken upgrade is gone.
         assert_eq!(std::fs::read(&target).unwrap(), b"OLD");
+    }
+}
+
+/// The repo-root `skills/` folder mirrors the skills embedded in the binary
+/// for readers browsing the repo. The embedded copies are the source; this
+/// keeps the mirror from drifting (it had, missing four skills and the
+/// `axil resolve` guidance).
+#[cfg(test)]
+mod skills_mirror_drift {
+    #[test]
+    fn root_skills_match_the_embedded_copies() {
+        let crate_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let embedded = crate_dir.join("src/skills");
+        let mirror = crate_dir.join("../../../skills");
+        let mut names: Vec<_> = std::fs::read_dir(&embedded)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name())
+            .collect();
+        names.sort();
+        for name in names {
+            let source = std::fs::read_to_string(embedded.join(&name)).unwrap();
+            let copy = std::fs::read_to_string(mirror.join(&name)).unwrap_or_default();
+            assert!(
+                source == copy,
+                "skills/{} differs from crates/adapters/axil-cli/src/skills/{0}; \
+                 copy the embedded file over it",
+                name.to_string_lossy()
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod recall_summary_tests {
+    use super::*;
+
+    #[test]
+    fn commits_rules_and_checkpoints_have_a_summary() {
+        let commit = json!({"sha": "abc", "subject": "fix the probe", "author": "a"});
+        assert_eq!(pick_summary(Some(&commit)), Some("fix the probe"));
+        let rule = json!({"rule": "consult Axil first"});
+        assert_eq!(pick_summary(Some(&rule)), Some("consult Axil first"));
+        let checkpoint = json!({"goal": "finish phase 28", "state": "step 3"});
+        assert_eq!(pick_summary(Some(&checkpoint)), Some("finish phase 28"));
+        assert_eq!(pick_summary(Some(&json!({"sha": "abc"}))), None);
+    }
+
+    #[test]
+    fn hits_with_nothing_to_show_are_left_out() {
+        let hits = vec![
+            json!({"id": "A", "table": "commits", "score": 0.9, "data": {"sha": "abc"}}),
+            json!({"id": "B", "table": "decisions", "score": 0.8, "data": {"summary": "use redb"}}),
+        ];
+        let block = format_context_block(&hits, None, &[]);
+        assert!(block.contains("use redb"), "{block}");
+        assert!(
+            !block.contains("no summary") && !block.contains("id=A"),
+            "{block}"
+        );
+
+        let compact = format_recall_results(&hits, &RecallFormat::Compact, None);
+        assert_eq!(compact.len(), 1);
+        assert_eq!(compact[0]["id"], "B");
+
+        // Nothing displayable at all: no block, so the hook stays silent.
+        assert!(format_context_block(&hits[..1], None, &[]).is_empty());
     }
 }
 

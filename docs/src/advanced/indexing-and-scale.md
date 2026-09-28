@@ -175,9 +175,9 @@ fixtures/
 The walker already respects `.gitignore` automatically, so `.axilignore`
 is for things you want to commit but skip indexing.
 
-**6. Mmap vectors.** Already on by default (Phase 8b.12). Zero-copy
-access to the HNSW file means startup doesn't read the whole index into
-memory.
+**6. Vector store size.** Every process that opens the database loads all
+vectors into memory and builds the search graph on first search; memory-mapped
+vectors are not wired in yet. Keep the vector store to what recall needs.
 
 **7. Run SCIP refresh in the background.** Already the default via the
 brain hook. Don't make the agent wait for fresh SCIP.

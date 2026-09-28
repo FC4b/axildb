@@ -517,6 +517,26 @@ impl Storage {
         Ok(results)
     }
 
+    /// The newest `limit` records of a table, newest first. The table index
+    /// holds ids in insertion order, so this reads only the tail.
+    pub fn list_newest(&self, table: &str, limit: usize) -> Result<Vec<Record>> {
+        let txn = self.begin_read()?;
+        let idx_table = txn.open_table(TABLE_INDEX)?;
+        let ids = Self::read_index(&idx_table, table)?;
+
+        let records_table = txn.open_table(RECORDS)?;
+        let mut results = Vec::with_capacity(limit.min(ids.len()));
+        for rid in ids.iter().rev() {
+            if results.len() == limit {
+                break;
+            }
+            if let Some(guard) = records_table.get(rid.as_str())? {
+                results.push(self.decode_body(rid.as_str(), guard.value())?);
+            }
+        }
+        Ok(results)
+    }
+
     /// Update a record's data. Returns the updated record.
     ///
     /// Uses a single write transaction to ensure atomicity.
@@ -1224,6 +1244,25 @@ mod tests {
 
         let page = storage.list("items", 2, 1).unwrap();
         assert_eq!(page.len(), 2);
+    }
+
+    #[test]
+    fn list_newest_returns_the_tail_newest_first() {
+        let (storage, _dir) = temp_storage();
+        for i in 0..5 {
+            storage
+                .insert(&Record::new("items", json!({"i": i})))
+                .unwrap();
+        }
+        let newest: Vec<i64> = storage
+            .list_newest("items", 3)
+            .unwrap()
+            .iter()
+            .map(|r| r.data["i"].as_i64().unwrap())
+            .collect();
+        assert_eq!(newest, vec![4, 3, 2]);
+        assert_eq!(storage.list_newest("items", 10).unwrap().len(), 5);
+        assert!(storage.list_newest("nothing", 3).unwrap().is_empty());
     }
 
     #[test]

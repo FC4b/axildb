@@ -86,6 +86,22 @@ fn truncate_encoding_triplet(
     type_ids.truncate(keep);
 }
 
+/// The text the cross-encoder scores for one candidate: a top-level
+/// `summary`, else `data` — a string, or a record object (what the CLI
+/// passes), read through [`axil_core::util::searchable_text`].
+fn passage_text(candidate: &Value) -> String {
+    if let Some(summary) = candidate.get("summary").and_then(Value::as_str) {
+        if !summary.trim().is_empty() {
+            return summary.to_string();
+        }
+    }
+    match candidate.get("data") {
+        Some(Value::String(text)) => text.clone(),
+        Some(data @ Value::Object(_)) => axil_core::util::searchable_text(data),
+        _ => String::new(),
+    }
+}
+
 /// Rerank a set of candidate results using a cross-encoder model.
 ///
 /// Takes the top `config.top_k_rerank` candidates, scores each (query, passage)
@@ -109,17 +125,7 @@ pub fn rerank(query: &str, results: &mut Vec<Value>, config: &RerankConfig) -> R
     // Only rerank top K.
     let rerank_count = results.len().min(config.top_k_rerank);
 
-    // Extract passage text from each candidate.
-    let passages: Vec<String> = results[..rerank_count]
-        .iter()
-        .map(|v| {
-            v.get("summary")
-                .and_then(|s| s.as_str())
-                .or_else(|| v.get("data").and_then(|d| d.as_str()))
-                .unwrap_or("")
-                .to_string()
-        })
-        .collect();
+    let passages: Vec<String> = results[..rerank_count].iter().map(passage_text).collect();
 
     // Score each (query, passage) pair.
     let mut scores: Vec<RerankScore> = Vec::with_capacity(rerank_count);
@@ -135,6 +141,10 @@ pub fn rerank(query: &str, results: &mut Vec<Value>, config: &RerankConfig) -> R
             .ok_or_else(|| "rerank runtime cache miss".to_string())?;
 
         for (i, passage) in passages.iter().enumerate() {
+            // Nothing to score: an empty passage takes no rank from a real one.
+            if passage.trim().is_empty() {
+                continue;
+            }
             let windows = passage_windows(passage);
             let mut best: f32 = f32::NEG_INFINITY;
             for window in &windows {
@@ -143,9 +153,8 @@ pub fn rerank(query: &str, results: &mut Vec<Value>, config: &RerankConfig) -> R
                     best = score;
                 }
             }
-            // Empty passage → no windows → neutral score.
             if !best.is_finite() {
-                best = 0.0;
+                continue;
             }
 
             scores.push(RerankScore {
@@ -164,7 +173,8 @@ pub fn rerank(query: &str, results: &mut Vec<Value>, config: &RerankConfig) -> R
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
-    // Rebuild the results: reranked portion first, then the rest unchanged.
+    // Rebuild the results: the scored candidates by score, then the
+    // unscorable ones (no text) in their original order, then the rest.
     let mut reranked: Vec<Value> = Vec::with_capacity(results.len());
     for rs in &scores {
         let mut item = results[rs.index].clone();
@@ -172,6 +182,12 @@ pub fn rerank(query: &str, results: &mut Vec<Value>, config: &RerankConfig) -> R
             obj.insert("rerank_score".to_string(), serde_json::json!(rs.score));
         }
         reranked.push(item);
+    }
+    let scored: std::collections::HashSet<usize> = scores.iter().map(|rs| rs.index).collect();
+    for (i, item) in results[..rerank_count].iter().enumerate() {
+        if !scored.contains(&i) {
+            reranked.push(item.clone());
+        }
     }
     // Append items that weren't reranked.
     for item in results.iter().skip(rerank_count) {
@@ -317,6 +333,22 @@ pub fn rerank(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The CLI hands the reranker records whose `data` is an object; reading
+    /// only string fields made every passage empty.
+    #[test]
+    fn passage_text_reads_record_objects() {
+        let record = serde_json::json!({"id": "A", "data": {"summary": "pool size is 32", "files": ["a.rs"]}});
+        assert_eq!(passage_text(&record), "pool size is 32");
+        let flat =
+            serde_json::json!({"summary": "top-level summary", "data": {"summary": "inner"}});
+        assert_eq!(passage_text(&flat), "top-level summary");
+        assert_eq!(
+            passage_text(&serde_json::json!({"data": "plain text"})),
+            "plain text"
+        );
+        assert_eq!(passage_text(&serde_json::json!({"id": "B"})), "");
+    }
     use serde_json::json;
 
     #[test]

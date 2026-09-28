@@ -277,6 +277,6 @@ hit-rate 0% → 20%, ~45% context-token reduction, p95 19ms → 15ms.
 
 - [Memory Types](../concepts/memory-types.md) — recency-weighted recall per type
 - [Engines (Storage Plugins)](../concepts/plugins.md) — vector / graph / FTS engines that feed Step 1
-- [Performance](./performance.md) — Phase 8b cascaded filtering, adaptive RRF, deferred indexing, mmap vectors
+- [Performance](./performance.md) — Phase 8b cascaded filtering, adaptive RRF, deferred indexing
 - [Cognitive Memory](./cognitive.md) — importance, decay, tiered memory (feeds the activation/importance signals)
 - [Evaluation Log](./eval-log.md) — Phase 15 measurements behind the recall@1 numbers and the reranker decision

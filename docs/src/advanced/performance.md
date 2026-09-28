@@ -24,11 +24,14 @@ Reciprocal Rank Fusion weights are automatically tuned based on which signals ar
 ### Batch embedding
 Multiple texts can be embedded in a single ONNX inference call.
 
-### Int8 quantization
-Use `bge-small-en-v1.5-int8` for ~3x faster embedding with minimal quality loss.
+### Int8 embedding model
+Use `bge-small-int8` (`bge-small-en-v1.5-int8`, an int8-quantized ONNX model) for faster
+embedding at a small quality cost. No committed benchmark measures the trade-off yet, so
+check it on your own data before switching.
 
-### Mmap vectors
-Vector index is memory-mapped for zero-copy access on large datasets.
+Stored vectors are full `f32`, and the vector store is loaded into memory when the database
+opens. Vector quantization and memory-mapped vectors exist as code in `axil-vector` but are
+not wired in yet.
 
 ### Deferred indexing
 Write buffer batches index updates for high-throughput insert workloads.

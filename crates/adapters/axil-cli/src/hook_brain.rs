@@ -1869,10 +1869,21 @@ impl HookCtx {
         .map(str::to_string)
         .collect();
 
+        // `summary` is what recall shows; `content` (subject and body) is
+        // what gets embedded and searched, so the reasoning in the body is
+        // findable instead of the sha and author.
+        let body = body.trim_end();
+        let content = if body.is_empty() {
+            subject.to_string()
+        } else {
+            format!("{subject}\n\n{body}")
+        };
         let payload = json!({
             "sha": sha,
+            "summary": subject,
+            "content": content,
             "subject": subject,
-            "body": body.trim_end(),
+            "body": body,
             "author": author,
             "committed_at": committed_at,
             "files": files,

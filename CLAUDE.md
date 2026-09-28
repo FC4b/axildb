@@ -371,10 +371,15 @@ local, gitignored `tasks/` dir — they are not shipped in the public repo.)
 ### Phase 7d: AxilQL ✅
 ### Phase 8a: Performance ✅
 ### Phase 8b: AI Agent Performance Optimizations ✅
-- All 21 items complete (8b.1–8b.21): cascaded filtering, adaptive RRF, batch embedding,
-  activation scoring, int8 quantization, Matryoshka dims, temporal edges, tiered memory,
-  PageRank recall, deferred indexing, negation detection, mmap vectors, binary embeddings,
-  snapshots, hook capture, entity extraction, token-budgeted recall, multi-agent, boot context
+- 8b.1–8b.21 shipped: cascaded filtering, adaptive RRF, batch embedding, activation scoring,
+  temporal edges, tiered memory, PageRank recall, deferred indexing, negation detection,
+  snapshots, hook capture, entity extraction, token-budgeted recall, multi-agent, boot
+  context, and the int8-quantized embedding *model* (`bge-small-int8`).
+- **Code present but not wired into any open or search path** (verified 2026-09-28, no
+  callers): int8 vector quantization (`axil-vector/src/quantize.rs`), binary embeddings
+  (`binary.rs`), mmap vectors (`mmap.rs`; the store is loaded into memory on open), and
+  Matryoshka search (`HnswIndex::search_mrl`). Don't claim them until they are wired and
+  benchmarked on a large store.
 
 ### Phase 9: Ship — Remaining Work
 - Testing gaps, examples, feature polish, benchmarks. (CI/CD now shipped — `.github/workflows/ci.yml` + `release-plz.yml`.)
