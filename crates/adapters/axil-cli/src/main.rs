@@ -6266,6 +6266,34 @@ fn retry_busy_open(mut open: impl FnMut() -> Result<Axil>) -> Result<Axil> {
     Err(last.unwrap_or_else(|| anyhow::Error::from(axil_core::AxilError::Busy)))
 }
 
+/// How long a write command waits for another process to release the writer
+/// lock. The hook queue's drainer holds it for a few seconds per job, and a
+/// write that failed on the first contended open would be lost.
+const WRITE_BUSY_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Open for a write command, waiting out another process's writer lock for up
+/// to [`WRITE_BUSY_WAIT`] with a doubling backoff. Any other error returns
+/// immediately.
+fn open_waiting_for_writer(mut open: impl FnMut() -> Result<Axil>) -> Result<Axil> {
+    let deadline = std::time::Instant::now() + WRITE_BUSY_WAIT;
+    let mut delay = std::time::Duration::from_millis(100);
+    loop {
+        match open() {
+            Err(e) if is_busy_chain(&e) => {
+                if std::time::Instant::now() + delay >= deadline {
+                    return Err(e.context(format!(
+                        "another axil process held the writer lock for {}s; retry shortly",
+                        WRITE_BUSY_WAIT.as_secs()
+                    )));
+                }
+                std::thread::sleep(delay);
+                delay = (delay * 2).min(std::time::Duration::from_secs(1));
+            }
+            other => return other,
+        }
+    }
+}
+
 /// Open for a hot read command, tolerating a concurrent writer.
 ///
 /// Axil is single-writer: while another process holds the writable handle, a
@@ -8636,15 +8664,19 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             // default-space vector creates the store at the vector's dimension;
             // a named space or no vector opens all detected engines).
             #[cfg(feature = "embed")]
-            let db = if embed.is_some() {
-                open_with_embedder_creating(&db_path)?
-            } else {
-                open_for_store(&db_path, raw_vector.as_deref(), space.is_some())?
-            };
+            let db = open_waiting_for_writer(|| {
+                if embed.is_some() {
+                    open_with_embedder_creating(&db_path)
+                } else {
+                    open_for_store(&db_path, raw_vector.as_deref(), space.is_some())
+                }
+            })?;
             #[cfg(all(feature = "vector", not(feature = "embed")))]
-            let db = open_for_store(&db_path, raw_vector.as_deref(), space.is_some())?;
+            let db = open_waiting_for_writer(|| {
+                open_for_store(&db_path, raw_vector.as_deref(), space.is_some())
+            })?;
             #[cfg(not(feature = "vector"))]
-            let db = open_with_all_detected(&db_path)?;
+            let db = open_waiting_for_writer(|| open_with_all_detected(&db_path))?;
 
             // Wire up LLM if --llm flag is set and config exists.
             let db = if llm { wire_llm(db, &db_path)? } else { db };
@@ -10307,7 +10339,9 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
         } => {
             let db_path = require_db(&db_opt)?;
             let secs = parse_duration(&duration)?;
-            let db = open_with_timeseries(&db_path)?;
+            // The Stop hook counts recent records with this: ride out a short
+            // writer instead of failing on the first contended open.
+            let db = retry_busy_open(|| open_with_timeseries(&db_path))?;
 
             let mut records = db.since(table.as_deref(), secs)?;
             // `since` yields oldest-first; a limit should keep the *newest* N,
@@ -13479,10 +13513,11 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             if let Some(ref topic_query) = topic {
                 #[cfg(feature = "embed")]
                 {
-                    let db_embed = open_with_embedder(&db_path)?;
+                    // `db` already has the vector engine attached; a second
+                    // open from this process would find its own lock and fail.
                     let mut cfg = axil_core::RecallConfig::default();
                     cfg.qtc = Some(axil_core::scoring::QtcConfig::default());
-                    if let Ok(results) = db_embed.recall(topic_query, 5, Some(cfg)) {
+                    if let Ok(results) = db.recall(topic_query, 5, Some(cfg)) {
                         let topic_vals: Vec<Value> = results
                             .iter()
                             .map(|rr| {
@@ -14368,7 +14403,9 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
         // ── Recall for file ────────────────────────────────────────
         Command::RecallForFile { file, top_k } => {
             let db_path = require_db(&db_opt)?;
-            let db = open_with_all_detected(&db_path)?;
+            // A hook runs this before every edit: ride out a short writer, and
+            // fall back to a read-only open rather than fail.
+            let db = open_read_command(&db_path)?;
 
             let file_lower = file.to_lowercase();
             let short_name = std::path::Path::new(&file)
@@ -16121,7 +16158,7 @@ fn run_checkpoint_extension(
     };
 
     let db_path = require_db(db_opt)?;
-    let db = open_with_all_detected(&db_path)?;
+    let db = open_waiting_for_writer(|| open_with_all_detected(&db_path))?;
     match axil_core::dispatch_cli(&db, &db.extensions(), &invocation)? {
         axil_core::Dispatch::Handled(output) => {
             if !output.stdout.is_empty() {

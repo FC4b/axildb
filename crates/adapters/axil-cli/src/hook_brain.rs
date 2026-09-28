@@ -1303,26 +1303,22 @@ impl HookCtx {
         }
     }
 
-    /// Count narrative records stored in the last hour.
-    fn count_recent_narrative(&self) -> i64 {
-        let Some(out) = self.axil_db_out(&["since", "1h"]) else {
-            return 0;
-        };
-        let Ok(rows) = serde_json::from_str::<Value>(out.trim()) else {
-            return 0;
-        };
-        rows.as_array()
-            .map(|arr| {
-                arr.iter()
-                    .filter(|r| {
-                        r.get("table")
-                            .and_then(Value::as_str)
-                            .map(|t| NARRATIVE_TABLES.contains(&t))
-                            .unwrap_or(false)
-                    })
-                    .count() as i64
-            })
-            .unwrap_or(0)
+    /// Count narrative records stored in the last hour, or `None` when the
+    /// lookup failed (a busy database is not "nothing stored").
+    fn count_recent_narrative(&self) -> Option<i64> {
+        let out = self.axil_db_out(&["since", "1h"])?;
+        let rows = serde_json::from_str::<Value>(out.trim()).ok()?;
+        let rows = rows.as_array()?;
+        Some(
+            rows.iter()
+                .filter(|r| {
+                    r.get("table")
+                        .and_then(Value::as_str)
+                        .map(|t| NARRATIVE_TABLES.contains(&t))
+                        .unwrap_or(false)
+                })
+                .count() as i64,
+        )
     }
 
     /// True when HEAD has a commit within the last hour. Lets the Stop
@@ -1530,6 +1526,9 @@ impl HookCtx {
         let mut ctx = String::new();
         if !sentinel.exists() {
             if let Some(out) = self.axil_db_out(&["recall-for-file", &rel, "--top-k", "3"]) {
+                // Only a lookup that ran marks the file done; a failed one
+                // (say, a busy database) is retried on the next edit.
+                let _ = std::fs::write(&sentinel, "");
                 if let Ok(v) = serde_json::from_str::<Value>(out.trim()) {
                     let matches = v.get("matches").and_then(Value::as_i64).unwrap_or(0);
                     if matches > 0 {
@@ -1557,13 +1556,12 @@ impl HookCtx {
                     }
                 }
             }
-            let _ = std::fs::write(&sentinel, "");
         }
 
         // 5-edit nudge: fires at every 5th edit with no narrative stored.
         if let Ok(manifest) = std::fs::read_to_string(self.sfile("manifest")) {
             let edit_count = manifest.lines().count();
-            if edit_count >= 5 && edit_count % 5 == 0 && self.count_recent_narrative() == 0 {
+            if edit_count >= 5 && edit_count % 5 == 0 && self.count_recent_narrative() == Some(0) {
                 let nudge = format!(
                     "⚠️ AXIL — {edit_count} files edited this session, no {NARRATIVE_TABLES_TEXT} stored. \
                      Store inline (axil store …) or commit; don't batch at the end."
@@ -1620,11 +1618,14 @@ impl HookCtx {
             self.axil_db_out(&["code-search", &query, "--top-k", "3", "--format", "pretty"])
         } else {
             self.axil_db_out(&["fts", &query, "--limit", "3", "--format", "table"])
-        }
-        .unwrap_or_default();
-
+        };
+        // A search that ran is done for the session, hits or not; a failed one
+        // (say, a busy database) is retried the next time.
+        let Some(hits) = hits else {
+            return Ok(());
+        };
+        let _ = std::fs::write(&sentinel, "");
         if !is_empty_axil_output(&hits) {
-            let _ = std::fs::write(&sentinel, "");
             let ctx = format!(
                 "📎 AXIL {mode}('{query}') — check this before spending tokens on repo-wide search:\n{hits}\n\nFor broad repo lookups, prefer 'axil {mode} <query>' first; use rg/grep after Axil points you at files or when verifying current text."
             );
@@ -1941,7 +1942,7 @@ impl HookCtx {
         if !self.event.stop_hook_active
             && file_count > 2
             && self.db.is_some()
-            && self.count_recent_narrative() == 0
+            && self.count_recent_narrative() == Some(0)
             && !self.has_recent_git_commit()
         {
             let files_json = serde_json::to_string(&turn).unwrap_or_else(|_| "[]".into());

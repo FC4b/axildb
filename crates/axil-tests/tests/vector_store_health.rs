@@ -216,3 +216,28 @@ fn cli_repairs_a_vector_store_left_dirty_by_a_killed_writer() {
     let (_, stderr, _) = axil(&path, &["doctor"]);
     assert!(!stderr.contains("repaired"), "{stderr}");
 }
+
+#[test]
+fn boot_topic_recalls_with_a_vector_store_attached() {
+    // `boot --topic` used to open the database a second time for its recall,
+    // which found this process's own writer lock and failed whenever a vector
+    // store existed.
+    use axil_vector::AxilBuilderVectorExt;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("memory.axil");
+    Axil::open(&path)
+        .with_vector(384)
+        .unwrap()
+        .build()
+        .unwrap()
+        .insert(
+            "decisions",
+            json!({"summary": "the connection pool size is 32"}),
+        )
+        .unwrap();
+
+    let (stdout, stderr, code) = axil(&path, &["boot", "--topic", "connection pool"]);
+    assert_eq!(code, 0, "{stderr}");
+    let boot: Value = serde_json::from_str(&stdout).expect(&stdout);
+    assert!(boot["topic_recall"].is_array(), "{stdout}");
+}
