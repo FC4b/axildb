@@ -89,6 +89,7 @@ fn truncate_encoding_triplet(
 /// The text the cross-encoder scores for one candidate: a top-level
 /// `summary`, else `data` — a string, or a record object (what the CLI
 /// passes), read through [`axil_core::util::searchable_text`].
+#[cfg(any(feature = "rerank", test))]
 fn passage_text(candidate: &Value) -> String {
     if let Some(summary) = candidate.get("summary").and_then(Value::as_str) {
         if !summary.trim().is_empty() {

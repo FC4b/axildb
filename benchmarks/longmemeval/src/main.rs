@@ -248,6 +248,8 @@ struct OverallStats {
     hit_rate: f64,
     avg_recall: f64,
     avg_precision: f64,
+    #[serde(flatten)]
+    harder: HarderReport,
 }
 
 #[derive(Debug, Serialize)]
@@ -257,6 +259,89 @@ struct CategoryReport {
     hit_rate: f64,
     avg_recall: f64,
     avg_precision: f64,
+    #[serde(flatten)]
+    harder: HarderReport,
+}
+
+/// Characters of a hit's summary the CLI's default (compact) recall format
+/// shows the agent (`format_recall_results` truncates to 200).
+const COMPACT_SUMMARY_CHARS: usize = 200;
+
+/// Rank depth for NDCG.
+const NDCG_DEPTH: usize = 10;
+
+/// Per-question measures beyond "was any answer session retrieved".
+#[derive(Debug, Default, Clone, Copy)]
+struct Harder {
+    /// 1.0 when every answer session is in the top-k.
+    recall_all: f64,
+    /// NDCG@10 over the session ranking, binary relevance.
+    ndcg: f64,
+    /// Share of the answer turns whose text the agent would actually read
+    /// in the compact format (the first 200 chars of each hit)...
+    turn_recall_compact: f64,
+    /// ...and in the full record text.
+    turn_recall_full: f64,
+    /// Tokens (bytes / 4) of the top-k hits in each format.
+    tokens_compact: f64,
+    tokens_full: f64,
+}
+
+#[derive(Debug, Default)]
+struct HarderSums {
+    n: usize,
+    sum: Harder,
+}
+
+impl HarderSums {
+    fn add(&mut self, h: Harder) {
+        self.n += 1;
+        self.sum.recall_all += h.recall_all;
+        self.sum.ndcg += h.ndcg;
+        self.sum.turn_recall_compact += h.turn_recall_compact;
+        self.sum.turn_recall_full += h.turn_recall_full;
+        self.sum.tokens_compact += h.tokens_compact;
+        self.sum.tokens_full += h.tokens_full;
+    }
+
+    fn report(&self) -> HarderReport {
+        let n = self.n.max(1) as f64;
+        let mean = |x: f64| x / n;
+        // Evidence found per 1k tokens shown: a ratio of the means, so a few
+        // tiny answers can't dominate it.
+        let per_1k = |recall: f64, tokens: f64| {
+            if tokens > 0.0 {
+                recall / tokens * 1000.0
+            } else {
+                0.0
+            }
+        };
+        HarderReport {
+            recall_all: mean(self.sum.recall_all),
+            ndcg_at_10: mean(self.sum.ndcg),
+            turn_recall_compact: mean(self.sum.turn_recall_compact),
+            turn_recall_full: mean(self.sum.turn_recall_full),
+            tokens_compact: mean(self.sum.tokens_compact),
+            tokens_full: mean(self.sum.tokens_full),
+            evidence_per_1k_tokens_compact: per_1k(
+                self.sum.turn_recall_compact,
+                self.sum.tokens_compact,
+            ),
+            evidence_per_1k_tokens_full: per_1k(self.sum.turn_recall_full, self.sum.tokens_full),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct HarderReport {
+    recall_all: f64,
+    ndcg_at_10: f64,
+    turn_recall_compact: f64,
+    turn_recall_full: f64,
+    tokens_compact: f64,
+    tokens_full: f64,
+    evidence_per_1k_tokens_compact: f64,
+    evidence_per_1k_tokens_full: f64,
 }
 
 #[derive(Debug, Serialize)]
@@ -275,6 +360,7 @@ struct QuestionResult {
     category: String,
     recall: f64,
     precision: f64,
+    harder: Harder,
     miss: Option<MissReport>,
 }
 
@@ -372,6 +458,8 @@ fn main() {
 
     // Aggregate.
     let mut category_stats: HashMap<String, CategoryStats> = HashMap::new();
+    let mut category_harder: HashMap<String, HarderSums> = HashMap::new();
+    let mut overall_harder = HarderSums::default();
     let mut total_recall = 0.0f64;
     let mut total_precision = 0.0f64;
     let mut total_hits = 0usize;
@@ -381,8 +469,14 @@ fn main() {
             category,
             recall,
             precision,
+            harder,
             miss,
         } = result;
+        overall_harder.add(harder);
+        category_harder
+            .entry(category.clone())
+            .or_default()
+            .add(harder);
         let hit = recall > 0.0;
         total_recall += recall;
         total_precision += precision;
@@ -416,16 +510,22 @@ fn main() {
             hit_rate: total_hits as f64 / total as f64,
             avg_recall: total_recall / total as f64,
             avg_precision: total_precision / total as f64,
+            harder: overall_harder.report(),
         },
         by_category: category_stats
             .into_iter()
             .map(|(cat, stats)| {
+                let harder = category_harder
+                    .get(&cat)
+                    .map(HarderSums::report)
+                    .unwrap_or_else(|| HarderSums::default().report());
                 (cat, CategoryReport {
                     total: stats.total,
                     hits: stats.hits,
                     hit_rate: stats.hits as f64 / stats.total as f64,
                     avg_recall: stats.recall_sum / stats.total as f64,
                     avg_precision: stats.precision_sum / stats.total as f64,
+                    harder,
                 })
             })
             .collect(),
@@ -472,12 +572,14 @@ fn evaluate_question(q: &Question, args: &Args, embedder: &Arc<Embedder>, model:
     let mut record_to_session: HashMap<axil_core::RecordId, String> = HashMap::new();
     let mut items: Vec<(Value, chrono::DateTime<chrono::Utc>)> = Vec::new();
     let mut session_ids: Vec<String> = Vec::new();
+    let mut session_texts: Vec<String> = Vec::new();
     let now = chrono::Utc::now();
 
     for (si, session) in q.haystack_sessions.iter().enumerate() {
         let session_id = format!("session_{}", si);
         let date = q.haystack_dates.get(si).map(|s| s.as_str()).unwrap_or("");
         let text = session_text(session);
+        session_texts.push(text.clone());
         let summary_end = text.floor_char_boundary(text.len().min(500));
         let data = json!({
             "session_id": session_id,
@@ -602,7 +704,12 @@ fn evaluate_question(q: &Question, args: &Args, embedder: &Arc<Embedder>, model:
         (t_query - t_fts).as_secs_f64(),
         t_query.as_secs_f64());
 
-    let retrieved_sessions = collapse_to_sessions(retrieved_hits, &record_to_session, args.top_k);
+    let ranked = collapse_to_sessions(
+        retrieved_hits,
+        &record_to_session,
+        args.top_k.max(NDCG_DEPTH),
+    );
+    let retrieved_sessions: Vec<String> = ranked.iter().take(args.top_k).cloned().collect();
 
     // The answer_session_ids in LongMemEval use a different naming scheme.
     // We need to check if any retrieved session contains answer content.
@@ -620,12 +727,21 @@ fn evaluate_question(q: &Question, args: &Args, embedder: &Arc<Embedder>, model:
         .map(|i| format!("session_{}", i))
         .collect();
 
+    let harder = harder_metrics(
+        q,
+        &session_texts,
+        &ranked,
+        &retrieved_sessions,
+        &answer_session_tags,
+    );
+
     // Compute recall and precision
     if answer_session_tags.is_empty() {
         return QuestionResult {
             category: q.question_type.clone(),
             recall: 1.0,
             precision: 0.0,
+            harder,
             miss: None,
         };
     }
@@ -665,7 +781,94 @@ fn evaluate_question(q: &Question, args: &Args, embedder: &Arc<Embedder>, model:
         category: q.question_type.clone(),
         recall,
         precision,
+        harder,
         miss,
+    }
+}
+
+/// The measures session hit/recall can't see. Questions with no answer
+/// session (abstention) count as fully found, like `recall` does.
+fn harder_metrics(
+    q: &Question,
+    session_texts: &[String],
+    ranked: &[String],
+    top_k: &[String],
+    answers: &[String],
+) -> Harder {
+    let index = |tag: &str| {
+        tag.strip_prefix("session_")
+            .and_then(|i| i.parse::<usize>().ok())
+    };
+    let shown = |text: &str| -> String {
+        let end = text.floor_char_boundary(text.len().min(COMPACT_SUMMARY_CHARS));
+        text[..end].to_string()
+    };
+    let tokens = |f: &dyn Fn(&str) -> String| -> f64 {
+        top_k
+            .iter()
+            .filter_map(|t| index(t).and_then(|i| session_texts.get(i)))
+            .map(|text| f(text).len() as f64 / 4.0)
+            .sum()
+    };
+    let tokens_compact = tokens(&|t: &str| shown(t));
+    let tokens_full = tokens(&|t: &str| t.to_string());
+
+    if answers.is_empty() {
+        return Harder {
+            recall_all: 1.0,
+            ndcg: 1.0,
+            turn_recall_compact: 1.0,
+            turn_recall_full: 1.0,
+            tokens_compact,
+            tokens_full,
+        };
+    }
+
+    let found = answers.iter().filter(|a| top_k.contains(a)).count();
+    let dcg: f64 = ranked
+        .iter()
+        .take(NDCG_DEPTH)
+        .enumerate()
+        .filter(|(_, tag)| answers.contains(tag))
+        .map(|(rank, _)| 1.0 / (rank as f64 + 2.0).log2())
+        .sum();
+    let ideal: f64 = (0..answers.len().min(NDCG_DEPTH))
+        .map(|rank| 1.0 / (rank as f64 + 2.0).log2())
+        .sum();
+
+    // Answer turns, and whether each is inside what the agent reads.
+    let mut evidence = 0usize;
+    let (mut in_compact, mut in_full) = (0usize, 0usize);
+    for (si, session) in q.haystack_sessions.iter().enumerate() {
+        let tag = format!("session_{si}");
+        let retrieved = top_k.contains(&tag);
+        for turn in session.iter().filter(|t| t.has_answer) {
+            evidence += 1;
+            if !retrieved {
+                continue;
+            }
+            in_full += 1;
+            let line = format!("{}: {}", turn.role, turn.content);
+            if shown(&session_texts[si]).contains(&line) {
+                in_compact += 1;
+            }
+        }
+    }
+    let share = |n: usize| {
+        if evidence == 0 {
+            1.0
+        } else {
+            n as f64 / evidence as f64
+        }
+    };
+
+    Harder {
+        recall_all: if found == answers.len() { 1.0 } else { 0.0 },
+        ndcg: if ideal > 0.0 { dcg / ideal } else { 0.0 },
+        turn_recall_compact: share(in_compact),
+        turn_recall_full: share(in_full),
+        tokens_compact,
+        tokens_full,
     }
 }
 
@@ -674,6 +877,7 @@ fn question_failure(q: &Question, retrieved_sessions: Vec<String>, answer_sessio
         category: q.question_type.clone(),
         recall: 0.0,
         precision: 0.0,
+        harder: Harder::default(),
         miss: Some(MissReport {
             question_id: q.question_id.clone(),
             question_type: q.question_type.clone(),

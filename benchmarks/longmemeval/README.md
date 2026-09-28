@@ -40,7 +40,16 @@ scripts/longmemeval-gate.sh --strategy recall-qtc --questions 30
 scripts/longmemeval-gate.sh --rerank --questions 30
 ```
 
-`--variant s` is the default; `m` and `oracle` are also supported.
+`--variant s` is the default; `m` and `oracle` are also supported. The `m`
+split (about 480 sessions per question, 2.6 GB) is the retrieval setting the
+paper used; a question takes roughly ten times as long as on `s`. The gate
+skips loudly when the requested split's file is missing.
+
+Each configuration (split, strategy, top-k, question count, rerank) has its own
+baseline: `baseline.jsonl` for the default 500-question `recall-qtc` run, and
+`baselines/<variant>-<strategy>-k<top_k>-n<questions>.json` for the rest. A
+comparison against a baseline recorded under another configuration fails
+instead of passing on a meaningless delta.
 
 The gate exit codes:
 
@@ -68,7 +77,9 @@ Output is a single JSON `BenchmarkReport` on stdout (progress on stderr):
   "rerank": "off",
   "top_k": 5,
   "total_questions": 20,
-  "overall": { "hit_rate": 0.90, "avg_recall": 0.88, "avg_precision": 0.176 },
+  "overall": { "hit_rate": 0.90, "avg_recall": 0.88, "avg_precision": 0.176,
+               "recall_all": 0.90, "ndcg_at_10": 0.86, "turn_recall_compact": 0.0,
+               "turn_recall_full": 0.90, "tokens_compact": 250, "tokens_full": 15515, … },
   "by_category": { "single-session-user": { ... } },
   "misses": [ ... ]
 }
@@ -102,3 +113,25 @@ that touch `crates/axil-{core,vector,fts,graph,indexer,memory}`. The gate
 isn't present — useful for forks that don't want to pay the dataset download.
 The reference workflow caches both the dataset and the bench's `target/` to
 keep wall time tractable.
+
+## Beyond session hit rate
+
+Session hit rate on `s` is close to saturated, so it can't show most changes.
+Every report also carries:
+
+| Metric | Meaning |
+|---|---|
+| `recall_all` | Share of questions with *every* answer session in the top-k |
+| `ndcg_at_10` | Ranking quality over the top 10 sessions (binary relevance) |
+| `turn_recall_compact` | Share of answer turns the agent would actually read in the CLI's default compact output (the first 200 characters of each hit) |
+| `turn_recall_full` | The same, reading each hit's full text |
+| `tokens_compact`, `tokens_full` | Tokens (bytes / 4) of the top-k hits in each form |
+| `evidence_per_1k_tokens_*` | Answer turns found per 1,000 tokens shown |
+
+`ndcg_at_10` is gated with `avg_recall`; the rest is printed. The gap between
+`turn_recall_compact` and `turn_recall_full` is the cost of showing a hit's
+opening lines instead of the part that matched: on the first 20 `s` questions
+(`recall-qtc`, top-5) the right session was found for 90% of them, yet the
+compact output contained the answer turn for none, while the full text cost
+about 15,500 tokens per question.
+

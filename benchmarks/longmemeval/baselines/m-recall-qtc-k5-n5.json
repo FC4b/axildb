@@ -1,0 +1,39 @@
+{
+  "benchmark": "LongMemEval",
+  "variant": "m",
+  "strategy": "recall-qtc",
+  "rerank": "off",
+  "top_k": 5,
+  "total_questions": 5,
+  "overall": {
+    "hit_rate": 1.0,
+    "avg_recall": 1.0,
+    "avg_precision": 0.2,
+    "recall_all": 1.0,
+    "ndcg_at_10": 0.9261859507142916,
+    "turn_recall_compact": 0.0,
+    "turn_recall_full": 1.0,
+    "tokens_compact": 250.0,
+    "tokens_full": 13170.15,
+    "evidence_per_1k_tokens_compact": 0.0,
+    "evidence_per_1k_tokens_full": 0.07592927946910248
+  },
+  "by_category": {
+    "single-session-assistant": {
+      "total": 5,
+      "hits": 5,
+      "hit_rate": 1.0,
+      "avg_recall": 1.0,
+      "avg_precision": 0.2,
+      "recall_all": 1.0,
+      "ndcg_at_10": 0.9261859507142916,
+      "turn_recall_compact": 0.0,
+      "turn_recall_full": 1.0,
+      "tokens_compact": 250.0,
+      "tokens_full": 13170.15,
+      "evidence_per_1k_tokens_compact": 0.0,
+      "evidence_per_1k_tokens_full": 0.07592927946910248
+    }
+  },
+  "misses": []
+}

@@ -1774,7 +1774,7 @@ impl HookCtx {
             // A commit message IS a decision/summary the agent already wrote —
             // capture it as narrative so the Stop guard doesn't demand a
             // re-statement of what's in the commit.
-            if cmd.contains("git commit") {
+            if runs_git_commit(cmd) {
                 self.capture_git_commit();
             }
         }
@@ -1848,6 +1848,11 @@ impl HookCtx {
         ) else {
             return;
         };
+        // Once per commit: a failed or no-op commit leaves HEAD where it
+        // was, and storing it again only adds duplicate recall hits.
+        if !self.claim(&format!("commit-{sha}")) {
+            return;
+        }
         let body = run_capture(
             Command::new("git")
                 .arg("-C")
@@ -2844,6 +2849,31 @@ fn axil_subcommands(cmd: &str) -> Vec<String> {
     found
 }
 
+/// True when the command line itself runs `git commit` (as a command, not
+/// text inside a heredoc, an echo or a commit message).
+fn runs_git_commit(cmd: &str) -> bool {
+    primary_commands(&strip_heredoc_bodies(cmd))
+        .iter()
+        .any(|words| {
+            let words = skip_wrappers(words);
+            let mut rest = words.iter().map(String::as_str);
+            if rest.next() != Some("git") {
+                return false;
+            }
+            // Skip git's own options: `git -C dir commit`, `git -c k=v commit`.
+            while let Some(word) = rest.next() {
+                match word {
+                    "-C" | "-c" => {
+                        rest.next();
+                    }
+                    w if w.starts_with('-') => {}
+                    w => return w == "commit",
+                }
+            }
+            false
+        })
+}
+
 /// Manifests and lockfiles `axil deps` reads, across its five ecosystems.
 fn is_dependency_manifest(path: &str) -> bool {
     const NAMES: &[&str] = &[
@@ -3103,6 +3133,17 @@ mod tests {
             detect_repo_search("find . -name '*.rs'"),
             (true, String::new())
         );
+    }
+
+    #[test]
+    fn git_commit_is_detected_only_as_a_command() {
+        assert!(runs_git_commit("git commit -m 'fix'"));
+        assert!(runs_git_commit("git add a && git commit -q -F -"));
+        assert!(runs_git_commit("git -C repo commit --amend --no-edit"));
+        assert!(!runs_git_commit("git log --oneline -3"));
+        assert!(!runs_git_commit(r#"echo "run git commit next""#));
+        assert!(!runs_git_commit("cat <<'EOF'\ngit commit -m x\nEOF"));
+        assert!(!runs_git_commit("grep -n 'git commit' notes.md"));
     }
 
     #[test]

@@ -1,0 +1,57 @@
+{"id": "q01", "kind": "decision", "question": "Why is the published crate named axildb when the binary is called axil?", "expect": [["01KVPHW2R51RVD88J7MWTATQBX"]]}
+{"id": "q02", "kind": "decision", "question": "Which platforms do release archives ship for, and what happened to the Intel Mac build?", "expect": [["01M3B6793N5H238HJ2QG1FB33G"]]}
+{"id": "q03", "kind": "decision", "question": "How do we make local builds link onnxruntime statically like the release binaries?", "expect": [["01M3B8VMTW0QMJFMAF3EZ972VD"], ["01M3B7Q5F9FWKEGVDW48R1SFJX"]]}
+{"id": "q04", "kind": "decision", "question": "Should the engine lifecycle hooks be made generic in a single loop?", "expect": [["01KVJGM9ARSSFQ95Z470Z9WZ0P"], ["01KVHY066PDM576QVFMWWBDE7Q"]]}
+{"id": "q05", "kind": "decision", "question": "What is Axil's strategic moat against other agent memory products?", "expect": [["01KVFYCKRDBKS0GZV7PMR1MAVH"]]}
+{"id": "q06", "kind": "decision", "question": "Is WASM plugin support in scope for the 1.0 release?", "expect": [["01KVEWEA7TZWNQ7G96N9ZYGJN4"]]}
+{"id": "q07", "kind": "decision", "question": "How are compiled WASM plugin modules cached between runs?", "expect": [["01KVGFQXRY68E4JMN0V4QQC8X9"]]}
+{"id": "q08", "kind": "decision", "question": "How does the host check that a guest plugin speaks a compatible ABI version?", "expect": [["01KVGG4GAKN3TEVM7GVD3X1DBG"]]}
+{"id": "q09", "kind": "decision", "question": "What stops a WASM plugin call that loops forever?", "expect": [["01KVGGTVXY9CJNSEP3K71E5RVH"]]}
+{"id": "q10", "kind": "decision", "question": "What security problems did the code review of the WASM plugin work find?", "expect": [["01KVJQRTRRRH022NNG0H9MYYBA"]]}
+{"id": "q11", "kind": "decision", "question": "What is the README tagline now, and what did it replace?", "expect": [["01KVNE58PMAR5JEDTGZJVDN1GD"]]}
+{"id": "q12", "kind": "decision", "question": "After comparing with CodeGraph, did we decide to build a code explore tool?", "expect": [["01KVQ44B0ED068WK7KW8HZQSA3"], ["01KVQ3DSS82AC1KP7FANBBA93V"]]}
+{"id": "q13", "kind": "error", "question": "Which README benchmark claims had no committed source behind them, and how was that fixed?", "expect": [["01KVPVJT9AVSETPPHMP0NP78A5"], ["01KVSP6RBV2C6VK2W4VGHDAVME"]]}
+{"id": "q14", "kind": "context", "question": "How does Axil estimate token counts?", "expect": [["01KVVRDSJTM43QD21ZJTAF8TVT", "01KVVRDWW9ZM28RB1H7F5HCWTX"]]}
+{"id": "q15", "kind": "decision", "question": "How does recall treat queries that look like code identifiers?", "expect": [["01KVVTDZKJFXK184EWGVV4GNM1"]]}
+{"id": "q16", "kind": "decision", "question": "What does the zlib completeness check do in recall?", "expect": [["01KVVSB9GF34SKZRYM5BYSX0SJ"]]}
+{"id": "q17", "kind": "decision", "question": "Should memories be categorized by topic or by what they are for?", "expect": [["01KVZY31P38Y4DC6A1TRC0W52V", "01KVZX8SPP2D7R20FZY4J6G41E"]]}
+{"id": "q18", "kind": "decision", "question": "Which code path decides whether a new fact supersedes an older one?", "expect": [["01M38SP95XCEA41AB5SREHA4KW"]]}
+{"id": "q19", "kind": "decision", "question": "When does the vector engine build its HNSW graph?", "expect": [["01M38SPB1XH0PWQAMGH3QRRXHC"]]}
+{"id": "q20", "kind": "decision", "question": "Are AGG and GROUP reserved words in AxilQL?", "expect": [["01M38SPC4856AH4MS1TZJ1M9CT"]]}
+{"id": "q21", "kind": "decision", "question": "Where do axil.toml settings such as the slow query threshold get applied?", "expect": [["01M38SPD5QT12M2VG8E4TVNH0N"]]}
+{"id": "q22", "kind": "decision", "question": "Do MCP tool calls run concurrently or one at a time?", "expect": [["01M38SPE8H9HS5DQ917YZ0ZTBZ"]]}
+{"id": "q23", "kind": "decision", "question": "Can a small model tell reliably when a new memory replaces an old one?", "expect": [["01M3GREV479NWC07ZARFTT808N", "01M3GEF99JTN1QX9RGFQ6HZEF0"]]}
+{"id": "q24", "kind": "decision", "question": "Should Axil ship a Jev-style typed decision model?", "expect": [["01M3GVZFWTQ6QRYN8K5K0X930N"]]}
+{"id": "q25", "kind": "decision", "question": "How does marking an error as fixed work?", "expect": [["01M3H06ER149ARV9KGJSQTME7W"]]}
+{"id": "q26", "kind": "decision", "question": "What happens now when the vector store file was not closed cleanly?", "expect": [["01M3HND11YA0FE9GDW2728NJX0"]]}
+{"id": "q27", "kind": "error", "question": "Why did the hook's session counters keep resetting every turn?", "expect": [["01M3HXZJ0FFQZ5Y1P3PP23MH53"], ["01M3HWH1K3J7Q1R6JDXE9Z2QJ9"]]}
+{"id": "q28", "kind": "rule", "question": "How should finished Phase 28 feature branches be merged?", "expect": [["01M3H4BJHZKYQY2EG1SPVDKK29"]]}
+{"id": "q29", "kind": "rule", "question": "What should I do before grepping the repository for context?", "expect": [["01KVCKTBXGQQVK8D1GQWJG0MHJ"]]}
+{"id": "q30", "kind": "decision", "question": "Is there any reusable code in laya-ultrafast?", "expect": [["01M3FDQBSEN3Z2Z5GKK62YC7RJ"]]}
+{"id": "q31", "kind": "decision", "question": "Which Atlas sync crates live in the public repository?", "expect": [["01KWRGZXZHR7FDSY9YFA28STRZ"]]}
+{"id": "q32", "kind": "context", "question": "Why was the first crates.io publish only partial?", "expect": [["01KVPPDB5V9V2SVCT5JK3KEQ61"]]}
+{"id": "q33", "kind": "decision", "question": "Where are the versions of internal crate dependencies declared?", "expect": [["01KVTQ6D1NGR3HN7Y4XYKWF6PC"]]}
+{"id": "q34", "kind": "error", "question": "Why did the CLI fail to compile with only the wasm-host feature?", "expect": [["01KVND9BJ7RW6686H55R5K8GPY"]]}
+{"id": "q35", "kind": "error", "question": "What was wrong with the README install command for a custom feature set?", "expect": [["01KVNF4Y1CZBSZSAPYC1KF6FQ8"]]}
+{"id": "q36", "kind": "error", "question": "Why did the code graph hint misfire on repos without a SCIP index?", "expect": [["01KVQWC5NKF9DK98HN830E1EM8"]]}
+{"id": "q37", "kind": "error", "question": "Why does pipeline_overhead_under_5ms fail only in a full workspace test run?", "expect": [["01KVQXHS91SDGNB8KQMP8AK49P"]]}
+{"id": "q38", "kind": "error", "question": "Why didn't release-plz publish the backlog features, and how did 1.2.0 get out?", "expect": [["01KVW95YRY2V61NTBXA0XT8M93"], ["01KVYKJPS1JBKC5DVZVEJWJR8J"]]}
+{"id": "q39", "kind": "error", "question": "Is the six-variant MemoryType enum in the brain module dead code?", "expect": [["01KVZY3154YQ7VTDZNYTTSQGC6"]]}
+{"id": "q40", "kind": "error", "question": "Are the benchmark harnesses tracked in git?", "expect": [["01KW2GN0FDQCG1JGGKZQ2K01HP"], ["01KW2J0BGP7NFGA1GMX33D8AE5"]]}
+{"id": "q41", "kind": "error", "question": "Why did the sqlite-compare benchmark stop building?", "expect": [["01KW2J0C12GPDYBWANTQ6Z19NF"]]}
+{"id": "q42", "kind": "error", "question": "Why did the code review look at hundreds of commits instead of the PR diff?", "expect": [["01M3788RY7GJC2FRTG1881VQ8S"]]}
+{"id": "q43", "kind": "error", "question": "Why did the one-line installer return 404, and was it fixed?", "expect": [["01M38HTJTNXAGF5TCA8QDHHY69"], ["01M3B67ANFQEED5K8AW65KN8XT"]]}
+{"id": "q44", "kind": "error", "question": "Why did git apply fail on a diff we had saved to a file?", "expect": [["01M38P8F71FF4XP483BVJXJEZY"]]}
+{"id": "q45", "kind": "error", "question": "What made the ql_parse fuzz target panic?", "expect": [["01M3AXYZH13FXTSRR7W573BGJT"], ["01M3AXY8M0ZQ8JBGE10XEDH4CC"]]}
+{"id": "q46", "kind": "error", "question": "Why did publishing 2.3.0 fail with a 403, and how was it resolved?", "expect": [["01M3AXZ0N2TE6T94Q2KCXYHXMD"], ["01M3B33DS23ZKFY9HHKDB8BSYS"]]}
+{"id": "q47", "kind": "error", "question": "Why was recall keyword-only for three months on this repo?", "expect": [["01M3FCG2Z0GVK1C1ZVCCGMS3Q7", "01M3GDCMVB43DNS9SQHNMTAZWX", "01M3HXZJ0FFQZ5Y1P3PP23MH53"]]}
+{"id": "q48", "kind": "error", "question": "Why are there no superseded records in the memory database?", "expect": [["01M3GEF5V7JH4Z9RESFVPJM7KZ"]]}
+{"id": "q49", "kind": "error", "question": "What goes wrong when running rustfmt in this repo?", "expect": [["01M3H12J9KBRPD25QVKMNR70P0", "01M3JQHGXHZJRPF0E4FHQ4KX8N"]]}
+{"id": "q50", "kind": "error", "question": "Why do the MCP server integration tests fail with unknown command mcp?", "expect": [["01M3H12K7H00815M00QX9D6W7Q"]]}
+{"id": "q51", "kind": "context", "question": "How do we run several coding agents in parallel on this repo?", "expect": [["01M38SPFETKZNJXCFN0WKXRKKJ"]]}
+{"id": "q52", "kind": "context", "question": "Why are decisions and errors invisible to axil-memory's remember search?", "expect": [["01KVZX11BADN2AT9Y0DQ8MWZD0"]]}
+{"id": "q53", "kind": "context", "question": "When was the first fully automatic release?", "expect": [["01M3B6ZJQGNX39KQDC1E3BWDRX"]]}
+{"id": "q54", "kind": "commit", "question": "Which commit added the command that closes recorded errors?", "expect": [["01M3H13AWH8ZK97ZVYNB2B9YEB"]]}
+{"id": "q55", "kind": "commit", "question": "What changed to keep HNSW recall@10 steady as the store grows?", "expect": [["01KWRG3QKP39XM9Q5HJ4800HBP"]]}
+{"id": "q56", "kind": "commit", "question": "How do release archives get built after release-plz publishes?", "expect": [["01M38K9C72R61SKMRFK88K1E8P", "01M38KG5940FY5DT9JC8CT3HDN", "01M3B67ANFQEED5K8AW65KN8XT"]]}
+{"id": "q57", "kind": "commit", "question": "What happens now when axil.toml is malformed?", "expect": [["01M38RXNEDPF5HHKFP7B5EDS88", "01M38SPD5QT12M2VG8E4TVNH0N"]]}

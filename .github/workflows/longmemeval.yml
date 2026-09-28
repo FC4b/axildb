@@ -50,7 +50,7 @@ env:
 
 jobs:
   longmemeval-gate:
-    name: ${{ github.event_name == 'pull_request' && 'longmemeval liveness smoke (PR — not a quality gate)' || 'longmemeval recall-quality gate (nightly/manual)' }}
+    name: ${{ github.event_name == 'pull_request' && 'longmemeval smoke (PR, 20 questions)' || 'longmemeval recall-quality gate (nightly/manual)' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -116,13 +116,12 @@ jobs:
       # The gate self-skips (exit 0) when the dataset is absent, so this step is
       # safe to run unconditionally.
       #
-      # PR runs are a fast liveness smoke: 20 questions over the `recall`
-      # strategy with a slack tolerance — the committed baseline is the
-      # recall-qtc 500-question run, so a strict 2% compare of a 20-q recall
-      # smoke against it would false-alarm on the N/strategy mismatch. The slack
-      # tolerance still trips a *collapse* (recall path broken / returning ~0) or
-      # a harness crash (exit 1), which is the per-PR signal we want. The strict
-      # apples-to-apples 2% gate against the baseline is the nightly full run.
+      # PR runs are a fast smoke: 20 questions over the `recall` strategy,
+      # compared with the baseline recorded for exactly that configuration
+      # (benchmarks/longmemeval/baselines/s-recall-k5-n20.json). 10% tolerance:
+      # with 20 questions one question is 5%, and embedding numerics can reorder
+      # near-ties across CPUs. The strict 2% gate on the 500-question
+      # `recall-qtc` baseline is the nightly full run.
       #
       # Nightly / manual runs use the gate defaults (recall-qtc, 500 questions,
       # 2% tolerance) — the exact strategy and N the baseline was recorded at.
@@ -131,10 +130,8 @@ jobs:
         run: |
           set -euo pipefail
           if [ "${{ github.event_name }}" = "pull_request" ]; then
-            echo "[ci] PR liveness smoke: recall strategy, 20 questions, slack tolerance"
-            echo "[ci] NOT a quality gate — the 500q recall-qtc baseline is a strategy/N mismatch, so this only trips on collapse (recall path broken / ~0) or a harness crash."
-            echo "[ci] Honest upgrade path (follow-up, not this branch): commit a fixed-subset (20q, recall strategy) baseline so PR runs get an apples-to-apples compare."
-            scripts/longmemeval-gate.sh --questions 20 --strategy recall --tolerance 0.5
+            echo "[ci] PR smoke: recall strategy, 20 questions, vs the baseline recorded for that config"
+            scripts/longmemeval-gate.sh --questions 20 --strategy recall --tolerance 0.1
           else
             echo "[ci] full gate: default strategy (recall-qtc) at 500 questions vs baseline"
             scripts/longmemeval-gate.sh

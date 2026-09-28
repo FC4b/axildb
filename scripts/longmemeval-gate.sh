@@ -4,8 +4,10 @@
 #
 # Runs the LongMemEval recall harness on the `s` split (small,
 # single-session-user questions) and fails on >2% relative regression
-# in overall avg_recall vs the baseline checked in at
-# benchmarks/longmemeval/baseline.jsonl.
+# in overall avg_recall or ndcg_at_10 vs the baseline recorded for the same
+# configuration (benchmarks/longmemeval/baseline.jsonl for the default
+# 500-question recall-qtc run, benchmarks/longmemeval/baselines/<config>.json
+# for the rest).
 #
 # The bench binary writes a JSON BenchmarkReport to stdout — this script
 # captures it, optionally promotes it to the baseline (--save), and
@@ -17,13 +19,14 @@
 #   scripts/longmemeval-gate.sh --save                # overwrite baseline
 #   scripts/longmemeval-gate.sh --rerank              # measure reranker delta (needs --features rerank)
 #   scripts/longmemeval-gate.sh --questions 20        # smoke-test mode
-#   scripts/longmemeval-gate.sh --strategy recall     # default: vector
+#   scripts/longmemeval-gate.sh --strategy recall     # default: recall-qtc
 #   scripts/longmemeval-gate.sh --tolerance 0.05      # relax to 5%
 #
 # Exit codes:
 #   0  pass (within tolerance, or skipped because dataset is missing)
 #   1  usage / setup error (e.g. bench binary failed)
-#   2  no baseline on disk and --save was not passed
+#   2  no baseline for this configuration (re-run with --save), or the
+#      baseline was recorded under a different configuration
 #   3  regression beyond tolerance
 #
 set -euo pipefail
@@ -67,15 +70,33 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-DATASET_S="${HARNESS}/data/longmemeval_${VARIANT}_cleaned.json"
-DATASET_ORACLE="${HARNESS}/data/longmemeval_oracle.json"
-if [[ ! -f "${DATASET_S}" && ! -f "${DATASET_ORACLE}" ]]; then
+# The requested split's own file: an `m` run must not proceed because the `s`
+# or oracle file happens to be present.
+if [[ "${VARIANT}" == "oracle" ]]; then
+  DATASET="${HARNESS}/data/longmemeval_oracle.json"
+else
+  DATASET="${HARNESS}/data/longmemeval_${VARIANT}_cleaned.json"
+fi
+if [[ ! -f "${DATASET}" ]]; then
   # Degrade honestly: a skip is non-fatal, but it must be loud so a green run is
   # never mistaken for a verified one ("green can mean never ran").
-  msg="longmemeval-gate SKIPPED — dataset missing at ${DATASET_S} (see ${HARNESS}/README.md). This gate did NOT run; recall was NOT verified by it."
+  msg="longmemeval-gate SKIPPED — ${VARIANT} dataset missing at ${DATASET} (see ${HARNESS}/README.md). This gate did NOT run; recall was NOT verified by it."
   echo "⚠️  ${msg}" >&2
   [[ -n "${CI:-}" ]] && echo "::warning title=longmemeval-gate skipped::${msg}"
   exit 0
+fi
+
+# One baseline per configuration: a 20-question `recall` smoke compared with
+# the 500-question `recall-qtc` run measures the config change, not the code.
+# That run keeps its original path, which the docs cite.
+N_LABEL="${QUESTIONS}"
+[[ "${QUESTIONS}" == "0" ]] && N_LABEL="all"
+CONFIG="${VARIANT}-${STRATEGY}-k${TOP_K}-n${N_LABEL}"
+[[ "${RERANK}" != "off" ]] && CONFIG="${CONFIG}-rerank-${RERANK}"
+if [[ "${CONFIG}" == "s-recall-qtc-k5-n500" ]]; then
+  BASELINE="${HARNESS}/baseline.jsonl"
+else
+  BASELINE="${HARNESS}/baselines/${CONFIG}.json"
 fi
 
 CANDIDATE="${CANDIDATE_DIR}/candidate.json"
@@ -102,12 +123,13 @@ cargo "${CARGO_ARGS[@]}" > "${CANDIDATE}"
 
 if [[ "${SAVE}" -eq 1 ]]; then
   echo "[gate] saving new baseline → ${BASELINE}"
+  mkdir -p "$(dirname "${BASELINE}")"
   cp "${CANDIDATE}" "${BASELINE}"
   exit 0
 fi
 
 if [[ ! -f "${BASELINE}" ]]; then
-  echo "[gate] no baseline at ${BASELINE} — re-run with --save to seed one"
+  echo "[gate] no baseline for config ${CONFIG} at ${BASELINE} — re-run with --save to seed one"
   exit 2
 fi
 
@@ -123,26 +145,42 @@ def load(path):
 base = load(base_path)
 cand = load(cand_path)
 
-def get(report, key):
-    return float(report["overall"][key])
+# A baseline recorded under another configuration can't judge this run.
+config_keys = ("variant", "strategy", "rerank", "top_k", "total_questions")
+mismatch = [k for k in config_keys if base.get(k) != cand.get(k)]
+if mismatch:
+    for k in mismatch:
+        print(f"[gate] config mismatch: {k} baseline={base.get(k)!r} candidate={cand.get(k)!r}", file=sys.stderr)
+    print("[gate] FAIL: the baseline was recorded under a different configuration", file=sys.stderr)
+    sys.exit(2)
 
-metrics = ("avg_recall", "hit_rate", "avg_precision")
+# Gated: session recall, and NDCG@10 (ranking quality) once the baseline
+# has it. The rest is printed so a change's effect is visible.
+gated = ("avg_recall", "ndcg_at_10")
+metrics = (
+    "avg_recall", "ndcg_at_10", "hit_rate", "avg_precision", "recall_all",
+    "turn_recall_compact", "turn_recall_full", "tokens_compact", "tokens_full",
+)
 ok = True
-print(f"[gate] {'metric':<14} {'baseline':>10} {'candidate':>10} {'delta':>10}")
+print(f"[gate] {'metric':<20} {'baseline':>10} {'candidate':>10} {'delta':>10}")
 for m in metrics:
-    b = get(base, m)
-    c = get(cand, m)
+    b = base["overall"].get(m)
+    c = cand["overall"].get(m)
+    if b is None or c is None:
+        shown = "n/a" if b is None else f"{float(b):.4f}"
+        print(f"[gate] {m:<20} {shown:>10} {'' if c is None else f'{float(c):.4f}':>10}  (not in both reports)")
+        continue
+    b, c = float(b), float(c)
     delta = c - b
     rel = (delta / b) if b > 0 else 0.0
     flag = ""
-    # Only avg_recall is the gated metric — others are informational.
-    if m == "avg_recall" and rel < -tolerance:
+    if m in gated and rel < -tolerance:
         flag = f"  REGRESSION (rel={rel:+.3%} > -{tolerance:.0%})"
         ok = False
-    print(f"[gate] {m:<14} {b:>10.4f} {c:>10.4f} {delta:>+10.4f}{flag}")
+    print(f"[gate] {m:<20} {b:>10.4f} {c:>10.4f} {delta:>+10.4f}{flag}")
 
 if not ok:
-    print(f"[gate] FAIL: avg_recall regressed beyond {tolerance:.0%} tolerance", file=sys.stderr)
+    print(f"[gate] FAIL: a gated metric regressed beyond {tolerance:.0%} tolerance", file=sys.stderr)
     sys.exit(3)
 print("[gate] PASS")
 PY
