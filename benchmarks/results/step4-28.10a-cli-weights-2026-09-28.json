@@ -1,0 +1,82 @@
+{
+  "item": "28.10a CLI recall weights",
+  "date": "2026-09-28",
+  "configs": {
+    "legacy": "vector=alpha(0.7), recency=0.3, other defaults (sum 1.45)",
+    "A": "legacy divided by its sum (1.0)",
+    "B": "ScoreWeights::with_vector_recency_split(0.7): vector 0.385, recency 0.165, other defaults (sum 1.0)"
+  },
+  "dogfood_same_snapshot": {
+    "legacy": {
+      "hit@1": 0.5263157894736842,
+      "hit@5": 0.7368421052631579,
+      "hit@10": 0.7894736842105263,
+      "mrr@10": 0.6266290726817042,
+      "recall_all@10": 0.7192982456140351,
+      "ndcg@10": 0.6392541912171845,
+      "hook_hit": 0.8070175438596491,
+      "hook_tokens": 279.4342105263158,
+      "hook_hits_per_1k_tokens": 2.888041311547456,
+      "n": 57
+    },
+    "A": {
+      "hit@1": 0.5614035087719298,
+      "hit@5": 0.7017543859649122,
+      "hit@10": 0.7368421052631579,
+      "mrr@10": 0.6280910609857978,
+      "recall_all@10": 0.6842105263157895,
+      "ndcg@10": 0.6296674081230392,
+      "hook_hit": 0.8421052631578947,
+      "hook_tokens": 280.7938596491228,
+      "hook_hits_per_1k_tokens": 2.999015947892098,
+      "n": 57
+    },
+    "B": {
+      "hit@1": 0.6491228070175439,
+      "hit@5": 0.8245614035087719,
+      "hit@10": 0.8421052631578947,
+      "mrr@10": 0.7271929824561404,
+      "recall_all@10": 0.8070175438596491,
+      "ndcg@10": 0.7335475581902294,
+      "hook_hit": 0.8421052631578947,
+      "hook_tokens": 278.890350877193,
+      "hook_hits_per_1k_tokens": 3.0194851148819724,
+      "n": 57
+    }
+  },
+  "dogfood_e2e_qa_hook": {
+    "legacy": {
+      "accuracy": 0.6140350877192983,
+      "context_tokens": 279.4342105263158
+    },
+    "A": {
+      "accuracy": 0.631578947368421,
+      "context_tokens": 280.7938596491228
+    },
+    "B": {
+      "accuracy": 0.7017543859649122,
+      "context_tokens": 278.890350877193
+    }
+  },
+  "longmemeval_s20_recall_qtc": {
+    "legacy": {
+      "avg_recall": 0.9,
+      "recall_all": 0.9,
+      "ndcg_at_10": 0.8565464876785729,
+      "turn_recall_full": 0.9
+    },
+    "A": {
+      "avg_recall": 0.9,
+      "recall_all": 0.9,
+      "ndcg_at_10": 0.8709997289944674,
+      "turn_recall_full": 0.9
+    },
+    "B": {
+      "avg_recall": 0.9,
+      "recall_all": 0.9,
+      "ndcg_at_10": 0.8565464876785729,
+      "turn_recall_full": 0.9
+    }
+  },
+  "needle_gate": "31/31 recall@5 1.000 (B)"
+}

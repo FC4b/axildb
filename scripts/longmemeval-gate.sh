@@ -146,7 +146,7 @@ base = load(base_path)
 cand = load(cand_path)
 
 # A baseline recorded under another configuration can't judge this run.
-config_keys = ("variant", "strategy", "rerank", "top_k", "total_questions")
+config_keys = ("variant", "strategy", "weights", "rerank", "top_k", "total_questions")
 mismatch = [k for k in config_keys if base.get(k) != cand.get(k)]
 if mismatch:
     for k in mismatch:

@@ -1208,7 +1208,9 @@ enum Command {
         /// Only include records before this date (ISO 8601).
         #[arg(long)]
         before: Option<String>,
-        /// Blend factor: alpha * similarity + (1-alpha) * recency. Default 0.7.
+        /// How recall splits its similarity + recency share: alpha to
+        /// similarity, 1-alpha to recency. The other signals (graph, keyword,
+        /// temporal, …) keep their weights, and all weights sum to 1. Default 0.7.
         #[arg(long, default_value = "0.7")]
         alpha: f32,
         /// Exclude results from files that changed since last index.
@@ -9174,11 +9176,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                 Vec::new()
             };
             let cfg = axil_core::RecallConfig {
-                weights: axil_core::ScoreWeights {
-                    vector: alpha,
-                    recency: 1.0 - alpha,
-                    ..Default::default()
-                },
+                weights: axil_core::ScoreWeights::with_vector_recency_split(alpha),
                 scope_filter,
                 min_confidence,
                 min_importance,

@@ -139,6 +139,12 @@ struct Args {
     #[arg(long)]
     dump_context: Option<PathBuf>,
 
+    /// Override recall score weights for the `recall` and `recall-qtc`
+    /// strategies, e.g. `vector=0.7,recency=0.3`; unnamed weights keep their
+    /// defaults. Used to measure the weights the CLI builds.
+    #[arg(long)]
+    weights: Option<String>,
+
     /// Number of graph neighbors to expand per entity.
     #[arg(long, default_value = "3")]
     expand_neighbors: usize,
@@ -241,6 +247,8 @@ struct BenchmarkReport {
     benchmark: String,
     variant: String,
     strategy: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    weights: Option<String>,
     rerank: String,
     top_k: usize,
     total_questions: usize,
@@ -528,6 +536,7 @@ fn main() {
         benchmark: "LongMemEval".to_string(),
         variant: args.variant.clone(),
         strategy: args.strategy.clone(),
+        weights: args.weights.clone(),
         rerank: format!("{:?}", args.rerank).to_lowercase(),
         top_k: args.top_k,
         total_questions: total,
@@ -697,6 +706,7 @@ fn evaluate_question(q: &Question, args: &Args, embedder: &Arc<Embedder>, model:
         }
         "recall" => {
             let mut cfg = axil_core::RecallConfig::default();
+            apply_weights(&mut cfg, args);
             if let Some(now) = parse_question_now(q) {
                 cfg.now = now;
             }
@@ -709,6 +719,7 @@ fn evaluate_question(q: &Question, args: &Args, embedder: &Arc<Embedder>, model:
         }
         "recall-qtc" => {
             let mut cfg = axil_core::RecallConfig::default();
+            apply_weights(&mut cfg, args);
             if let Some(now) = parse_question_now(q) {
                 cfg.now = now;
             }
@@ -829,6 +840,29 @@ fn evaluate_question(q: &Question, args: &Args, embedder: &Arc<Embedder>, model:
         harder,
         miss,
         context,
+    }
+}
+
+/// Apply `--weights name=value,...` on top of the default weights.
+fn apply_weights(cfg: &mut axil_core::RecallConfig, args: &Args) {
+    let Some(spec) = args.weights.as_deref() else {
+        return;
+    };
+    let w = &mut cfg.weights;
+    for pair in spec.split(',').filter(|p| !p.trim().is_empty()) {
+        let (name, value) = pair.split_once('=').expect("--weights takes name=value pairs");
+        let value: f32 = value.trim().parse().expect("--weights value must be a number");
+        let slot = match name.trim() {
+            "vector" => &mut w.vector,
+            "recency" => &mut w.recency,
+            "graph" => &mut w.graph,
+            "keyword" => &mut w.keyword,
+            "feedback" => &mut w.feedback,
+            "temporal" => &mut w.temporal,
+            "preference" => &mut w.preference,
+            other => panic!("unknown weight {other:?}"),
+        };
+        *slot = value;
     }
 }
 

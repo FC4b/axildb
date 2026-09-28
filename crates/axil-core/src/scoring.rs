@@ -75,6 +75,23 @@ impl Default for ScoreWeights {
     }
 }
 
+impl ScoreWeights {
+    /// Defaults with the vector/recency balance set by one `alpha` (the CLI's
+    /// `--alpha`): `alpha` splits the default vector + recency share between
+    /// the two, the other signals keep their default weights, and the weights
+    /// still sum to 1.
+    pub fn with_vector_recency_split(alpha: f32) -> Self {
+        let defaults = Self::default();
+        let share = defaults.vector + defaults.recency;
+        let alpha = alpha.clamp(0.0, 1.0);
+        Self {
+            vector: share * alpha,
+            recency: share * (1.0 - alpha),
+            ..defaults
+        }
+    }
+}
+
 /// Breakdown of individual scoring signals for a single result.
 ///
 /// `#[non_exhaustive]`: construct it with [`ScoreExplanation::new`] rather than a
@@ -481,6 +498,18 @@ mod tests {
             w.vector + w.recency + w.graph + w.keyword + w.feedback + w.temporal + w.preference;
         // rrf defaults to 0 and is excluded from the normalization invariant.
         assert!((sum - 1.0).abs() < 0.001, "weights sum to {sum}");
+    }
+
+    #[test]
+    fn vector_recency_split_keeps_the_sum_at_one() {
+        for alpha in [0.0, 0.3, 0.7, 1.0, 1.5] {
+            let w = ScoreWeights::with_vector_recency_split(alpha);
+            let sum =
+                w.vector + w.recency + w.graph + w.keyword + w.feedback + w.temporal + w.preference;
+            assert!((sum - 1.0).abs() < 0.001, "alpha {alpha}: weights sum to {sum}");
+        }
+        let w = ScoreWeights::with_vector_recency_split(0.7);
+        assert!((w.vector / (w.vector + w.recency) - 0.7).abs() < 0.001);
     }
 
     #[test]
