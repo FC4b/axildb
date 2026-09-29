@@ -1998,7 +1998,8 @@ fn claude_registers_session_end(project_dir: &Path) -> bool {
 /// writer lock before giving a job up.
 const BUSY_WAIT_MAX: Duration = Duration::from_secs(120);
 
-/// A drain lock untouched this long belonged to a drainer that died.
+/// A drain lock written by an older axil (which holds no OS lock) and
+/// untouched this long belonged to a drainer that died.
 const DRAIN_LOCK_STALE_SECS: u64 = 30 * 60;
 
 /// Bound on `drain.log`; past it the log starts over.
@@ -2101,49 +2102,112 @@ pub(crate) fn drain(db: &Path) -> Result<i32> {
     }
 }
 
-/// `hook-queue/drain.lock`, created exclusively and refreshed per job.
-struct DrainLock(PathBuf);
+/// `hook-queue/drain.lock`, held by an OS file lock on the open handle.
+///
+/// The OS drops that lock when the holder exits by any means, SIGKILL
+/// included, so a dead drainer's lock is free at once, and a live one is
+/// never judged stale however long a job runs or the laptop sleeps. The file
+/// itself is still touched per job and removed on drop: an older axil only
+/// checks that the file exists and how old it is, and that keeps it backing
+/// off while this one drains.
+struct DrainLock {
+    path: PathBuf,
+    file: std::fs::File,
+}
+
+/// Content prefix that marks `drain.lock` as written by a drainer that holds
+/// the OS lock. A bare pid means an older axil wrote it.
+const DRAIN_LOCK_TAG: &str = "flock";
 
 impl DrainLock {
     fn acquire(dir: &Path) -> Option<Self> {
         let path = dir.join("drain.lock");
-        for _ in 0..2 {
-            match std::fs::OpenOptions::new()
+        // The holder unlinks the path before its lock goes, so a process that
+        // locked the old inode in that gap finds the path moved on and retries
+        // against the new file.
+        for _ in 0..4 {
+            let file = std::fs::OpenOptions::new()
+                .read(true)
                 .write(true)
-                .create_new(true)
+                .create(true)
+                .truncate(false)
                 .open(&path)
-            {
-                Ok(_) => {
-                    let lock = Self(path);
-                    lock.touch();
-                    return Some(lock);
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                    let stale = std::fs::metadata(&path)
-                        .and_then(|m| m.modified())
-                        .ok()
-                        .and_then(|t| t.elapsed().ok())
-                        .is_some_and(|age| age.as_secs() > DRAIN_LOCK_STALE_SECS);
-                    if !stale {
-                        return None;
-                    }
-                    let _ = std::fs::remove_file(&path);
-                }
-                Err(_) => return None,
+                .ok()?;
+            if file.try_lock().is_err() {
+                return None;
             }
+            if !same_file(&file, &path) {
+                continue;
+            }
+            if legacy_holder_live(&file) {
+                return None;
+            }
+            let lock = Self { path, file };
+            lock.touch();
+            return Some(lock);
         }
         None
     }
 
+    /// Rewrite the tag and pid, which also refreshes the mtime an older axil
+    /// reads as liveness.
     fn touch(&self) {
-        let _ = std::fs::write(&self.0, std::process::id().to_string());
+        use std::io::{Seek as _, Write as _};
+        let mut file = &self.file;
+        let _ = file.set_len(0);
+        let _ = file.seek(std::io::SeekFrom::Start(0));
+        let _ = write!(file, "{DRAIN_LOCK_TAG} {}", std::process::id());
     }
 }
 
 impl Drop for DrainLock {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
+        // Unlink first, then let the handle close and release the lock, so
+        // nobody can lock this inode after the path stops naming it and
+        // believe they own the queue. Skip it if the path already names
+        // another file (an older axil judged this one stale and replaced it).
+        if same_file(&self.file, &self.path) {
+            let _ = std::fs::remove_file(&self.path);
+        }
     }
+}
+
+/// Whether `path` still names the file open as `file`.
+#[cfg(unix)]
+fn same_file(file: &std::fs::File, path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+    match (file.metadata(), std::fs::metadata(path)) {
+        (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino(),
+        _ => false,
+    }
+}
+
+/// Whether `path` still names the file open as `file`. Windows cannot unlink
+/// a file another handle holds open, so the path never moves under a holder.
+#[cfg(not(unix))]
+fn same_file(_file: &std::fs::File, path: &Path) -> bool {
+    path.exists()
+}
+
+/// With the OS lock in hand, a drainer from an older axil may still be live:
+/// it never takes the OS lock and only writes its bare pid. Honor its lock
+/// until the mtime rule it used goes stale. An empty file is one this call
+/// just created, or a new drainer's that died before its first touch, and is
+/// free. (For an instant it can also be an older axil's before its first
+/// write; both drainers then run, which the per-job rename claim tolerates.)
+fn legacy_holder_live(file: &std::fs::File) -> bool {
+    use std::io::Read as _;
+    let mut body = String::new();
+    let _ = (&*file).read_to_string(&mut body);
+    let body = body.trim();
+    if body.is_empty() || body.starts_with(DRAIN_LOCK_TAG) {
+        return false;
+    }
+    file.metadata()
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .is_none_or(|age| age.as_secs() <= DRAIN_LOCK_STALE_SECS)
 }
 
 fn queue_files(dir: &Path, ext: &str) -> Vec<PathBuf> {
@@ -3633,5 +3697,98 @@ mod tests {
         }
         // Guard against an empty/renamed fixture set silently passing.
         assert!(cases_run >= 20, "expected >=20 fixture cases, ran {cases_run}");
+    }
+
+    fn age_file(path: &Path, secs: u64) {
+        let f = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+        f.set_modified(std::time::SystemTime::now() - Duration::from_secs(secs))
+            .unwrap();
+    }
+
+    /// Not a test on its own: `drain_lock_freed_when_holder_is_killed` runs
+    /// the test binary on just this function to get a second process that
+    /// holds the lock until it is killed.
+    #[test]
+    #[ignore = "helper process for drain_lock_freed_when_holder_is_killed"]
+    fn drain_lock_holder_process() {
+        let Some(dir) = std::env::var_os("AXIL_TEST_DRAIN_LOCK_DIR") else {
+            return;
+        };
+        let dir = PathBuf::from(dir);
+        let _lock = DrainLock::acquire(&dir).expect("helper takes the free lock");
+        std::fs::write(dir.join("holder.ready"), "").unwrap();
+        std::thread::sleep(Duration::from_secs(120));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn drain_lock_freed_when_holder_is_killed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "hook_brain::tests::drain_lock_holder_process",
+                "--exact",
+                "--ignored",
+                "--test-threads=1",
+            ])
+            .env("AXIL_TEST_DRAIN_LOCK_DIR", dir)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let ready = dir.join("holder.ready");
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        while !ready.exists() {
+            if std::time::Instant::now() > deadline || child.try_wait().unwrap().is_some() {
+                let _ = child.kill();
+                panic!("helper process never took the drain lock");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            DrainLock::acquire(dir).is_none(),
+            "a live holder in another process keeps the lock"
+        );
+
+        child.kill().unwrap(); // SIGKILL: no Drop, the lock file stays behind
+        child.wait().unwrap();
+        let path = dir.join("drain.lock");
+        assert!(path.exists(), "a killed holder leaves its lock file");
+        let lock = DrainLock::acquire(dir).expect("a killed holder's lock is free at once");
+        drop(lock);
+        assert!(!path.exists(), "dropping the lock removes the file");
+    }
+
+    #[test]
+    fn drain_lock_live_holder_with_old_mtime_is_not_stolen() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let held = DrainLock::acquire(dir).expect("free lock");
+        // Older than the mtime rule ever allowed: a long job, or a laptop
+        // that slept through it.
+        age_file(&dir.join("drain.lock"), DRAIN_LOCK_STALE_SECS * 4);
+        assert!(DrainLock::acquire(dir).is_none());
+        assert!(dir.join("drain.lock").exists());
+        drop(held);
+        assert!(DrainLock::acquire(dir).is_some());
+    }
+
+    #[test]
+    fn drain_lock_honors_an_older_axil_until_stale() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let path = dir.join("drain.lock");
+        // What an older drainer writes: a bare pid, and no OS lock.
+        std::fs::write(&path, "4242").unwrap();
+        assert!(DrainLock::acquire(dir).is_none());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "4242");
+
+        age_file(&path, DRAIN_LOCK_STALE_SECS + 60);
+        let lock = DrainLock::acquire(dir).expect("a stale legacy lock is taken over");
+        assert!(std::fs::read_to_string(&path)
+            .unwrap()
+            .starts_with(DRAIN_LOCK_TAG));
+        drop(lock);
     }
 }
