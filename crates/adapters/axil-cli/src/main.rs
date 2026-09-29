@@ -13846,15 +13846,9 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                     if let Some(pos) = narrative.find("\n\n") {
                         narrative.insert_str(pos + 2, &warnings);
                     }
-                    let output = if let Some(max_tokens) = budget {
-                        let max_bytes = max_tokens * 4;
-                        if narrative.len() > max_bytes {
-                            format!("{}...", &narrative[..max_bytes])
-                        } else {
-                            narrative
-                        }
-                    } else {
-                        narrative
+                    let output = match budget {
+                        Some(max_tokens) => cut_narrative_to_budget(narrative, max_tokens),
+                        None => narrative,
                     };
                     println!("{output}");
                 }
@@ -19607,6 +19601,22 @@ fn apply_token_budget(v: &Value, budget: Option<usize>) -> Value {
 
 // ─── Boot context helpers ──────────────────────────────────────────
 
+/// Cut a boot narrative to a `max_tokens * 4` byte budget, appending "..."
+/// when anything was dropped. The cut floors to a char boundary: boot text
+/// carries arrows, em dashes and user-stored non-ASCII, and a raw byte slice
+/// through one of those panics the whole boot.
+fn cut_narrative_to_budget(narrative: String, max_tokens: usize) -> String {
+    let max_bytes = max_tokens.saturating_mul(4);
+    if narrative.len() <= max_bytes {
+        return narrative;
+    }
+    let mut cut = max_bytes;
+    while !narrative.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!("{}...", &narrative[..cut])
+}
+
 /// Convert boot JSON to a human-readable narrative format.
 fn boot_to_narrative(data: &Value) -> String {
     let mut out = String::new();
@@ -20421,6 +20431,46 @@ mod agents_md_drift {
             "AGENTS.md AXIL block drifted from agent_instructions_codex(); \
              regenerate AGENTS.md (re-run the Codex integration installer) and commit it."
         );
+    }
+}
+
+#[cfg(test)]
+mod boot_narrative_budget {
+    use super::cut_narrative_to_budget;
+
+    #[test]
+    fn under_budget_is_untouched() {
+        let s = "short → text".to_string();
+        assert_eq!(cut_narrative_to_budget(s.clone(), 100), s);
+    }
+
+    #[test]
+    fn ascii_cut_is_exact_byte_budget() {
+        let s = "a".repeat(20);
+        assert_eq!(
+            cut_narrative_to_budget(s, 2),
+            format!("{}...", "a".repeat(8))
+        );
+    }
+
+    // A budget of 1 token is 4 bytes; "aa→" puts byte 4 inside the 3-byte
+    // arrow, which used to panic on the raw slice.
+    #[test]
+    fn multibyte_boundary_floors_instead_of_panicking() {
+        let s = "aa→bbbbbbbb".to_string();
+        assert!(!s.is_char_boundary(4));
+        assert_eq!(cut_narrative_to_budget(s, 1), "aa...");
+    }
+
+    #[test]
+    fn every_budget_over_multibyte_text_is_valid() {
+        let s = "Résumé — naïve 日本語 🎉 text ".repeat(8);
+        for tokens in 0..s.len() {
+            let out = cut_narrative_to_budget(s.clone(), tokens);
+            let body = out.strip_suffix("...").unwrap_or(&out);
+            assert!(s.starts_with(body));
+            assert!(body.len() <= tokens * 4);
+        }
     }
 }
 
