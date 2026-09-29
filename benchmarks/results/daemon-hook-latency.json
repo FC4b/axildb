@@ -1,0 +1,146 @@
+{
+  "benchmark": "agent hook wall-clock latency, one-shot (every lookup is a fresh axil process)",
+  "label": "one-shot baseline (no daemon)",
+  "date": "2026-09-29T03:02:14Z",
+  "git_commit": "65d45ff",
+  "axil_version": "axil 2.3.1 (axildb-v2.3.1-25-g65d45ff-dirty)",
+  "build": "release",
+  "machine": "Apple M1 Pro, 10 cores, 16 GiB, macOS 26.6",
+  "load_average_1m": {
+    "before": 6.85,
+    "after": 6.54
+  },
+  "corpus": {
+    "database": "copy of benchmarks/dogfood-recall/data/snap-prefix (frozen copy of this repo's .axil)",
+    "files_bytes": {
+      "memory.axil": 89395200,
+      "memory.axil.graph": 120713216,
+      "memory.axil.ts": 139264,
+      "memory.axil.vec": 7127040
+    },
+    "project_tree": "git archive of HEAD, 617 files"
+  },
+  "method": {
+    "command": "axil hook run --dialect claude, payload on stdin",
+    "samples_per_case": 50,
+    "timing": "whole hook process wall clock, python perf_counter around subprocess.run",
+    "warmup": "2 unmeasured rounds of every case",
+    "session_ids": "fresh per sample, so no per-session sentinel skips a lookup",
+    "validation": "a sample counts only if its lookup ran (output or sentinel checked); a prompt recall that returns nothing after its 1800 ms --timeout-ms counts, as a deadline_hit"
+  },
+  "cases": {
+    "hook_floor": {
+      "path": "UserPromptSubmit (no lookup)",
+      "ok": 50,
+      "failed": 0,
+      "deadline_hits": 0,
+      "p50_ms": 8.6,
+      "p95_ms": 11.0,
+      "mean_ms": 9.0,
+      "min_ms": 7.5,
+      "max_ms": 13.0
+    },
+    "user_prompt_recall": {
+      "path": "UserPromptSubmit -> recall context-block",
+      "ok": 50,
+      "failed": 0,
+      "deadline_hits": 1,
+      "p50_ms": 1465.5,
+      "p95_ms": 1982.1,
+      "mean_ms": 1493.6,
+      "min_ms": 1063.1,
+      "max_ms": 2021.3
+    },
+    "session_start_boot": {
+      "path": "SessionStart -> boot narrative",
+      "ok": 50,
+      "failed": 0,
+      "deadline_hits": 0,
+      "p50_ms": 342.8,
+      "p95_ms": 399.8,
+      "mean_ms": 354.7,
+      "min_ms": 306.7,
+      "max_ms": 727.8
+    },
+    "pre_edit_file_recall": {
+      "path": "PreToolUse Edit -> recall-for-file",
+      "ok": 50,
+      "failed": 0,
+      "deadline_hits": 0,
+      "p50_ms": 859.3,
+      "p95_ms": 1008.8,
+      "mean_ms": 890.7,
+      "min_ms": 781.2,
+      "max_ms": 1686.6
+    },
+    "pre_bash_code_search": {
+      "path": "PreToolUse Bash -> code-search",
+      "ok": 50,
+      "failed": 0,
+      "deadline_hits": 0,
+      "p50_ms": 417.7,
+      "p95_ms": 472.6,
+      "mean_ms": 412.9,
+      "min_ms": 253.2,
+      "max_ms": 582.8
+    },
+    "pre_bash_fts": {
+      "path": "PreToolUse Bash -> fts",
+      "ok": 50,
+      "failed": 0,
+      "deadline_hits": 0,
+      "p50_ms": 251.6,
+      "p95_ms": 302.9,
+      "mean_ms": 239.3,
+      "min_ms": 103.1,
+      "max_ms": 401.6
+    },
+    "stop_since": {
+      "path": "Stop -> since 1h",
+      "ok": 50,
+      "failed": 0,
+      "deadline_hits": 0,
+      "p50_ms": 114.5,
+      "p95_ms": 425.3,
+      "mean_ms": 182.2,
+      "min_ms": 102.6,
+      "max_ms": 482.1
+    }
+  },
+  "freshness_scan": {
+    "check_freshness_ms": {
+      "first": 57.4,
+      "p50": 34.2,
+      "p95": 37.1
+    },
+    "disk_files": 433,
+    "hashed_bytes": 6035061,
+    "indexed_files": 486,
+    "iterations": 20,
+    "parts_ms": {
+      "list_stored_hashes": {
+        "first": 1.6,
+        "p50": 1.6,
+        "p95": 1.9
+      },
+      "read_and_hash": {
+        "first": 10.3,
+        "p50": 10.3,
+        "p95": 18.3
+      },
+      "walk_project": {
+        "first": 9.1,
+        "p50": 8.0,
+        "p95": 9.8
+      }
+    },
+    "stale_file_paths_ms": {
+      "first": 75.7,
+      "p50": 21.0,
+      "p95": 29.9
+    },
+    "stale_files": 93,
+    "method": "crates/extensions/axil-indexer/examples/freshness_timing.rs on the same copy and tree: the calls recall (stale_file_paths) and boot (check_freshness) make",
+    "share_of_prompt_hook_p50": 0.014
+  }
+}
