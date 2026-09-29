@@ -382,12 +382,20 @@ impl Embedder {
         Ok(embedding)
     }
 
-    /// Batch embed multiple texts in a single ONNX inference call.
+    /// Batch embed multiple texts, in as few ONNX inference calls as memory
+    /// allows.
     ///
-    /// Pads all sequences to the longest in the batch and runs one forward pass.
-    /// 5-10x faster than sequential embedding for bulk operations.
+    /// Texts are tokenized together, sorted by length so each call pads as
+    /// little as possible, and grouped under [`ATTENTION_BUDGET`]; results come
+    /// back in input order. One call over many texts is several times faster
+    /// than one call per text.
     #[cfg(feature = "embed")]
     pub fn embed_batch_impl(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, String> {
+        self.embed_batch_within(texts, ATTENTION_BUDGET)
+    }
+
+    #[cfg(feature = "embed")]
+    fn embed_batch_within(&self, texts: &[&str], budget: usize) -> Result<Vec<Vec<f32>>, String> {
         if texts.is_empty() {
             return Ok(vec![]);
         }
@@ -395,19 +403,48 @@ impl Embedder {
             return self.embed_impl(texts[0]).map(|v| vec![v]);
         }
 
-        use ort::value::Tensor;
-
         let runtime = self.runtime()?;
-        // Batch tokenize all texts
         let encodings = runtime
             .tokenizer
             .encode_batch(texts.to_vec(), true)
             .map_err(|e| format!("batch tokenization failed: {e}"))?;
 
-        let batch_size = encodings.len();
-        let max_len = encodings
+        let mut order: Vec<usize> = (0..encodings.len()).collect();
+        order.sort_by_key(|&i| encodings[i].get_ids().len());
+
+        let mut results: Vec<Vec<f32>> = vec![Vec::new(); encodings.len()];
+        let mut group: Vec<usize> = Vec::new();
+        for &i in &order {
+            // Sorted ascending, so this text is the longest the group would hold.
+            let len = encodings[i].get_ids().len().max(1);
+            if !group.is_empty() && (group.len() + 1).saturating_mul(len * len) > budget {
+                self.run_group(runtime, &encodings, &group, &mut results)?;
+                group.clear();
+            }
+            group.push(i);
+        }
+        if !group.is_empty() {
+            self.run_group(runtime, &encodings, &group, &mut results)?;
+        }
+        Ok(results)
+    }
+
+    /// One ONNX call over the encodings at `indices`, padded to the longest of
+    /// them; each embedding lands at its index in `results`.
+    #[cfg(feature = "embed")]
+    fn run_group(
+        &self,
+        runtime: &Runtime,
+        encodings: &[tokenizers::Encoding],
+        indices: &[usize],
+        results: &mut [Vec<f32>],
+    ) -> Result<(), String> {
+        use ort::value::Tensor;
+
+        let batch_size = indices.len();
+        let max_len = indices
             .iter()
-            .map(|e| e.get_ids().len())
+            .map(|&i| encodings[i].get_ids().len())
             .max()
             .unwrap_or(0);
         let dims = self.model.dimensions();
@@ -417,13 +454,13 @@ impl Embedder {
         let mut all_mask = vec![0i64; batch_size * max_len];
         let mut all_types = vec![0i64; batch_size * max_len];
 
-        for (i, enc) in encodings.iter().enumerate() {
+        for (row, &i) in indices.iter().enumerate() {
+            let enc = &encodings[i];
             let ids = enc.get_ids();
             let mask = enc.get_attention_mask();
             let types = enc.get_type_ids();
-            let seq_len = ids.len();
-            let offset = i * max_len;
-            for j in 0..seq_len {
+            let offset = row * max_len;
+            for j in 0..ids.len() {
                 all_ids[offset + j] = ids[j] as i64;
                 all_mask[offset + j] = mask[j] as i64;
                 all_types[offset + j] = types[j] as i64;
@@ -435,9 +472,9 @@ impl Embedder {
         let attention = Tensor::<i64>::from_array(([batch_size, max_len], all_mask.clone()))
             .map_err(|e| format!("batch attention_mask tensor error: {e}"))?;
 
-        // Single ONNX inference call for entire batch. ModernBERT-family
-        // models reject `token_type_ids`; only bind it when the model
-        // declared the input.
+        // One ONNX inference call for the group. ModernBERT-family models
+        // reject `token_type_ids`; only bind it when the model declared the
+        // input.
         let data: Vec<f32> = {
             let mut session = runtime.acquire_session();
             let outputs = if runtime.accepts_token_type_ids {
@@ -465,15 +502,13 @@ impl Embedder {
 
         // Pool each sample in the batch (pure CPU, no lock needed)
         let stride = max_len * dims; // elements per sample
-        let mut results = Vec::with_capacity(batch_size);
-
-        for i in 0..batch_size {
-            let sample_offset = i * stride;
-            let mask_offset = i * max_len;
+        for (row, &i) in indices.iter().enumerate() {
+            let sample_offset = row * stride;
+            let mask_offset = row * max_len;
 
             if sample_offset + stride > data.len() {
                 return Err(format!(
-                    "batch output too small: sample {i} needs offset {} but only {} elements",
+                    "batch output too small: sample {row} needs offset {} but only {} elements",
                     sample_offset + stride,
                     data.len()
                 ));
@@ -508,12 +543,20 @@ impl Embedder {
             };
 
             l2_normalize(&mut embedding);
-            results.push(embedding);
+            results[i] = embedding;
         }
 
-        Ok(results)
+        Ok(())
     }
 }
+
+/// Cap on `texts × longest² (tokens)` for one batched inference call.
+/// Attention memory grows with the batch size times the square of its longest
+/// sequence: padding a batch of long texts to 8,192 tokens (nomic, bge-m3)
+/// OOM-killed a 16 GB machine. This fits 16 texts of 512 tokens per call; a
+/// single text longer than the budget still runs, alone.
+#[cfg(feature = "embed")]
+const ATTENTION_BUDGET: usize = 16 * 512 * 512;
 
 /// L2-normalize a vector in place.
 #[cfg(feature = "embed")]
@@ -859,5 +902,34 @@ mod tests {
             first,
             "a failed load is reported the same way every time"
         );
+    }
+
+    #[test]
+    fn a_batch_matches_one_text_at_a_time_across_groups() {
+        let model = EmbeddingModel::BgeSmall;
+        if !crate::download::is_model_available(&model) {
+            eprintln!("skipped: {} is not installed", model.name());
+            return;
+        }
+        let embedder = Embedder::new_with_pool(model, 1).unwrap();
+        let long = "the connection pool times out under load ".repeat(20);
+        let texts = [
+            "short",
+            long.as_str(),
+            "a medium length sentence about recall and hooks",
+            "x",
+            "store decisions immediately rather than batching them at the end",
+        ];
+        // A budget of one 64-token row forces several inference calls.
+        let batched = embedder.embed_batch_within(&texts, 64 * 64).unwrap();
+        assert_eq!(batched.len(), texts.len());
+        for (text, got) in texts.iter().zip(&batched) {
+            let alone = embedder.embed(text).unwrap();
+            let cos: f32 = alone.iter().zip(got).map(|(a, b)| a * b).sum();
+            assert!(
+                cos > 0.9999,
+                "{text:?} came back as a different vector ({cos})"
+            );
+        }
     }
 }
