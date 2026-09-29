@@ -141,6 +141,12 @@
     },
     "stale_files": 93,
     "method": "crates/extensions/axil-indexer/examples/freshness_timing.rs on the same copy and tree: the calls recall (stale_file_paths) and boot (check_freshness) make",
-    "share_of_prompt_hook_p50": 0.014
+    "warm_gate_p50_ms": 50,
+    "share_of_warm_gate": {
+      "p50": 0.42,
+      "p95": 0.598
+    },
+    "note": "share_of_warm_gate is the scan's warm cost over the warm daemon's p50 gate; it grows with the tree (433 files here). Whether the freshness hash cache is needed is decided on the warm daemon's own numbers, not on this one-shot run. one_shot_share_of_prompt_hook_p50 uses the first (cold) call, the cost each fresh hook process pays.",
+    "one_shot_share_of_prompt_hook_p50": 0.052
   }
 }

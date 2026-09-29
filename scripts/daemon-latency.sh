@@ -286,10 +286,29 @@ if fbin and os.access(fbin, os.X_OK):
               file=sys.stderr)
 
 
+# The scan is weighed against the budget it has to fit, the warm daemon's
+# p50 gate, not against this one-shot hook: most of the one-shot time is
+# process start, embedder load and engine open, which the daemon removes and
+# the scan (still run on every recall) does not. A one-shot hook is a fresh
+# process, so it pays the first (cold) call, not the in-process p50.
+WARM_GATE_P50_MS = 50
 recall_p50 = results.get("user_prompt_recall", {}).get("p50_ms")
-if freshness and recall_p50:
-    scan = freshness["stale_file_paths_ms"]["p50"]
-    freshness["share_of_prompt_hook_p50"] = round(scan / recall_p50, 3)
+if freshness:
+    scan = freshness["stale_file_paths_ms"]
+    freshness["warm_gate_p50_ms"] = WARM_GATE_P50_MS
+    freshness["share_of_warm_gate"] = {
+        "p50": round(scan["p50"] / WARM_GATE_P50_MS, 3),
+        "p95": round(scan["p95"] / WARM_GATE_P50_MS, 3),
+    }
+    freshness["note"] = ("share_of_warm_gate is the scan's warm cost over the "
+                         "warm daemon's p50 gate; it grows with the tree "
+                         f"({freshness.get('disk_files')} files here). Whether "
+                         "the freshness hash cache is needed is decided on the "
+                         "warm daemon's own numbers, not on this one-shot run.")
+    if recall_p50:
+        freshness["one_shot_share_of_prompt_hook_p50"] = round(scan["first"] / recall_p50, 3)
+        freshness["note"] += (" one_shot_share_of_prompt_hook_p50 uses the first "
+                              "(cold) call, the cost each fresh hook process pays.")
 
 
 def sh(*cmd):
