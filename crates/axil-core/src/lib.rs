@@ -133,7 +133,7 @@ pub use scoring::{
     DedupConfig, QtcConfig, RecallConfig, RecallResult, ScoreExplanation, ScoreWeights,
     SignalValues,
 };
-pub use storage::Storage;
+pub use storage::{EntityKeyIndexStatus, EntityKeyLookup, Storage};
 #[cfg(feature = "cdc")]
 pub use storage::{ChangeEntry, SyncMeta};
 #[cfg(feature = "event-log")]

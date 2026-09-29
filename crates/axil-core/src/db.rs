@@ -607,15 +607,6 @@ impl AxilBuilder {
                 .and_then(|_| db.mark_entity_migration_done());
         }
 
-        // Build the `_entities` key index once, so auto-linking resolves the
-        // entities it extracts with point lookups instead of decoding every
-        // entity row per insert. After the first build this is one read of
-        // the ready marker. A failed build leaves the marker unset and
-        // auto-linking keeps scanning, so the error is not fatal to the open.
-        if !db.storage.is_read_only() {
-            let _ = db.storage.ensure_entity_key_index();
-        }
-
         // Auto-reindex FTS if schema migration rebuilt the index. Never on a
         // read-only handle (it can't write the index, and the writer owns it).
         if needs_fts_reindex && !db.storage.is_read_only() {
@@ -3310,6 +3301,44 @@ impl Axil {
         Ok(purged)
     }
 
+    /// Why the `_entities` key index needs rebuilding, if it does: it is
+    /// stale (the `_entities` list changed without it), or it is current but
+    /// disagrees with rows rewritten in place. Both come from a writer that
+    /// does not maintain the index, such as an older binary on the same file.
+    ///
+    /// Verifying a current index decodes every `_entities` row. `None` when
+    /// the index is absent (auto-linking builds it on first use), in step
+    /// with the rows, or not used by this handle.
+    fn entity_key_index_drift(&self) -> Option<String> {
+        use crate::storage::EntityKeyIndexStatus;
+        match self.storage.entity_key_index_status().ok()? {
+            EntityKeyIndexStatus::Stale => Some(
+                "the _entities key index is stale: _entities changed without it \
+                 (written by an older axil binary?)"
+                    .to_string(),
+            ),
+            EntityKeyIndexStatus::Current => match self.storage.verify_entity_key_index() {
+                Ok(Some(0)) | Ok(None) | Err(_) => None,
+                Ok(Some(n)) => Some(format!(
+                    "the _entities key index disagrees with {n} _entities row(s) \
+                     rewritten without it (by an older axil binary?)"
+                )),
+            },
+            EntityKeyIndexStatus::Absent | EntityKeyIndexStatus::Failed => None,
+        }
+    }
+
+    /// Rebuild the `_entities` key index from the rows. Returns the number of
+    /// rows indexed, or `None` when this handle does not use the index (an
+    /// encryption cipher). Auto-linking rebuilds a stale index on its own;
+    /// this is the explicit repair `axil heal --reindex` runs, and it also
+    /// covers in-place key rewrites by an older binary that lookups cannot
+    /// see.
+    pub fn rebuild_entity_key_index(&self) -> Result<Option<usize>> {
+        let count = self.storage.rebuild_entity_key_index()?;
+        Ok(self.storage.entity_key_index_ready()?.then_some(count))
+    }
+
     /// Detect problems in the database.
     pub fn detect_problems(&self) -> Vec<crate::diagnostics::ProblemDetection> {
         // `count_orphaned_edges` and `count_dead_records` are each a full-DB
@@ -3327,6 +3356,16 @@ impl Axil {
         dead_records: (usize, usize),
     ) -> Vec<crate::diagnostics::ProblemDetection> {
         let mut problems = Vec::new();
+
+        if let Some(reason) = self.entity_key_index_drift() {
+            problems.push(crate::diagnostics::ProblemDetection {
+                detector: "entity_key_index_drift".to_string(),
+                severity: Severity::Warning,
+                message: reason,
+                recommendation: "Rebuild it: axil heal --reindex".to_string(),
+                auto_fixable: true,
+            });
+        }
 
         // Vectors present on disk but unloadable into the live index (e.g.
         // written by an older version before insert-time validation). They
@@ -3785,6 +3824,25 @@ impl Axil {
                 action: "purge_unloadable_vectors".to_string(),
                 result: format!("removed {purged} unloadable vector row(s)"),
             });
+        }
+
+        // An `_entities` key index an older binary left behind the rows. A
+        // stale one also repairs itself on the next auto-link; one that
+        // missed an in-place key rewrite only repairs here.
+        if !self.storage.is_read_only() {
+            if let Some(reason) = self.entity_key_index_drift() {
+                let result = match self.rebuild_entity_key_index() {
+                    Ok(count) => format!(
+                        "{reason}; rebuilt from {} _entities row(s)",
+                        count.unwrap_or(0)
+                    ),
+                    Err(e) => format!("{reason}; rebuild failed: {e}"),
+                };
+                actions.push(crate::diagnostics::HealAction {
+                    action: "entity_key_index_rebuild".to_string(),
+                    result,
+                });
+            }
         }
 
         // 2. Rebuild vector index if needed
@@ -5524,22 +5582,47 @@ impl Axil {
     /// keyed by canonical_id.
     ///
     /// With the entity key index built this holds only the extracted
-    /// entities' own keys, fetched by point lookup; otherwise (index not built
-    /// yet, a read-only handle that predates it, an encrypted store) it is the
-    /// full map from a scan. The two agree on every key the caller asks
-    /// about, which are the only keys it reads before inserting its own.
+    /// entities' own keys, fetched by point lookup; otherwise (a read-only
+    /// handle on a store without the index, an encrypted store, a failed
+    /// build) it is the full map from a scan. The two agree on every key the
+    /// caller asks about, which are the only keys it reads before inserting
+    /// its own.
+    ///
+    /// A missing or stale index is built here, on a writable handle, rather
+    /// than when the database opens: this call would otherwise pay the full
+    /// scan, so the build replaces a cost the insert already had instead of
+    /// adding one to commands that never resolve entities.
     fn known_entities_for(
         &self,
         entities: &[crate::entity::Entity],
         file_hint: Option<&str>,
     ) -> Result<std::collections::HashMap<String, RecordId>> {
+        if entities.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
         let keys: Vec<String> = entities
             .iter()
             .map(|e| entity_canonical_id(e, file_hint))
             .collect();
         let key_refs: Vec<&str> = keys.iter().map(String::as_str).collect();
-        if let Some(found) = self.storage.lookup_entity_keys(&key_refs)? {
-            return Ok(found);
+        let built = match self.storage.lookup_entity_keys(&key_refs)? {
+            crate::storage::EntityKeyLookup::Found(found) => return Ok(found),
+            _ if self.storage.is_read_only() => false,
+            crate::storage::EntityKeyLookup::Unavailable => {
+                matches!(self.storage.ensure_entity_key_index(), Ok(true))
+            }
+            // Rebuilt outright: a stale row can leave the list's fingerprint
+            // intact, so the status check inside `ensure` would not notice.
+            crate::storage::EntityKeyLookup::Stale => {
+                self.storage.rebuild_entity_key_index().is_ok()
+            }
+        };
+        // A failed build is not an error here: the scan below reads the same
+        // rows and reports whatever stopped the build.
+        if built {
+            if let Some(found) = self.storage.lookup_entity_keys(&key_refs)?.into_found() {
+                return Ok(found);
+            }
         }
         self.scan_entity_keys()
     }
@@ -7207,6 +7290,91 @@ mod tests {
         let path = dir.path().join("test.axil");
         let db = Axil::open(&path).build().unwrap();
         (db, dir)
+    }
+
+    /// Entity resolution must see what an older binary (one that does not
+    /// maintain the `_entities` key index) wrote: resolving against a stale
+    /// index would duplicate an entity it added, or link to one it deleted.
+    #[test]
+    fn entity_resolution_sees_an_older_writers_entities() {
+        use crate::storage::EntityKeyIndexStatus;
+        let (db, _dir) = temp_db();
+        let entities = crate::entity::extract_entities("The `kafka_broker` carries AuditEvents");
+        let key = entity_canonical_id(&entities[0], None);
+        assert_eq!(
+            db.storage.entity_key_index_status().unwrap(),
+            EntityKeyIndexStatus::Absent,
+            "opening does not build the index"
+        );
+        assert!(db.known_entities_for(&entities, None).unwrap().is_empty());
+        assert!(
+            db.storage.entity_key_index_ready().unwrap(),
+            "the first resolution builds it"
+        );
+
+        let added = Record::new("_entities", json!({ "canonical_id": key }));
+        db.storage.older_writer_insert(&added);
+        let known = db.known_entities_for(&entities, None).unwrap();
+        assert_eq!(known.get(&key), Some(&added.id), "no duplicate");
+        assert!(db.storage.entity_key_index_ready().unwrap(), "rebuilt");
+
+        db.storage.older_writer_delete(&added.id);
+        let known = db.known_entities_for(&entities, None).unwrap();
+        assert_eq!(known.get(&key), None, "no link to a deleted entity");
+
+        let kept = db
+            .storage
+            .insert(&Record::new("_entities", json!({ "canonical_id": key })))
+            .unwrap();
+        db.storage
+            .older_writer_update(&kept, json!({ "canonical_id": "renamed" }));
+        let known = db.known_entities_for(&entities, None).unwrap();
+        assert_eq!(known.get(&key), None, "the row no longer carries the key");
+    }
+
+    /// An in-place key rewrite by an older binary leaves the `_entities` list
+    /// alone, so only a full check sees it; diagnostics report it and a heal
+    /// rebuilds the index.
+    #[test]
+    fn heal_rebuilds_an_entity_key_index_an_older_writer_left_behind() {
+        let (db, _dir) = temp_db();
+        let id = db
+            .storage
+            .insert(&Record::new("_entities", json!({"canonical_id": "kafka"})))
+            .unwrap();
+        db.storage.ensure_entity_key_index().unwrap();
+        assert!(!db
+            .detect_problems()
+            .iter()
+            .any(|p| p.detector == "entity_key_index_drift"));
+
+        db.storage
+            .older_writer_update(&id, json!({"canonical_id": "rabbitmq"}));
+        let problem = db
+            .detect_problems()
+            .into_iter()
+            .find(|p| p.detector == "entity_key_index_drift")
+            .expect("drift is reported");
+        assert!(problem.auto_fixable);
+
+        let report = db
+            .heal_all(&crate::config::HealingConfig::default(), false)
+            .unwrap();
+        assert!(report
+            .actions
+            .iter()
+            .any(|a| a.action == "entity_key_index_rebuild"));
+        assert!(!db
+            .detect_problems()
+            .iter()
+            .any(|p| p.detector == "entity_key_index_drift"));
+        let found = db
+            .storage
+            .lookup_entity_keys(&["rabbitmq"])
+            .unwrap()
+            .into_found()
+            .unwrap();
+        assert_eq!(found["rabbitmq"], id);
     }
 
     #[test]

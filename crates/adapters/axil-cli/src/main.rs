@@ -10464,7 +10464,8 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                                 "vector_deletion_ratio"
                                 | "missing_embeddings"
                                 | "missing_fts"
-                                | "vector_load_skips" => reindex,
+                                | "vector_load_skips"
+                                | "entity_key_index_drift" => reindex,
                                 "orphaned_edges" | "orphaned_vectors" => orphans,
                                 _ => compact || orphans,
                             };
@@ -10537,6 +10538,21 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                                     reembedded, refts
                                 ),
                             }));
+                        }
+
+                        // The `_entities` key index, rebuilt outright: an
+                        // older binary rewriting a row's key in place leaves
+                        // nothing a cheaper check could catch.
+                        match db.rebuild_entity_key_index() {
+                            Ok(Some(count)) => actions.push(json!({
+                                "action": "entity_key_index_rebuild",
+                                "result": format!("indexed {count} _entities rows"),
+                            })),
+                            Ok(None) => {}
+                            Err(e) => actions.push(json!({
+                                "action": "entity_key_index_rebuild",
+                                "result": format!("rebuild failed: {e}"),
+                            })),
                         }
                     }
                 }

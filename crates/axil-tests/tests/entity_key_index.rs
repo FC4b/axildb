@@ -1,7 +1,8 @@
 //! The `_entities` key index must leave auto-linking's results unchanged.
 //!
 //! Each fixture runs twice: once through the index and once with the index
-//! dropped, which sends `auto_link` down the full-scan path it always used.
+//! switched off, which sends `auto_link` down the full-scan path it always
+//! used.
 //! Record ids differ between the two databases, so the runs are compared by
 //! record bodies — every `_entities` row in list order, and the body of each
 //! entity every stored memory links to.
@@ -62,10 +63,8 @@ fn run_fixture(use_index: bool) -> Outcome {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("fixture.axil");
     let db = open_with_graph(&path);
-    assert!(db.storage().entity_key_index_ready().unwrap());
     if !use_index {
-        db.storage().drop_entity_key_index().unwrap();
-        assert!(!db.storage().entity_key_index_ready().unwrap());
+        db.storage().set_entity_key_index_enabled(false);
     }
 
     let mut memories = Vec::new();
@@ -145,20 +144,41 @@ fn auto_link_links_the_same_entities_with_and_without_the_index() {
     assert_eq!(indexed, scanned);
 }
 
+/// A store written without the index gets it from the first insert that
+/// auto-links, not from opening: commands that never resolve entities (the
+/// hook's lookups among them) must not pay for, or commit, the build.
 #[test]
-fn opening_a_store_without_the_index_builds_it() {
+fn the_first_auto_link_builds_the_index_and_opening_does_not() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("legacy.axil");
     {
         let db = open_with_graph(&path);
-        db.storage().drop_entity_key_index().unwrap();
+        db.storage().set_entity_key_index_enabled(false);
         for text in PHASE_A {
             store(&db, text);
         }
+    }
+
+    {
+        let db = open_with_graph(&path);
+        db.search_text("AuthModule", 5).ok();
+        db.list("decisions").unwrap();
         assert!(!db.storage().entity_key_index_ready().unwrap());
     }
 
     let db = open_with_graph(&path);
+    assert!(!db.storage().entity_key_index_ready().unwrap());
+    let before = db.storage().list("_entities", usize::MAX, 0).unwrap().len();
+    store(&db, "Unrelated note with no entities");
+    assert!(
+        !db.storage().entity_key_index_ready().unwrap(),
+        "nothing to resolve, nothing to build"
+    );
+    store(&db, PHASE_A[0]);
+    assert_eq!(
+        db.storage().list("_entities", usize::MAX, 0).unwrap().len(),
+        before
+    );
     assert!(db.storage().entity_key_index_ready().unwrap());
 
     let rows = db.storage().list("_entities", usize::MAX, 0).unwrap();
@@ -172,7 +192,12 @@ fn opening_a_store_without_the_index_builds_it() {
         }
     }
     let keys: Vec<&str> = scan.keys().map(String::as_str).collect();
-    let indexed = db.storage().lookup_entity_keys(&keys).unwrap().unwrap();
+    let indexed = db
+        .storage()
+        .lookup_entity_keys(&keys)
+        .unwrap()
+        .into_found()
+        .unwrap();
     assert_eq!(indexed, scan);
 
     // Linking a repeat mention reuses the migrated rows instead of adding
