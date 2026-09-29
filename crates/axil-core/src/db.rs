@@ -607,6 +607,15 @@ impl AxilBuilder {
                 .and_then(|_| db.mark_entity_migration_done());
         }
 
+        // Build the `_entities` key index once, so auto-linking resolves the
+        // entities it extracts with point lookups instead of decoding every
+        // entity row per insert. After the first build this is one read of
+        // the ready marker. A failed build leaves the marker unset and
+        // auto-linking keeps scanning, so the error is not fatal to the open.
+        if !db.storage.is_read_only() {
+            let _ = db.storage.ensure_entity_key_index();
+        }
+
         // Auto-reindex FTS if schema migration rebuilt the index. Never on a
         // read-only handle (it can't write the index, and the writer owns it).
         if needs_fts_reindex && !db.storage.is_read_only() {
@@ -5219,33 +5228,13 @@ impl Axil {
 
         use crate::util::edge_types;
 
-        // Load entity table for all lookups to avoid creating duplicates.
-        // Cache keys are canonical_ids; pre-migration rows synthesize one
-        // from `name` so lookups still hit.
-        let mut known_entities: std::collections::HashMap<String, RecordId> = self
-            .storage
-            .list("_entities", usize::MAX, 0)?
-            .into_iter()
-            .filter_map(|r| {
-                let canonical = r
-                    .data
-                    .get("canonical_id")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string())
-                    .or_else(|| {
-                        r.data
-                            .get("name")
-                            .and_then(|v| v.as_str())
-                            .map(|s| s.to_string())
-                    })?;
-                Some((canonical, r.id))
-            })
-            .collect();
-
         // File hint for provisional code-symbol canonical ids: pull a
         // single path-like value off the record so two records mentioning
         // the same symbol in different files don't collapse.
         let file_hint = pick_file_hint(&record.data);
+
+        // Known entities, keyed by canonical_id, to avoid creating duplicates.
+        let mut known_entities = self.known_entities_for(&entities, file_hint.as_deref())?;
 
         // Step 2: Create/find entity nodes and link via →mentions→
         for entity in &entities {
@@ -5529,6 +5518,55 @@ impl Axil {
             updated += 1;
         }
         Ok(updated)
+    }
+
+    /// The existing `_entities` rows `auto_link` may resolve `entities` to,
+    /// keyed by canonical_id.
+    ///
+    /// With the entity key index built this holds only the extracted
+    /// entities' own keys, fetched by point lookup; otherwise (index not built
+    /// yet, a read-only handle that predates it, an encrypted store) it is the
+    /// full map from a scan. The two agree on every key the caller asks
+    /// about, which are the only keys it reads before inserting its own.
+    fn known_entities_for(
+        &self,
+        entities: &[crate::entity::Entity],
+        file_hint: Option<&str>,
+    ) -> Result<std::collections::HashMap<String, RecordId>> {
+        let keys: Vec<String> = entities
+            .iter()
+            .map(|e| entity_canonical_id(e, file_hint))
+            .collect();
+        let key_refs: Vec<&str> = keys.iter().map(String::as_str).collect();
+        if let Some(found) = self.storage.lookup_entity_keys(&key_refs)? {
+            return Ok(found);
+        }
+        self.scan_entity_keys()
+    }
+
+    /// Every `_entities` row keyed by canonical_id, from a full scan.
+    /// Pre-migration rows synthesize the key from `name` so lookups still
+    /// hit; when rows share a key the one listed last wins.
+    fn scan_entity_keys(&self) -> Result<std::collections::HashMap<String, RecordId>> {
+        Ok(self
+            .storage
+            .list("_entities", usize::MAX, 0)?
+            .into_iter()
+            .filter_map(|r| {
+                let canonical = r
+                    .data
+                    .get("canonical_id")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+                    .or_else(|| {
+                        r.data
+                            .get("name")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string())
+                    })?;
+                Some((canonical, r.id))
+            })
+            .collect())
     }
 
     /// Find an existing entity node or create a new one, using an in-memory cache.
