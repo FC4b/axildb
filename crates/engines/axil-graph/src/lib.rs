@@ -10,8 +10,8 @@ use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
 use redb::{
     Database, MultimapTable, MultimapTableDefinition, ReadOnlyMultimapTable, ReadOnlyTable,
-    ReadableDatabase, ReadableMultimapTable, ReadableTable, ReadableTableMetadata, Table,
-    TableDefinition, WriteTransaction,
+    ReadTransaction, ReadableDatabase, ReadableMultimapTable, ReadableTable, ReadableTableMetadata,
+    Table, TableDefinition, WriteTransaction,
 };
 use serde_json::Value;
 
@@ -43,6 +43,12 @@ const ADJACENCY_STAMP_KEY: &str = "adjacency";
 /// Version of the adjacency tables' layout, the first byte of the stamp.
 /// Bumping it makes every existing store rebuild its tables on first use.
 const ADJACENCY_FORMAT: u8 = 1;
+
+/// Most adjacency changes one write transaction of a sync commits (see
+/// [`GraphEngine::sync_adjacency_in_chunks`]). Small enough that a killed
+/// sync loses little of its inserts, large enough that the commits stay
+/// few: the 161k-edge dogfood store's 322k entries take seven.
+const SYNC_CHUNK: usize = 50_000;
 
 // ── On-disk adjacency ───────────────────────────────────────────────
 
@@ -105,6 +111,149 @@ fn adjacency_stamp(edges: &impl ReadableTable<&'static str, &'static [u8]>) -> R
     Ok(stamp)
 }
 
+/// Whether the stamp stored in `meta` matches `edges`, read from the same
+/// transaction. No `meta` table means the adjacency tables were never built.
+fn stamp_matches(
+    meta: Option<&impl ReadableTable<&'static str, &'static [u8]>>,
+    edges: &impl ReadableTable<&'static str, &'static [u8]>,
+) -> Result<bool> {
+    let Some(meta) = meta else {
+        return Ok(false);
+    };
+    let Some(stored) = meta.get(ADJACENCY_STAMP_KEY)? else {
+        return Ok(false);
+    };
+    Ok(stored.value() == adjacency_stamp(edges)?.as_slice())
+}
+
+/// Open a table for reading, `None` when no transaction has created it yet.
+fn open_existing(
+    txn: &ReadTransaction,
+    def: TableDefinition<&'static str, &'static [u8]>,
+) -> Result<Option<ReadOnlyTable<&'static str, &'static [u8]>>> {
+    match txn.open_table(def) {
+        Ok(table) => Ok(Some(table)),
+        Err(redb::TableError::TableDoesNotExist(_)) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// [`open_existing`] for a multimap table.
+fn open_existing_multimap(
+    txn: &ReadTransaction,
+    def: MultimapTableDefinition<&'static str, &'static [u8]>,
+) -> Result<Option<ReadOnlyMultimapTable<&'static str, &'static [u8]>>> {
+    match txn.open_multimap_table(def) {
+        Ok(table) => Ok(Some(table)),
+        Err(redb::TableError::TableDoesNotExist(_)) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// One change to an adjacency table.
+struct AdjOp {
+    outgoing: bool,
+    key: String,
+    value: Vec<u8>,
+    insert: bool,
+}
+
+/// The changes that make the adjacency tables match the edges table, and
+/// the edges whose JSON can't be decoded (to be removed with them).
+///
+/// Computed as a diff against what the tables already hold, so bringing a
+/// store up to date writes only what is missing or wrong: every entry the
+/// first time, and a handful after an older binary added a few edges. A
+/// full delete-and-reinsert would rewrite every page of both tables each
+/// time, and redb can't reuse the freed pages within that transaction, so
+/// the file would grow by the size of the tables on every rebuild.
+struct AdjacencyPlan {
+    /// Sorted by table, key and value, the order the tables store them in,
+    /// so applying them in order touches each page once.
+    ops: Vec<AdjOp>,
+    corrupt: Vec<String>,
+}
+
+impl AdjacencyPlan {
+    fn compute(
+        edges: &impl ReadableTable<&'static str, &'static [u8]>,
+        out: Option<&impl ReadableMultimapTable<&'static str, &'static [u8]>>,
+        inc: Option<&impl ReadableMultimapTable<&'static str, &'static [u8]>>,
+    ) -> Result<Self> {
+        let rows = edges.len()? as usize;
+        let mut corrupt = Vec::new();
+        let mut want_out: Vec<(String, Vec<u8>)> = Vec::with_capacity(rows);
+        let mut want_in: Vec<(String, Vec<u8>)> = Vec::with_capacity(rows);
+        for row in edges.iter()? {
+            let (key, value) = row?;
+            let id = key.value();
+            let Some(edge) = decode_edge(id, value.value(), &mut corrupt) else {
+                continue;
+            };
+            let out_entry = AdjEntry::encode(&edge.edge_type, edge.to.as_str(), id);
+            let in_entry = AdjEntry::encode(&edge.edge_type, edge.from.as_str(), id);
+            want_out.push((edge.from.0, out_entry));
+            want_in.push((edge.to.0, in_entry));
+        }
+        let mut ops = Vec::new();
+        Self::diff(true, want_out, out, &mut ops)?;
+        Self::diff(false, want_in, inc, &mut ops)?;
+        Ok(Self { ops, corrupt })
+    }
+
+    /// Append to `ops` the inserts and removals that turn `table` into
+    /// exactly `want`, by merging the two in the table's sort order.
+    fn diff(
+        outgoing: bool,
+        mut want: Vec<(String, Vec<u8>)>,
+        table: Option<&impl ReadableMultimapTable<&'static str, &'static [u8]>>,
+        ops: &mut Vec<AdjOp>,
+    ) -> Result<()> {
+        // redb orders `&str` keys and `&[u8]` values bytewise, as `Ord` on
+        // `String` and `Vec<u8>` does.
+        want.sort_unstable();
+        let insert = |(key, value): (String, Vec<u8>)| AdjOp {
+            outgoing,
+            key,
+            value,
+            insert: true,
+        };
+        let mut want = want.into_iter().peekable();
+        if let Some(table) = table {
+            for row in table.iter()? {
+                let (key, values) = row?;
+                let key = key.value();
+                for guard in values {
+                    let guard = guard?;
+                    let have = guard.value();
+                    let mut wanted = false;
+                    while let Some((k, v)) = want.peek() {
+                        match (k.as_str(), v.as_slice()).cmp(&(key, have)) {
+                            std::cmp::Ordering::Less => ops.push(insert(want.next().unwrap())),
+                            std::cmp::Ordering::Equal => {
+                                want.next();
+                                wanted = true;
+                                break;
+                            }
+                            std::cmp::Ordering::Greater => break,
+                        }
+                    }
+                    if !wanted {
+                        ops.push(AdjOp {
+                            outgoing,
+                            key: key.to_string(),
+                            value: have.to_vec(),
+                            insert: false,
+                        });
+                    }
+                }
+            }
+        }
+        ops.extend(want.map(insert));
+        Ok(())
+    }
+}
+
 /// Decode an edge fetched from disk. A corrupt one is reported, queued in
 /// `corrupt` for removal, and treated as absent.
 fn decode_edge(edge_id: &str, bytes: &[u8], corrupt: &mut Vec<String>) -> Option<Edge> {
@@ -124,6 +273,7 @@ struct DiskView {
     edges: ReadOnlyTable<&'static str, &'static [u8]>,
     out: ReadOnlyMultimapTable<&'static str, &'static [u8]>,
     inc: ReadOnlyMultimapTable<&'static str, &'static [u8]>,
+    meta: Option<ReadOnlyTable<&'static str, &'static [u8]>>,
 }
 
 impl DiskView {
@@ -133,7 +283,18 @@ impl DiskView {
             edges: txn.open_table(EDGES_TABLE)?,
             out: txn.open_multimap_table(OUT_TABLE)?,
             inc: txn.open_multimap_table(IN_TABLE)?,
+            meta: open_existing(&txn, META_TABLE)?,
         })
+    }
+
+    /// Whether this snapshot's adjacency tables match its edges table.
+    fn is_current(&self) -> Result<bool> {
+        stamp_matches(self.meta.as_ref(), &self.edges)
+    }
+
+    /// Whether `node` has any edge, in either direction.
+    fn has_entries(&self, node: &str) -> Result<bool> {
+        Ok(!self.out.get(node)?.is_empty() || !self.inc.get(node)?.is_empty())
     }
 
     /// Call `f` for each edge of `node` on one side (`outgoing` or
@@ -254,16 +415,69 @@ struct DiskWriter<'t> {
     out: MultimapTable<'t, &'static str, &'static [u8]>,
     inc: MultimapTable<'t, &'static str, &'static [u8]>,
     meta: Table<'t, &'static str, &'static [u8]>,
+    /// Whether opening had to bring the adjacency tables up to date. That
+    /// work is worth committing even when the write itself changes nothing.
+    reconciled: bool,
 }
 
 impl<'t> DiskWriter<'t> {
+    /// Open the tables and make sure the adjacency tables match the edges
+    /// table before anything is written against them.
+    ///
+    /// The check is repeated in every write transaction rather than trusted
+    /// from when this process first touched the graph: an older binary may
+    /// have written edges since, and stamping on top of that would make its
+    /// edges invisible to every later process.
     fn open(txn: &'t WriteTransaction) -> Result<Self> {
+        let mut w = Self::open_tables(txn)?;
+        if !w.is_current()? {
+            w.reconcile()?;
+            w.reconciled = true;
+        }
+        Ok(w)
+    }
+
+    /// Open the tables as they are, for [`GraphEngine::sync_adjacency`],
+    /// which brings them up to date itself.
+    fn open_tables(txn: &'t WriteTransaction) -> Result<Self> {
         Ok(Self {
             edges: txn.open_table(EDGES_TABLE)?,
             out: txn.open_multimap_table(OUT_TABLE)?,
             inc: txn.open_multimap_table(IN_TABLE)?,
             meta: txn.open_table(META_TABLE)?,
+            reconciled: false,
         })
+    }
+
+    fn is_current(&self) -> Result<bool> {
+        stamp_matches(Some(&self.meta), &self.edges)
+    }
+
+    /// Make the adjacency tables match the edges table, dropping corrupt
+    /// edges, within this transaction.
+    fn reconcile(&mut self) -> Result<()> {
+        let plan = AdjacencyPlan::compute(&self.edges, Some(&self.out), Some(&self.inc))?;
+        self.apply(&plan.ops)?;
+        for id in &plan.corrupt {
+            self.edges.remove(id.as_str())?;
+        }
+        Ok(())
+    }
+
+    fn apply(&mut self, ops: &[AdjOp]) -> Result<()> {
+        for op in ops {
+            let table = if op.outgoing {
+                &mut self.out
+            } else {
+                &mut self.inc
+            };
+            if op.insert {
+                table.insert(op.key.as_str(), op.value.as_slice())?;
+            } else {
+                table.remove(op.key.as_str(), op.value.as_slice())?;
+            }
+        }
+        Ok(())
     }
 
     fn link(&mut self, from: &str, edge_type: &str, to: &str, edge_id: &str) -> Result<()> {
@@ -317,8 +531,9 @@ impl<'t> DiskWriter<'t> {
     }
 
     /// Remove every edge touching `node`, from both directions. Needs no
-    /// edge JSON: the node's adjacency entries name both endpoints.
-    fn remove_node(&mut self, node: &str) -> Result<()> {
+    /// edge JSON: the node's adjacency entries name both endpoints. Returns
+    /// whether the node had any entry.
+    fn remove_node(&mut self, node: &str) -> Result<bool> {
         let collect =
             |table: &MultimapTable<'t, &'static str, &'static [u8]>| -> Result<Vec<Vec<u8>>> {
                 let mut values = Vec::new();
@@ -345,7 +560,7 @@ impl<'t> DiskWriter<'t> {
             self.edges.remove(entry.edge_id)?;
             self.unlink(entry.other, entry.edge_type, node, entry.edge_id)?;
         }
-        Ok(())
+        Ok(!outgoing.is_empty() || !incoming.is_empty())
     }
 
     /// Remove the given edges and every adjacency entry naming them, by
@@ -625,14 +840,34 @@ enum Store {
 
 /// Graph plugin for Axil — stores directed edges between records with
 /// traversal and neighbor queries.
+///
+/// # Corrupt edges
+///
+/// An edge whose stored JSON can't be decoded is treated as absent and
+/// removed from the store, but only once a read decodes it. Reads that
+/// need only endpoints and types answer from the adjacency tables without
+/// decoding edge JSON: [`neighbor_ids`](Self::neighbor_ids),
+/// [`traverse_ids`](Self::traverse_ids) without a time filter,
+/// [`edge_count`](Self::edge_count), `GraphIndex::all_edge_ids`, and a
+/// `delete_edge` of the id, which returns `true`. Until a decoding read
+/// ([`get_edge`](Self::get_edge), [`get_edges`](Self::get_edges), a
+/// time-filtered traversal) or a rebuild of the tables removes it, those
+/// still count it. Its adjacency entry was written from a valid edge, so
+/// what they report is the edge as it was before the damage. Decoding
+/// every edge on those paths to catch this would cost what the adjacency
+/// tables exist to save, and a stored edge only goes bad through a write
+/// from outside this engine or damage to the file.
 pub struct GraphEngine {
     graph_db: Database,
     /// Settled by the first graph operation, not at open, so commands that
     /// open the database without using the graph pay nothing: checking the
-    /// adjacency stamp, and on a store that lacks the tables (or was written
-    /// by a binary that doesn't maintain them) building them — a one-time
-    /// cost of a full edge scan. A failed setup is kept, so every later
-    /// operation reports it.
+    /// adjacency stamp, and on a store that lacks the tables building them,
+    /// which scans every edge (the first time, about 0.8 s of CPU on a
+    /// store of 160k edges, and several seconds of wall time on a loaded
+    /// machine). After an older binary writes edges, whichever operation
+    /// notices next scans the edges again but writes only the entries
+    /// that changed. A failed setup is kept, so every later operation
+    /// reports it.
     store: OnceLock<std::result::Result<Store, String>>,
 }
 
@@ -686,12 +921,7 @@ impl GraphEngine {
     /// Bring the adjacency tables up to date, or fall back to holding every
     /// edge in memory when they can't be written.
     fn prepare(&self) -> Result<Store> {
-        let ready = match self.adjacency_is_current() {
-            Ok(true) => Ok(()),
-            Ok(false) => self.build_adjacency(),
-            Err(e) => Err(e),
-        };
-        match ready {
+        match self.sync_adjacency() {
             Ok(()) => {
                 let count = DiskView::open(&self.graph_db)?.edges.len()? as usize;
                 if count > MAX_EDGES {
@@ -710,47 +940,114 @@ impl GraphEngine {
 
     /// Whether the adjacency tables were last written against the edges
     /// table as it is now (see [`adjacency_stamp`]).
+    #[cfg(test)]
     fn adjacency_is_current(&self) -> Result<bool> {
         let txn = self.graph_db.begin_read()?;
-        let stored = match txn.open_table(META_TABLE) {
-            Ok(meta) => meta.get(ADJACENCY_STAMP_KEY)?.map(|g| g.value().to_vec()),
-            Err(redb::TableError::TableDoesNotExist(_)) => None,
-            Err(e) => return Err(e.into()),
-        };
-        let Some(stored) = stored else {
-            return Ok(false);
-        };
-        let edges = txn.open_table(EDGES_TABLE)?;
-        Ok(stored == adjacency_stamp(&edges)?)
+        let meta = open_existing(&txn, META_TABLE)?;
+        stamp_matches(meta.as_ref(), &txn.open_table(EDGES_TABLE)?)
     }
 
-    /// Rebuild the adjacency tables from the edges table, dropping corrupt
-    /// edges, and stamp them — all in one transaction, so a crash leaves
-    /// either the old state (rebuilt again next time) or a complete one.
-    fn build_adjacency(&self) -> Result<()> {
-        let txn = self.graph_db.begin_write()?;
-        txn.delete_multimap_table(OUT_TABLE)?;
-        txn.delete_multimap_table(IN_TABLE)?;
-        {
-            let mut w = DiskWriter::open(&txn)?;
-            let mut corrupt: Vec<String> = Vec::new();
-            for row in w.edges.iter()? {
-                let (key, value) = row?;
-                let id = key.value();
-                let Some(edge) = decode_edge(id, value.value(), &mut corrupt) else {
-                    continue;
+    /// Bring the adjacency tables in line with the edges table and stamp
+    /// them; returns at once when the stamp already matches.
+    fn sync_adjacency(&self) -> Result<()> {
+        self.sync_adjacency_in_chunks(SYNC_CHUNK, &mut |_| true)
+    }
+
+    /// [`Self::sync_adjacency`], committing at most `chunk` adjacency
+    /// changes per write transaction.
+    ///
+    /// Building the tables for a large store the first time takes seconds,
+    /// and the process doing it may be a hook that gets killed at its
+    /// timeout. Committing in chunks means a killed process still leaves
+    /// most of its work behind: the next sync diffs against the partly
+    /// built tables and writes only the rest. Only the last chunk stamps,
+    /// so no process trusts the tables before they are complete.
+    ///
+    /// Every chunk is computed from one snapshot of the edges table and
+    /// applied only while the edges table still matches that snapshot, so
+    /// each change either adds an entry the final tables need or removes
+    /// one they must not have; applying any subset of them, in any
+    /// interleaving with other processes doing the same, can't undo
+    /// another's work. When the edges table changes mid-sync the plan is
+    /// recomputed; after a few such attempts the sync falls back to one
+    /// write transaction, which nothing can interleave with.
+    ///
+    /// `before_chunk` is called with the number of chunks committed so far
+    /// before each write transaction; returning `false` ends the sync there,
+    /// as a killed process would.
+    fn sync_adjacency_in_chunks(
+        &self,
+        chunk: usize,
+        before_chunk: &mut dyn FnMut(usize) -> bool,
+    ) -> Result<()> {
+        const ATTEMPTS: usize = 3;
+        let mut committed = 0;
+        for _ in 0..ATTEMPTS {
+            let (target, plan) = {
+                let txn = self.graph_db.begin_read()?;
+                let edges = txn.open_table(EDGES_TABLE)?;
+                if stamp_matches(open_existing(&txn, META_TABLE)?.as_ref(), &edges)? {
+                    return Ok(());
+                }
+                let out = open_existing_multimap(&txn, OUT_TABLE)?;
+                let inc = open_existing_multimap(&txn, IN_TABLE)?;
+                let plan = AdjacencyPlan::compute(&edges, out.as_ref(), inc.as_ref())?;
+                (adjacency_stamp(&edges)?, plan)
+            };
+            let chunks: Vec<&[AdjOp]> = if plan.ops.is_empty() {
+                // Nothing to change, but the stamp still has to be written.
+                vec![&[]]
+            } else {
+                plan.ops.chunks(chunk.max(1)).collect()
+            };
+            let last = chunks.len() - 1;
+            let mut replan = false;
+            for (i, ops) in chunks.into_iter().enumerate() {
+                if !before_chunk(committed) {
+                    return Ok(());
+                }
+                let txn = self.graph_db.begin_write()?;
+                let proceed = {
+                    let mut w = DiskWriter::open_tables(&txn)?;
+                    if w.is_current()? {
+                        // Another process finished the job.
+                        Some(false)
+                    } else if adjacency_stamp(&w.edges)? != target {
+                        None
+                    } else {
+                        w.apply(ops)?;
+                        if i == last {
+                            for id in &plan.corrupt {
+                                w.edges.remove(id.as_str())?;
+                            }
+                            w.finish()?;
+                        }
+                        Some(true)
+                    }
                 };
-                let (from, to) = (edge.from.as_str(), edge.to.as_str());
-                w.out
-                    .insert(from, AdjEntry::encode(&edge.edge_type, to, id).as_slice())?;
-                w.inc
-                    .insert(to, AdjEntry::encode(&edge.edge_type, from, id).as_slice())?;
+                match proceed {
+                    Some(true) => {
+                        txn.commit()?;
+                        committed += 1;
+                    }
+                    Some(false) => {
+                        txn.abort()?;
+                        return Ok(());
+                    }
+                    None => {
+                        txn.abort()?;
+                        replan = true;
+                        break;
+                    }
+                }
             }
-            for id in &corrupt {
-                w.edges.remove(id.as_str())?;
+            if !replan {
+                return Ok(());
             }
-            w.finish()?;
         }
+        // The edges table kept changing under the chunked sync.
+        let txn = self.graph_db.begin_write()?;
+        DiskWriter::open(&txn)?.finish()?;
         txn.commit()?;
         Ok(())
     }
@@ -819,15 +1116,29 @@ impl GraphEngine {
         }
     }
 
-    /// Run a read against a snapshot of the on-disk store, then remove any
-    /// corrupt edges it ran into.
+    /// Run a read against a snapshot of the on-disk store, first bringing
+    /// the adjacency tables up to date if the edges table changed without
+    /// them, then remove any corrupt edges the read ran into.
     fn with_view<T>(
         &self,
         read: impl FnOnce(&DiskView, &mut Vec<String>) -> Result<T>,
     ) -> Result<T> {
         let mut corrupt = Vec::new();
         let result = {
-            let view = DiskView::open(&self.graph_db)?;
+            let mut view = DiskView::open(&self.graph_db)?;
+            // Checked on every read, not just the first: in a long-lived
+            // process (the MCP server, the worker) an older binary may have
+            // written edges since, and those would otherwise stay invisible.
+            // The check is three lookups. A sync that loses a race with yet
+            // another such write is retried once, then the read goes ahead.
+            for _ in 0..2 {
+                if view.is_current()? {
+                    break;
+                }
+                drop(view);
+                self.sync_adjacency()?;
+                view = DiskView::open(&self.graph_db)?;
+            }
             read(&view, &mut corrupt)
         };
         self.purge_corrupt(corrupt);
@@ -973,15 +1284,18 @@ impl GraphEngine {
         match self.store()? {
             Store::Disk => {
                 let txn = self.graph_db.begin_write()?;
-                let existed = {
+                let (existed, changed) = {
                     let mut w = DiskWriter::open(&txn)?;
                     let existed = w.remove(edge_id.as_str())?;
-                    if existed {
+                    let changed = existed || w.reconciled;
+                    if changed {
                         w.finish()?;
                     }
-                    existed
+                    (existed, changed)
                 };
-                if existed {
+                // A commit is a durable write of the graph file; skip it
+                // when there is nothing to keep.
+                if changed {
                     txn.commit()?;
                 } else {
                     txn.abort()?;
@@ -1251,16 +1565,33 @@ impl Engine for GraphEngine {
 
     fn on_record_delete(&self, id: &RecordId) -> Result<()> {
         match self.store()? {
-            // One write transaction: no edge for this record can be added
-            // between collecting its edges and removing them.
             Store::Disk => {
-                let txn = self.graph_db.begin_write()?;
-                {
-                    let mut w = DiskWriter::open(&txn)?;
-                    w.remove_node(id.as_str())?;
-                    w.finish()?;
+                // Most deleted records have no edges (recall chunks, doc
+                // chunks, cache rows), and a commit is a durable write of
+                // the graph file. A read settles that there is nothing to do
+                // without taking the writer lock. An edge another thread
+                // commits after this read is ordered after the delete, as
+                // it would be had it committed after a write transaction.
+                if !self.with_view(|view, _| view.has_entries(id.as_str()))? {
+                    return Ok(());
                 }
-                txn.commit()?;
+                // One write transaction: no edge for this record can be added
+                // between collecting its edges and removing them.
+                let txn = self.graph_db.begin_write()?;
+                let changed = {
+                    let mut w = DiskWriter::open(&txn)?;
+                    let changed = w.remove_node(id.as_str())? || w.reconciled;
+                    if changed {
+                        w.finish()?;
+                    }
+                    changed
+                };
+                // The edges may have gone between the read and the write.
+                if changed {
+                    txn.commit()?;
+                } else {
+                    txn.abort()?;
+                }
                 Ok(())
             }
             // Hold the write lock for the entire operation for the same
@@ -2001,6 +2332,38 @@ mod adjacency_parity_tests {
         matches!(g.store(), Ok(Store::Disk))
     }
 
+    fn clear_stamp(g: &GraphEngine) {
+        let txn = g.graph_db.begin_write().unwrap();
+        clear_adjacency_stamp(&txn).unwrap();
+        txn.commit().unwrap();
+    }
+
+    /// How many adjacency changes a sync would make now.
+    fn pending_ops(g: &GraphEngine) -> usize {
+        let txn = g.graph_db.begin_read().unwrap();
+        let edges = txn.open_table(EDGES_TABLE).unwrap();
+        let out = open_existing_multimap(&txn, OUT_TABLE).unwrap();
+        let inc = open_existing_multimap(&txn, IN_TABLE).unwrap();
+        AdjacencyPlan::compute(&edges, out.as_ref(), inc.as_ref())
+            .unwrap()
+            .ops
+            .len()
+    }
+
+    /// Write an edge the way an older binary does: to "edges" alone. Goes
+    /// through the engine's own handle, since redb allows one per file per
+    /// process; the engine can't tell the difference.
+    fn write_edge_without_adjacency(db: &Database, edge: &Edge) {
+        let txn = db.begin_write().unwrap();
+        {
+            let mut edges = txn.open_table(EDGES_TABLE).unwrap();
+            edges
+                .insert(edge.id.as_str(), edge.to_bytes().unwrap().as_slice())
+                .unwrap();
+        }
+        txn.commit().unwrap();
+    }
+
     #[test]
     fn disk_adjacency_matches_in_memory_oracle() {
         for seed in 1..=8u64 {
@@ -2079,9 +2442,12 @@ mod adjacency_parity_tests {
         assert!(is_disk(&g));
         assert!(g.adjacency_is_current().unwrap());
 
-        // The build is idempotent: running it again changes nothing.
-        g.build_adjacency().unwrap();
-        g.build_adjacency().unwrap();
+        // The build is idempotent: with the stamp gone, a sync finds nothing
+        // to change and only stamps again.
+        clear_stamp(&g);
+        assert_eq!(pending_ops(&g), 0);
+        g.sync_adjacency().unwrap();
+        assert!(g.adjacency_is_current().unwrap());
         assert_parity(&g, &oracle, &nodes, &mut rng);
         run_ops(&g, &mut oracle, &nodes, &mut rng, 80, 40);
     }
@@ -2222,6 +2588,244 @@ mod adjacency_parity_tests {
         assert_eq!(g.edge_count(), 1);
         assert_eq!(g.all_edge_ids().unwrap().len(), 1);
         assert!(g.adjacency_is_current().unwrap());
+    }
+
+    #[test]
+    fn corrupt_edge_counts_until_a_decoding_read() {
+        // The contract documented on `GraphEngine`: reads that don't decode
+        // edge JSON still see a corrupt edge until one that does removes it.
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b, c) = (
+            RecordId("a".into()),
+            RecordId("b".into()),
+            RecordId("c".into()),
+        );
+        let bad = {
+            let g = GraphEngine::open(graph_path(&dir)).unwrap();
+            g.create_edge(a.clone(), "knows", c.clone(), json!({}))
+                .unwrap();
+            g.create_edge(a.clone(), "knows", b.clone(), json!({}))
+                .unwrap()
+        };
+        {
+            let db = open_raw(&dir);
+            let txn = db.begin_write().unwrap();
+            txn.open_table(EDGES_TABLE)
+                .unwrap()
+                .insert(bad.id.as_str(), b"garbage".as_slice())
+                .unwrap();
+            txn.commit().unwrap();
+        }
+        let g = GraphEngine::open(graph_path(&dir)).unwrap();
+        assert_eq!(
+            rid_strings(g.neighbor_ids(&a, None, Direction::Out)),
+            vec!["b".to_string(), "c".to_string()]
+        );
+        assert_eq!(g.edge_count(), 2);
+        assert_eq!(g.all_edge_ids().unwrap().len(), 2);
+
+        assert_eq!(g.get_edges(&a, None, Direction::Out).len(), 1);
+
+        assert_eq!(g.neighbor_ids(&a, None, Direction::Out), vec![c.clone()]);
+        assert_eq!(g.edge_count(), 1);
+        assert_eq!(g.all_edge_ids().unwrap().len(), 1);
+        assert!(!g.delete_edge(&bad.id).unwrap());
+    }
+
+    #[test]
+    fn record_delete_without_edges_takes_no_write_transaction() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphEngine::open(graph_path(&dir)).unwrap();
+        let (a, b) = (RecordId("a".into()), RecordId("b".into()));
+        g.create_edge(a.clone(), "knows", b.clone(), json!({}))
+            .unwrap();
+        assert!(is_disk(&g));
+        let lonely = RecordId("lonely".into());
+
+        // Hold the writer lock: a delete that begins a write transaction
+        // (and so would commit, a durable write) blocks until it's released.
+        let held = g.graph_db.begin_write().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::scope(|s| {
+            let (g, lonely) = (&g, &lonely);
+            s.spawn(move || {
+                g.on_record_delete(lonely).unwrap();
+                tx.send(()).unwrap();
+            });
+            let finished = rx.recv_timeout(std::time::Duration::from_secs(5)).is_ok();
+            held.abort().unwrap();
+            assert!(
+                finished,
+                "deleting an edgeless record waited for the writer lock"
+            );
+        });
+
+        // A record with edges still loses them.
+        g.on_record_delete(&a).unwrap();
+        assert_eq!(g.edge_count(), 0);
+        assert!(g.neighbor_ids(&b, None, Direction::In).is_empty());
+        assert!(g.adjacency_is_current().unwrap());
+    }
+
+    #[test]
+    fn long_lived_engine_picks_up_edges_written_by_an_older_binary() {
+        let dir = tempfile::tempdir().unwrap();
+        let nodes = nodes(6);
+        let mut rng = Rng::new(71);
+        let mut oracle = AdjacencyIndex::new();
+        let g = GraphEngine::open(graph_path(&dir)).unwrap();
+        run_ops(&g, &mut oracle, &nodes, &mut rng, 60, 60);
+
+        // An older binary adds an edge while this engine stays open. This
+        // engine's next write must not stamp over the missing entries.
+        let old = Edge::new(nodes[0].clone(), "knows", nodes[1].clone(), json!({}));
+        write_edge_without_adjacency(&g.graph_db, &old);
+        oracle.add(old);
+        assert_eq!(
+            pending_ops(&g),
+            2,
+            "only the new edge's entries are missing"
+        );
+        let e = g
+            .create_edge(nodes[2].clone(), "mentions", nodes[3].clone(), json!({}))
+            .unwrap();
+        oracle.add(e);
+        assert!(g.adjacency_is_current().unwrap());
+        assert_parity(&g, &oracle, &nodes, &mut rng);
+
+        // Reads catch it too, with no write in between: an added edge, and
+        // an edge removed from "edges" alone, as an older binary's record
+        // delete does.
+        let old = Edge::new(nodes[4].clone(), "depends_on", nodes[0].clone(), json!({}));
+        write_edge_without_adjacency(&g.graph_db, &old);
+        oracle.add(old);
+        let victim = oracle.edges.keys().min().cloned().unwrap();
+        {
+            let txn = g.graph_db.begin_write().unwrap();
+            txn.open_table(EDGES_TABLE)
+                .unwrap()
+                .remove(victim.as_str())
+                .unwrap();
+            txn.commit().unwrap();
+        }
+        oracle.remove(&victim);
+        assert_parity(&g, &oracle, &nodes, &mut rng);
+        assert!(g.adjacency_is_current().unwrap());
+
+        drop(g);
+        let g = GraphEngine::open(graph_path(&dir)).unwrap();
+        assert!(g.adjacency_is_current().unwrap());
+        assert_parity(&g, &oracle, &nodes, &mut rng);
+    }
+
+    #[test]
+    fn interrupted_sync_resumes_where_it_stopped() {
+        let dir = tempfile::tempdir().unwrap();
+        let nodes = nodes(10);
+        let mut rng = Rng::new(81);
+        let mut oracle = AdjacencyIndex::new();
+        {
+            let g = GraphEngine::open(graph_path(&dir)).unwrap();
+            run_ops(&g, &mut oracle, &nodes, &mut rng, 200, 200);
+        }
+        {
+            let db = open_raw(&dir);
+            let txn = db.begin_write().unwrap();
+            txn.delete_multimap_table(OUT_TABLE).unwrap();
+            txn.delete_multimap_table(IN_TABLE).unwrap();
+            txn.delete_table(META_TABLE).unwrap();
+            txn.commit().unwrap();
+        }
+        let g = GraphEngine::open(graph_path(&dir)).unwrap();
+        let total = pending_ops(&g);
+        assert_eq!(total, 2 * oracle.edge_count());
+
+        // Killed after two chunks: their entries are on disk, unstamped.
+        g.sync_adjacency_in_chunks(10, &mut |done| done < 2)
+            .unwrap();
+        assert!(!g.adjacency_is_current().unwrap());
+        assert_eq!(pending_ops(&g), total - 20);
+
+        // An older binary then removes edges whose entries are already
+        // written, and adds one.
+        let written: Vec<RecordId> = oracle
+            .edges
+            .values()
+            .filter(|e| e.from == nodes[0])
+            .map(|e| e.id.clone())
+            .collect();
+        assert!(!written.is_empty());
+        {
+            let txn = g.graph_db.begin_write().unwrap();
+            {
+                let mut edges = txn.open_table(EDGES_TABLE).unwrap();
+                for id in &written {
+                    edges.remove(id.as_str()).unwrap();
+                    oracle.remove(id);
+                }
+            }
+            txn.commit().unwrap();
+        }
+        let added = Edge::new(nodes[0].clone(), "knows", nodes[9].clone(), json!({}));
+        write_edge_without_adjacency(&g.graph_db, &added);
+        oracle.add(added);
+
+        // The next process finishes the job from there.
+        drop(g);
+        let g = GraphEngine::open(graph_path(&dir)).unwrap();
+        assert!(pending_ops(&g) < total);
+        assert_parity(&g, &oracle, &nodes, &mut rng);
+        assert!(g.adjacency_is_current().unwrap());
+        assert_eq!(pending_ops(&g), 0);
+    }
+
+    #[test]
+    fn sync_replans_when_edges_change_between_chunks() {
+        let dir = tempfile::tempdir().unwrap();
+        let nodes = nodes(8);
+        let mut rng = Rng::new(91);
+        let mut oracle = AdjacencyIndex::new();
+        let g = GraphEngine::open(graph_path(&dir)).unwrap();
+        run_ops(&g, &mut oracle, &nodes, &mut rng, 120, 120);
+        clear_stamp(&g);
+        // Damage the tables: drop the outgoing entries of half the nodes and
+        // add a stray.
+        {
+            let txn = g.graph_db.begin_write().unwrap();
+            {
+                let mut out = txn.open_multimap_table(OUT_TABLE).unwrap();
+                for node in &nodes[..4] {
+                    out.remove_all(node.as_str()).unwrap();
+                }
+                out.insert(
+                    nodes[2].as_str(),
+                    AdjEntry::encode("knows", "ghost", "no-such-edge").as_slice(),
+                )
+                .unwrap();
+            }
+            txn.commit().unwrap();
+        }
+        let pending = pending_ops(&g);
+        assert!(pending > 3);
+        // An older binary writes between the first and second chunk, so the
+        // rest of the plan is stale: the sync must notice and replan.
+        let added = Edge::new(nodes[3].clone(), "knows", nodes[4].clone(), json!({}));
+        let mut calls = 0;
+        g.sync_adjacency_in_chunks(1, &mut |done| {
+            calls += 1;
+            if done == 1 && calls == 2 {
+                write_edge_without_adjacency(&g.graph_db, &added);
+            }
+            true
+        })
+        .unwrap();
+        oracle.add(added);
+        // One chunk per change of the first plan up to the write, then one
+        // per change of the second.
+        assert!(calls > pending, "the sync replanned ({calls} chunks)");
+        assert!(g.adjacency_is_current().unwrap());
+        assert_eq!(pending_ops(&g), 0);
+        assert_parity(&g, &oracle, &nodes, &mut rng);
     }
 
     #[test]
