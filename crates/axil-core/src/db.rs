@@ -7257,7 +7257,12 @@ impl Axil {
         let alpha = qtc.alpha.clamp(0.0, 1.0);
         let rerank_n = results.len().min(qtc.top_k);
 
-        for result in results.iter_mut().take(rerank_n) {
+        // Results without stored chunk vectors are chunked here and embedded
+        // together in one batched call; a call per result cost up to
+        // `top_k` model runs per recall.
+        let mut pending: Vec<(usize, std::ops::Range<usize>)> = Vec::new();
+        let mut chunks: Vec<String> = Vec::new();
+        for (i, result) in results.iter_mut().take(rerank_n).enumerate() {
             // Fast path: read pre-computed chunk vectors stored at insert.
             if let Some(best) =
                 self.qtc_best_cosine_from_stored_chunks(&result.record, query_vec, q_norm)
@@ -7266,26 +7271,39 @@ impl Axil {
                 continue;
             }
 
-            // Slow path: chunk + embed at query time.
+            // Slow path: chunk at query time.
             let text = crate::util::searchable_text(&result.record.data);
             if text.trim().is_empty() {
                 continue;
             }
-            let chunks = chunk_by_chars(&text, qtc.chunk_chars, qtc.stride_chars);
-            if chunks.is_empty() {
+            let record_chunks = chunk_by_chars(&text, qtc.chunk_chars, qtc.stride_chars);
+            if record_chunks.is_empty() {
                 continue;
             }
-            let refs: Vec<&str> = chunks.iter().map(String::as_str).collect();
-            let Ok(vectors) = embedder.embed_batch(&refs) else {
-                continue;
-            };
+            let start = chunks.len();
+            chunks.extend(record_chunks);
+            pending.push((i, start..chunks.len()));
+        }
+        if pending.is_empty() {
+            return;
+        }
+
+        let refs: Vec<&str> = chunks.iter().map(String::as_str).collect();
+        let Ok(vectors) = embedder.embed_batch(&refs) else {
+            return;
+        };
+        if vectors.len() != chunks.len() {
+            return;
+        }
+        for (i, range) in pending {
             let mut best: f32 = 0.0;
-            for vec in &vectors {
+            for vec in &vectors[range] {
                 let sim = cosine(query_vec, q_norm, vec);
                 if sim > best {
                     best = sim;
                 }
             }
+            let result = &mut results[i];
             result.score = alpha * best + (1.0 - alpha) * result.score;
         }
     }
@@ -8262,6 +8280,89 @@ mod tests {
     }
 
     // ── QTC helpers ────────────────────────────────────────────────────
+
+    /// Bag-of-bytes embedder that counts its batch calls.
+    struct CountingEmbedder(std::sync::atomic::AtomicUsize);
+
+    impl crate::plugin::TextEmbedder for CountingEmbedder {
+        fn embed(&self, text: &str) -> Result<Vec<f32>> {
+            let mut v = vec![0.0f32; 8];
+            for b in text.bytes() {
+                v[usize::from(b % 8)] += 1.0;
+            }
+            Ok(v)
+        }
+
+        fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            texts.iter().map(|t| self.embed(t)).collect()
+        }
+    }
+
+    #[test]
+    fn query_time_chunks_are_embedded_in_one_call_with_the_same_scores() {
+        // No vector index: every result has to be chunked at query time.
+        let (db, _dir) = temp_db();
+        let qtc = crate::scoring::QtcConfig {
+            top_k: 20,
+            chunk_chars: 40,
+            stride_chars: 30,
+            alpha: 0.7,
+        };
+        let texts = [
+            "short text",
+            "a much longer text that spans several chunks of forty characters each",
+            "",
+            "another record about chunks",
+        ];
+        let results = || -> Vec<crate::scoring::RecallResult> {
+            texts
+                .iter()
+                .enumerate()
+                .map(|(i, t)| crate::scoring::RecallResult {
+                    record: Record::new("notes", json!({ "summary": t })),
+                    score: 0.1 * i as f32,
+                    explanation: crate::scoring::ScoreExplanation {
+                        signals: Vec::new(),
+                        summary: String::new(),
+                        query_class: None,
+                    },
+                })
+                .collect()
+        };
+        let embedder = CountingEmbedder(std::sync::atomic::AtomicUsize::new(0));
+        let query = crate::plugin::TextEmbedder::embed(&embedder, "chunk text").unwrap();
+
+        let mut got = results();
+        db.apply_query_time_chunks(&mut got, &query, &embedder, &qtc);
+        assert_eq!(embedder.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        // Each result scored on its own, as before batching.
+        let q_norm = l2_norm(&query);
+        for (got, before) in got.iter().zip(results()) {
+            let text = crate::util::searchable_text(&before.record.data);
+            if text.trim().is_empty() {
+                assert_eq!(got.score, before.score);
+                continue;
+            }
+            let best = chunk_by_chars(&text, qtc.chunk_chars, qtc.stride_chars)
+                .iter()
+                .map(|c| {
+                    cosine(
+                        &query,
+                        q_norm,
+                        &crate::plugin::TextEmbedder::embed(&embedder, c).unwrap(),
+                    )
+                })
+                .fold(0.0f32, f32::max);
+            let expected = qtc.alpha * best + (1.0 - qtc.alpha) * before.score;
+            assert!(
+                (got.score - expected).abs() < 1e-6,
+                "{text}: {} vs {expected}",
+                got.score
+            );
+        }
+    }
 
     #[test]
     fn chunk_by_chars_short_text_single_chunk() {
