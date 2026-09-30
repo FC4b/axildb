@@ -2274,10 +2274,12 @@ enum Command {
         /// Context-aware: push memories related to this error text.
         #[arg(long)]
         error: Option<String>,
-        /// Use the stable v1 boot schema (fixed section order + token budget
-        /// discipline). Opt-in for one release; will become the default later.
-        /// Emits JSON matching `axil_core::BootContext`.
-        #[arg(long = "schema", value_parser = ["v1"])]
+        /// Emit the structured boot schema, JSON matching
+        /// `axil_core::BootContext` (the MCP `boot` payload): fixed section
+        /// order, the same budget. `v2` is the current schema, one string per
+        /// row. `v1` (a whole record per row) is no longer produced, and
+        /// asking for it is an error rather than a silently different shape.
+        #[arg(long = "schema", value_parser = ["v1", "v2"])]
         schema: Option<String>,
     },
 
@@ -13322,8 +13324,15 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             // render in `axil boot`, like a native Extension's.
             register_installed_plugins(&db, &db_path);
 
-            // Opt-in stable schema; legacy flat JSON below stays the default.
+            // Opt-in structured schema; the flat JSON below stays the default.
             if schema.as_deref() == Some("v1") {
+                anyhow::bail!(
+                    "boot schema v1 (a whole record per row) is no longer produced; \
+                     `axil boot --schema v2` returns the current BootContext, whose rows \
+                     are one-line strings (`id · age · status · summary`)"
+                );
+            }
+            if schema.is_some() {
                 let opts = axil_core::BootOptions {
                     token_budget: budget,
                     topic: topic.clone(),
@@ -13370,7 +13379,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             }
 
             // Decisions and errors rank by importance decayed with age, the
-            // same order `--schema v1` and the MCP boot use, so an old but
+            // same order `--schema v2` and the MCP boot use, so an old but
             // once-important record does not outrank this week's work.
             let decay = load_config(&db_path).map(|c| c.decay).unwrap_or_default();
             let mut decisions = db.list("decisions").unwrap_or_default();
@@ -13418,10 +13427,13 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                         .iter()
                         .take(5)
                         .map(|b| {
-                            json!({
-                                "statement": b.statement,
-                                "confidence": b.confidence,
-                            })
+                            json!(axil_core::boot::boot_row(
+                                &b.id,
+                                &boot_age_of(&b.created_at, now),
+                                &format!("conf {:.2}", b.confidence),
+                                &b.statement,
+                                axil_core::boot::BOOT_ROW_SUMMARY_CHARS,
+                            ))
                         })
                         .collect();
                     sections.insert("beliefs".into(), json!(belief_vals));
@@ -13445,10 +13457,14 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                     })
                     .take(5)
                     .map(|r| {
-                        json!({
-                            "name": r.data.get("name").cloned().unwrap_or(Value::Null),
-                            "confidence": r.data.get("confidence").cloned().unwrap_or(Value::Null),
-                        })
+                        let confidence = r.data.get("confidence").and_then(Value::as_f64);
+                        json!(axil_core::boot::boot_row(
+                            &r.id.to_string(),
+                            &axil_core::boot::boot_age(r.created_at, now),
+                            &format!("conf {:.2}", confidence.unwrap_or(0.0)),
+                            &axil_core::boot::record_headline(r),
+                            axil_core::boot::BOOT_ROW_SUMMARY_CHARS,
+                        ))
                     })
                     .collect();
                 if !high_conf.is_empty() {
@@ -13476,11 +13492,14 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                             let summary = knowledge
                                 .consolidated_summary()
                                 .unwrap_or_else(|| format!("{count} facts"));
-                            Some(json!({
-                                "entity": name,
-                                "facts": count,
-                                "consolidated": summary,
-                            }))
+                            Some(json!(format!(
+                                "{name}{sep}{count} facts{sep}{}",
+                                axil_core::boot::clip_one_line(
+                                    &summary,
+                                    axil_core::boot::BOOT_ROW_SUMMARY_CHARS
+                                ),
+                                sep = axil_core::boot::BOOT_ROW_SEP,
+                            )))
                         })
                         .collect();
                     if !entity_vals.is_empty() {
@@ -13494,12 +13513,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                     let pref_vals: Vec<Value> = prefs
                         .iter()
                         .take(5)
-                        .map(|r| {
-                            json!({
-                                "key": r.data.get("key").cloned().unwrap_or(Value::Null),
-                                "value": r.data.get("value").cloned().unwrap_or(Value::Null),
-                            })
-                        })
+                        .map(|r| json!(axil_core::boot::preference_row(r, now)))
                         .collect();
                     sections.insert("preferences".into(), json!(pref_vals));
                 }
@@ -13557,12 +13571,17 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                             .iter()
                             .take(3)
                             .map(|p| {
-                                json!({
-                                    "name": p.name,
-                                    "type": p.pattern_type.as_str(),
-                                    "description": p.description,
-                                    "frequency": p.frequency,
-                                })
+                                json!(format!(
+                                    "{}{sep}{}{sep}seen {}x{sep}{}",
+                                    p.name,
+                                    p.pattern_type.as_str(),
+                                    p.frequency,
+                                    axil_core::boot::clip_one_line(
+                                        &p.description,
+                                        axil_core::boot::BOOT_ROW_SUMMARY_CHARS
+                                    ),
+                                    sep = axil_core::boot::BOOT_ROW_SEP,
+                                ))
                             })
                             .collect();
                         sections.insert("active_patterns".into(), json!(pat_vals));
@@ -13592,10 +13611,10 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                         if stale > 0 {
                             sections.insert(
                                 "dep_docs_freshness".into(),
-                                json!({
-                                    "stale_manifests": stale,
-                                    "recommendation": "run `axil deps refresh --if-stale`",
-                                }),
+                                json!(format!(
+                                    "{stale} stale manifests{}run `axil deps refresh --if-stale`",
+                                    axil_core::boot::BOOT_ROW_SEP
+                                )),
                             );
                         }
                     }
@@ -13614,12 +13633,14 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                     if freshness.status != axil_indexer::freshness::FreshnessStatus::Fresh {
                         sections.insert(
                             "index_freshness".into(),
-                            json!({
-                                "status": freshness.status.as_str(),
-                                "changed_files": freshness.changed_files,
-                                "new_files": freshness.new_files,
-                                "recommendation": freshness.recommendation,
-                            }),
+                            json!(format!(
+                                "{}{sep}{} changed, {} new{sep}{}",
+                                freshness.status.as_str(),
+                                freshness.changed_files,
+                                freshness.new_files,
+                                freshness.recommendation,
+                                sep = axil_core::boot::BOOT_ROW_SEP,
+                            )),
                         );
                     }
                 }
@@ -13627,12 +13648,22 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                 let project = db.list("_idx_project").unwrap_or_default();
                 if !project.is_empty() {
                     let proj = &project[0];
-                    sections.insert("project".into(), json!({
-                        "name": proj.data.get("name").cloned().unwrap_or(Value::Null),
-                        "type": proj.data.get("project_type").cloned().unwrap_or(Value::Null),
-                        "files": proj.data.get("file_count").cloned().unwrap_or(Value::Null),
-                        "modules": proj.data.get("module_count").cloned().unwrap_or(Value::Null),
-                    }));
+                    let field = |k: &str| match proj.data.get(k) {
+                        Some(Value::String(s)) => s.clone(),
+                        Some(Value::Null) | None => "?".to_string(),
+                        Some(other) => other.to_string(),
+                    };
+                    sections.insert(
+                        "project".into(),
+                        json!(format!(
+                            "{}{sep}{}{sep}{} files{sep}{} modules",
+                            field("name"),
+                            field("project_type"),
+                            field("file_count"),
+                            field("module_count"),
+                            sep = axil_core::boot::BOOT_ROW_SEP,
+                        )),
+                    );
 
                     // Top modules by file count, one line each. A module
                     // whose summary is only parser fallback ("N lines of
@@ -13789,16 +13820,23 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             if db.event_log_enabled() {
                 if let Ok(events) = db.recall_delta(None, None, 10) {
                     if !events.is_empty() {
+                        // `record id · kind · op table (by agent)`: the id
+                        // leads, like every other row, so `axil get` expands it.
                         let change_vals: Vec<Value> = events
                             .iter()
                             .map(|e| {
-                                json!({
-                                    "cursor": e.cursor,
-                                    "kind": e.kind,
-                                    "table": e.table,
-                                    "record_id": e.record_id,
-                                    "agent_id": e.agent_id,
-                                })
+                                let by = e
+                                    .agent_id
+                                    .as_deref()
+                                    .map_or_else(String::new, |a| format!(" (by {a})"));
+                                json!(format!(
+                                    "{}{sep}{}{sep}{} {}{by}",
+                                    e.record_id,
+                                    e.kind,
+                                    e.op,
+                                    e.table,
+                                    sep = axil_core::boot::BOOT_ROW_SEP,
+                                ))
                             })
                             .collect();
                         sections.insert("recent_changes".into(), json!(change_vals));
@@ -19461,6 +19499,15 @@ fn truncate_value(v: &Value, max_len: usize) -> Value {
     }
 }
 
+/// [`axil_core::boot::boot_age`] of an RFC 3339 timestamp stored as text,
+/// or `?` when it does not parse.
+fn boot_age_of(timestamp: &str, now: chrono::DateTime<chrono::Utc>) -> String {
+    chrono::DateTime::parse_from_rfc3339(timestamp).map_or_else(
+        |_| "?".to_string(),
+        |t| axil_core::boot::boot_age(t.with_timezone(&chrono::Utc), now),
+    )
+}
+
 /// Sessions older than this are left out of boot.
 const BOOT_SESSION_MAX_AGE_DAYS: i64 = 90;
 /// Sessions older than this are labelled stale in boot.
@@ -19772,30 +19819,7 @@ fn narrative_sections(data: &Value) -> Vec<NarrativeSection> {
             "context_push" => out.extend(rows(key, "## Pushed Context")),
             // Cross-agent delta from the semantic event log (present only
             // when the `event-log` feature is enabled and the log is on).
-            "recent_changes" => {
-                let lines: Vec<String> = data
-                    .get(key)
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten()
-                    .map(|c| {
-                        let kind = c.get("kind").and_then(|v| v.as_str()).unwrap_or("?");
-                        let table = c.get("table").and_then(|v| v.as_str()).unwrap_or("");
-                        let rec = c.get("record_id").and_then(|v| v.as_str()).unwrap_or("");
-                        match c.get("agent_id").and_then(|v| v.as_str()) {
-                            Some(agent) => format!("- {kind} [{table}] {rec} (by {agent})"),
-                            None => format!("- {kind} [{table}] {rec}"),
-                        }
-                    })
-                    .collect();
-                if !lines.is_empty() {
-                    out.push(NarrativeSection {
-                        header: "## Recent Changes (since last session)".into(),
-                        lines,
-                        prefix_only: false,
-                    });
-                }
-            }
+            "recent_changes" => out.extend(rows(key, "## Recent Changes (since last session)")),
             "recent_sessions" => out.extend(rows(key, "## Recent Sessions")),
             "lessons" => out.extend(rows(key, "## Lessons (resolved errors)")),
             "architecture" => out.extend(rows(key, "## Architecture Notes")),

@@ -452,7 +452,10 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
         // ─── Boot contract (Track C) ────────────────────────────────
         ToolDefinition {
             name: "boot".into(),
-            description: "Return a stable BootContext (schema v1): current_scope, constraints, recent_decisions, active_failures (open errors), open_threads, preferences, confidence_notes. One line per row (`id · age · status · summary`, expand with `get`); the budget cuts rows, then lower-priority sections.".into(),
+            description: format!(
+                "Return a stable BootContext (schema_version \"{}\"): current_scope, constraints, recent_decisions, active_failures (open errors), open_threads, preferences, confidence_notes. Every row is one string (`id · age · status · summary`, expand with `get`); the budget cuts rows, then lower-priority sections.",
+                axil_core::BOOT_SCHEMA_VERSION
+            ),
             input_schema: json!({
                 "type": "object",
                 "properties": {

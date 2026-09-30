@@ -120,12 +120,14 @@ fn close_session_is_idempotent_by_id() {
 // ─── Track C: boot contract over MCP ─────────────────────────────────
 
 #[test]
-fn boot_returns_schema_v1_with_fixed_section_order() {
+fn boot_returns_schema_2_with_fixed_section_order() {
     let (_tmp, path) = temp_db_path();
     let server = McpServer::open(&path).unwrap();
     let out = dispatch_json(&server, "boot", json!({"budget": 2000}));
 
-    assert_eq!(out["schema_version"], "1");
+    // Schema 2: rows are one-line strings (schema 1 carried whole records).
+    assert_eq!(out["schema_version"], "2");
+    assert_eq!(out["schema_version"], axil_core::BOOT_SCHEMA_VERSION);
     let sections = out["sections"].as_array().expect("sections array");
     let kinds: Vec<&str> = sections.iter().filter_map(|s| s["kind"].as_str()).collect();
     assert_eq!(
@@ -160,7 +162,7 @@ fn boot_defaults_to_the_core_budget() {
 }
 
 /// The MCP tool shares `Axil::boot`, so its rows are one-liners and its
-/// budget holds inside the never-dropped sections, like `axil boot --schema v1`.
+/// budget holds inside the never-dropped sections, like `axil boot --schema v2`.
 #[test]
 fn boot_rows_are_one_liners_within_budget() {
     let (_tmp, path) = temp_db_path();

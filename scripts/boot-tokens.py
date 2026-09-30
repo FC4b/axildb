@@ -9,7 +9,7 @@ tokenizer count.
 Surfaces:
   narrative   axil boot --boot-format narrative
   json        axil boot
-  schema_v1   axil boot --schema v1
+  schema      axil boot --schema v2   (--schema v1 on a binary that predates schema 2)
   hook        axil boot --boot-format narrative --budget 800   (the SessionStart hook's exact call)
   mcp_boot    MCP tools/call boot {}                            (text of the tool result)
 
@@ -37,7 +37,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SURFACES = {
     "narrative": ["boot", "--boot-format", "narrative"],
     "json": ["boot"],
-    "schema_v1": ["boot", "--schema", "v1"],
+    "schema": ["boot", "--schema", "<latest>"],
     "hook": ["boot", "--boot-format", "narrative", "--budget", "800"],
 }
 
@@ -83,13 +83,36 @@ def budget_fields(stdout: str) -> dict:
         return {}
     if not isinstance(v, dict):
         return {}
-    keys = ("token_budget", "token_budget_used", "dropped_sections", "omitted_items")
+    keys = (
+        "schema_version",
+        "token_budget",
+        "token_budget_used",
+        "dropped_sections",
+        "omitted_items",
+        "omitted_by_section",
+    )
     return {k: v[k] for k in keys if k in v}
+
+
+def latest_schema(axil: str) -> str:
+    """The newest `--schema` value this binary accepts: `v2` since schema 2,
+    `v1` before it (v1 is refused once v2 exists)."""
+    p = subprocess.run([axil, "boot", "--help"], capture_output=True, text=True)
+    in_schema = False
+    for line in p.stdout.splitlines():
+        if line.strip().startswith("--"):
+            in_schema = line.strip().startswith("--schema")
+        elif in_schema and "[possible values:" in line:
+            values = line.split("[possible values:", 1)[1].strip(" ]").split(", ")
+            return max(values)
+    return "v1"
 
 
 def measure(axil: str, db: str, cwd: str) -> dict:
     out = {}
+    schema = latest_schema(axil)
     for name, args in SURFACES.items():
+        args = [schema if a == "<latest>" else a for a in args]
         p = subprocess.run(
             [axil, "--db", db, *args], cwd=cwd, capture_output=True, timeout=300
         )

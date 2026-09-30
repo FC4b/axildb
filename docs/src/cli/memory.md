@@ -103,14 +103,16 @@ axil boot --boot-format narrative           # plain text, as the session hook in
 axil boot --files src/auth.rs               # also push memories about these files
 axil boot --entities auth-module
 axil boot --budget 2000                     # default 1000 tokens, estimated as bytes/4
-axil boot --schema v1                       # the stable BootContext schema (also MCP `boot`)
+axil boot --schema v2                       # the stable BootContext schema (also MCP `boot`)
 ```
 
 Each item is one line, `id · age · status · summary` (for example
 `01M3… · 2d · open · vector store left in needs-repair state…`); run
 `axil get <id>` to expand one. Sections fill in priority order until the
 budget is spent: Resume Here, pinned rules, open errors, decisions, then
-the rest. Open errors are those not yet marked resolved; resolved ones show
+the rest. `--schema v2` rows are one-line strings (`schema_version`
+`"2"`); schema 1, a whole record per row, is no longer produced, so
+`--schema v1` is an error. Open errors are those not yet marked resolved; resolved ones show
 up lower down as lessons (`error → fix`). Modules whose index summary is
 only a parser fallback (a line count or a file's first comment) are left
 out.

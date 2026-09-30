@@ -164,13 +164,15 @@ oversized Resume Here block keeps its leading lines. The narrative format
 ends with a note counting what was left out; JSON reports it as
 `omitted_items`.
 
-`axil boot --schema v1` (and the MCP `boot` tool) returns fixed, ordered
+`axil boot --schema v2` (and the MCP `boot` tool) returns fixed, ordered
 sections (current scope → constraints → recent decisions → active failures
 → open threads → preferences → confidence notes) and fills them in the
-same priority order. The four load-bearing sections (scope, constraints,
-decisions, failures) are never dropped, but the budget holds inside them
-too: their rows are cut once it is spent. A lower-priority section with no
-row left is dropped and named in `dropped_sections`. The contract lives in
+same priority order. Its `schema_version` is `"2"`: every row is a
+one-line string, where schema 1 carried whole records; `--schema v1` is no
+longer produced and is an error. The four load-bearing sections (scope,
+constraints, decisions, failures) are never dropped, but the budget holds
+inside them too: their rows are cut once it is spent. A lower-priority
+section with no row left is dropped and named in `dropped_sections`. The contract lives in
 [`crates/axil-core/src/boot.rs`](../../../crates/axil-core/src/boot.rs).
 `scripts/boot-tokens.py` measures each boot surface on a database copy.
 

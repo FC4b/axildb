@@ -8,9 +8,9 @@
 //!
 //! ## Schema
 //!
-//! The returned struct carries a `schema_version` ("1" for now) and a
-//! fixed, ordered `sections` list. Sections MAY be absent (e.g. an empty
-//! DB has no `recent_decisions`) but never reordered.
+//! The returned struct carries a `schema_version` ([`BOOT_SCHEMA_VERSION`])
+//! and a fixed, ordered `sections` list. Sections MAY be absent (a
+//! lower-priority section the budget had no room for) but never reordered.
 //!
 //! ```text
 //! CurrentScope ─► Constraints ─► RecentDecisions ─► ActiveFailures
@@ -19,10 +19,12 @@
 //!
 //! ## Rows
 //!
-//! Record-backed rows (rules, decisions, failures, threads) are one line
-//! each: `id · age · status · summary` (see [`boot_row`]). The summary is
+//! Every row (rules, decisions, failures, threads, preferences) is one
+//! string: `id · age · status · summary` (see [`boot_row`]). The summary is
 //! clipped, so a row costs a few dozen tokens instead of a whole record;
-//! `axil get <id>` (MCP `get`) expands it.
+//! `axil get <id>` (MCP `get`) expands it. Schema 1 carried whole records
+//! (`{id, data, created_at}`) instead; that shape change is why the version
+//! is 2.
 //!
 //! ## Token budget
 //!
@@ -48,8 +50,9 @@ use crate::record::Record;
 use crate::token::TokenEstimator;
 
 /// Stable schema version. Bumped when the `sections` layout changes in a
-/// way that breaks downstream parsers.
-pub const BOOT_SCHEMA_VERSION: &str = "1";
+/// way that breaks downstream parsers: version 2 made every row a one-line
+/// string where version 1 carried the whole record.
+pub const BOOT_SCHEMA_VERSION: &str = "2";
 
 /// Default boot budget, in tokens, when the caller doesn't pass one — for
 /// this schema and for the CLI's `axil boot` formats alike.
@@ -253,7 +256,7 @@ impl Axil {
         sections.push(BootSection::OpenThreads { content: threads });
 
         // 5. preferences: user-set key/value pairs.
-        let prefs = self.list_preferences_truncated(MAX_PREFERENCES);
+        let prefs = self.list_preferences_truncated(MAX_PREFERENCES, now);
         sections.push(BootSection::Preferences { content: prefs });
 
         // 6. confidence notes: how fresh/stale the DB is.
@@ -431,18 +434,13 @@ impl Axil {
         json!({ "rules": items })
     }
 
-    fn list_preferences_truncated(&self, n: usize) -> Vec<Value> {
+    fn list_preferences_truncated(&self, n: usize, now: DateTime<Utc>) -> Vec<Value> {
         let mut prefs = self.list("preferences").unwrap_or_default();
         prefs.sort_by(|a, b| b.created_at.cmp(&a.created_at));
         prefs.truncate(n);
         prefs
-            .into_iter()
-            .map(|r| {
-                json!({
-                    "key": r.data.get("key").cloned().unwrap_or_default(),
-                    "value": r.data.get("value").cloned().unwrap_or_default(),
-                })
-            })
+            .iter()
+            .map(|r| Value::String(preference_row(r, now)))
             .collect()
     }
 
@@ -666,6 +664,28 @@ pub fn record_row(record: &Record, now: DateTime<Utc>) -> String {
         &record_status(record),
         &record_headline(record),
         max_chars,
+    )
+}
+
+/// A `preferences` record as one boot row: `id · age · preference · key =
+/// value`, a string value shown as-is and any other value as compact JSON.
+pub fn preference_row(record: &Record, now: DateTime<Utc>) -> String {
+    let key = record
+        .data
+        .get("key")
+        .and_then(Value::as_str)
+        .unwrap_or("?");
+    let value = match record.data.get("value") {
+        Some(Value::String(s)) => s.clone(),
+        Some(other) => other.to_string(),
+        None => String::new(),
+    };
+    boot_row(
+        &record.id.to_string(),
+        &boot_age(record.created_at, now),
+        "preference",
+        &format!("{key} = {value}"),
+        BOOT_ROW_SUMMARY_CHARS,
     )
 }
 
@@ -904,10 +924,10 @@ mod tests {
     }
 
     #[test]
-    fn boot_returns_schema_v1_with_fixed_order() {
+    fn boot_returns_schema_2_with_fixed_order() {
         let (db, _dir) = temp_db();
         let ctx = db.boot(BootOptions::default()).unwrap();
-        assert_eq!(ctx.schema_version, "1");
+        assert_eq!(ctx.schema_version, "2");
         let kinds: Vec<&str> = ctx.sections.iter().map(BootSection::kind_str).collect();
         assert_eq!(
             kinds,
@@ -1467,6 +1487,19 @@ mod tests {
         assert_eq!((kept.as_str(), cut), ("## H\n- one", 2));
         let (kept, cut) = take_fitting_lines(text, |_| false);
         assert_eq!((kept.as_str(), cut), ("", 4));
+    }
+
+    #[test]
+    fn preferences_are_one_line_rows() {
+        let (db, _dir) = temp_db();
+        let rec = db
+            .insert("preferences", json!({ "key": "editor", "value": "helix" }))
+            .unwrap();
+        let ctx = db.boot(BootOptions::default()).unwrap();
+        assert_eq!(
+            rows(&ctx, "preferences")[0].as_str().unwrap(),
+            format!("{} · <1h · preference · editor = helix", rec.id)
+        );
     }
 
     #[test]
