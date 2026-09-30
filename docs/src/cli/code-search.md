@@ -200,6 +200,12 @@ to proxies in this file. With SCIP enabled, the result set also
 includes memories about symbols defined in the file (via the canonical
 entity bridge).
 
+Each memory hit carries `summary` (its main field) and `line`: the
+same bounded one-line rendering the prompt hook's `<context>` block uses,
+which keeps what a bare summary drops (an error as `error → fix (root
+cause)`, a decision as `summary — reason`, a commit as its subject), at most
+240 bytes across the parts. The pre-edit hook shows `line`.
+
 ## `recall-for-entity`
 
 Surface memories about a symbol — and, with `--trace-graph`, memories

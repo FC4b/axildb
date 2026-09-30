@@ -1536,17 +1536,7 @@ impl HookCtx {
                         let summaries: Vec<String> = v
                             .get("results")
                             .and_then(Value::as_array)
-                            .map(|rows| {
-                                rows.iter()
-                                    .map(|r| {
-                                        format!(
-                                            "  • [{}] {}",
-                                            r.get("table").and_then(Value::as_str).unwrap_or(""),
-                                            r.get("summary").and_then(Value::as_str).unwrap_or("")
-                                        )
-                                    })
-                                    .collect()
-                            })
+                            .map(|rows| rows.iter().filter_map(file_memory_line).collect())
                             .unwrap_or_default();
                         if !summaries.is_empty() {
                             ctx = format!(
@@ -2851,6 +2841,28 @@ fn is_empty_axil_output(out: &str) -> bool {
         || t.starts_with("(no matches)")
 }
 
+/// One `recall-for-file` result as a pre-edit bullet. A memory hit brings
+/// its `line`, the same bounded per-table rendering the prompt hook's block
+/// uses (an error's fix and cause, a decision's reason); other rows fall back
+/// to their `summary`, collapsed to one line and cut to the same bound. Rows
+/// with neither, such as the related-files and impact entries, are left out
+/// rather than shown blank.
+fn file_memory_line(row: &Value) -> Option<String> {
+    let text = ["line", "summary"]
+        .iter()
+        .filter_map(|k| row.get(*k).and_then(Value::as_str))
+        .map(crate::collapse_whitespace)
+        .find(|s| !s.is_empty())?;
+    let label = ["table", "match"]
+        .iter()
+        .find_map(|k| row.get(*k).and_then(Value::as_str))
+        .unwrap_or("");
+    Some(format!(
+        "  • [{label}] {}",
+        crate::truncate_str(&text, crate::CONTEXT_LINE_MAX_BYTES)
+    ))
+}
+
 /// The axil subcommands a command line runs, in order: for each `axil`
 /// word (or a path ending in it), the first word after it that is neither
 /// an option nor a global option's value (`axil --db x store` is `store`).
@@ -3329,6 +3341,30 @@ mod tests {
         brain.db = None;
         assert_eq!(brain.todo_store_reminder(1), None);
         assert!(stub_calls(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn pre_edit_bullets_prefer_the_context_line() {
+        let row = json!({"table": "errors", "summary": "hook counters reset",
+            "line": "hook counters reset → keep them per session (state lived per turn)"});
+        assert_eq!(
+            file_memory_line(&row).as_deref(),
+            Some("  • [errors] hook counters reset → keep them per session (state lived per turn)")
+        );
+        // A row without a line keeps its summary, cut to the same bound.
+        let index = json!({"match": "file_index", "summary": "x".repeat(900)});
+        let bullet = file_memory_line(&index).unwrap();
+        assert!(bullet.starts_with("  • [file_index] xxx"), "{bullet}");
+        assert!(bullet.len() <= crate::CONTEXT_LINE_MAX_BYTES + 20, "{}", bullet.len());
+        // A multi-line summary stays on its bullet's line.
+        let multi = json!({"match": "file_index", "summary": "line one\n\n  line two\t"});
+        assert_eq!(
+            file_memory_line(&multi).as_deref(),
+            Some("  • [file_index] line one line two")
+        );
+        // Nothing to show: no blank bullet.
+        assert_eq!(file_memory_line(&json!({"match": "related_files", "related": []})), None);
+        assert_eq!(file_memory_line(&json!({"table": "context", "line": null, "summary": " "})), None);
     }
 
     #[test]
