@@ -161,7 +161,7 @@ pub fn parse(source: &str, include_private: bool) -> ParsedFile {
     // Pattern detection
     detect_patterns(source, &mut file);
 
-    file.summary = generate_summary(&file);
+    (file.summary, file.summary_low_confidence) = generate_summary(&file);
     file
 }
 
@@ -506,7 +506,7 @@ const PY_PATTERN_LABELS: &[(&str, &str)] = &[
     ("tests", "tests"),
 ];
 
-fn generate_summary(file: &ParsedFile) -> String {
+fn generate_summary(file: &ParsedFile) -> (String, bool) {
     super::generate_summary_common(file, PY_PATTERN_LABELS, || {
         "no summary available".to_string()
     })

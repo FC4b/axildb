@@ -2257,10 +2257,14 @@ enum Command {
 
     /// Session boot context — curated wake-up context for agent sessions.
     ///
-    /// Combines recent sessions, decisions, errors, and architecture notes
-    /// into a single context payload for session initialization.
+    /// Combines the resume block, rules, open errors, decisions, recent
+    /// sessions and architecture notes into one payload, one line per item
+    /// (`id · age · status · summary`; `axil get <id>` expands a row).
     Boot {
-        /// Maximum token budget for output (estimate: 1 token ≈ 4 bytes).
+        /// Token budget for the output, estimated as ceil(bytes / 4); `0` or
+        /// omitted means the default (1000). Sections fill in priority order —
+        /// Resume Here, rules, open errors, decisions, then the rest — and
+        /// rows that do not fit are left out.
         #[arg(long)]
         budget: Option<usize>,
         /// Boot output format: json (default), narrative (plain text), compact.
@@ -2278,10 +2282,12 @@ enum Command {
         /// Context-aware: push memories related to this error text.
         #[arg(long)]
         error: Option<String>,
-        /// Use the stable v1 boot schema (fixed section order + token budget
-        /// discipline). Opt-in for one release; will become the default later.
-        /// Emits JSON matching `axil_core::BootContext`.
-        #[arg(long = "schema", value_parser = ["v1"])]
+        /// Emit the structured boot schema, JSON matching
+        /// `axil_core::BootContext` (the MCP `boot` payload): fixed section
+        /// order, the same budget. `v2` is the current schema, one string per
+        /// row. `v1` (a whole record per row) is no longer produced, and
+        /// asking for it is an error rather than a silently different shape.
+        #[arg(long = "schema", value_parser = ["v1", "v2"])]
         schema: Option<String>,
     },
 
@@ -13521,8 +13527,15 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             // render in `axil boot`, like a native Extension's.
             register_installed_plugins(&db, &db_path);
 
-            // Opt-in stable schema; legacy flat JSON below stays the default.
+            // Opt-in structured schema; the flat JSON below stays the default.
             if schema.as_deref() == Some("v1") {
+                anyhow::bail!(
+                    "boot schema v1 (a whole record per row) is no longer produced; \
+                     `axil boot --schema v2` returns the current BootContext, whose rows \
+                     are one-line strings (`id · age · status · summary`)"
+                );
+            }
+            if schema.is_some() {
                 let opts = axil_core::BootOptions {
                     token_budget: budget,
                     topic: topic.clone(),
@@ -13533,73 +13546,80 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                 return Ok(EXIT_OK);
             }
 
+            let budget_tokens = budget
+                .filter(|&b| b > 0)
+                .unwrap_or(axil_core::DEFAULT_TOKEN_BUDGET);
             let mut sections = serde_json::Map::new();
+            // Every record-backed section below is one row per item,
+            // `id · age · status · summary`; `axil get <id>` expands a row.
+            let now = chrono::Utc::now();
+            let row = |r: &axil_core::Record| json!(axil_core::boot::record_row(r, now));
 
-            // Pinned rules + high-importance constraints. These are loaded
-            // FIRST so the agent sees them before any other context. The
-            // narrative renderer prints them at the top, never dropped.
+            // Pinned rules + high-importance constraints. They fill right
+            // after the resume block, before any other context.
             let mut rules = db.list("rules").unwrap_or_default();
             rules.retain(|r| {
                 axil_core::importance::is_pinned(&r.data)
                     || axil_core::importance::get_importance(&r.data) >= 0.9
             });
             if !rules.is_empty() {
-                let rule_vals: Vec<Value> = rules
-                    .iter()
-                    .map(|r| {
-                        json!({
-                            "id": r.id.to_string(),
-                            "rule": r.data.get("rule").cloned().unwrap_or(Value::Null),
-                        })
-                    })
-                    .collect();
+                let rule_vals: Vec<Value> = rules.iter().map(row).collect();
                 sections.insert("rules".into(), json!(rule_vals));
             }
 
             // The newest sessions, one line each: the full file and entity
             // lists cost tokens, and `axil get <id>` has them.
-            let now = chrono::Utc::now();
             let session_vals: Vec<Value> = db
                 .storage()
                 .list_newest("_sessions", 3)
                 .unwrap_or_default()
                 .iter()
                 .filter_map(|r| boot_session_line(r, now))
+                .map(Value::String)
                 .collect();
             if !session_vals.is_empty() {
                 sections.insert("recent_sessions".into(), json!(session_vals));
             }
 
-            // Top 5 decisions by importance (not just recency)
+            // Decisions and errors rank by importance decayed with age, the
+            // same order `--schema v2` and the MCP boot use, so an old but
+            // once-important record does not outrank this week's work.
+            let decay = load_config(&db_path).map(|c| c.decay).unwrap_or_default();
             let mut decisions = db.list("decisions").unwrap_or_default();
-            decisions.sort_by(|a, b| {
-                let ia = axil_core::importance::get_importance(&a.data);
-                let ib = axil_core::importance::get_importance(&b.data);
-                ib.partial_cmp(&ia).unwrap_or(std::cmp::Ordering::Equal)
-            });
+            axil_core::boot::sort_by_effective_importance(
+                &mut decisions,
+                decay.half_life_for("decisions"),
+                now,
+            );
             decisions.truncate(5);
             if !decisions.is_empty() {
-                let dec_vals: Vec<Value> = decisions
-                    .iter()
-                    .map(|r| truncate_record_json(r, 200))
-                    .collect();
+                let dec_vals: Vec<Value> = decisions.iter().map(row).collect();
                 sections.insert("decisions".into(), json!(dec_vals));
             }
 
-            // Top 5 errors by importance
+            // Errors split by lifecycle: the top 5 open ones are things to
+            // act on and fill early; the top 3 resolved ones are lessons (the
+            // error with its fix) and fill with the rest.
             let mut errors = db.list("errors").unwrap_or_default();
-            errors.sort_by(|a, b| {
-                let ia = axil_core::importance::get_importance(&a.data);
-                let ib = axil_core::importance::get_importance(&b.data);
-                ib.partial_cmp(&ia).unwrap_or(std::cmp::Ordering::Equal)
-            });
-            errors.truncate(5);
-            if !errors.is_empty() {
-                let err_vals: Vec<Value> = errors
-                    .iter()
-                    .map(|r| truncate_record_json(r, 200))
-                    .collect();
+            axil_core::boot::sort_by_effective_importance(
+                &mut errors,
+                decay.half_life_for("errors"),
+                now,
+            );
+            let (open_errors, resolved_errors): (Vec<_>, Vec<_>) = errors
+                .iter()
+                .partition(|r| axil_core::boot::is_open_error(&r.data));
+            if !open_errors.is_empty() {
+                let err_vals: Vec<Value> = open_errors.into_iter().take(5).map(row).collect();
                 sections.insert("errors".into(), json!(err_vals));
+            }
+            if !resolved_errors.is_empty() {
+                let lesson_vals: Vec<Value> = resolved_errors
+                    .into_iter()
+                    .take(3)
+                    .map(|r| json!(boot_error_row(r, now)))
+                    .collect();
+                sections.insert("lessons".into(), json!(lesson_vals));
             }
 
             // Current beliefs (top 5, non-doubted)
@@ -13610,10 +13630,13 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                         .iter()
                         .take(5)
                         .map(|b| {
-                            json!({
-                                "statement": b.statement,
-                                "confidence": b.confidence,
-                            })
+                            json!(axil_core::boot::boot_row(
+                                &b.id,
+                                &boot_age_of(&b.created_at, now),
+                                &format!("conf {:.2}", b.confidence),
+                                &b.statement,
+                                axil_core::boot::BOOT_ROW_SUMMARY_CHARS,
+                            ))
                         })
                         .collect();
                     sections.insert("beliefs".into(), json!(belief_vals));
@@ -13637,10 +13660,14 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                     })
                     .take(5)
                     .map(|r| {
-                        json!({
-                            "name": r.data.get("name").cloned().unwrap_or(Value::Null),
-                            "confidence": r.data.get("confidence").cloned().unwrap_or(Value::Null),
-                        })
+                        let confidence = r.data.get("confidence").and_then(Value::as_f64);
+                        json!(axil_core::boot::boot_row(
+                            &r.id.to_string(),
+                            &axil_core::boot::boot_age(r.created_at, now),
+                            &format!("conf {:.2}", confidence.unwrap_or(0.0)),
+                            &axil_core::boot::record_headline(r),
+                            axil_core::boot::BOOT_ROW_SUMMARY_CHARS,
+                        ))
                     })
                     .collect();
                 if !high_conf.is_empty() {
@@ -13668,11 +13695,14 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                             let summary = knowledge
                                 .consolidated_summary()
                                 .unwrap_or_else(|| format!("{count} facts"));
-                            Some(json!({
-                                "entity": name,
-                                "facts": count,
-                                "consolidated": summary,
-                            }))
+                            Some(json!(format!(
+                                "{name}{sep}{count} facts{sep}{}",
+                                axil_core::boot::clip_one_line(
+                                    &summary,
+                                    axil_core::boot::BOOT_ROW_SUMMARY_CHARS
+                                ),
+                                sep = axil_core::boot::BOOT_ROW_SEP,
+                            )))
                         })
                         .collect();
                     if !entity_vals.is_empty() {
@@ -13686,12 +13716,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                     let pref_vals: Vec<Value> = prefs
                         .iter()
                         .take(5)
-                        .map(|r| {
-                            json!({
-                                "key": r.data.get("key").cloned().unwrap_or(Value::Null),
-                                "value": r.data.get("value").cloned().unwrap_or(Value::Null),
-                            })
-                        })
+                        .map(|r| json!(axil_core::boot::preference_row(r, now)))
                         .collect();
                     sections.insert("preferences".into(), json!(pref_vals));
                 }
@@ -13704,8 +13729,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                 .filter(|r| r.data.get("type").and_then(Value::as_str) == Some("architecture"))
                 .collect();
             if !arch.is_empty() {
-                let arch_vals: Vec<Value> =
-                    arch.iter().map(|r| truncate_record_json(r, 200)).collect();
+                let arch_vals: Vec<Value> = arch.iter().map(|r| row(r)).collect();
                 sections.insert("architecture".into(), json!(arch_vals));
             }
 
@@ -13721,19 +13745,11 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                     let mut cfg = axil_core::RecallConfig::default();
                     cfg.qtc = Some(axil_core::scoring::QtcConfig::default());
                     if let Ok(results) = db.recall(topic_query, 5, Some(cfg)) {
+                        // Mixed tables, so the status slot names the table;
+                        // rows stay in recall's rank order.
                         let topic_vals: Vec<Value> = results
                             .iter()
-                            .map(|rr| {
-                                json!({
-                                    "id": rr.record.id.to_string(),
-                                    "score": round4(rr.score),
-                                    "table": rr.record.table,
-                                    "summary": rr.record.data.get("summary")
-                                        .or_else(|| rr.record.data.get("description"))
-                                        .cloned()
-                                        .unwrap_or_else(|| truncate_value(&rr.record.data, 200)),
-                                })
-                            })
+                            .map(|rr| json!(boot_table_row(&rr.record, now)))
                             .collect();
                         sections.insert("topic_recall".into(), json!(topic_vals));
                     }
@@ -13758,12 +13774,17 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                             .iter()
                             .take(3)
                             .map(|p| {
-                                json!({
-                                    "name": p.name,
-                                    "type": p.pattern_type.as_str(),
-                                    "description": p.description,
-                                    "frequency": p.frequency,
-                                })
+                                json!(format!(
+                                    "{}{sep}{}{sep}seen {}x{sep}{}",
+                                    p.name,
+                                    p.pattern_type.as_str(),
+                                    p.frequency,
+                                    axil_core::boot::clip_one_line(
+                                        &p.description,
+                                        axil_core::boot::BOOT_ROW_SUMMARY_CHARS
+                                    ),
+                                    sep = axil_core::boot::BOOT_ROW_SEP,
+                                ))
                             })
                             .collect();
                         sections.insert("active_patterns".into(), json!(pat_vals));
@@ -13793,10 +13814,10 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                         if stale > 0 {
                             sections.insert(
                                 "dep_docs_freshness".into(),
-                                json!({
-                                    "stale_manifests": stale,
-                                    "recommendation": "run `axil deps refresh --if-stale`",
-                                }),
+                                json!(format!(
+                                    "{stale} stale manifests{}run `axil deps refresh --if-stale`",
+                                    axil_core::boot::BOOT_ROW_SEP
+                                )),
                             );
                         }
                     }
@@ -13815,12 +13836,14 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                     if freshness.status != axil_indexer::freshness::FreshnessStatus::Fresh {
                         sections.insert(
                             "index_freshness".into(),
-                            json!({
-                                "status": freshness.status.as_str(),
-                                "changed_files": freshness.changed_files,
-                                "new_files": freshness.new_files,
-                                "recommendation": freshness.recommendation,
-                            }),
+                            json!(format!(
+                                "{}{sep}{} changed, {} new{sep}{}",
+                                freshness.status.as_str(),
+                                freshness.changed_files,
+                                freshness.new_files,
+                                freshness.recommendation,
+                                sep = axil_core::boot::BOOT_ROW_SEP,
+                            )),
                         );
                     }
                 }
@@ -13828,36 +13851,53 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                 let project = db.list("_idx_project").unwrap_or_default();
                 if !project.is_empty() {
                     let proj = &project[0];
-                    sections.insert("project".into(), json!({
-                        "name": proj.data.get("name").cloned().unwrap_or(Value::Null),
-                        "type": proj.data.get("project_type").cloned().unwrap_or(Value::Null),
-                        "files": proj.data.get("file_count").cloned().unwrap_or(Value::Null),
-                        "modules": proj.data.get("module_count").cloned().unwrap_or(Value::Null),
-                    }));
+                    let field = |k: &str| match proj.data.get(k) {
+                        Some(Value::String(s)) => s.clone(),
+                        Some(Value::Null) | None => "?".to_string(),
+                        Some(other) => other.to_string(),
+                    };
+                    sections.insert(
+                        "project".into(),
+                        json!(format!(
+                            "{}{sep}{}{sep}{} files{sep}{} modules",
+                            field("name"),
+                            field("project_type"),
+                            field("file_count"),
+                            field("module_count"),
+                            sep = axil_core::boot::BOOT_ROW_SEP,
+                        )),
+                    );
 
-                    // Top modules by file count
+                    // Top modules by file count, one line each. A module
+                    // whose summary is only parser fallback ("N lines of
+                    // Rust code", a first comment) says nothing worth a
+                    // boot line, so it is skipped.
+                    let file_count = |m: &axil_core::Record| {
+                        m.data
+                            .get("files")
+                            .and_then(Value::as_array)
+                            .map_or(0, Vec::len)
+                    };
                     let mut modules = db.list("_idx_modules").unwrap_or_default();
-                    modules.sort_by(|a, b| {
-                        let ca = a
-                            .data
-                            .get("file_count")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(0);
-                        let cb = b
-                            .data
-                            .get("file_count")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(0);
-                        cb.cmp(&ca)
-                    });
-                    if !modules.is_empty() {
-                        let mod_vals: Vec<Value> = modules.iter().take(5).map(|m| {
-                            json!({
-                                "path": m.data.get("path").cloned().unwrap_or(Value::Null),
-                                "files": m.data.get("file_count").cloned().unwrap_or(Value::Null),
-                                "summary": m.data.get("summary").cloned().unwrap_or(Value::Null),
-                            })
-                        }).collect();
+                    modules.sort_by_key(|m| std::cmp::Reverse(file_count(m)));
+                    let mod_vals: Vec<Value> = modules
+                        .iter()
+                        .filter_map(|m| {
+                            let summary = axil_indexer::parser::confident_summary(&m.data)?;
+                            let path = m.data.get("path").and_then(Value::as_str).unwrap_or("?");
+                            let files = file_count(m);
+                            Some(json!(format!(
+                                "{path}{sep}{files} files{sep}{}",
+                                axil_core::boot::clip_one_line(
+                                    &summary,
+                                    axil_core::boot::BOOT_ROW_SUMMARY_CHARS
+                                ),
+                                sep = axil_core::boot::BOOT_ROW_SEP,
+                            )))
+                        })
+                        .take(5)
+                        .collect();
+                    if !mod_vals.is_empty() {
                         sections.insert("modules".into(), json!(mod_vals));
                     }
                 }
@@ -13886,16 +13926,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                                     .to_lowercase();
                                 if text.contains(&needle) || text.contains(&short) {
                                     seen_ids.insert(record.id.to_string());
-                                    context_hits.push(json!({
-                                        "source": "file_context",
-                                        "file": file_name,
-                                        "table": record.table,
-                                        "id": record.id.to_string(),
-                                        "summary": record.data.get("summary")
-                                            .or_else(|| record.data.get("error"))
-                                            .cloned()
-                                            .unwrap_or_else(|| truncate_value(&record.data, 150)),
-                                    }));
+                                    context_hits.push(json!(boot_table_row(&record, now)));
                                     break;
                                 }
                             }
@@ -13926,18 +13957,8 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                                     if seen_ids.contains(&id_str) {
                                         continue;
                                     }
-                                    seen_ids.insert(id_str.clone());
-                                    context_hits.push(json!({
-                                        "source": "file_context_semantic",
-                                        "file": file_name,
-                                        "table": record.table,
-                                        "id": id_str,
-                                        "summary": record.data.get("summary")
-                                            .or_else(|| record.data.get("error"))
-                                            .cloned()
-                                            .unwrap_or_else(|| truncate_value(&record.data, 150)),
-                                        "similarity": round4(*score),
-                                    }));
+                                    seen_ids.insert(id_str);
+                                    context_hits.push(json!(boot_table_row(record, now)));
                                 }
                             }
                         }
@@ -13954,12 +13975,15 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                         for entity in &entity_names {
                             if let Ok(knowledge) = mem.semantic().about(entity) {
                                 for fact in knowledge.facts.iter().take(3) {
-                                    context_hits.push(json!({
-                                        "source": "entity_context",
-                                        "entity": entity,
-                                        "fact": fact.data.get("fact").cloned().unwrap_or(Value::Null),
-                                        "id": fact.id.to_string(),
-                                    }));
+                                    let text =
+                                        fact.data.get("fact").and_then(Value::as_str).unwrap_or("");
+                                    context_hits.push(json!(axil_core::boot::boot_row(
+                                        &fact.id.to_string(),
+                                        &axil_core::boot::boot_age(fact.created_at, now),
+                                        "fact",
+                                        &format!("{entity}: {text}"),
+                                        axil_core::boot::BOOT_ROW_SUMMARY_CHARS,
+                                    )));
                                 }
                             }
                         }
@@ -13979,12 +14003,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                             .to_lowercase();
                         let matching = error_words.iter().filter(|w| text.contains(**w)).count();
                         if matching >= 2 || (error_words.len() == 1 && matching == 1) {
-                            context_hits.push(json!({
-                                "source": "error_context",
-                                "id": record.id.to_string(),
-                                "error": record.data.get("error").cloned().unwrap_or(Value::Null),
-                                "fix": record.data.get("fix").cloned().unwrap_or(Value::Null),
-                            }));
+                            context_hits.push(json!(boot_error_row(&record, now)));
                         }
                     }
                 }
@@ -14004,16 +14023,23 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             if db.event_log_enabled() {
                 if let Ok(events) = db.recall_delta(None, None, 10) {
                     if !events.is_empty() {
+                        // `record id · kind · op table (by agent)`: the id
+                        // leads, like every other row, so `axil get` expands it.
                         let change_vals: Vec<Value> = events
                             .iter()
                             .map(|e| {
-                                json!({
-                                    "cursor": e.cursor,
-                                    "kind": e.kind,
-                                    "table": e.table,
-                                    "record_id": e.record_id,
-                                    "agent_id": e.agent_id,
-                                })
+                                let by = e
+                                    .agent_id
+                                    .as_deref()
+                                    .map_or_else(String::new, |a| format!(" (by {a})"));
+                                json!(format!(
+                                    "{}{sep}{}{sep}{} {}{by}",
+                                    e.record_id,
+                                    e.kind,
+                                    e.op,
+                                    e.table,
+                                    sep = axil_core::boot::BOOT_ROW_SEP,
+                                ))
                             })
                             .collect();
                         sections.insert("recent_changes".into(), json!(change_vals));
@@ -14035,36 +14061,27 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                 sections.insert("extension_blocks".into(), Value::Array(blocks_arr));
             }
 
+            dedupe_boot_rows(&mut sections);
             let boot_data = Value::Object(sections);
 
+            // Degraded-Engine warnings are never cut, so every format fits
+            // them inside the budget rather than adding them on top.
+            let warnings = degraded_warnings(&db);
             match boot_format {
                 BootFormat::Narrative => {
-                    let mut narrative = boot_to_narrative(&boot_data);
-                    // Right under the header, so a byte budget cuts from the
-                    // other end and never drops it.
-                    let warnings: String = degraded_warnings(&db)
-                        .iter()
-                        .map(|w| format!("WARNING: {w}\n"))
-                        .collect();
-                    if let Some(pos) = narrative.find("\n\n") {
-                        narrative.insert_str(pos + 2, &warnings);
-                    }
-                    let output = match budget {
-                        Some(max_tokens) => cut_narrative_to_budget(narrative, max_tokens),
-                        None => narrative,
-                    };
-                    println!("{output}");
+                    let narrative = boot_to_narrative(&boot_data, &warnings, budget_tokens);
+                    // The fill already fits the budget; the byte cut only
+                    // bites when the header and warnings alone exceed it.
+                    // `print!`: the text ends in its own newline, and one
+                    // more would be a byte past the budget.
+                    print!("{}", cut_narrative_to_budget(narrative, budget_tokens));
                 }
                 BootFormat::Compact => {
                     let compact = compact_boot_json(&boot_data);
-                    let mut output = apply_token_budget(&compact, budget);
-                    insert_degraded(&mut output, &db);
-                    out.print(&output);
+                    out.print(&apply_token_budget(&compact, budget_tokens, &warnings));
                 }
                 BootFormat::Json => {
-                    let mut output = apply_token_budget(&boot_data, budget);
-                    insert_degraded(&mut output, &db);
-                    out.print(&output);
+                    out.print(&apply_token_budget(&boot_data, budget_tokens, &warnings));
                 }
             }
             Ok(EXIT_OK)
@@ -19801,21 +19818,13 @@ fn truncate_value(v: &Value, max_len: usize) -> Value {
     }
 }
 
-/// Create a truncated JSON representation of a record.
-fn truncate_record_json(record: &axil_core::Record, max_field_len: usize) -> Value {
-    let mut v = json!({
-        "id": record.id.to_string(),
-        "table": record.table,
-    });
-    if let Some(obj) = record.data.as_object() {
-        for (k, val) in obj {
-            if k.starts_with('_') {
-                continue;
-            }
-            v[k] = truncate_value(val, max_field_len);
-        }
-    }
-    v
+/// [`axil_core::boot::boot_age`] of an RFC 3339 timestamp stored as text,
+/// or `?` when it does not parse.
+fn boot_age_of(timestamp: &str, now: chrono::DateTime<chrono::Utc>) -> String {
+    chrono::DateTime::parse_from_rfc3339(timestamp).map_or_else(
+        |_| "?".to_string(),
+        |t| axil_core::boot::boot_age(t.with_timezone(&chrono::Utc), now),
+    )
 }
 
 /// Sessions older than this are left out of boot.
@@ -19823,9 +19832,10 @@ const BOOT_SESSION_MAX_AGE_DAYS: i64 = 90;
 /// Sessions older than this are labelled stale in boot.
 const BOOT_SESSION_STALE_DAYS: i64 = 7;
 
-/// Boot's one-line view of a `_sessions` record: when it ended and what it
-/// touched. `None` when it is too old to be worth showing.
-fn boot_session_line(r: &axil_core::Record, now: chrono::DateTime<chrono::Utc>) -> Option<Value> {
+/// Boot's one-line view of a `_sessions` record — `id · age · recent|stale ·
+/// summary`, aged from when it ended — or `None` when it is too old to be
+/// worth showing.
+fn boot_session_line(r: &axil_core::Record, now: chrono::DateTime<chrono::Utc>) -> Option<String> {
     let ended = r
         .data
         .get("ended_at")
@@ -19864,14 +19874,59 @@ fn boot_session_line(r: &axil_core::Record, now: chrono::DateTime<chrono::Utc>) 
             format!("{file_count} files: {}{more}", names.join(", "))
         }
     };
-    Some(json!({
-        "id": r.id.to_string(),
-        "ended_at": ended.to_rfc3339(),
-        "age_days": age_days,
-        "stale": age_days > BOOT_SESSION_STALE_DAYS,
-        "summary": summary,
-        "file_count": file_count,
-    }))
+    let status = if age_days > BOOT_SESSION_STALE_DAYS {
+        "stale"
+    } else {
+        "recent"
+    };
+    Some(axil_core::boot::boot_row(
+        &r.id.to_string(),
+        &axil_core::boot::boot_age(ended, now),
+        status,
+        &summary,
+        axil_core::boot::BOOT_ROW_SUMMARY_CHARS,
+    ))
+}
+
+/// An `errors` record as a boot row whose summary carries the fix too
+/// (`error → fix`): for a lesson or a pushed match, the fix is the point.
+fn boot_error_row(r: &axil_core::Record, now: chrono::DateTime<chrono::Utc>) -> String {
+    let field = |k: &str| {
+        r.data
+            .get(k)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    };
+    let error = field("error").map_or_else(|| axil_core::boot::record_headline(r), String::from);
+    let summary = match field("resolution").or_else(|| field("fix")) {
+        Some(fix) => format!("{error} → {fix}"),
+        None => error,
+    };
+    axil_core::boot::boot_row(
+        &r.id.to_string(),
+        &axil_core::boot::boot_age(r.created_at, now),
+        &axil_core::boot::record_status(r),
+        &summary,
+        axil_core::boot::BOOT_ROW_SUMMARY_CHARS,
+    )
+}
+
+/// A boot row for a list that mixes tables (topic recall, pushed context):
+/// the status slot names the table, since "active" alone would not say
+/// whether the row is a decision, a note or a commit.
+fn boot_table_row(r: &axil_core::Record, now: chrono::DateTime<chrono::Utc>) -> String {
+    let status = match axil_core::boot::record_status(r).as_str() {
+        "active" => r.table.clone(),
+        lifecycle => format!("{} {lifecycle}", r.table),
+    };
+    axil_core::boot::boot_row(
+        &r.id.to_string(),
+        &axil_core::boot::boot_age(r.created_at, now),
+        &status,
+        &axil_core::boot::record_headline(r),
+        axil_core::boot::BOOT_ROW_SUMMARY_CHARS,
+    )
 }
 
 /// One line per Engine this open could not attach, for agent-facing output.
@@ -19892,164 +19947,365 @@ fn insert_degraded(output: &mut Value, db: &Axil) {
     }
 }
 
-/// Apply a token budget to a JSON value by serializing and truncating.
-fn apply_token_budget(v: &Value, budget: Option<usize>) -> Value {
-    if let Some(max_tokens) = budget {
-        let serialized = serde_json::to_string(v).unwrap_or_default();
-        let max_bytes = max_tokens * 4;
-        if serialized.len() > max_bytes {
-            // Try to truncate array elements
-            if let Some(obj) = v.as_object() {
-                let mut result = serde_json::Map::new();
-                let mut used = 2;
-                for (k, val) in obj {
-                    let entry = serde_json::to_string(val).unwrap_or_default();
-                    if used + entry.len() + k.len() + 4 > max_bytes && !result.is_empty() {
-                        break;
-                    }
-                    used += entry.len() + k.len() + 4;
-                    result.insert(k.clone(), val.clone());
+/// Boot sections in fill order, highest priority first: the resume block,
+/// pinned rules, open errors and decisions lead, then everything else. A
+/// section missing from this list fills last.
+const BOOT_FILL_ORDER: &[&str] = &[
+    "extension_blocks",
+    "rules",
+    "errors",
+    "decisions",
+    "topic_recall",
+    "context_push",
+    "recent_changes",
+    "recent_sessions",
+    "lessons",
+    "architecture",
+    "index_freshness",
+    "dep_docs_freshness",
+    "beliefs",
+    "procedures",
+    "key_entities",
+    "preferences",
+    "active_patterns",
+    "project",
+    "modules",
+];
+
+/// Keys of a boot object in [`BOOT_FILL_ORDER`], unlisted keys last.
+fn boot_fill_keys(obj: &serde_json::Map<String, Value>) -> Vec<&String> {
+    let rank = |k: &str| {
+        BOOT_FILL_ORDER
+            .iter()
+            .position(|o| *o == k)
+            .unwrap_or(BOOT_FILL_ORDER.len())
+    };
+    let mut keys: Vec<&String> = obj.keys().collect();
+    keys.sort_by_key(|k| rank(k));
+    keys
+}
+
+/// Sections whose rows are records, in fill order. A record shows once, in
+/// the first of these that lists it (see [`dedupe_boot_rows`]).
+const BOOT_RECORD_SECTIONS: &[&str] = &[
+    "rules",
+    "errors",
+    "decisions",
+    "topic_recall",
+    "context_push",
+    "lessons",
+    "architecture",
+];
+
+/// Drop a record row that a higher-priority section already shows, so
+/// pushed context or a lesson does not repeat an open error or a decision
+/// and spend the budget twice. Topic recall keeps its list whole — it is
+/// the answer to `--for` — but its ids count for the sections after it. A
+/// section left empty by this goes too.
+fn dedupe_boot_rows(sections: &mut serde_json::Map<String, Value>) {
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let id_of = |v: &Value| {
+        v.as_str()
+            .and_then(|row| row.split(axil_core::boot::BOOT_ROW_SEP).next())
+            .map(String::from)
+    };
+    for key in BOOT_RECORD_SECTIONS {
+        let Some(Value::Array(rows)) = sections.get_mut(*key) else {
+            continue;
+        };
+        if *key != "topic_recall" && !rows.is_empty() {
+            rows.retain(|row| id_of(row).is_none_or(|id| !seen.contains(&id)));
+            if rows.is_empty() {
+                sections.remove(*key);
+                continue;
+            }
+        }
+        seen.extend(rows.iter().filter_map(id_of));
+    }
+}
+
+/// How a fill slot of a flat boot payload goes back into it.
+enum BootSlotKind {
+    /// The lines of an `extension_blocks` entry, rendered verbatim.
+    Block(Value),
+    /// The array under `key`; `items` are the original values, so an item
+    /// that is not a string goes back as it was.
+    Rows { key: String, items: Vec<Value> },
+    /// The single value under `key`, shown as one row.
+    Single { key: String, value: Value },
+}
+
+/// A flat boot payload as fill slots in [`BOOT_FILL_ORDER`] (every
+/// extension block its own slot, named by its id), each with how it goes
+/// back into the payload.
+fn boot_slots(
+    obj: &serde_json::Map<String, Value>,
+) -> (Vec<BootSlotKind>, Vec<axil_core::boot::FillSlot>) {
+    use axil_core::boot::FillSlot;
+    let as_row = |v: &Value| v.as_str().map_or_else(|| v.to_string(), String::from);
+    let mut kinds = Vec::new();
+    let mut slots = Vec::new();
+    for key in boot_fill_keys(obj) {
+        match (key.as_str(), &obj[key]) {
+            ("extension_blocks", Value::Array(blocks)) => {
+                for entry in blocks {
+                    let id = entry
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .unwrap_or("extension");
+                    let text = entry.get("text").and_then(Value::as_str).unwrap_or("");
+                    let lines = text.trim_end().lines().map(String::from).collect();
+                    kinds.push(BootSlotKind::Block(entry.clone()));
+                    slots.push(FillSlot::new(id, lines));
                 }
-                return Value::Object(result);
+            }
+            (_, Value::Array(items)) => {
+                kinds.push(BootSlotKind::Rows {
+                    key: key.clone(),
+                    items: items.clone(),
+                });
+                slots.push(FillSlot {
+                    clippable: items.iter().all(Value::is_string),
+                    ..FillSlot::new(key.as_str(), items.iter().map(as_row).collect())
+                });
+            }
+            (_, value) => {
+                kinds.push(BootSlotKind::Single {
+                    key: key.clone(),
+                    value: value.clone(),
+                });
+                slots.push(FillSlot {
+                    clippable: value.is_string(),
+                    ..FillSlot::new(key.as_str(), vec![as_row(value)])
+                });
             }
         }
     }
-    v.clone()
+    (kinds, slots)
+}
+
+/// Rows left out per section, summed by name (two blocks could share an id).
+fn boot_omitted(
+    slots: &[axil_core::boot::FillSlot],
+    sel: &[Option<Vec<String>>],
+) -> Vec<(String, usize)> {
+    let mut out: Vec<(String, usize)> = Vec::new();
+    for (name, n) in axil_core::boot::omitted_by_slot(slots, sel) {
+        match out.iter_mut().find(|(m, _)| *m == name) {
+            Some((_, total)) => *total += n,
+            None => out.push((name, n)),
+        }
+    }
+    out
+}
+
+/// The flat boot JSON showing `sel` of `slots`, with `omitted_items` and
+/// `omitted_by_section` when anything was left out and `degraded` when an
+/// Engine is.
+fn render_boot_json(
+    kinds: &[BootSlotKind],
+    slots: &[axil_core::boot::FillSlot],
+    sel: &[Option<Vec<String>>],
+    degraded: &[String],
+) -> Value {
+    let mut out = serde_json::Map::new();
+    let mut blocks: Vec<Value> = Vec::new();
+    for ((kind, slot), kept) in kinds.iter().zip(slots).zip(sel) {
+        let Some(kept) = kept else { continue };
+        match kind {
+            BootSlotKind::Block(entry) => {
+                let mut entry = entry.clone();
+                if *kept != slot.rows {
+                    entry["text"] = json!(kept.join("\n"));
+                }
+                blocks.push(entry);
+            }
+            BootSlotKind::Rows { key, items } => {
+                let rows = kept
+                    .iter()
+                    .zip(items)
+                    .map(|(row, item)| match item {
+                        Value::String(_) => json!(row),
+                        other => other.clone(),
+                    })
+                    .collect();
+                out.insert(key.clone(), Value::Array(rows));
+            }
+            BootSlotKind::Single { key, value } => {
+                let value = match (value, kept.first()) {
+                    (Value::String(_), Some(row)) => json!(row),
+                    (other, _) => other.clone(),
+                };
+                out.insert(key.clone(), value);
+            }
+        }
+    }
+    if !blocks.is_empty() {
+        out.insert("extension_blocks".into(), Value::Array(blocks));
+    }
+    let omitted = boot_omitted(slots, sel);
+    if !omitted.is_empty() {
+        let total: usize = omitted.iter().map(|(_, n)| n).sum();
+        out.insert("omitted_items".into(), json!(total));
+        let by_section: serde_json::Map<String, Value> =
+            omitted.into_iter().map(|(k, n)| (k, json!(n))).collect();
+        out.insert("omitted_by_section".into(), Value::Object(by_section));
+    }
+    if !degraded.is_empty() {
+        out.insert("degraded".into(), json!(degraded));
+    }
+    Value::Object(out)
+}
+
+/// Fit boot JSON into `budget_tokens`, estimated as `ceil(bytes / 4)` of
+/// the compact serialization. Rows fill by
+/// [`axil_core::boot::fill_by_priority`] in strict [`BOOT_FILL_ORDER`]:
+/// the first row that misses is clipped and ends the fill, so no row shows
+/// while a higher-priority one is cut. `degraded` warnings are always
+/// included and count against the budget. When anything was left out,
+/// `omitted_items` and `omitted_by_section` say what.
+fn apply_token_budget(v: &Value, budget_tokens: usize, degraded: &[String]) -> Value {
+    let Some(obj) = v.as_object() else {
+        return v.clone();
+    };
+    let (kinds, slots) = boot_slots(obj);
+    let limit = budget_tokens.saturating_mul(4);
+    let json_len = |v: &Value| serde_json::to_string(v).map_or(0, |s| s.len());
+    let sel = axil_core::boot::fill_by_priority(&slots, |sel| {
+        json_len(&render_boot_json(&kinds, &slots, sel, degraded)) <= limit
+    });
+    render_boot_json(&kinds, &slots, &sel, degraded)
 }
 
 // ─── Boot context helpers ──────────────────────────────────────────
 
-/// Cut a boot narrative to a `max_tokens * 4` byte budget, appending "..."
-/// when anything was dropped. The cut floors to a char boundary: boot text
-/// carries arrows, em dashes and user-stored non-ASCII, and a raw byte slice
-/// through one of those panics the whole boot.
+/// Cut a boot narrative to a `max_tokens * 4` byte budget, ending it in
+/// "...\n" when anything was dropped; the marker counts against the budget
+/// (and is left off when it alone would not fit). The cut floors to a char
+/// boundary: boot text carries arrows, em dashes and user-stored non-ASCII,
+/// and a raw byte slice through one of those panics the whole boot.
 fn cut_narrative_to_budget(narrative: String, max_tokens: usize) -> String {
     let max_bytes = max_tokens.saturating_mul(4);
     if narrative.len() <= max_bytes {
         return narrative;
     }
-    let mut cut = max_bytes;
+    let marker = if max_bytes >= 4 { "...\n" } else { "" };
+    let mut cut = max_bytes - marker.len();
     while !narrative.is_char_boundary(cut) {
         cut -= 1;
     }
-    format!("{}...", &narrative[..cut])
+    format!("{}{marker}", &narrative[..cut])
 }
 
-/// Convert boot JSON to a human-readable narrative format.
-fn boot_to_narrative(data: &Value) -> String {
-    let mut out = String::new();
-    out.push_str("=== Axil Boot Context ===\n");
-    out.push_str("INSTRUCTION: This database is your memory. Use `axil recall \"<topic>\"` for project questions. Do NOT read files or grep for status — query the DB first.\n\n");
+/// The fixed opening of a narrative boot; never cut by the budget.
+const BOOT_NARRATIVE_HEADER: &str = "=== Axil Boot Context ===\nINSTRUCTION: This database is your memory. Use `axil recall \"<topic>\"` for project questions. Do NOT read files or grep for status — query the DB first.\nRows read `id · age · status · summary`; `axil get <id>` expands one.\n\n";
 
-    // Extension blocks render before rules/sessions/decisions. Each
-    // block is a self-contained markdown fragment (Extensions own
-    // their own headers); emit in registration order, blank-line separated.
-    if let Some(blocks) = data.get("extension_blocks").and_then(|v| v.as_array()) {
-        for entry in blocks {
-            let text = entry.get("text").and_then(|v| v.as_str()).unwrap_or("");
-            let trimmed = text.trim_end();
-            if !trimmed.is_empty() {
-                out.push_str(trimmed);
-                out.push_str("\n\n");
-            }
-        }
+/// The sections a narrative boot renders, each with its heading, in
+/// [`BOOT_FILL_ORDER`]. The flat JSON carries more (beliefs, project,
+/// modules, ...); the narrative, which the SessionStart hook injects,
+/// keeps to these.
+const BOOT_NARRATIVE_SECTIONS: &[(&str, &str)] = &[
+    ("extension_blocks", ""),
+    ("rules", "Rules (pinned — always apply)"),
+    ("errors", "Open Errors"),
+    ("decisions", "Decisions"),
+    ("topic_recall", "Related Context"),
+    ("context_push", "Pushed Context"),
+    ("recent_changes", "Recent Changes (since last session)"),
+    ("recent_sessions", "Recent Sessions"),
+    ("lessons", "Lessons (resolved errors)"),
+    ("architecture", "Architecture Notes"),
+];
+
+/// The narrative heading of a boot section.
+fn boot_section_title(key: &str) -> String {
+    let title = BOOT_NARRATIVE_SECTIONS
+        .iter()
+        .find(|(k, _)| *k == key)
+        .map_or(key, |(_, title)| title);
+    format!("## {title}")
+}
+
+/// The note that ends a narrative boot when the budget left rows out,
+/// naming the sections that lost them.
+fn boot_omitted_note(omitted: &[(String, usize)], budget_tokens: usize) -> String {
+    let total: usize = omitted.iter().map(|(_, n)| n).sum();
+    let by_section: Vec<String> = omitted.iter().map(|(k, n)| format!("{k} {n}")).collect();
+    format!(
+        "({total} more left out to fit the ~{budget_tokens}-token boot budget, estimated as bytes/4: {}; raise --budget to see them.)\n",
+        by_section.join(", ")
+    )
+}
+
+/// The narrative showing `sel` of `slots`: the header, `warnings`, each
+/// shown section in fill order, and a closing note naming what was left
+/// out.
+fn render_boot_narrative(
+    kinds: &[BootSlotKind],
+    slots: &[axil_core::boot::FillSlot],
+    sel: &[Option<Vec<String>>],
+    warnings: &[String],
+    budget_tokens: usize,
+) -> String {
+    let mut out = String::from(BOOT_NARRATIVE_HEADER);
+    for w in warnings {
+        out.push_str(&format!("WARNING: {w}\n"));
     }
-
-    // Cross-agent delta from the semantic event log (present only when the
-    // `event-log` feature is enabled and the log is on; absent otherwise, so
-    // this renders nothing by default).
-    if let Some(changes) = data.get("recent_changes").and_then(|v| v.as_array()) {
-        if !changes.is_empty() {
-            out.push_str("## Recent Changes (since last session)\n");
-            for c in changes {
-                let kind = c.get("kind").and_then(|v| v.as_str()).unwrap_or("?");
-                let table = c.get("table").and_then(|v| v.as_str()).unwrap_or("");
-                let rec = c.get("record_id").and_then(|v| v.as_str()).unwrap_or("");
-                match c.get("agent_id").and_then(|v| v.as_str()) {
-                    Some(agent) => {
-                        out.push_str(&format!("- {kind} [{table}] {rec} (by {agent})\n"))
-                    }
-                    None => out.push_str(&format!("- {kind} [{table}] {rec}\n")),
+    if !warnings.is_empty() {
+        out.push('\n');
+    }
+    for (kind, kept) in kinds.iter().zip(sel) {
+        let Some(kept) = kept else { continue };
+        match kind {
+            // A block is a self-contained markdown fragment whose first
+            // line is its own heading.
+            BootSlotKind::Block(_) => {
+                for line in kept {
+                    out.push_str(line);
+                    out.push('\n');
                 }
             }
-            out.push('\n');
-        }
-    }
-
-    if let Some(rules) = data.get("rules").and_then(|v| v.as_array()) {
-        if !rules.is_empty() {
-            out.push_str("## Rules (pinned — always apply)\n");
-            for r in rules {
-                let rule = r.get("rule").and_then(|v| v.as_str()).unwrap_or("?");
-                out.push_str(&format!("- {}\n", rule));
-            }
-            out.push('\n');
-        }
-    }
-
-    if let Some(sessions) = data.get("recent_sessions").and_then(|v| v.as_array()) {
-        out.push_str("## Recent Sessions\n");
-        for s in sessions {
-            let summary = s.get("summary").and_then(|v| v.as_str()).unwrap_or("?");
-            let age = match s.get("age_days").and_then(|v| v.as_i64()) {
-                Some(0) => "today".to_string(),
-                Some(1) => "1 day ago".to_string(),
-                Some(d) => format!("{d} days ago"),
-                None => "?".to_string(),
-            };
-            let stale = if s.get("stale").and_then(|v| v.as_bool()) == Some(true) {
-                ", stale"
-            } else {
-                ""
-            };
-            out.push_str(&format!("- {summary} ({age}{stale})\n"));
-        }
-        out.push('\n');
-    }
-
-    if let Some(decisions) = data.get("decisions").and_then(|v| v.as_array()) {
-        out.push_str("## Decisions\n");
-        for d in decisions {
-            let summary = d.get("summary").and_then(|v| v.as_str()).unwrap_or("?");
-            out.push_str(&format!("- {}\n", summary));
-        }
-        out.push('\n');
-    }
-
-    if let Some(errors) = data.get("errors").and_then(|v| v.as_array()) {
-        out.push_str("## Known Issues\n");
-        for e in errors {
-            let error = e.get("error").and_then(|v| v.as_str()).unwrap_or("?");
-            let fix = e.get("fix").and_then(|v| v.as_str()).unwrap_or("");
-            if fix.is_empty() {
-                out.push_str(&format!("- {}\n", error));
-            } else {
-                out.push_str(&format!("- {}: {}\n", error, fix));
+            // A section with no rows (an empty `topic_recall`) says nothing
+            // in prose; the JSON keeps its `[]`.
+            BootSlotKind::Rows { .. } | BootSlotKind::Single { .. } if kept.is_empty() => continue,
+            BootSlotKind::Rows { key, .. } | BootSlotKind::Single { key, .. } => {
+                out.push_str(&boot_section_title(key));
+                out.push('\n');
+                for row in kept {
+                    out.push_str("- ");
+                    out.push_str(row);
+                    out.push('\n');
+                }
             }
         }
         out.push('\n');
     }
-
-    if let Some(arch) = data.get("architecture").and_then(|v| v.as_array()) {
-        out.push_str("## Architecture Notes\n");
-        for a in arch {
-            let summary = a.get("summary").and_then(|v| v.as_str()).unwrap_or("?");
-            out.push_str(&format!("- {}\n", summary));
-        }
-        out.push('\n');
+    let omitted = boot_omitted(slots, sel);
+    if !omitted.is_empty() {
+        out.push_str(&boot_omitted_note(&omitted, budget_tokens));
     }
-
-    if let Some(topic) = data.get("topic_recall").and_then(|v| v.as_array()) {
-        out.push_str("## Related Context\n");
-        for t in topic {
-            let summary = t.get("summary").and_then(|v| v.as_str()).unwrap_or("?");
-            let score = t.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
-            out.push_str(&format!("- [{:.2}] {}\n", score, summary));
-        }
-        out.push('\n');
-    }
-
     out
+}
+
+/// Render boot JSON as plain-text narrative within `budget_tokens`
+/// (estimated as `ceil(bytes / 4)`). The header and `warnings` always
+/// appear; rows of the [`BOOT_NARRATIVE_SECTIONS`] then fill by
+/// [`axil_core::boot::fill_by_priority`] in strict [`BOOT_FILL_ORDER`],
+/// and a closing note names the sections that lost rows.
+fn boot_to_narrative(data: &Value, warnings: &[String], budget_tokens: usize) -> String {
+    let shown: serde_json::Map<String, Value> = data
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter(|(k, _)| BOOT_NARRATIVE_SECTIONS.iter().any(|(s, _)| s == k))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    let (kinds, slots) = boot_slots(&shown);
+    let limit = budget_tokens.saturating_mul(4);
+    let sel = axil_core::boot::fill_by_priority(&slots, |sel| {
+        render_boot_narrative(&kinds, &slots, sel, warnings, budget_tokens).len() <= limit
+    });
+    render_boot_narrative(&kinds, &slots, &sel, warnings, budget_tokens)
 }
 
 /// Create a compact boot JSON (strip whitespace, abbreviate keys).
@@ -20064,12 +20320,15 @@ fn compact_boot_json(data: &Value) -> Value {
                         if let Some(obj) = item.as_object() {
                             let mut slim = serde_json::Map::new();
                             for (ik, iv) in obj {
+                                // `text` is an extension block's body (the
+                                // Resume Here block leads the fill order).
                                 if ik == "id"
                                     || ik == "score"
                                     || ik == "summary"
                                     || ik == "error"
                                     || ik == "fix"
                                     || ik == "type"
+                                    || ik == "text"
                                 {
                                     slim.insert(ik.clone(), truncate_value(iv, 150));
                                 }
@@ -20790,21 +21049,21 @@ mod boot_narrative_budget {
     }
 
     #[test]
-    fn ascii_cut_is_exact_byte_budget() {
+    fn ascii_cut_fits_the_byte_budget_marker_included() {
         let s = "a".repeat(20);
         assert_eq!(
             cut_narrative_to_budget(s, 2),
-            format!("{}...", "a".repeat(8))
+            format!("{}...\n", "a".repeat(4))
         );
     }
 
-    // A budget of 1 token is 4 bytes; "aa→" puts byte 4 inside the 3-byte
-    // arrow, which used to panic on the raw slice.
+    // A budget of 2 tokens is 8 bytes, 4 of them for the marker; "aaa→"
+    // puts byte 4 inside the 3-byte arrow, which a raw slice panics on.
     #[test]
     fn multibyte_boundary_floors_instead_of_panicking() {
-        let s = "aa→bbbbbbbb".to_string();
+        let s = "aaa→bbbbbbbbbb".to_string();
         assert!(!s.is_char_boundary(4));
-        assert_eq!(cut_narrative_to_budget(s, 1), "aa...");
+        assert_eq!(cut_narrative_to_budget(s, 2), "aaa...\n");
     }
 
     #[test]
@@ -20812,10 +21071,327 @@ mod boot_narrative_budget {
         let s = "Résumé — naïve 日本語 🎉 text ".repeat(8);
         for tokens in 0..s.len() {
             let out = cut_narrative_to_budget(s.clone(), tokens);
-            let body = out.strip_suffix("...").unwrap_or(&out);
+            let body = out.strip_suffix("...\n").unwrap_or(&out);
             assert!(s.starts_with(body));
-            assert!(body.len() <= tokens * 4);
+            assert!(out.len() <= tokens * 4, "{tokens}: {} bytes", out.len());
         }
+    }
+}
+
+#[cfg(test)]
+mod boot_budget_fill {
+    use super::{apply_token_budget, boot_error_row, boot_to_narrative, dedupe_boot_rows};
+    use serde_json::{json, Value};
+
+    fn row(id: usize, status: &str, text: &str) -> Value {
+        json!(format!("ID{id:024} · 2d · {status} · {text}"))
+    }
+
+    /// A payload whose every section is far bigger than a small budget.
+    fn big_boot() -> Value {
+        let long = "words that cost tokens — with non-ASCII → text ".repeat(3);
+        let rows = |status: &str, n: usize| -> Vec<Value> {
+            (0..n)
+                .map(|i| row(i, status, &format!("{status} {i} {long}")))
+                .collect()
+        };
+        let mut resume = String::from("## Resume Here\n");
+        for i in 0..40 {
+            resume.push_str(&format!("- step {i} of the resume block\n"));
+        }
+        json!({
+            "extension_blocks": [{"id": "checkpoint", "text": resume}],
+            "rules": rows("pinned", 2),
+            "errors": rows("open", 5),
+            "decisions": rows("active", 5),
+            "recent_sessions": rows("recent", 3),
+            "lessons": rows("resolved", 3),
+            "architecture": rows("architecture", 2),
+        })
+    }
+
+    #[test]
+    fn narrative_fills_in_priority_order_within_budget() {
+        let data = big_boot();
+        let out = boot_to_narrative(&data, &[], 1000);
+        assert!(out.len() <= 4000, "{} bytes", out.len());
+        let pos = |needle: &str| out.find(needle);
+        let resume = pos("## Resume Here").expect("resume block first");
+        let rules = pos("## Rules").expect("rules kept");
+        let errors = pos("## Open Errors").expect("open errors kept");
+        let decisions = pos("## Decisions").expect("decisions kept");
+        assert!(resume < rules && rules < errors && errors < decisions);
+        assert!(
+            !out.contains("## Lessons"),
+            "low priority is cut first:\n{out}"
+        );
+        assert!(out.contains("more left out to fit the ~1000-token boot budget"));
+        // Every row keeps its `id · age · status · summary` shape, a clipped
+        // one included.
+        for line in out.lines().filter(|l| l.starts_with("- ID")) {
+            assert_eq!(line.splitn(4, " · ").count(), 4, "{line}");
+        }
+    }
+
+    #[test]
+    fn narrative_resume_block_is_cut_to_a_prefix() {
+        let data = big_boot();
+        let out = boot_to_narrative(&data, &["vector engine unavailable".into()], 150);
+        assert!(out.len() <= 600, "{} bytes:\n{out}", out.len());
+        assert!(out.contains("WARNING: vector engine unavailable"));
+        assert!(out.contains("## Resume Here\n- step 0 "));
+        assert!(!out.contains("step 39"));
+    }
+
+    #[test]
+    fn narrative_without_a_cut_has_no_omitted_note() {
+        let data = json!({"decisions": [row(1, "active", "small")]});
+        let out = boot_to_narrative(&data, &[], 1000);
+        assert!(out.contains("## Decisions\n- ID"));
+        assert!(!out.contains("left out"));
+    }
+
+    #[test]
+    fn the_omitted_note_names_the_sections_that_lost_rows() {
+        let out = boot_to_narrative(&big_boot(), &[], 600);
+        let note = out.lines().last().unwrap();
+        assert!(note.contains("left out"), "{out}");
+        for section in ["lessons 3", "architecture 2", "recent_sessions 3"] {
+            assert!(note.contains(section), "{note}");
+        }
+    }
+
+    /// Two long pinned rules, three long open errors, six short decisions
+    /// and three sessions: enough rows in every load-bearing slot that a
+    /// fill letting a lower section in ahead of a higher one would show.
+    fn rules_errors_decisions() -> Value {
+        let rules: Vec<Value> = (0..2)
+            .map(|i| {
+                row(
+                    i,
+                    "pinned",
+                    &format!("Rule {i}: always check the rule text. ").repeat(9),
+                )
+            })
+            .collect();
+        let errors: Vec<Value> = (0..3)
+            .map(|i| {
+                row(
+                    10 + i,
+                    "open",
+                    &format!("Open error {i} keeps happening. ").repeat(4),
+                )
+            })
+            .collect();
+        let decisions: Vec<Value> = (0..6)
+            .map(|i| row(20 + i, "active", &format!("decision {i}")))
+            .collect();
+        let sessions: Vec<Value> = (0..3)
+            .map(|i| row(30 + i, "recent", "2 files: a.rs, b.rs"))
+            .collect();
+        json!({
+            "rules": rules,
+            "errors": errors,
+            "decisions": decisions,
+            "recent_sessions": sessions,
+        })
+    }
+
+    /// `shown` is a prefix of `all`: every row whole except the last, which
+    /// may be clipped (a prefix of its original, ending in `…`).
+    fn assert_strict_prefix(shown: &[String], all: &[String], budget: usize) {
+        assert!(shown.len() <= all.len(), "budget {budget}: {shown:?}");
+        for (k, row) in shown.iter().enumerate() {
+            if *row == all[k] {
+                continue;
+            }
+            assert_eq!(
+                k + 1,
+                shown.len(),
+                "budget {budget}: row {k} out of order or cut: {row}"
+            );
+            let kept = row.strip_suffix('…').expect("a clipped row ends in …");
+            assert!(
+                all[k].starts_with(kept.trim_end()),
+                "budget {budget}: {row}"
+            );
+        }
+    }
+
+    /// Every `- ` row line of a narrative, with the heading above it.
+    fn narrative_rows(out: &str) -> Vec<String> {
+        let mut heading = "";
+        let mut rows = Vec::new();
+        for line in out.lines() {
+            if line.starts_with("## ") {
+                heading = line;
+            } else if line.starts_with("- ") {
+                rows.push(format!("{heading} {line}"));
+            }
+        }
+        rows
+    }
+
+    #[test]
+    fn narrative_rows_fill_in_strict_priority_order() {
+        let data = rules_errors_decisions();
+        let all = narrative_rows(&boot_to_narrative(&data, &[], 100_000));
+        assert_eq!(all.len(), 2 + 3 + 6 + 3);
+        for budget in (60..800).step_by(3) {
+            let out = boot_to_narrative(&data, &[], budget);
+            assert_strict_prefix(&narrative_rows(&out), &all, budget);
+        }
+    }
+
+    #[test]
+    fn json_rows_fill_in_strict_priority_order() {
+        let data = rules_errors_decisions();
+        let keys = ["rules", "errors", "decisions", "recent_sessions"];
+        let rows = |v: &Value| -> Vec<String> {
+            keys.iter()
+                .flat_map(|k| {
+                    v.get(*k)
+                        .and_then(Value::as_array)
+                        .cloned()
+                        .unwrap_or_default()
+                })
+                .map(|r| r.as_str().unwrap().to_string())
+                .collect()
+        };
+        let all = rows(&data);
+        for budget in (30..800).step_by(3) {
+            let out = apply_token_budget(&data, budget, &[]);
+            assert_strict_prefix(&rows(&out), &all, budget);
+            assert!(
+                serde_json::to_string(&out).unwrap().len() <= budget * 4 || rows(&out).is_empty()
+            );
+        }
+    }
+
+    /// The SessionStart hook's boot is `--boot-format narrative --budget
+    /// 800`. On a payload shaped like the dogfood DB's (a ~1 KB resume
+    /// block, a long pinned rule, five open errors), the budget reaches
+    /// Decisions, and Recent Sessions (lower priority) stays out while any
+    /// decision is cut.
+    #[test]
+    fn the_hook_budget_reaches_decisions_before_sessions() {
+        let mut resume = String::from("## Resume Here\n");
+        resume.push_str(&format!("- {}\n", "headline of the checkpoint ".repeat(8)));
+        resume.push_str(&format!(
+            "- **Goal:** {}\n",
+            "the goal of the work ".repeat(4)
+        ));
+        resume.push_str(&format!(
+            "- **State:** {}\n",
+            "where things stand now ".repeat(8)
+        ));
+        resume.push_str("- **Next:**\n");
+        for i in 0..3 {
+            resume.push_str(&format!("  - next step {i} {}\n", "to do ".repeat(20)));
+        }
+        let long = "an error summary long enough to be clipped at the row limit ".repeat(2);
+        let data = json!({
+            "extension_blocks": [{"id": "checkpoint", "text": resume}],
+            "rules": [row(1, "pinned", &"Always consult Axil first before any search. ".repeat(10))],
+            "errors": (0..5).map(|i| row(10 + i, "open", &long)).collect::<Vec<_>>(),
+            "decisions": (0..5).map(|i| row(20 + i, "active", &long)).collect::<Vec<_>>(),
+            "recent_sessions": (0..3).map(|i| row(30 + i, "recent", "2 files: a.rs, b.rs")).collect::<Vec<_>>(),
+        });
+        let out = boot_to_narrative(&data, &[], 800);
+        assert!(out.len() <= 3200, "{} bytes", out.len());
+        let decisions = out.find("## Decisions").expect(&out);
+        assert!(
+            out[decisions..]
+                .lines()
+                .nth(1)
+                .is_some_and(|l| l.starts_with("- ID")),
+            "{out}"
+        );
+        assert!(out.contains("## Rules") && out.contains("## Open Errors"));
+        assert!(!out.contains("## Recent Sessions"), "{out}");
+        let note = out.lines().last().unwrap();
+        assert!(note.contains("recent_sessions 3"), "{note}");
+    }
+
+    #[test]
+    fn json_budget_trims_array_items_not_whole_keys() {
+        let data = big_boot();
+        let out = apply_token_budget(&data, 600, &[]);
+        let text = serde_json::to_string(&out).unwrap();
+        assert!(text.len() <= 2400, "{} bytes", text.len());
+        assert!(out["omitted_items"].as_u64().unwrap() > 0);
+        assert_eq!(out["omitted_by_section"]["lessons"], 3);
+        // The resume block and the rules fill first; later sections keep
+        // whatever rows still fit rather than vanishing as whole keys.
+        assert!(out["extension_blocks"][0]["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("## Resume Here"));
+        assert_eq!(out["rules"].as_array().unwrap().len(), 2);
+        let errors = out["errors"].as_array().map_or(0, Vec::len);
+        assert!(errors > 0 && errors < 5, "errors trimmed to {errors}");
+        assert!(out.get("lessons").is_none());
+    }
+
+    #[test]
+    fn json_budget_cuts_an_oversized_block_to_leading_lines() {
+        let data = big_boot();
+        let out = apply_token_budget(&data, 100, &[]);
+        let text = out["extension_blocks"][0]["text"].as_str().unwrap();
+        assert!(text.starts_with("## Resume Here\n- step 0 "), "{text}");
+        assert!(!text.contains("step 39"));
+        assert!(serde_json::to_string(&out).unwrap().len() <= 400);
+    }
+
+    #[test]
+    fn json_within_budget_is_unchanged() {
+        let data = json!({"decisions": [row(1, "active", "small")], "topic_recall": []});
+        assert_eq!(apply_token_budget(&data, 1000, &[]), data);
+    }
+
+    #[test]
+    fn degraded_warnings_count_against_the_json_budget() {
+        let warning = "vector engine could not attach. Fix: run `axil heal`".to_string();
+        let out = apply_token_budget(&big_boot(), 300, std::slice::from_ref(&warning));
+        assert_eq!(out["degraded"][0], json!(warning));
+        assert!(serde_json::to_string(&out).unwrap().len() <= 1200);
+    }
+
+    #[test]
+    fn pushed_context_does_not_repeat_rows_shown_above() {
+        let error = row(1, "open", "boot panicked");
+        let decision = row(2, "active", "use redb");
+        let mut sections = json!({
+            "errors": [error.clone()],
+            "topic_recall": [decision.clone()],
+            "decisions": [decision.clone()],
+            "context_push": [row(1, "errors open", "boot panicked"), row(3, "context", "new")],
+            "architecture": [row(3, "architecture", "new")],
+        });
+        dedupe_boot_rows(sections.as_object_mut().unwrap());
+        // Topic recall keeps its list whole; pushed context loses the open
+        // error, and the architecture row pushed context already shows goes
+        // with its now-empty section.
+        assert_eq!(sections["topic_recall"], json!([decision]));
+        assert_eq!(sections["context_push"], json!([row(3, "context", "new")]));
+        assert!(sections.get("architecture").is_none(), "{sections}");
+    }
+
+    #[test]
+    fn error_rows_carry_the_fix() {
+        let now = chrono::Utc::now();
+        let mut record = axil_core::Record::new(
+            "errors",
+            json!({"error": "boot panicked", "fix": "cut on a char boundary", "resolved": true}),
+        );
+        record.created_at = now - chrono::Duration::days(2);
+        assert_eq!(
+            boot_error_row(&record, now),
+            format!(
+                "{} · 2d · resolved · boot panicked → cut on a char boundary",
+                record.id
+            )
+        );
     }
 }
 

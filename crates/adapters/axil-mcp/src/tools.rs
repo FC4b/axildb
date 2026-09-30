@@ -452,11 +452,14 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
         // ─── Boot contract (Track C) ────────────────────────────────
         ToolDefinition {
             name: "boot".into(),
-            description: "Return a stable BootContext (schema v1): current_scope, constraints, recent_decisions, active_failures, open_threads, preferences, confidence_notes. Fixed section order, token-budget aware — lower-priority sections drop when over budget.".into(),
+            description: format!(
+                "Return a stable BootContext (schema_version \"{}\"): current_scope, constraints, recent_decisions, active_failures (open errors), open_threads, preferences, confidence_notes. Every row is one string (`id · age · status · summary`, expand with `get`). Rows fill in strict priority order (scope, constraints, active_failures, recent_decisions, then the rest) until the budget is spent; omitted_by_section names what was cut.",
+                axil_core::BOOT_SCHEMA_VERSION
+            ),
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "budget": {"type": "integer", "description": "Token budget (default 2000)"},
+                    "budget": {"type": "integer", "description": format!("Token budget, estimated as bytes/4 (default {})", axil_core::DEFAULT_TOKEN_BUDGET)},
                     "topic":  {"type": "string", "description": "Optional topic for focused recall"},
                     "scope":  {"type": "array", "items": {"type": "string"}, "description": "Scope filter"}
                 }

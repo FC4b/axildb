@@ -40,7 +40,7 @@ and says so, instead of quietly recalling by keyword only:
 
 - `doctor` reports a `vector_engine` error (exit code 2).
 - `heal --dry-run` lists an `engine_unavailable` problem.
-- `boot` output gains a `degraded` list (also in `boot --schema v1` and the MCP
+- `boot` output gains a `degraded` list (also in `boot --schema v2` and the MCP
   `boot` tool), and narrative boot starts with a `WARNING:` line.
 - The recall context block the prompt hook injects starts with a `# Warning:`
   line, and MCP `recall` results carry the warning as a second text block.

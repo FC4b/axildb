@@ -1,0 +1,153 @@
+{
+  "what": "size of each `axil boot` surface on one database, old binary vs new",
+  "date": "2026-09-30",
+  "snapshot": "benchmarks/dogfood-recall/data/snap-prefix (copy)",
+  "token_estimate": "ceil(bytes / 4) of the output (Axil's bytes/4 budget heuristic), not a tokenizer count",
+  "runs": {
+    "old": {
+      "binary": "axil 2.3.1 (axildb-v2.3.1-25-g65d45ff)",
+      "surfaces": {
+        "narrative": {
+          "cmd": "axil boot --boot-format narrative",
+          "exit": 0,
+          "bytes": 5942,
+          "est_tokens": 1486
+        },
+        "json": {
+          "cmd": "axil boot",
+          "exit": 0,
+          "bytes": 12118,
+          "est_tokens": 3030
+        },
+        "schema": {
+          "cmd": "axil boot --schema v1",
+          "exit": 0,
+          "bytes": 23041,
+          "est_tokens": 5761,
+          "schema_version": "1",
+          "token_budget": 2000,
+          "token_budget_used": 5678,
+          "dropped_sections": [
+            "confidence_notes",
+            "preferences",
+            "open_threads"
+          ]
+        },
+        "hook": {
+          "cmd": "axil boot --boot-format narrative --budget 800",
+          "exit": 0,
+          "bytes": 3204,
+          "est_tokens": 801
+        },
+        "mcp_boot": {
+          "cmd": "MCP tools/call boot {}",
+          "exit": 0,
+          "bytes": 23100,
+          "est_tokens": 5775,
+          "schema_version": "1",
+          "token_budget": 2000,
+          "token_budget_used": 5693,
+          "dropped_sections": [
+            "confidence_notes",
+            "preferences",
+            "open_threads"
+          ]
+        }
+      }
+    },
+    "new": {
+      "binary": "axil 2.3.1 (axildb-v2.3.1-34-g36f687f)",
+      "surfaces": {
+        "narrative": {
+          "cmd": "axil boot --boot-format narrative",
+          "exit": 0,
+          "bytes": 3999,
+          "est_tokens": 1000
+        },
+        "json": {
+          "cmd": "axil boot",
+          "exit": 0,
+          "bytes": 3944,
+          "est_tokens": 986,
+          "omitted_items": 13,
+          "omitted_by_section": {
+            "architecture": 1,
+            "index_freshness": 1,
+            "lessons": 3,
+            "modules": 5,
+            "project": 1,
+            "recent_sessions": 2
+          }
+        },
+        "schema": {
+          "cmd": "axil boot --schema v2",
+          "exit": 0,
+          "bytes": 3988,
+          "est_tokens": 997,
+          "schema_version": "2",
+          "token_budget": 1000,
+          "token_budget_used": 997,
+          "dropped_sections": [
+            "confidence_notes",
+            "preferences",
+            "open_threads"
+          ],
+          "omitted_items": 17,
+          "omitted_by_section": {
+            "confidence_notes": 1,
+            "open_threads": 10,
+            "recent_decisions": 6
+          }
+        },
+        "hook": {
+          "cmd": "axil boot --boot-format narrative --budget 800",
+          "exit": 0,
+          "bytes": 3199,
+          "est_tokens": 800
+        },
+        "mcp_boot": {
+          "cmd": "MCP tools/call boot {}",
+          "exit": 0,
+          "bytes": 3987,
+          "est_tokens": 997,
+          "schema_version": "2",
+          "token_budget": 1000,
+          "token_budget_used": 997,
+          "dropped_sections": [
+            "confidence_notes",
+            "preferences",
+            "open_threads"
+          ],
+          "omitted_items": 17,
+          "omitted_by_section": {
+            "confidence_notes": 1,
+            "open_threads": 10,
+            "recent_decisions": 6
+          }
+        }
+      }
+    }
+  },
+  "est_tokens": {
+    "narrative": {
+      "old_est_tokens": 1486,
+      "new_est_tokens": 1000
+    },
+    "json": {
+      "old_est_tokens": 3030,
+      "new_est_tokens": 986
+    },
+    "schema": {
+      "old_est_tokens": 5761,
+      "new_est_tokens": 997
+    },
+    "hook": {
+      "old_est_tokens": 801,
+      "new_est_tokens": 800
+    },
+    "mcp_boot": {
+      "old_est_tokens": 5775,
+      "new_est_tokens": 997
+    }
+  }
+}

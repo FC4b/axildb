@@ -18,6 +18,12 @@ use crate::scanner::Language;
 pub struct ParsedFile {
     /// 1-2 sentence summary of the file's purpose.
     pub summary: String,
+    /// True when `summary` is a fallback (a line or symbol count, the first
+    /// plain comment in the file, or "no summary available") rather than
+    /// text drawn from doc comments, detected patterns, types or exports.
+    /// It reads like a description but says little about what the file is
+    /// for, so agent-facing summaries such as `axil boot` leave it out.
+    pub summary_low_confidence: bool,
     /// Exported/public symbols.
     pub exports: Vec<String>,
     /// Import statements (module/crate names).
@@ -102,17 +108,21 @@ pub(super) fn brace_match_body(source: &str, from: usize) -> Option<&str> {
 ///
 /// Shared logic across all language parsers. Each parser provides its own
 /// `pattern_labels` mapping (e.g. `"http_handler"` → `"HTTP request handlers"`)
-/// and a `last_resort` fallback string for when nothing else works.
+/// and a `last_resort` fallback string for when nothing else works. Returns
+/// the summary and whether it is low-confidence, which is exactly when it
+/// came from `last_resort`.
 pub(super) fn generate_summary_common(
     file: &ParsedFile,
     pattern_labels: &[(&str, &str)],
     last_resort: impl Fn() -> String,
-) -> String {
+) -> (String, bool) {
+    let confident = |s: String| (s, false);
+
     // Priority 1: Module-level doc comment
     if let Some(ref doc) = file.module_doc {
         let first = doc.split('.').next().unwrap_or(doc).trim();
         if !first.is_empty() {
-            return first.to_string();
+            return confident(first.to_string());
         }
     }
 
@@ -129,9 +139,9 @@ pub(super) fn generate_summary_common(
         if first.len() > 15 {
             if !file.key_types.is_empty() {
                 let types: Vec<&str> = file.key_types.iter().take(2).map(|s| s.as_str()).collect();
-                return format!("{first}. Defines {}", types.join(", "));
+                return confident(format!("{first}. Defines {}", types.join(", ")));
             }
-            return first.to_string();
+            return confident(first.to_string());
         }
     }
 
@@ -163,10 +173,74 @@ pub(super) fn generate_summary_common(
     }
 
     if !desc_parts.is_empty() {
-        desc_parts.join("; ")
+        confident(desc_parts.join("; "))
     } else {
-        last_resort()
+        (last_resort(), true)
     }
+}
+
+/// Whether `summary` has the shape of a parser or module fallback: empty or
+/// punctuation only, "no summary available", "N lines of <Lang> code", or
+/// comma-separated counts such as "2 functions, 1 types, 40 lines" or
+/// "3 files".
+///
+/// For records indexed before `summary_low_confidence` existed. The
+/// first-comment fallback cannot be told apart from a real summary by its
+/// text, so this catches only the machine-shaped ones.
+pub fn is_fallback_summary(summary: &str) -> bool {
+    let s = summary.trim();
+    if s.chars()
+        .all(|c| c.is_ascii_punctuation() || c.is_whitespace())
+    {
+        return true;
+    }
+    if s == "no summary available" {
+        return true;
+    }
+    let count_of = |part: &str, nouns: &[&str]| {
+        let mut words = part.split_whitespace();
+        matches!(
+            (words.next(), words.next(), words.next()),
+            (Some(n), Some(noun), None) if n.parse::<u64>().is_ok() && nouns.contains(&noun)
+        )
+    };
+    let words: Vec<&str> = s.split_whitespace().collect();
+    if let [n, "lines", "of", _, "code"] = words.as_slice() {
+        if n.parse::<u64>().is_ok() {
+            return true;
+        }
+    }
+    s.split(", ")
+        .all(|part| count_of(part, &["functions", "types", "lines", "files"]))
+}
+
+/// The summary of an indexed file or module record worth showing an agent,
+/// or `None` when all it has is a fallback.
+///
+/// A record tagged `summary_low_confidence` has nothing to show. A module
+/// whose files mix confident and fallback summaries carries
+/// `confident_summary`, built from the confident ones only, and that is
+/// preferred. Otherwise `summary` is used with any fallback-shaped parts
+/// ([`is_fallback_summary`]) dropped, which also cleans module summaries
+/// indexed before the tag existed.
+pub fn confident_summary(data: &serde_json::Value) -> Option<String> {
+    let text = |key: &str| data.get(key).and_then(serde_json::Value::as_str);
+    if data
+        .get("summary_low_confidence")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+    {
+        return None;
+    }
+    if let Some(c) = text("confident_summary").filter(|c| !c.trim().is_empty()) {
+        return Some(c.to_string());
+    }
+    let parts: Vec<&str> = text("summary")?
+        .split(". ")
+        .map(str::trim)
+        .filter(|p| !is_fallback_summary(p.trim_end_matches('.')))
+        .collect();
+    (!parts.is_empty()).then(|| parts.join(". "))
 }
 
 /// Parse a source file and extract structured information.
@@ -176,5 +250,88 @@ pub fn parse_file(source: &str, language: Language, include_private: bool) -> Pa
         Language::TypeScript | Language::JavaScript => typescript::parse(source, include_private),
         Language::Python => python::parse(source, include_private),
         _ => generic::parse(source),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn parsers_tag_fallback_summaries() {
+        let rust = parse_file("fn a() {}\n", Language::Rust, false);
+        assert_eq!(rust.summary, "1 lines of Rust code");
+        assert!(rust.summary_low_confidence);
+
+        let comment = parse_file(
+            "// TODO: split this file\nfn a() {}\n",
+            Language::Rust,
+            false,
+        );
+        assert_eq!(comment.summary, "TODO: split this file");
+        assert!(comment.summary_low_confidence, "a first comment is a guess");
+
+        let documented = parse_file("//! Token cache.\nfn a() {}\n", Language::Rust, false);
+        assert!(!documented.summary_low_confidence);
+
+        let python = parse_file("x = 1\n", Language::Python, false);
+        assert_eq!(python.summary, "no summary available");
+        assert!(python.summary_low_confidence);
+
+        let generic = generic::parse("package main\nfunc main() {}\n");
+        assert!(generic.summary_low_confidence, "{}", generic.summary);
+        let generic_doc = generic::parse("// Package auth checks tokens.\npackage auth\n");
+        assert!(!generic_doc.summary_low_confidence);
+    }
+
+    #[test]
+    fn fallback_shapes_are_recognized() {
+        for s in [
+            "",
+            " . ",
+            "no summary available",
+            "242 lines of Rust code",
+            "2 functions, 1 types, 40 lines",
+            "0 lines",
+            "3 files",
+        ] {
+            assert!(is_fallback_summary(s), "{s:?}");
+        }
+        for s in [
+            "JWT auth middleware",
+            "tests",
+            "defines Claims struct",
+            "3 files: a, b",
+        ] {
+            assert!(!is_fallback_summary(s), "{s:?}");
+        }
+    }
+
+    #[test]
+    fn confident_summary_skips_fallbacks() {
+        assert_eq!(
+            confident_summary(&json!({"summary": "3 files", "summary_low_confidence": true})),
+            None
+        );
+        assert_eq!(
+            confident_summary(
+                &json!({"summary": "a. 2 lines of Rust code", "confident_summary": "a"})
+            )
+            .as_deref(),
+            Some("a")
+        );
+        // A module indexed before the tag: fallback-shaped parts are dropped.
+        assert_eq!(
+            confident_summary(
+                &json!({"summary": "242 lines of Rust code. . Encryption benchmark"})
+            )
+            .as_deref(),
+            Some("Encryption benchmark")
+        );
+        assert_eq!(
+            confident_summary(&json!({"summary": "12 lines of Rust code"})),
+            None
+        );
     }
 }

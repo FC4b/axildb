@@ -941,30 +941,28 @@ impl<'a> ProjectIndexer<'a> {
                 .map(|(_, _, parsed)| parsed.summary.as_str())
                 .filter(|s| *s != "no summary available")
                 .collect();
+            let max_chars = self.config.max_module_summary_tokens * 4;
 
             let module_summary = if summaries.is_empty() {
                 format!("{} files", entries.len())
             } else {
-                // Deduplicate and combine unique summaries
-                let mut unique: Vec<&str> = Vec::new();
-                for s in &summaries {
-                    if !unique.iter().any(|u| u == s) {
-                        unique.push(s);
-                    }
-                }
-                let combined = unique.join(". ");
-                let max_chars = self.config.max_module_summary_tokens * 4;
-                if combined.len() > max_chars {
-                    // Truncate at sentence boundary
-                    let truncated = &combined[..max_chars];
-                    match truncated.rfind(". ") {
-                        Some(pos) => format!("{}.", &truncated[..pos]),
-                        None => format!("{truncated}..."),
-                    }
-                } else {
-                    combined
-                }
+                combine_summaries(&summaries, max_chars)
             };
+
+            // The same summary from confident file summaries only. `summary`
+            // itself stays as it was (it is embedded and keyword-scored), so
+            // agent-facing views read this one instead: all fallbacks means
+            // the module is tagged low-confidence, a mix gets its own
+            // `confident_summary`.
+            let confident: Vec<&str> = entries
+                .iter()
+                .filter(|(_, _, parsed)| !parsed.summary_low_confidence)
+                .map(|(_, _, parsed)| parsed.summary.as_str())
+                .filter(|s| !parser::is_fallback_summary(s))
+                .collect();
+            let confident_summary = (!confident.is_empty())
+                .then(|| combine_summaries(&confident, max_chars))
+                .filter(|c| *c != module_summary);
 
             // Collect public API across files
             let public_api: Vec<String> = entries
@@ -995,7 +993,7 @@ impl<'a> ProjectIndexer<'a> {
                 .take(10)
                 .collect();
 
-            let module_data = json!({
+            let mut module_data = json!({
                 "path": format!("{dir_path}/"),
                 "name": module_name,
                 "summary": module_summary,
@@ -1005,6 +1003,11 @@ impl<'a> ProjectIndexer<'a> {
                 "external_deps": external_deps,
                 "tokens": token::estimate_json_tokens(&json!({"summary": &module_summary})),
             });
+            if confident.is_empty() {
+                module_data["summary_low_confidence"] = json!(true);
+            } else if let Some(c) = confident_summary {
+                module_data["confident_summary"] = json!(c);
+            }
 
             let module_record = self.db.insert(TABLE_MODULES, module_data)?;
             let _ = self.db.embed_field(&module_record.id, "summary");
@@ -1459,6 +1462,32 @@ fn infer_dep_purpose(name: &str) -> &'static str {
     }
 }
 
+/// Deduplicate `summaries`, join them into sentences, and cut the result to
+/// `max_chars` bytes at a sentence boundary when there is one. The cut
+/// floors to a char boundary first: doc comments carry em dashes and
+/// arrows, and slicing through one panics.
+fn combine_summaries(summaries: &[&str], max_chars: usize) -> String {
+    let mut unique: Vec<&str> = Vec::new();
+    for s in summaries {
+        if !unique.contains(s) {
+            unique.push(s);
+        }
+    }
+    let combined = unique.join(". ");
+    if combined.len() <= max_chars {
+        return combined;
+    }
+    let mut cut = max_chars;
+    while !combined.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    let truncated = &combined[..cut];
+    match truncated.rfind(". ") {
+        Some(pos) => format!("{}.", &truncated[..pos]),
+        None => format!("{truncated}..."),
+    }
+}
+
 /// Build the JSON data for a file record.
 fn build_file_record(scanned: &ScannedFile, parsed: &ParsedFile, source: &str) -> Value {
     let line_count = source.lines().count();
@@ -1472,7 +1501,7 @@ fn build_file_record(scanned: &ScannedFile, parsed: &ParsedFile, source: &str) -
         })
         .unwrap_or_default();
 
-    json!({
+    let mut record = json!({
         "path": scanned.rel_path,
         "language": scanned.language.as_str(),
         "size_bytes": scanned.size_bytes,
@@ -1486,7 +1515,11 @@ fn build_file_record(scanned: &ScannedFile, parsed: &ParsedFile, source: &str) -
         "last_modified": modified,
         "content_hash": hash_content(source),
         "tokens": token::estimate_json_tokens(&json!({"summary": &parsed.summary})),
-    })
+    });
+    if parsed.summary_low_confidence {
+        record["summary_low_confidence"] = json!(true);
+    }
+    record
 }
 
 /// Reconstruct a lightweight ParsedFile from stored record JSON.
@@ -1503,12 +1536,19 @@ fn reconstruct_parsed_file(data: &Value) -> ParsedFile {
             .unwrap_or_default()
     };
 
+    let summary = data
+        .get("summary")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    // Records indexed before the tag existed: judge by the summary's shape.
+    let summary_low_confidence = data
+        .get("summary_low_confidence")
+        .and_then(Value::as_bool)
+        .unwrap_or_else(|| parser::is_fallback_summary(&summary));
     ParsedFile {
-        summary: data
-            .get("summary")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
+        summary,
+        summary_low_confidence,
         exports: get_string_array("exports"),
         imports: get_string_array("imports"),
         key_types: get_string_array("key_types"),
@@ -1638,5 +1678,80 @@ mod tests {
         // Plain names without an affix aren't tests.
         assert_eq!(test_target_name("login"), None);
         assert_eq!(test_target_name("validate"), None);
+    }
+
+    #[test]
+    fn combine_summaries_cuts_on_a_char_boundary() {
+        // Byte 10 falls inside the em dash; the cut must floor, not panic.
+        let s = combine_summaries(&["abcdefghi— tail text"], 10);
+        assert_eq!(s, "abcdefghi...");
+        let s = combine_summaries(&["One — two", "One — two", "Three"], 1000);
+        assert_eq!(s, "One — two. Three", "duplicates are dropped");
+    }
+
+    #[test]
+    fn fallback_summaries_are_tagged_on_files_and_modules() {
+        let db_dir = tempfile::tempdir().unwrap();
+        let db = Axil::open(db_dir.path().join("t.axil")).build().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let src = root.path().join("src");
+        let only_filler = root.path().join("scripts");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&only_filler).unwrap();
+        std::fs::write(
+            src.join("auth.rs"),
+            "//! JWT auth middleware — validates tokens.\n\nfn check() {}\n",
+        )
+        .unwrap();
+        std::fs::write(src.join("glue.rs"), "fn a() {}\nfn b() {}\n").unwrap();
+        std::fs::write(only_filler.join("run.rs"), "fn main() {}\n").unwrap();
+
+        ProjectIndexer::new(&db, IndexConfig::default())
+            .index_full(root.path())
+            .unwrap();
+
+        let files = db.list(TABLE_FILES).unwrap();
+        let file = |name: &str| {
+            files
+                .iter()
+                .find(|f| f.data["path"].as_str().unwrap().ends_with(name))
+                .unwrap_or_else(|| panic!("{name} indexed"))
+        };
+        assert_eq!(file("glue.rs").data["summary"], "2 lines of Rust code");
+        assert_eq!(file("glue.rs").data["summary_low_confidence"], true);
+        assert!(file("auth.rs").data.get("summary_low_confidence").is_none());
+
+        let modules = db.list(TABLE_MODULES).unwrap();
+        let module = |dir: &str| {
+            modules
+                .iter()
+                .find(|m| m.data["path"].as_str().unwrap().ends_with(dir))
+                .unwrap_or_else(|| panic!("{dir} module"))
+        };
+        // The stored summary is unchanged; the confident view drops filler.
+        let src_mod = &module("src/").data;
+        assert!(src_mod["summary"]
+            .as_str()
+            .unwrap()
+            .contains("2 lines of Rust code"));
+        assert_eq!(
+            parser::confident_summary(src_mod).as_deref(),
+            Some("JWT auth middleware — validates tokens")
+        );
+        let filler_mod = &module("scripts/").data;
+        assert_eq!(filler_mod["summary_low_confidence"], true);
+        assert_eq!(parser::confident_summary(filler_mod), None);
+
+        // An incremental pass rebuilds modules from stored file records and
+        // keeps the tags.
+        ProjectIndexer::new(&db, IndexConfig::default())
+            .index_incremental(root.path())
+            .unwrap();
+        let modules = db.list(TABLE_MODULES).unwrap();
+        let rebuilt = modules
+            .iter()
+            .find(|m| m.data["path"].as_str().unwrap().ends_with("scripts/"))
+            .unwrap();
+        assert_eq!(rebuilt.data["summary_low_confidence"], true);
     }
 }

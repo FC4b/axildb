@@ -40,7 +40,7 @@ The flagship use case. Your agent learns, remembers, synthesizes, and forgets â€
 ```bash
 axil store decisions '{"summary":"chose redb over sled","reason":"ACID + maintained","files":["Cargo.toml"]}'
 axil recall "storage choice" --top-k 5
-axil boot --schema v1   # session-start context with budget discipline
+axil boot --schema v2   # session-start context with budget discipline
 ```
 
 ---
@@ -151,7 +151,7 @@ For complex agent workflows that span hours/days â€” long-running task graphs, i
 - Decision branches (`axil branch create alternative-approach`)
 
 **What you retrieve**
-- "Resume the task I was working on" (`axil boot --schema v1`)
+- "Resume the task I was working on" (`axil boot --schema v2`)
 - "What did I try last time that failed?" (`recall errors`)
 - "Switch to the other exploration branch" (`axil branch switch`)
 

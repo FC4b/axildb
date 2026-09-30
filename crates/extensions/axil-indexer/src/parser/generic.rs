@@ -51,7 +51,9 @@ pub fn parse(source: &str) -> ParsedFile {
         }
     }
 
-    // Generate summary
+    // Generate summary. Without a leading comment block all there is to say
+    // is how much code the file holds, which is a low-confidence fallback.
+    file.summary_low_confidence = file.module_doc.is_none();
     file.summary = if let Some(ref doc) = file.module_doc {
         let first = doc.split('.').next().unwrap_or(doc).trim();
         first.to_string()

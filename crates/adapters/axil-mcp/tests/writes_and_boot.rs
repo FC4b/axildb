@@ -120,12 +120,14 @@ fn close_session_is_idempotent_by_id() {
 // ─── Track C: boot contract over MCP ─────────────────────────────────
 
 #[test]
-fn boot_returns_schema_v1_with_fixed_section_order() {
+fn boot_returns_schema_2_with_fixed_section_order() {
     let (_tmp, path) = temp_db_path();
     let server = McpServer::open(&path).unwrap();
     let out = dispatch_json(&server, "boot", json!({"budget": 2000}));
 
-    assert_eq!(out["schema_version"], "1");
+    // Schema 2: rows are one-line strings (schema 1 carried whole records).
+    assert_eq!(out["schema_version"], "2");
+    assert_eq!(out["schema_version"], axil_core::BOOT_SCHEMA_VERSION);
     let sections = out["sections"].as_array().expect("sections array");
     let kinds: Vec<&str> = sections.iter().filter_map(|s| s["kind"].as_str()).collect();
     assert_eq!(
@@ -149,6 +151,82 @@ fn boot_reports_token_budget_usage() {
     let out = dispatch_json(&server, "boot", json!({"budget": 500}));
     assert_eq!(out["token_budget"], 500);
     assert!(out["token_budget_used"].as_u64().is_some());
+}
+
+#[test]
+fn boot_defaults_to_the_core_budget() {
+    let (_tmp, path) = temp_db_path();
+    let server = McpServer::open(&path).unwrap();
+    let out = dispatch_json(&server, "boot", json!({}));
+    assert_eq!(out["token_budget"], axil_core::DEFAULT_TOKEN_BUDGET);
+}
+
+/// The MCP tool shares `Axil::boot`, so its rows are one-liners and its
+/// budget holds inside the never-dropped sections, like `axil boot --schema v2`.
+#[test]
+fn boot_rows_are_one_liners_within_budget() {
+    let (_tmp, path) = temp_db_path();
+    let server = McpServer::open(&path).unwrap();
+    let db = server.db_for_tests();
+    let long = "plenty of words that cost tokens ".repeat(30);
+    for i in 0..20 {
+        db.insert(
+            "decisions",
+            json!({ "summary": format!("decision {i} {long}") }),
+        )
+        .unwrap();
+        db.insert("errors", json!({ "error": format!("error {i} {long}") }))
+            .unwrap();
+    }
+    db.insert(
+        "errors",
+        json!({ "error": "fixed long ago", "resolved": true }),
+    )
+    .unwrap();
+
+    let out = dispatch_json(&server, "boot", json!({"budget": 600}));
+    let text = serde_json::to_string(&out).unwrap();
+    assert!(
+        text.len().div_ceil(4) <= 600,
+        "serialized {} bytes",
+        text.len()
+    );
+    assert!(
+        out["omitted_items"].as_u64().unwrap_or(0) > 0,
+        "rows were cut: {out}"
+    );
+
+    let by_section: u64 = out["omitted_by_section"]
+        .as_object()
+        .expect("omitted_by_section names the cut sections")
+        .values()
+        .filter_map(serde_json::Value::as_u64)
+        .sum();
+    assert_eq!(by_section, out["omitted_items"].as_u64().unwrap());
+
+    let sections = out["sections"].as_array().unwrap();
+    let rows_of = |kind: &str| {
+        sections
+            .iter()
+            .find(|s| s["kind"] == kind)
+            .and_then(|s| s["content"].as_array())
+            .cloned()
+            .unwrap_or_default()
+    };
+    // Failures fill before decisions, strictly: no decision shows while a
+    // failure (capped at 5 before the budget) is cut.
+    let rows = rows_of("active_failures");
+    assert!(!rows.is_empty(), "failures are never dropped");
+    if !rows_of("recent_decisions").is_empty() {
+        assert_eq!(rows.len(), 5, "{out}");
+        assert!(out["omitted_by_section"].get("active_failures").is_none());
+    }
+    for row in rows {
+        let row = row.as_str().expect("rows are one-line strings");
+        let fields: Vec<&str> = row.splitn(4, " · ").collect();
+        assert_eq!(fields.len(), 4, "{row}");
+        assert_eq!(fields[2], "open", "resolved errors are not failures: {row}");
+    }
 }
 
 #[test]

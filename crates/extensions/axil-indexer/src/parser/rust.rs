@@ -203,7 +203,7 @@ pub fn parse(source: &str, include_private: bool) -> ParsedFile {
     detect_patterns(source, &mut file);
 
     // Generate summary
-    file.summary = generate_summary(&file, &lines);
+    (file.summary, file.summary_low_confidence) = generate_summary(&file, &lines);
 
     file
 }
@@ -352,9 +352,11 @@ const RUST_PATTERN_LABELS: &[(&str, &str)] = &[
     ("tests", "tests"),
 ];
 
-fn generate_summary(file: &ParsedFile, lines: &[&str]) -> String {
+fn generate_summary(file: &ParsedFile, lines: &[&str]) -> (String, bool) {
     super::generate_summary_common(file, RUST_PATTERN_LABELS, || {
-        // Rust-specific fallback: first comment, then line count
+        // Rust-specific fallback: first comment, then line count. Both are
+        // low-confidence: the first `// ` comment is as often a license
+        // line or a TODO as a description.
         for line in lines.iter().take(20) {
             let trimmed = line.trim();
             if let Some(comment) = trimmed.strip_prefix("// ") {
