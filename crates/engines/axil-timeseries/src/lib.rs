@@ -193,13 +193,20 @@ pub struct TimeSeriesEngine {
 
 impl TimeSeriesEngine {
     /// Open or create a time-series store at the companion path for the given database.
+    ///
+    /// Returns [`AxilError::Busy`] when another process holds the store open
+    /// for writing, so the caller can retry; any other open failure is a
+    /// plugin error.
     pub fn open(db_path: impl AsRef<Path>) -> Result<Self> {
         let ts_path = companion_path(db_path.as_ref(), ".ts");
-        let ts_db = Database::create(&ts_path).map_err(|e| {
-            AxilError::Plugin(Box::new(std::io::Error::other(format!(
-                "failed to open timeseries store at {}: {e}",
+        let ts_db = Database::create(&ts_path).map_err(|e| match e {
+            // Held open by another process: the retryable `Busy`, so callers
+            // wait for the writer instead of reporting a broken store.
+            redb::DatabaseError::DatabaseAlreadyOpen => AxilError::Busy,
+            other => AxilError::Plugin(Box::new(std::io::Error::other(format!(
+                "failed to open timeseries store at {}: {other}",
                 ts_path.display()
-            ))))
+            )))),
         })?;
 
         // Only a new store needs its table created. Opening an existing one
@@ -456,6 +463,30 @@ mod tests {
 
     fn make_record(table: &str) -> Record {
         Record::new(table, json!({"data": "test"}))
+    }
+
+    #[test]
+    fn open_reports_a_store_held_by_a_writer_as_busy() {
+        let (held, dir) = temp_ts();
+        let path = dir.path().join("test.axil");
+        let err = TimeSeriesEngine::open(&path)
+            .err()
+            .expect("a second writable open must fail while the first is held");
+        assert!(err.is_busy(), "expected Busy, got {err}");
+
+        drop(held);
+        TimeSeriesEngine::open(&path).expect("the store opens once released");
+    }
+
+    #[test]
+    fn open_reports_a_corrupt_store_as_not_busy() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.axil");
+        std::fs::write(companion_path(&path, ".ts"), b"not a redb file").unwrap();
+        let err = TimeSeriesEngine::open(&path)
+            .err()
+            .expect("a corrupt store must not open");
+        assert!(!err.is_busy(), "corrupt must not look retryable: {err}");
     }
 
     #[test]
