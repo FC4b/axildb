@@ -7,14 +7,14 @@
     "memory.axil.ts": 139264,
     "memory.axil.vec": 7127040
   },
-  "memory_axil_sha256": "c9e4942053f256f6da651aeae90b4fbb046e69b260415aacfd80969bc3a72f99",
+  "memory_axil_sha256": "e2c43335570cd8996f8055d292acfabb65cd4085e5ea40f9e9175fe63b25f0b2",
   "questions": "benchmarks/dogfood-recall/questions.jsonl",
   "axil": "axil 2.3.1 (axildb-v2.3.1-25-g65d45ff)",
   "method": {
     "classes": "keyed: searchable_text read a key field; fallback: it joined every string value; internal: an _-prefixed table embedded by an extension",
     "vector": "exact cosine over every vector in the default index, owners scored by their closest vector (a recall chunk counts for its source record); questions embedded with embed_query, records query with their stored vector and exclude themselves; records created after the cutoff are left out of every population",
     "hub": "an owner is a hub when its N_k exceeds the population mean + 2 std",
-    "what_if": "every keyed commit re-embedded from its data without any key field (sha, author, date, subject, body joined: the shape commits had before the hook stored content/summary), replacing its vectors",
+    "what_if": "every keyed commit re-embedded through the fallback, its vectors replaced by the ones insert would build for the new text (its own, plus one per recall chunk past the first chunk's length). prose: every key field removed (sha, author, date, subject, body joined: the shape commits had before the hook stored content/summary). text_poor: every multi-word string removed too (sha, author, date joined), the case of a fallback record with almost no prose",
     "recall": "`axil recall --recall-format full`, the dogfood ranked view: fetch 25, drop hits after the cutoff, keep the top k"
   },
   "vector": {
@@ -177,59 +177,75 @@
           "by_table": {
             "_checkpoint_records": {
               "hubs": 1,
+              "max_nk": 3,
               "mean_nk": 2.5,
               "owners": 2,
               "share_of_population": 0.0014,
-              "share_of_slots": 0.0088
+              "share_of_slots": 0.0088,
+              "slots": 5
             },
             "_idx_code_proxies": {
               "hubs": 12,
+              "max_nk": 4,
               "mean_nk": 0.191,
               "owners": 1042,
               "share_of_population": 0.7422,
-              "share_of_slots": 0.3491
+              "share_of_slots": 0.3491,
+              "slots": 199
             },
             "_idx_files": {
               "hubs": 9,
+              "max_nk": 6,
               "mean_nk": 0.4113,
               "owners": 141,
               "share_of_population": 0.1004,
-              "share_of_slots": 0.1018
+              "share_of_slots": 0.1018,
+              "slots": 58
             },
             "commits": {
               "hubs": 17,
+              "max_nk": 10,
               "mean_nk": 1.4063,
               "owners": 96,
               "share_of_population": 0.0684,
-              "share_of_slots": 0.2368
+              "share_of_slots": 0.2368,
+              "slots": 135
             },
             "context": {
               "hubs": 6,
+              "max_nk": 5,
               "mean_nk": 1.1579,
               "owners": 38,
               "share_of_population": 0.0271,
-              "share_of_slots": 0.0772
+              "share_of_slots": 0.0772,
+              "slots": 44
             },
             "decisions": {
               "hubs": 10,
+              "max_nk": 4,
               "mean_nk": 1.3036,
               "owners": 56,
               "share_of_population": 0.0399,
-              "share_of_slots": 0.1281
+              "share_of_slots": 0.1281,
+              "slots": 73
             },
             "errors": {
               "hubs": 9,
+              "max_nk": 5,
               "mean_nk": 2.0,
               "owners": 27,
               "share_of_population": 0.0192,
-              "share_of_slots": 0.0947
+              "share_of_slots": 0.0947,
+              "slots": 54
             },
             "rules": {
               "hubs": 0,
+              "max_nk": 1,
               "mean_nk": 1.0,
               "owners": 2,
               "share_of_population": 0.0014,
-              "share_of_slots": 0.0035
+              "share_of_slots": 0.0035,
+              "slots": 2
             }
           },
           "fallback_records": [
@@ -1008,6 +1024,7 @@
               "share_of_slots_from_other_tables": 0.9,
               "slot_lift": 0.3333,
               "slots": 10,
+              "slots_from_other_tables": 9,
               "zero_nk": 0,
               "zero_nk_rate": 0.0
             },
@@ -1023,6 +1040,7 @@
               "share_of_slots_from_other_tables": 0.0953,
               "slot_lift": 1.0365,
               "slots": 12283,
+              "slots_from_other_tables": 1171,
               "zero_nk": 14,
               "zero_nk_rate": 0.0118
             },
@@ -1038,6 +1056,7 @@
               "share_of_slots_from_other_tables": 0.5924,
               "slot_lift": 0.8088,
               "slots": 1747,
+              "slots_from_other_tables": 1035,
               "zero_nk": 6,
               "zero_nk_rate": 0.0278
             }
@@ -1045,67 +1064,91 @@
           "by_table": {
             "_checkpoint_records": {
               "hubs": 0,
+              "max_nk": 24,
               "mean_nk": 17.5,
               "owners": 2,
               "share_of_population": 0.0014,
               "share_of_slots": 0.0025,
-              "share_of_slots_from_other_tables": 1.0
+              "share_of_slots_from_other_tables": 1.0,
+              "slots": 35,
+              "slots_from_other_tables": 35
             },
             "_idx_code_proxies": {
               "hubs": 48,
+              "max_nk": 57,
               "mean_nk": 10.7361,
               "owners": 1042,
               "share_of_population": 0.7422,
               "share_of_slots": 0.7968,
-              "share_of_slots_from_other_tables": 0.0886
+              "share_of_slots_from_other_tables": 0.0886,
+              "slots": 11187,
+              "slots_from_other_tables": 991
             },
             "_idx_files": {
               "hubs": 2,
+              "max_nk": 35,
               "mean_nk": 7.5248,
               "owners": 141,
               "share_of_population": 0.1004,
               "share_of_slots": 0.0756,
-              "share_of_slots_from_other_tables": 0.1367
+              "share_of_slots_from_other_tables": 0.1367,
+              "slots": 1061,
+              "slots_from_other_tables": 145
             },
             "commits": {
               "hubs": 6,
+              "max_nk": 35,
               "mean_nk": 9.0938,
               "owners": 96,
               "share_of_population": 0.0684,
               "share_of_slots": 0.0622,
-              "share_of_slots_from_other_tables": 0.4708
+              "share_of_slots_from_other_tables": 0.4708,
+              "slots": 873,
+              "slots_from_other_tables": 411
             },
             "context": {
               "hubs": 0,
+              "max_nk": 24,
               "mean_nk": 11.3947,
               "owners": 38,
               "share_of_population": 0.0271,
               "share_of_slots": 0.0308,
-              "share_of_slots_from_other_tables": 0.7113
+              "share_of_slots_from_other_tables": 0.7113,
+              "slots": 433,
+              "slots_from_other_tables": 308
             },
             "decisions": {
               "hubs": 0,
+              "max_nk": 23,
               "mean_nk": 6.2679,
               "owners": 56,
               "share_of_population": 0.0399,
               "share_of_slots": 0.025,
-              "share_of_slots_from_other_tables": 0.7464
+              "share_of_slots_from_other_tables": 0.7464,
+              "slots": 351,
+              "slots_from_other_tables": 262
             },
             "errors": {
               "hubs": 0,
+              "max_nk": 9,
               "mean_nk": 3.5556,
               "owners": 27,
               "share_of_population": 0.0192,
               "share_of_slots": 0.0068,
-              "share_of_slots_from_other_tables": 0.6146
+              "share_of_slots_from_other_tables": 0.6146,
+              "slots": 96,
+              "slots_from_other_tables": 59
             },
             "rules": {
               "hubs": 0,
+              "max_nk": 3,
               "mean_nk": 2.0,
               "owners": 2,
               "share_of_population": 0.0014,
               "share_of_slots": 0.0003,
-              "share_of_slots_from_other_tables": 1.0
+              "share_of_slots_from_other_tables": 1.0,
+              "slots": 4,
+              "slots_from_other_tables": 4
             }
           },
           "fallback_records": [
@@ -1527,38 +1570,48 @@
           "by_table": {
             "commits": {
               "hubs": 6,
+              "max_nk": 15,
               "mean_nk": 2.5521,
               "owners": 96,
               "share_of_population": 0.4384,
-              "share_of_slots": 0.4298
+              "share_of_slots": 0.4298,
+              "slots": 245
             },
             "context": {
               "hubs": 0,
+              "max_nk": 6,
               "mean_nk": 2.1842,
               "owners": 38,
               "share_of_population": 0.1735,
-              "share_of_slots": 0.1456
+              "share_of_slots": 0.1456,
+              "slots": 83
             },
             "decisions": {
               "hubs": 3,
+              "max_nk": 13,
               "mean_nk": 2.6429,
               "owners": 56,
               "share_of_population": 0.2557,
-              "share_of_slots": 0.2596
+              "share_of_slots": 0.2596,
+              "slots": 148
             },
             "errors": {
               "hubs": 2,
+              "max_nk": 10,
               "mean_nk": 3.4074,
               "owners": 27,
               "share_of_population": 0.1233,
-              "share_of_slots": 0.1614
+              "share_of_slots": 0.1614,
+              "slots": 92
             },
             "rules": {
               "hubs": 0,
+              "max_nk": 1,
               "mean_nk": 1.0,
               "owners": 2,
               "share_of_population": 0.0091,
-              "share_of_slots": 0.0035
+              "share_of_slots": 0.0035,
+              "slots": 2
             }
           },
           "fallback_records": [
@@ -2326,6 +2379,7 @@
               "share_of_slots_from_other_tables": 0.7273,
               "slot_lift": 0.3667,
               "slots": 11,
+              "slots_from_other_tables": 8,
               "zero_nk": 0,
               "zero_nk_rate": 0.0
             },
@@ -2341,6 +2395,7 @@
               "share_of_slots_from_other_tables": 0.575,
               "slot_lift": 1.0088,
               "slots": 2179,
+              "slots_from_other_tables": 1253,
               "zero_nk": 3,
               "zero_nk_rate": 0.0139
             }
@@ -2348,43 +2403,58 @@
           "by_table": {
             "commits": {
               "hubs": 8,
+              "max_nk": 48,
               "mean_nk": 11.5,
               "owners": 96,
               "share_of_population": 0.4384,
               "share_of_slots": 0.5041,
-              "share_of_slots_from_other_tables": 0.4674
+              "share_of_slots_from_other_tables": 0.4674,
+              "slots": 1104,
+              "slots_from_other_tables": 516
             },
             "context": {
               "hubs": 1,
+              "max_nk": 29,
               "mean_nk": 13.8684,
               "owners": 38,
               "share_of_population": 0.1735,
               "share_of_slots": 0.2406,
-              "share_of_slots_from_other_tables": 0.7021
+              "share_of_slots_from_other_tables": 0.7021,
+              "slots": 527,
+              "slots_from_other_tables": 370
             },
             "decisions": {
               "hubs": 1,
+              "max_nk": 32,
               "mean_nk": 7.625,
               "owners": 56,
               "share_of_population": 0.2557,
               "share_of_slots": 0.195,
-              "share_of_slots_from_other_tables": 0.6979
+              "share_of_slots_from_other_tables": 0.6979,
+              "slots": 427,
+              "slots_from_other_tables": 298
             },
             "errors": {
               "hubs": 0,
+              "max_nk": 18,
               "mean_nk": 4.7037,
               "owners": 27,
               "share_of_population": 0.1233,
               "share_of_slots": 0.058,
-              "share_of_slots_from_other_tables": 0.5669
+              "share_of_slots_from_other_tables": 0.5669,
+              "slots": 127,
+              "slots_from_other_tables": 72
             },
             "rules": {
               "hubs": 0,
+              "max_nk": 3,
               "mean_nk": 2.5,
               "owners": 2,
               "share_of_population": 0.0091,
               "share_of_slots": 0.0023,
-              "share_of_slots_from_other_tables": 1.0
+              "share_of_slots_from_other_tables": 1.0,
+              "slots": 5,
+              "slots_from_other_tables": 5
             }
           },
           "fallback_records": [
@@ -2688,87 +2758,97 @@
           ]
         }
       },
-      "what_if": {
+      "what_if_prose": {
         "questions": {
           "by_class": {
             "fallback": {
               "hub_rate": 0.0,
               "hubs": 0,
-              "max_nk": 7,
-              "mean_nk": 3.3333,
+              "max_nk": 5,
+              "mean_nk": 2.6667,
               "median_nk": 2.0,
               "owners": 3,
               "share_of_population": 0.0137,
-              "share_of_slots": 0.0175,
-              "slot_lift": 1.2807,
-              "slots": 10,
+              "share_of_slots": 0.014,
+              "slot_lift": 1.0246,
+              "slots": 8,
               "zero_nk": 0,
               "zero_nk_rate": 0.0
             },
             "keyed": {
-              "hub_rate": 0.0413,
-              "hubs": 5,
-              "max_nk": 15,
-              "mean_nk": 2.9339,
+              "hub_rate": 0.0331,
+              "hubs": 4,
+              "max_nk": 14,
+              "mean_nk": 2.686,
               "median_nk": 2.0,
               "owners": 121,
               "share_of_population": 0.5525,
-              "share_of_slots": 0.6228,
-              "slot_lift": 1.1272,
-              "slots": 355,
-              "zero_nk": 12,
-              "zero_nk_rate": 0.0992
+              "share_of_slots": 0.5702,
+              "slot_lift": 1.032,
+              "slots": 325,
+              "zero_nk": 13,
+              "zero_nk_rate": 0.1074
             },
             "what_if_fallback": {
-              "hub_rate": 0.0211,
-              "hubs": 2,
-              "max_nk": 8,
-              "mean_nk": 2.1579,
+              "hub_rate": 0.0316,
+              "hubs": 3,
+              "max_nk": 15,
+              "mean_nk": 2.4947,
               "median_nk": 1.0,
               "owners": 95,
               "share_of_population": 0.4338,
-              "share_of_slots": 0.3596,
-              "slot_lift": 0.8291,
-              "slots": 205,
-              "zero_nk": 13,
-              "zero_nk_rate": 0.1368
+              "share_of_slots": 0.4158,
+              "slot_lift": 0.9585,
+              "slots": 237,
+              "zero_nk": 14,
+              "zero_nk_rate": 0.1474
             }
           },
           "by_table": {
             "commits": {
-              "hubs": 2,
-              "mean_nk": 2.2083,
+              "hubs": 3,
+              "max_nk": 15,
+              "mean_nk": 2.5208,
               "owners": 96,
               "share_of_population": 0.4384,
-              "share_of_slots": 0.3719
+              "share_of_slots": 0.4246,
+              "slots": 242
             },
             "context": {
               "hubs": 0,
-              "mean_nk": 2.3947,
+              "max_nk": 6,
+              "mean_nk": 2.2632,
               "owners": 38,
               "share_of_population": 0.1735,
-              "share_of_slots": 0.1596
+              "share_of_slots": 0.1509,
+              "slots": 86
             },
             "decisions": {
-              "hubs": 3,
-              "mean_nk": 2.9107,
+              "hubs": 2,
+              "max_nk": 14,
+              "mean_nk": 2.6607,
               "owners": 56,
               "share_of_population": 0.2557,
-              "share_of_slots": 0.286
+              "share_of_slots": 0.2614,
+              "slots": 149
             },
             "errors": {
               "hubs": 2,
-              "mean_nk": 3.7407,
+              "max_nk": 9,
+              "mean_nk": 3.3333,
               "owners": 27,
               "share_of_population": 0.1233,
-              "share_of_slots": 0.1772
+              "share_of_slots": 0.1579,
+              "slots": 90
             },
             "rules": {
               "hubs": 0,
+              "max_nk": 2,
               "mean_nk": 1.5,
               "owners": 2,
               "share_of_population": 0.0091,
-              "share_of_slots": 0.0053
+              "share_of_slots": 0.0053,
+              "slots": 3
             }
           },
           "fallback_records": [
@@ -2777,8 +2857,8 @@
               "hub": false,
               "id": "01M3JSQ0785BRCVGQ83YCP5KZR",
               "key": null,
-              "nk": 7,
-              "percentile": 0.9498,
+              "nk": 5,
+              "percentile": 0.8082,
               "string_keys": [
                 "_superseded_by",
                 "author",
@@ -2795,7 +2875,7 @@
               "id": "01KVCKTBXGQQVK8D1GQWJG0MHJ",
               "key": null,
               "nk": 2,
-              "percentile": 0.4155,
+              "percentile": 0.4247,
               "string_keys": [
                 "_seed",
                 "rule"
@@ -2808,7 +2888,7 @@
               "id": "01M3H4BJHZKYQY2EG1SPVDKK29",
               "key": null,
               "nk": 1,
-              "percentile": 0.1142,
+              "percentile": 0.1233,
               "string_keys": [
                 "reason",
                 "rule"
@@ -2816,17 +2896,17 @@
               "table": "rules"
             }
           ],
-          "hub_threshold": 7.1787,
+          "hub_threshold": 7.435,
           "k": 10,
           "keyed_answer_questions": {
             "fallback_above_first_expected": 13,
-            "fallback_slots": 186,
+            "fallback_slots": 213,
             "questions": 50,
             "with_fallback_in_top_k": 50
           },
           "nk_mean": 2.6027,
-          "nk_skewness": 1.6847,
-          "nk_std": 2.288,
+          "nk_skewness": 1.8817,
+          "nk_std": 2.4161,
           "owners": 219,
           "per_question": [
             {
@@ -2905,17 +2985,17 @@
                 },
                 {
                   "class": "what_if_fallback",
-                  "id": "01KVPJB219YYC8WFKN4CTCZCBQ",
-                  "rank": 8
+                  "id": "01KVHD0K08XW8SJ89KMAEM76NP",
+                  "rank": 7
                 },
                 {
                   "class": "what_if_fallback",
-                  "id": "01KVFCDA7BCSZP7MDBF73666SA",
+                  "id": "01KVJWHJXSAS9D1W6ZM611JSFV",
                   "rank": 9
                 },
                 {
                   "class": "what_if_fallback",
-                  "id": "01KVG6A0YP1VJ12JNDY01J2WRE",
+                  "id": "01KVPJB219YYC8WFKN4CTCZCBQ",
                   "rank": 10
                 }
               ],
@@ -2929,7 +3009,7 @@
                 {
                   "class": "what_if_fallback",
                   "id": "01KVHD0K08XW8SJ89KMAEM76NP",
-                  "rank": 5
+                  "rank": 3
                 },
                 {
                   "class": "what_if_fallback",
@@ -2956,13 +3036,18 @@
                 },
                 {
                   "class": "what_if_fallback",
+                  "id": "01KVSP611AJ2QFMQC7B1CWV8XX",
+                  "rank": 7
+                },
+                {
+                  "class": "what_if_fallback",
                   "id": "01KVFBX951DN7B7GYHXG6TB8WS",
-                  "rank": 8
+                  "rank": 9
                 },
                 {
                   "class": "what_if_fallback",
                   "id": "01KVGEM7HBNQC7SMPCKX6950GA",
-                  "rank": 9
+                  "rank": 10
                 }
               ],
               "first_expected_rank": 1,
@@ -3100,9 +3185,14 @@
                   "class": "what_if_fallback",
                   "id": "01M38RFGTBQP1B9TRT2R4Q6T1V",
                   "rank": 5
+                },
+                {
+                  "class": "what_if_fallback",
+                  "id": "01KVJQRX0NJKE8QZDCSS1NGZFK",
+                  "rank": 7
                 }
               ],
-              "first_expected_rank": 8,
+              "first_expected_rank": 9,
               "id": "q09",
               "kind": "decision"
             },
@@ -3112,7 +3202,7 @@
                 {
                   "class": "what_if_fallback",
                   "id": "01KVJQRX0NJKE8QZDCSS1NGZFK",
-                  "rank": 4
+                  "rank": 3
                 },
                 {
                   "class": "what_if_fallback",
@@ -3189,6 +3279,11 @@
                   "class": "what_if_fallback",
                   "id": "01KVR1NJ4B2HNK7QBGBHGRVPJW",
                   "rank": 6
+                },
+                {
+                  "class": "what_if_fallback",
+                  "id": "01KVQWBS94DHWFQ8FKNC7AY75W",
+                  "rank": 9
                 }
               ],
               "first_expected_rank": 1,
@@ -3215,7 +3310,7 @@
                 },
                 {
                   "class": "what_if_fallback",
-                  "id": "01KVQWBS94DHWFQ8FKNC7AY75W",
+                  "id": "01KVJWHJXSAS9D1W6ZM611JSFV",
                   "rank": 10
                 }
               ],
@@ -3258,6 +3353,11 @@
                   "class": "what_if_fallback",
                   "id": "01KVVTH50GAN9RVX7HCM41ZRFK",
                   "rank": 1
+                },
+                {
+                  "class": "what_if_fallback",
+                  "id": "01M38MP7VBAFNFPQEQY3VY8G8C",
+                  "rank": 4
                 }
               ],
               "first_expected_rank": 2,
@@ -3315,38 +3415,38 @@
               "fallback_hits": [
                 {
                   "class": "what_if_fallback",
-                  "id": "01M3GG2W9221D3GR23M7B6E486",
-                  "rank": 3
+                  "id": "01KVQWBS94DHWFQ8FKNC7AY75W",
+                  "rank": 2
                 },
                 {
                   "class": "what_if_fallback",
-                  "id": "01M38KW6VBNXHVZVRDA80GH0GQ",
+                  "id": "01M3GG2W9221D3GR23M7B6E486",
                   "rank": 4
                 },
                 {
                   "class": "what_if_fallback",
-                  "id": "01M38KWK5VE2EW005V6JCYRT31",
+                  "id": "01M38KW6VBNXHVZVRDA80GH0GQ",
                   "rank": 5
                 },
                 {
                   "class": "what_if_fallback",
-                  "id": "01M38KX16PKSQER1MQK3WKQ5RF",
+                  "id": "01M38KWK5VE2EW005V6JCYRT31",
                   "rank": 6
                 },
                 {
                   "class": "what_if_fallback",
-                  "id": "01M38M3NX8V69GHA6NTH2AMAZD",
+                  "id": "01M38KX16PKSQER1MQK3WKQ5RF",
                   "rank": 7
                 },
                 {
                   "class": "what_if_fallback",
-                  "id": "01M38M5ZZZRDK75EY3QDNC65TD",
+                  "id": "01M38M3NX8V69GHA6NTH2AMAZD",
                   "rank": 8
                 },
                 {
                   "class": "what_if_fallback",
-                  "id": "01KW2KDMPKF4SBS4014QJ259WJ",
-                  "rank": 10
+                  "id": "01M38M5ZZZRDK75EY3QDNC65TD",
+                  "rank": 9
                 }
               ],
               "first_expected_rank": 1,
@@ -3381,23 +3481,28 @@
               "fallback_hits": [
                 {
                   "class": "what_if_fallback",
-                  "id": "01KVG60PGXA3F4864G16HJNH0Q",
+                  "id": "01KVSP611AJ2QFMQC7B1CWV8XX",
                   "rank": 3
                 },
                 {
                   "class": "what_if_fallback",
-                  "id": "01KVFD4NVBETD74EAQDC4QGQRR",
+                  "id": "01KVG60PGXA3F4864G16HJNH0Q",
                   "rank": 4
                 },
                 {
                   "class": "what_if_fallback",
+                  "id": "01KVFD4NVBETD74EAQDC4QGQRR",
+                  "rank": 5
+                },
+                {
+                  "class": "what_if_fallback",
                   "id": "01KVQWBS94DHWFQ8FKNC7AY75W",
-                  "rank": 8
+                  "rank": 9
                 },
                 {
                   "class": "what_if_fallback",
                   "id": "01KVCNVC5TD35DFR7D2B962M1C",
-                  "rank": 9
+                  "rank": 10
                 }
               ],
               "first_expected_rank": 1,
@@ -3414,18 +3519,18 @@
                 },
                 {
                   "class": "what_if_fallback",
-                  "id": "01M38RXNEDPF5HHKFP7B5EDS88",
+                  "id": "01KVSP611AJ2QFMQC7B1CWV8XX",
                   "rank": 4
                 },
                 {
                   "class": "what_if_fallback",
-                  "id": "01KVG60PGXA3F4864G16HJNH0Q",
-                  "rank": 7
+                  "id": "01M38RXNEDPF5HHKFP7B5EDS88",
+                  "rank": 5
                 },
                 {
                   "class": "what_if_fallback",
-                  "id": "01KVGEM7HBNQC7SMPCKX6950GA",
-                  "rank": 10
+                  "id": "01KVG60PGXA3F4864G16HJNH0Q",
+                  "rank": 8
                 }
               ],
               "first_expected_rank": 1,
@@ -3442,18 +3547,18 @@
                 },
                 {
                   "class": "what_if_fallback",
-                  "id": "01KVG7BV789PF6B40S9FX87KFY",
+                  "id": "01KVQSNHC8MAD5HW5E4QAHX73C",
                   "rank": 6
                 },
                 {
                   "class": "what_if_fallback",
-                  "id": "01KVHBPJ5PZMYCWEG41C9QYVXN",
+                  "id": "01KVG7BV789PF6B40S9FX87KFY",
                   "rank": 7
                 },
                 {
                   "class": "what_if_fallback",
-                  "id": "01KVQSNHC8MAD5HW5E4QAHX73C",
-                  "rank": 10
+                  "id": "01KVHBPJ5PZMYCWEG41C9QYVXN",
+                  "rank": 8
                 }
               ],
               "first_expected_rank": 1,
@@ -3470,13 +3575,23 @@
                 },
                 {
                   "class": "what_if_fallback",
+                  "id": "01KVSP611AJ2QFMQC7B1CWV8XX",
+                  "rank": 6
+                },
+                {
+                  "class": "what_if_fallback",
+                  "id": "01M38MP7VBAFNFPQEQY3VY8G8C",
+                  "rank": 8
+                },
+                {
+                  "class": "what_if_fallback",
                   "id": "01KVQXHFSBZMZ0KG0V6MG9C232",
-                  "rank": 7
+                  "rank": 9
                 },
                 {
                   "class": "what_if_fallback",
                   "id": "01KVVSD5KJ70BX96094GT70DN3",
-                  "rank": 8
+                  "rank": 10
                 }
               ],
               "first_expected_rank": null,
@@ -3500,6 +3615,11 @@
                   "class": "what_if_fallback",
                   "id": "01M3GG2W9221D3GR23M7B6E486",
                   "rank": 9
+                },
+                {
+                  "class": "what_if_fallback",
+                  "id": "01KVSP611AJ2QFMQC7B1CWV8XX",
+                  "rank": 10
                 }
               ],
               "first_expected_rank": 2,
@@ -3521,18 +3641,28 @@
                 },
                 {
                   "class": "what_if_fallback",
-                  "id": "01M3GRF6EXPS4XGZFR0MMEY66A",
+                  "id": "01M3HT9J7GCDT19EJ1RMBWRMJR",
                   "rank": 6
                 },
                 {
                   "class": "what_if_fallback",
-                  "id": "01KVFD4NVBETD74EAQDC4QGQRR",
+                  "id": "01KVJWHJXSAS9D1W6ZM611JSFV",
                   "rank": 7
                 },
                 {
                   "class": "what_if_fallback",
-                  "id": "01M3HT9J7GCDT19EJ1RMBWRMJR",
+                  "id": "01M3GRF6EXPS4XGZFR0MMEY66A",
+                  "rank": 8
+                },
+                {
+                  "class": "what_if_fallback",
+                  "id": "01M3J0RCC0EQS5918B0X5K7H7W",
                   "rank": 9
+                },
+                {
+                  "class": "what_if_fallback",
+                  "id": "01KVQWBS94DHWFQ8FKNC7AY75W",
+                  "rank": 10
                 }
               ],
               "first_expected_rank": 2,
@@ -3592,8 +3722,13 @@
                 },
                 {
                   "class": "what_if_fallback",
-                  "id": "01KVGGTXX40HM1D3QM38JVCCJR",
+                  "id": "01M38MP7VBAFNFPQEQY3VY8G8C",
                   "rank": 9
+                },
+                {
+                  "class": "what_if_fallback",
+                  "id": "01KVGGTXX40HM1D3QM38JVCCJR",
+                  "rank": 10
                 }
               ],
               "first_expected_rank": 2,
@@ -3638,8 +3773,13 @@
                 },
                 {
                   "class": "what_if_fallback",
-                  "id": "01KVJHRDQ9GYWYY7DMQ6G3CCAR",
-                  "rank": 10
+                  "id": "01KVJWHJXSAS9D1W6ZM611JSFV",
+                  "rank": 4
+                },
+                {
+                  "class": "what_if_fallback",
+                  "id": "01M3HT9J7GCDT19EJ1RMBWRMJR",
+                  "rank": 5
                 }
               ],
               "first_expected_rank": 2,
@@ -3712,13 +3852,13 @@
               "fallback_hits": [
                 {
                   "class": "what_if_fallback",
-                  "id": "01KVPJSG5GEANPHB6KDM15519C",
-                  "rank": 5
+                  "id": "01KVTQ5PMKEGBMTTMJ0BHRQT1F",
+                  "rank": 3
                 },
                 {
                   "class": "what_if_fallback",
-                  "id": "01KVTQ5PMKEGBMTTMJ0BHRQT1F",
-                  "rank": 8
+                  "id": "01KVPJSG5GEANPHB6KDM15519C",
+                  "rank": 6
                 },
                 {
                   "class": "what_if_fallback",
@@ -3742,6 +3882,11 @@
                   "class": "what_if_fallback",
                   "id": "01KVPJSG5GEANPHB6KDM15519C",
                   "rank": 3
+                },
+                {
+                  "class": "what_if_fallback",
+                  "id": "01KVHD0K08XW8SJ89KMAEM76NP",
+                  "rank": 7
                 }
               ],
               "first_expected_rank": 2,
@@ -3806,8 +3951,13 @@
                 },
                 {
                   "class": "what_if_fallback",
-                  "id": "01KVND9CZ1K37XEHM1NCE3747D",
-                  "rank": 10
+                  "id": "01KVJWHJXSAS9D1W6ZM611JSFV",
+                  "rank": 7
+                },
+                {
+                  "class": "what_if_fallback",
+                  "id": "01KVHD0K08XW8SJ89KMAEM76NP",
+                  "rank": 8
                 }
               ],
               "first_expected_rank": 1,
@@ -3824,26 +3974,31 @@
                 },
                 {
                   "class": "what_if_fallback",
-                  "id": "01KVQWBS94DHWFQ8FKNC7AY75W",
-                  "rank": 3
-                },
-                {
-                  "class": "what_if_fallback",
                   "id": "01KVQZCS30FK59JT1C5GNAREDV",
-                  "rank": 5
+                  "rank": 2
                 },
                 {
                   "class": "what_if_fallback",
                   "id": "01KVR1NJ4B2HNK7QBGBHGRVPJW",
+                  "rank": 3
+                },
+                {
+                  "class": "what_if_fallback",
+                  "id": "01KVJQRX0NJKE8QZDCSS1NGZFK",
+                  "rank": 5
+                },
+                {
+                  "class": "what_if_fallback",
+                  "id": "01KVQWBS94DHWFQ8FKNC7AY75W",
                   "rank": 6
                 },
                 {
                   "class": "what_if_fallback",
-                  "id": "01KVHD0K08XW8SJ89KMAEM76NP",
-                  "rank": 10
+                  "id": "01KVJWHJXSAS9D1W6ZM611JSFV",
+                  "rank": 8
                 }
               ],
-              "first_expected_rank": 2,
+              "first_expected_rank": 4,
               "id": "q36",
               "kind": "error"
             },
@@ -3857,13 +4012,18 @@
                 },
                 {
                   "class": "what_if_fallback",
-                  "id": "01KW2KDMPKF4SBS4014QJ259WJ",
+                  "id": "01KVJWHJXSAS9D1W6ZM611JSFV",
                   "rank": 4
                 },
                 {
                   "class": "what_if_fallback",
+                  "id": "01KW2KDMPKF4SBS4014QJ259WJ",
+                  "rank": 5
+                },
+                {
+                  "class": "what_if_fallback",
                   "id": "01KVYPGEX6ZG5YK8S4JB03GMFZ",
-                  "rank": 8
+                  "rank": 9
                 }
               ],
               "first_expected_rank": 1,
@@ -3935,8 +4095,8 @@
                   "rank": 7
                 },
                 {
-                  "class": "fallback",
-                  "id": "01M3JSQ0785BRCVGQ83YCP5KZR",
+                  "class": "what_if_fallback",
+                  "id": "01KVJWHJXSAS9D1W6ZM611JSFV",
                   "rank": 10
                 }
               ],
@@ -3954,13 +4114,18 @@
                 },
                 {
                   "class": "what_if_fallback",
+                  "id": "01KVSP611AJ2QFMQC7B1CWV8XX",
+                  "rank": 5
+                },
+                {
+                  "class": "what_if_fallback",
                   "id": "01KW2MF1V4EJCH9B8R66M73PES",
-                  "rank": 6
+                  "rank": 7
                 },
                 {
                   "class": "what_if_fallback",
                   "id": "01M38S9P9SGTNQNCS06XP47Q7V",
-                  "rank": 8
+                  "rank": 9
                 }
               ],
               "first_expected_rank": 1,
@@ -3983,11 +4148,16 @@
                 {
                   "class": "what_if_fallback",
                   "id": "01KVJWHJXSAS9D1W6ZM611JSFV",
+                  "rank": 6
+                },
+                {
+                  "class": "what_if_fallback",
+                  "id": "01KVQWBS94DHWFQ8FKNC7AY75W",
                   "rank": 9
                 },
                 {
                   "class": "what_if_fallback",
-                  "id": "01KVTQ5PMKEGBMTTMJ0BHRQT1F",
+                  "id": "01M3HT9J7GCDT19EJ1RMBWRMJR",
                   "rank": 10
                 }
               ],
@@ -4010,8 +4180,18 @@
                 },
                 {
                   "class": "what_if_fallback",
-                  "id": "01M38RXNEDPF5HHKFP7B5EDS88",
+                  "id": "01M3HT9J7GCDT19EJ1RMBWRMJR",
                   "rank": 8
+                },
+                {
+                  "class": "what_if_fallback",
+                  "id": "01M38RXNEDPF5HHKFP7B5EDS88",
+                  "rank": 9
+                },
+                {
+                  "class": "what_if_fallback",
+                  "id": "01KVJWHJXSAS9D1W6ZM611JSFV",
+                  "rank": 10
                 }
               ],
               "first_expected_rank": 1,
@@ -4028,13 +4208,23 @@
                 },
                 {
                   "class": "what_if_fallback",
+                  "id": "01M3HT9J7GCDT19EJ1RMBWRMJR",
+                  "rank": 4
+                },
+                {
+                  "class": "what_if_fallback",
+                  "id": "01KVJWHJXSAS9D1W6ZM611JSFV",
+                  "rank": 6
+                },
+                {
+                  "class": "what_if_fallback",
                   "id": "01KVJHRDQ9GYWYY7DMQ6G3CCAR",
-                  "rank": 5
+                  "rank": 7
                 },
                 {
                   "class": "what_if_fallback",
                   "id": "01M38RXNEDPF5HHKFP7B5EDS88",
-                  "rank": 8
+                  "rank": 10
                 }
               ],
               "first_expected_rank": 1,
@@ -4061,8 +4251,13 @@
                 },
                 {
                   "class": "what_if_fallback",
-                  "id": "01M38RXNEDPF5HHKFP7B5EDS88",
+                  "id": "01KVHD0K08XW8SJ89KMAEM76NP",
                   "rank": 9
+                },
+                {
+                  "class": "what_if_fallback",
+                  "id": "01M38RXNEDPF5HHKFP7B5EDS88",
+                  "rank": 10
                 }
               ],
               "first_expected_rank": 1,
@@ -4079,13 +4274,23 @@
                 },
                 {
                   "class": "what_if_fallback",
-                  "id": "01M38K9C72R61SKMRFK88K1E8P",
+                  "id": "01M3HT9J7GCDT19EJ1RMBWRMJR",
                   "rank": 6
                 },
                 {
                   "class": "what_if_fallback",
-                  "id": "01M38KG5940FY5DT9JC8CT3HDN",
+                  "id": "01M38K9C72R61SKMRFK88K1E8P",
                   "rank": 7
+                },
+                {
+                  "class": "what_if_fallback",
+                  "id": "01M38KG5940FY5DT9JC8CT3HDN",
+                  "rank": 8
+                },
+                {
+                  "class": "what_if_fallback",
+                  "id": "01KVJQRX0NJKE8QZDCSS1NGZFK",
+                  "rank": 10
                 }
               ],
               "first_expected_rank": 1,
@@ -4096,17 +4301,27 @@
               "answers_all_keyed": true,
               "fallback_hits": [
                 {
+                  "class": "what_if_fallback",
+                  "id": "01M3HT9J7GCDT19EJ1RMBWRMJR",
+                  "rank": 2
+                },
+                {
                   "class": "fallback",
                   "id": "01M3JSQ0785BRCVGQ83YCP5KZR",
-                  "rank": 2
+                  "rank": 3
                 },
                 {
                   "class": "what_if_fallback",
                   "id": "01KWRG3QKP39XM9Q5HJ4800HBP",
-                  "rank": 5
+                  "rank": 6
+                },
+                {
+                  "class": "what_if_fallback",
+                  "id": "01M38MP7VBAFNFPQEQY3VY8G8C",
+                  "rank": 8
                 }
               ],
-              "first_expected_rank": 4,
+              "first_expected_rank": 5,
               "id": "q47",
               "kind": "error"
             },
@@ -4138,18 +4353,23 @@
               "fallback_hits": [
                 {
                   "class": "what_if_fallback",
-                  "id": "01KVYPGEX6ZG5YK8S4JB03GMFZ",
+                  "id": "01KVHD0K08XW8SJ89KMAEM76NP",
+                  "rank": 3
+                },
+                {
+                  "class": "what_if_fallback",
+                  "id": "01KVJWHJXSAS9D1W6ZM611JSFV",
                   "rank": 5
                 },
                 {
                   "class": "what_if_fallback",
-                  "id": "01M38RXNEDPF5HHKFP7B5EDS88",
-                  "rank": 9
+                  "id": "01KVJQRX0NJKE8QZDCSS1NGZFK",
+                  "rank": 7
                 },
                 {
                   "class": "what_if_fallback",
-                  "id": "01KVFDC629FXYVG0DA1PWEFZY8",
-                  "rank": 10
+                  "id": "01KVYPGEX6ZG5YK8S4JB03GMFZ",
+                  "rank": 8
                 }
               ],
               "first_expected_rank": 1,
@@ -4161,18 +4381,23 @@
               "fallback_hits": [
                 {
                   "class": "what_if_fallback",
-                  "id": "01KVQSNHC8MAD5HW5E4QAHX73C",
-                  "rank": 4
+                  "id": "01KVJQRX0NJKE8QZDCSS1NGZFK",
+                  "rank": 2
                 },
                 {
                   "class": "what_if_fallback",
-                  "id": "01KVFATHK8MJ08DNDYQVAMDMRW",
+                  "id": "01KVQSNHC8MAD5HW5E4QAHX73C",
                   "rank": 5
                 },
                 {
                   "class": "what_if_fallback",
-                  "id": "01KVND9CZ1K37XEHM1NCE3747D",
-                  "rank": 9
+                  "id": "01KVFATHK8MJ08DNDYQVAMDMRW",
+                  "rank": 6
+                },
+                {
+                  "class": "what_if_fallback",
+                  "id": "01KVJWHJXSAS9D1W6ZM611JSFV",
+                  "rank": 7
                 }
               ],
               "first_expected_rank": 1,
@@ -4238,31 +4463,36 @@
               "fallback_hits": [
                 {
                   "class": "what_if_fallback",
-                  "id": "01M3H13AWH8ZK97ZVYNB2B9YEB",
+                  "id": "01KVJWHJXSAS9D1W6ZM611JSFV",
                   "rank": 1
                 },
                 {
                   "class": "what_if_fallback",
-                  "id": "01KVW8CJHN1R9D1P3B404JH7MM",
+                  "id": "01M3H13AWH8ZK97ZVYNB2B9YEB",
                   "rank": 2
                 },
                 {
                   "class": "what_if_fallback",
-                  "id": "01KVJHRDQ9GYWYY7DMQ6G3CCAR",
+                  "id": "01KVW8CJHN1R9D1P3B404JH7MM",
                   "rank": 3
                 },
                 {
                   "class": "what_if_fallback",
-                  "id": "01KVYPGEX6ZG5YK8S4JB03GMFZ",
-                  "rank": 6
+                  "id": "01KVJHRDQ9GYWYY7DMQ6G3CCAR",
+                  "rank": 4
                 },
                 {
                   "class": "what_if_fallback",
-                  "id": "01M3J0RCC0EQS5918B0X5K7H7W",
-                  "rank": 10
+                  "id": "01KVYPGEX6ZG5YK8S4JB03GMFZ",
+                  "rank": 7
+                },
+                {
+                  "class": "what_if_fallback",
+                  "id": "01M3HT9J7GCDT19EJ1RMBWRMJR",
+                  "rank": 8
                 }
               ],
-              "first_expected_rank": 1,
+              "first_expected_rank": 2,
               "id": "q54",
               "kind": "commit"
             },
@@ -4276,23 +4506,23 @@
                 },
                 {
                   "class": "what_if_fallback",
-                  "id": "01KW2KDMPKF4SBS4014QJ259WJ",
+                  "id": "01M3HT9J7GCDT19EJ1RMBWRMJR",
                   "rank": 4
                 },
                 {
                   "class": "what_if_fallback",
-                  "id": "01KVVSD5KJ70BX96094GT70DN3",
-                  "rank": 8
+                  "id": "01M38MP7VBAFNFPQEQY3VY8G8C",
+                  "rank": 5
                 },
                 {
                   "class": "what_if_fallback",
-                  "id": "01KVQ25X06K47NC0WYTCMBY8CS",
-                  "rank": 9
+                  "id": "01KVTQ5PMKEGBMTTMJ0BHRQT1F",
+                  "rank": 6
                 },
                 {
-                  "class": "fallback",
-                  "id": "01M3JSQ0785BRCVGQ83YCP5KZR",
-                  "rank": 10
+                  "class": "what_if_fallback",
+                  "id": "01KW2KDMPKF4SBS4014QJ259WJ",
+                  "rank": 7
                 }
               ],
               "first_expected_rank": 1,
@@ -4364,24 +4594,29 @@
           "queries": 57,
           "top_hubs": [
             {
-              "class": "keyed",
+              "class": "what_if_fallback",
               "hub": true,
-              "id": "01KVJWHGS77876E3F7XTEJKCAY",
-              "key": "summary",
+              "id": "01KVJWHJXSAS9D1W6ZM611JSFV",
+              "key": "content",
               "nk": 15,
               "percentile": 0.9954,
               "string_keys": [
-                "reason",
+                "author",
+                "body",
+                "committed_at",
+                "content",
+                "sha",
+                "subject",
                 "summary"
               ],
-              "table": "decisions"
+              "table": "commits"
             },
             {
               "class": "keyed",
               "hub": true,
-              "id": "01KW2J0BGP7NFGA1GMX33D8AE5",
+              "id": "01KVJWHGS77876E3F7XTEJKCAY",
               "key": "summary",
-              "nk": 12,
+              "nk": 14,
               "percentile": 0.9909,
               "string_keys": [
                 "reason",
@@ -4390,59 +4625,13 @@
               "table": "decisions"
             },
             {
-              "class": "keyed",
+              "class": "what_if_fallback",
               "hub": true,
-              "id": "01KVW79Z78VBP6N0AGAM75XA4E",
-              "key": "error",
-              "nk": 11,
+              "id": "01M3HT9J7GCDT19EJ1RMBWRMJR",
+              "key": "content",
+              "nk": 12,
               "percentile": 0.9863,
               "string_keys": [
-                "error",
-                "fix",
-                "root_cause"
-              ],
-              "table": "errors"
-            },
-            {
-              "class": "keyed",
-              "hub": true,
-              "id": "01KVZY3154YQ7VTDZNYTTSQGC6",
-              "key": "error",
-              "nk": 9,
-              "percentile": 0.9817,
-              "string_keys": [
-                "error",
-                "fix",
-                "root_cause"
-              ],
-              "table": "errors"
-            },
-            {
-              "class": "what_if_fallback",
-              "hub": true,
-              "id": "01KW2KDMPKF4SBS4014QJ259WJ",
-              "key": "content",
-              "nk": 8,
-              "percentile": 0.968,
-              "string_keys": [
-                "author",
-                "body",
-                "committed_at",
-                "content",
-                "sha",
-                "subject",
-                "summary"
-              ],
-              "table": "commits"
-            },
-            {
-              "class": "what_if_fallback",
-              "hub": true,
-              "id": "01M38RXNEDPF5HHKFP7B5EDS88",
-              "key": "content",
-              "nk": 8,
-              "percentile": 0.968,
-              "string_keys": [
                 "author",
                 "body",
                 "committed_at",
@@ -4456,10 +4645,10 @@
             {
               "class": "keyed",
               "hub": true,
-              "id": "01KVCT6BGMW3HM1GF3JQHBXSR5",
+              "id": "01KW2J0BGP7NFGA1GMX33D8AE5",
               "key": "summary",
-              "nk": 8,
-              "percentile": 0.968,
+              "nk": 11,
+              "percentile": 0.9817,
               "string_keys": [
                 "reason",
                 "summary"
@@ -4467,29 +4656,30 @@
               "table": "decisions"
             },
             {
-              "class": "fallback",
-              "hub": false,
-              "id": "01M3JSQ0785BRCVGQ83YCP5KZR",
-              "key": null,
-              "nk": 7,
-              "percentile": 0.9498,
+              "class": "what_if_fallback",
+              "hub": true,
+              "id": "01KVSP611AJ2QFMQC7B1CWV8XX",
+              "key": "content",
+              "nk": 9,
+              "percentile": 0.9726,
               "string_keys": [
-                "_superseded_by",
                 "author",
                 "body",
                 "committed_at",
+                "content",
                 "sha",
-                "subject"
+                "subject",
+                "summary"
               ],
               "table": "commits"
             },
             {
               "class": "keyed",
-              "hub": false,
-              "id": "01KVNF4Y1CZBSZSAPYC1KF6FQ8",
+              "hub": true,
+              "id": "01KVZY3154YQ7VTDZNYTTSQGC6",
               "key": "error",
-              "nk": 7,
-              "percentile": 0.9498,
+              "nk": 9,
+              "percentile": 0.9726,
               "string_keys": [
                 "error",
                 "fix",
@@ -4499,25 +4689,11 @@
             },
             {
               "class": "keyed",
-              "hub": false,
-              "id": "01KVVNEJH5DB0WDTENC1A9VJYE",
+              "hub": true,
+              "id": "01KVW79Z78VBP6N0AGAM75XA4E",
               "key": "error",
-              "nk": 7,
-              "percentile": 0.9498,
-              "string_keys": [
-                "error",
-                "fix",
-                "root_cause"
-              ],
-              "table": "errors"
-            },
-            {
-              "class": "keyed",
-              "hub": false,
-              "id": "01M38P8F71FF4XP483BVJXJEZY",
-              "key": "error",
-              "nk": 7,
-              "percentile": 0.9498,
+              "nk": 8,
+              "percentile": 0.968,
               "string_keys": [
                 "error",
                 "fix",
@@ -4528,10 +4704,77 @@
             {
               "class": "what_if_fallback",
               "hub": false,
+              "id": "01KVHD0K08XW8SJ89KMAEM76NP",
+              "key": "content",
+              "nk": 7,
+              "percentile": 0.9498,
+              "string_keys": [
+                "author",
+                "body",
+                "committed_at",
+                "content",
+                "sha",
+                "subject",
+                "summary"
+              ],
+              "table": "commits"
+            },
+            {
+              "class": "what_if_fallback",
+              "hub": false,
+              "id": "01KW2KDMPKF4SBS4014QJ259WJ",
+              "key": "content",
+              "nk": 7,
+              "percentile": 0.9498,
+              "string_keys": [
+                "author",
+                "body",
+                "committed_at",
+                "content",
+                "sha",
+                "subject",
+                "summary"
+              ],
+              "table": "commits"
+            },
+            {
+              "class": "what_if_fallback",
+              "hub": false,
+              "id": "01M38RXNEDPF5HHKFP7B5EDS88",
+              "key": "content",
+              "nk": 7,
+              "percentile": 0.9498,
+              "string_keys": [
+                "author",
+                "body",
+                "committed_at",
+                "content",
+                "sha",
+                "subject",
+                "summary"
+              ],
+              "table": "commits"
+            },
+            {
+              "class": "keyed",
+              "hub": false,
+              "id": "01KVCT6BGMW3HM1GF3JQHBXSR5",
+              "key": "summary",
+              "nk": 7,
+              "percentile": 0.9498,
+              "string_keys": [
+                "reason",
+                "summary"
+              ],
+              "table": "decisions"
+            },
+            {
+              "class": "what_if_fallback",
+              "hub": false,
               "id": "01KVCNVC5TD35DFR7D2B962M1C",
               "key": "content",
               "nk": 6,
-              "percentile": 0.8995,
+              "percentile": 0.9041,
               "string_keys": [
                 "author",
                 "body",
@@ -4549,7 +4792,7 @@
               "id": "01KVG705S5W9VYZEVDD12DM4EW",
               "key": "content",
               "nk": 6,
-              "percentile": 0.8995,
+              "percentile": 0.9041,
               "string_keys": [
                 "author",
                 "body",
@@ -4567,7 +4810,7 @@
               "id": "01KVGA2EER840FJHB8RW6C3PAA",
               "key": "content",
               "nk": 6,
-              "percentile": 0.8995,
+              "percentile": 0.9041,
               "string_keys": [
                 "author",
                 "body",
@@ -4582,10 +4825,10 @@
             {
               "class": "what_if_fallback",
               "hub": false,
-              "id": "01KVJHRDQ9GYWYY7DMQ6G3CCAR",
+              "id": "01KVJQRX0NJKE8QZDCSS1NGZFK",
               "key": "content",
               "nk": 6,
-              "percentile": 0.8995,
+              "percentile": 0.9041,
               "string_keys": [
                 "author",
                 "body",
@@ -4599,9 +4842,9 @@
             }
           ],
           "vector_only": {
-            "hit@1": 0.7193,
+            "hit@1": 0.7018,
             "hit@10": 0.9474,
-            "mrr@10": 0.8224
+            "mrr@10": 0.8081
           }
         },
         "records_as_queries": {
@@ -4609,15 +4852,16 @@
             "fallback": {
               "hub_rate": 0.0,
               "hubs": 0,
-              "max_nk": 8,
-              "mean_nk": 4.6667,
+              "max_nk": 7,
+              "mean_nk": 4.0,
               "median_nk": 3.0,
               "owners": 3,
               "share_of_population": 0.0137,
-              "share_of_slots": 0.0064,
-              "share_of_slots_from_other_tables": 0.6429,
-              "slot_lift": 0.4667,
-              "slots": 14,
+              "share_of_slots": 0.0055,
+              "share_of_slots_from_other_tables": 0.5833,
+              "slot_lift": 0.4,
+              "slots": 12,
+              "slots_from_other_tables": 7,
               "zero_nk": 0,
               "zero_nk_rate": 0.0
             },
@@ -4625,73 +4869,90 @@
               "hub_rate": 0.0083,
               "hubs": 1,
               "max_nk": 28,
-              "mean_nk": 7.8512,
+              "mean_nk": 7.5455,
               "median_nk": 5.0,
               "owners": 121,
               "share_of_population": 0.5525,
-              "share_of_slots": 0.4338,
-              "share_of_slots_from_other_tables": 0.6295,
-              "slot_lift": 0.7851,
-              "slots": 950,
+              "share_of_slots": 0.4169,
+              "share_of_slots_from_other_tables": 0.6298,
+              "slot_lift": 0.7545,
+              "slots": 913,
+              "slots_from_other_tables": 575,
               "zero_nk": 3,
               "zero_nk_rate": 0.0248
             },
             "what_if_fallback": {
-              "hub_rate": 0.1579,
-              "hubs": 15,
-              "max_nk": 40,
-              "mean_nk": 12.9053,
+              "hub_rate": 0.1474,
+              "hubs": 14,
+              "max_nk": 42,
+              "mean_nk": 13.3158,
               "median_nk": 9.0,
               "owners": 95,
               "share_of_population": 0.4338,
-              "share_of_slots": 0.5598,
-              "share_of_slots_from_other_tables": 0.3956,
-              "slot_lift": 1.2905,
-              "slots": 1226,
+              "share_of_slots": 0.5776,
+              "share_of_slots_from_other_tables": 0.4126,
+              "slot_lift": 1.3316,
+              "slots": 1265,
+              "slots_from_other_tables": 522,
               "zero_nk": 0,
               "zero_nk_rate": 0.0
             }
           },
           "by_table": {
             "commits": {
-              "hubs": 15,
-              "mean_nk": 12.8542,
+              "hubs": 14,
+              "max_nk": 42,
+              "mean_nk": 13.25,
               "owners": 96,
               "share_of_population": 0.4384,
-              "share_of_slots": 0.5635,
-              "share_of_slots_from_other_tables": 0.3955
+              "share_of_slots": 0.5808,
+              "share_of_slots_from_other_tables": 0.4119,
+              "slots": 1272,
+              "slots_from_other_tables": 524
             },
             "context": {
               "hubs": 0,
-              "mean_nk": 12.2632,
+              "max_nk": 25,
+              "mean_nk": 11.7895,
               "owners": 38,
               "share_of_population": 0.1735,
-              "share_of_slots": 0.2128,
-              "share_of_slots_from_other_tables": 0.6717
+              "share_of_slots": 0.2046,
+              "share_of_slots_from_other_tables": 0.6674,
+              "slots": 448,
+              "slots_from_other_tables": 299
             },
             "decisions": {
               "hubs": 1,
-              "mean_nk": 6.5893,
+              "max_nk": 28,
+              "mean_nk": 6.375,
               "owners": 56,
               "share_of_population": 0.2557,
-              "share_of_slots": 0.1685,
-              "share_of_slots_from_other_tables": 0.6179
+              "share_of_slots": 0.163,
+              "share_of_slots_from_other_tables": 0.619,
+              "slots": 357,
+              "slots_from_other_tables": 221
             },
             "errors": {
               "hubs": 0,
-              "mean_nk": 4.2593,
+              "max_nk": 11,
+              "mean_nk": 4.0,
               "owners": 27,
               "share_of_population": 0.1233,
-              "share_of_slots": 0.0525,
-              "share_of_slots_from_other_tables": 0.4957
+              "share_of_slots": 0.0493,
+              "share_of_slots_from_other_tables": 0.5093,
+              "slots": 108,
+              "slots_from_other_tables": 55
             },
             "rules": {
               "hubs": 0,
-              "mean_nk": 3.0,
+              "max_nk": 3,
+              "mean_nk": 2.5,
               "owners": 2,
               "share_of_population": 0.0091,
-              "share_of_slots": 0.0027,
-              "share_of_slots_from_other_tables": 1.0
+              "share_of_slots": 0.0023,
+              "share_of_slots_from_other_tables": 1.0,
+              "slots": 5,
+              "slots_from_other_tables": 5
             }
           },
           "fallback_records": [
@@ -4700,8 +4961,8 @@
               "hub": false,
               "id": "01M3JSQ0785BRCVGQ83YCP5KZR",
               "key": null,
-              "nk": 8,
-              "percentile": 0.5023,
+              "nk": 7,
+              "percentile": 0.4566,
               "string_keys": [
                 "_superseded_by",
                 "author",
@@ -4718,7 +4979,7 @@
               "id": "01KVCKTBXGQQVK8D1GQWJG0MHJ",
               "key": null,
               "nk": 3,
-              "percentile": 0.1324,
+              "percentile": 0.1461,
               "string_keys": [
                 "_seed",
                 "rule"
@@ -4730,8 +4991,8 @@
               "hub": false,
               "id": "01M3H4BJHZKYQY2EG1SPVDKK29",
               "key": null,
-              "nk": 3,
-              "percentile": 0.1324,
+              "nk": 2,
+              "percentile": 0.0822,
               "string_keys": [
                 "reason",
                 "rule"
@@ -4739,21 +5000,75 @@
               "table": "rules"
             }
           ],
-          "hub_threshold": 26.6248,
+          "hub_threshold": 27.7718,
           "k": 10,
           "nk_mean": 10.0,
-          "nk_skewness": 1.3042,
-          "nk_std": 8.3124,
+          "nk_skewness": 1.5127,
+          "nk_std": 8.8859,
           "owners": 219,
           "queries": 219,
           "top_hubs": [
             {
               "class": "what_if_fallback",
               "hub": true,
+              "id": "01KVSP611AJ2QFMQC7B1CWV8XX",
+              "key": "content",
+              "nk": 42,
+              "percentile": 0.9954,
+              "string_keys": [
+                "author",
+                "body",
+                "committed_at",
+                "content",
+                "sha",
+                "subject",
+                "summary"
+              ],
+              "table": "commits"
+            },
+            {
+              "class": "what_if_fallback",
+              "hub": true,
               "id": "01KVHD0K08XW8SJ89KMAEM76NP",
               "key": "content",
-              "nk": 40,
-              "percentile": 0.9954,
+              "nk": 41,
+              "percentile": 0.9863,
+              "string_keys": [
+                "author",
+                "body",
+                "committed_at",
+                "content",
+                "sha",
+                "subject",
+                "summary"
+              ],
+              "table": "commits"
+            },
+            {
+              "class": "what_if_fallback",
+              "hub": true,
+              "id": "01KVJWHJXSAS9D1W6ZM611JSFV",
+              "key": "content",
+              "nk": 41,
+              "percentile": 0.9863,
+              "string_keys": [
+                "author",
+                "body",
+                "committed_at",
+                "content",
+                "sha",
+                "subject",
+                "summary"
+              ],
+              "table": "commits"
+            },
+            {
+              "class": "what_if_fallback",
+              "hub": true,
+              "id": "01KVJQRX0NJKE8QZDCSS1NGZFK",
+              "key": "content",
+              "nk": 37,
+              "percentile": 0.9817,
               "string_keys": [
                 "author",
                 "body",
@@ -4770,8 +5085,8 @@
               "hub": true,
               "id": "01KVG705S5W9VYZEVDD12DM4EW",
               "key": "content",
-              "nk": 38,
-              "percentile": 0.9909,
+              "nk": 36,
+              "percentile": 0.9726,
               "string_keys": [
                 "author",
                 "body",
@@ -4786,10 +5101,10 @@
             {
               "class": "what_if_fallback",
               "hub": true,
-              "id": "01KVQ25X06K47NC0WYTCMBY8CS",
+              "id": "01KVGA2EER840FJHB8RW6C3PAA",
               "key": "content",
-              "nk": 35,
-              "percentile": 0.9817,
+              "nk": 36,
+              "percentile": 0.9726,
               "string_keys": [
                 "author",
                 "body",
@@ -4806,8 +5121,26 @@
               "hub": true,
               "id": "01KW2KDMPKF4SBS4014QJ259WJ",
               "key": "content",
-              "nk": 35,
-              "percentile": 0.9817,
+              "nk": 33,
+              "percentile": 0.968,
+              "string_keys": [
+                "author",
+                "body",
+                "committed_at",
+                "content",
+                "sha",
+                "subject",
+                "summary"
+              ],
+              "table": "commits"
+            },
+            {
+              "class": "what_if_fallback",
+              "hub": true,
+              "id": "01KVQ25X06K47NC0WYTCMBY8CS",
+              "key": "content",
+              "nk": 32,
+              "percentile": 0.9635,
               "string_keys": [
                 "author",
                 "body",
@@ -4824,8 +5157,26 @@
               "hub": true,
               "id": "01KVFBX951DN7B7GYHXG6TB8WS",
               "key": "content",
-              "nk": 34,
-              "percentile": 0.9772,
+              "nk": 31,
+              "percentile": 0.9498,
+              "string_keys": [
+                "author",
+                "body",
+                "committed_at",
+                "content",
+                "sha",
+                "subject",
+                "summary"
+              ],
+              "table": "commits"
+            },
+            {
+              "class": "what_if_fallback",
+              "hub": true,
+              "id": "01KVQSNHC8MAD5HW5E4QAHX73C",
+              "key": "content",
+              "nk": 31,
+              "percentile": 0.9498,
               "string_keys": [
                 "author",
                 "body",
@@ -4842,8 +5193,8 @@
               "hub": true,
               "id": "01M3GG2W9221D3GR23M7B6E486",
               "key": "content",
-              "nk": 32,
-              "percentile": 0.9726,
+              "nk": 31,
+              "percentile": 0.9498,
               "string_keys": [
                 "author",
                 "body",
@@ -4861,7 +5212,7 @@
               "id": "01KVGEV5BNP6J02V2VYSZ6FDF3",
               "key": "content",
               "nk": 30,
-              "percentile": 0.9635,
+              "percentile": 0.9406,
               "string_keys": [
                 "author",
                 "body",
@@ -4879,7 +5230,7 @@
               "id": "01KVTQ5PMKEGBMTTMJ0BHRQT1F",
               "key": "content",
               "nk": 30,
-              "percentile": 0.9635,
+              "percentile": 0.9406,
               "string_keys": [
                 "author",
                 "body",
@@ -4897,7 +5248,7 @@
               "id": "01KVFDC629FXYVG0DA1PWEFZY8",
               "key": "content",
               "nk": 29,
-              "percentile": 0.9589,
+              "percentile": 0.9361,
               "string_keys": [
                 "author",
                 "body",
@@ -4915,7 +5266,1056 @@
               "id": "01KVVNPF8R0KXZAM27NV9K0W4T",
               "key": "summary",
               "nk": 28,
-              "percentile": 0.9543,
+              "percentile": 0.9315,
+              "string_keys": [
+                "reason",
+                "summary"
+              ],
+              "table": "decisions"
+            }
+          ]
+        }
+      },
+      "what_if_text_poor": {
+        "questions": {
+          "by_class": {
+            "fallback": {
+              "hub_rate": 0.3333,
+              "hubs": 1,
+              "max_nk": 11,
+              "mean_nk": 5.0,
+              "median_nk": 3.0,
+              "owners": 3,
+              "share_of_population": 0.0137,
+              "share_of_slots": 0.0263,
+              "slot_lift": 1.9211,
+              "slots": 15,
+              "zero_nk": 0,
+              "zero_nk_rate": 0.0
+            },
+            "keyed": {
+              "hub_rate": 0.1157,
+              "hubs": 14,
+              "max_nk": 19,
+              "mean_nk": 4.5868,
+              "median_nk": 4.0,
+              "owners": 121,
+              "share_of_population": 0.5525,
+              "share_of_slots": 0.9737,
+              "slot_lift": 1.7623,
+              "slots": 555,
+              "zero_nk": 3,
+              "zero_nk_rate": 0.0248
+            },
+            "what_if_fallback": {
+              "hub_rate": 0.0,
+              "hubs": 0,
+              "max_nk": 0,
+              "mean_nk": 0.0,
+              "median_nk": 0.0,
+              "owners": 95,
+              "share_of_population": 0.4338,
+              "share_of_slots": 0.0,
+              "slot_lift": 0.0,
+              "slots": 0,
+              "zero_nk": 95,
+              "zero_nk_rate": 1.0
+            }
+          },
+          "by_table": {
+            "commits": {
+              "hubs": 1,
+              "max_nk": 11,
+              "mean_nk": 0.1146,
+              "owners": 96,
+              "share_of_population": 0.4384,
+              "share_of_slots": 0.0193,
+              "slots": 11
+            },
+            "context": {
+              "hubs": 2,
+              "max_nk": 10,
+              "mean_nk": 3.7895,
+              "owners": 38,
+              "share_of_population": 0.1735,
+              "share_of_slots": 0.2526,
+              "slots": 144
+            },
+            "decisions": {
+              "hubs": 6,
+              "max_nk": 19,
+              "mean_nk": 4.6786,
+              "owners": 56,
+              "share_of_population": 0.2557,
+              "share_of_slots": 0.4596,
+              "slots": 262
+            },
+            "errors": {
+              "hubs": 6,
+              "max_nk": 14,
+              "mean_nk": 5.5185,
+              "owners": 27,
+              "share_of_population": 0.1233,
+              "share_of_slots": 0.2614,
+              "slots": 149
+            },
+            "rules": {
+              "hubs": 0,
+              "max_nk": 3,
+              "mean_nk": 2.0,
+              "owners": 2,
+              "share_of_population": 0.0091,
+              "share_of_slots": 0.007,
+              "slots": 4
+            }
+          },
+          "fallback_records": [
+            {
+              "class": "fallback",
+              "hub": true,
+              "id": "01M3JSQ0785BRCVGQ83YCP5KZR",
+              "key": null,
+              "nk": 11,
+              "percentile": 0.9635,
+              "string_keys": [
+                "_superseded_by",
+                "author",
+                "body",
+                "committed_at",
+                "sha",
+                "subject"
+              ],
+              "table": "commits"
+            },
+            {
+              "class": "fallback",
+              "hub": false,
+              "id": "01KVCKTBXGQQVK8D1GQWJG0MHJ",
+              "key": null,
+              "nk": 3,
+              "percentile": 0.6256,
+              "string_keys": [
+                "_seed",
+                "rule"
+              ],
+              "table": "rules"
+            },
+            {
+              "class": "fallback",
+              "hub": false,
+              "id": "01M3H4BJHZKYQY2EG1SPVDKK29",
+              "key": null,
+              "nk": 1,
+              "percentile": 0.4475,
+              "string_keys": [
+                "reason",
+                "rule"
+              ],
+              "table": "rules"
+            }
+          ],
+          "hub_threshold": 9.5578,
+          "k": 10,
+          "keyed_answer_questions": {
+            "fallback_above_first_expected": 3,
+            "fallback_slots": 10,
+            "questions": 50,
+            "with_fallback_in_top_k": 10
+          },
+          "nk_mean": 2.6027,
+          "nk_skewness": 1.7067,
+          "nk_std": 3.4775,
+          "owners": 219,
+          "per_question": [
+            {
+              "answers_all_keyed": true,
+              "fallback_hits": [],
+              "first_expected_rank": 1,
+              "id": "q01",
+              "kind": "decision"
+            },
+            {
+              "answers_all_keyed": true,
+              "fallback_hits": [],
+              "first_expected_rank": 1,
+              "id": "q02",
+              "kind": "decision"
+            },
+            {
+              "answers_all_keyed": true,
+              "fallback_hits": [],
+              "first_expected_rank": 1,
+              "id": "q03",
+              "kind": "decision"
+            },
+            {
+              "answers_all_keyed": true,
+              "fallback_hits": [],
+              "first_expected_rank": 1,
+              "id": "q04",
+              "kind": "decision"
+            },
+            {
+              "answers_all_keyed": true,
+              "fallback_hits": [],
+              "first_expected_rank": 1,
+              "id": "q05",
+              "kind": "decision"
+            },
+            {
+              "answers_all_keyed": true,
+              "fallback_hits": [],
+              "first_expected_rank": 1,
+              "id": "q06",
+              "kind": "decision"
+            },
+            {
+              "answers_all_keyed": true,
+              "fallback_hits": [],
+              "first_expected_rank": 1,
+              "id": "q07",
+              "kind": "decision"
+            },
+            {
+              "answers_all_keyed": true,
+              "fallback_hits": [],
+              "first_expected_rank": 1,
+              "id": "q08",
+              "kind": "decision"
+            },
+            {
+              "answers_all_keyed": true,
+              "fallback_hits": [],
+              "first_expected_rank": 4,
+              "id": "q09",
+              "kind": "decision"
+            },
+            {
+              "answers_all_keyed": true,
+              "fallback_hits": [],
+              "first_expected_rank": 1,
+              "id": "q10",
+              "kind": "decision"
+            },
+            {
+              "answers_all_keyed": true,
+              "fallback_hits": [
+                {
+                  "class": "fallback",
+                  "id": "01M3JSQ0785BRCVGQ83YCP5KZR",
+                  "rank": 3
+                }
+              ],
+              "first_expected_rank": 7,
+              "id": "q11",
+              "kind": "decision"
+            },
+            {
+              "answers_all_keyed": true,
+              "fallback_hits": [],
+              "first_expected_rank": 1,
+              "id": "q12",
+              "kind": "decision"
+            },
+            {
+              "answers_all_keyed": true,
+              "fallback_hits": [
+                {
+                  "class": "fallback",
+                  "id": "01M3JSQ0785BRCVGQ83YCP5KZR",
+                  "rank": 6
+                }
+              ],
+              "first_expected_rank": 1,
+              "id": "q13",
+              "kind": "error"
+            },
+            {
+              "answers_all_keyed": true,
+              "fallback_hits": [],
+              "first_expected_rank": 1,
+              "id": "q14",
+              "kind": "context"
+            },
+            {
+              "answers_all_keyed": true,
+              "fallback_hits": [],
+              "first_expected_rank": 1,
+              "id": "q15",
+              "kind": "decision"
+            },
+            {
+              "answers_all_keyed": true,
+              "fallback_hits": [
+                {
+                  "class": "fallback",
+                  "id": "01M3JSQ0785BRCVGQ83YCP5KZR",
+                  "rank": 9
+                }
+              ],
+              "first_expected_rank": 1,
+              "id": "q16",
+              "kind": "decision"
+            },
+            {
+              "answers_all_keyed": true,
+              "fallback_hits": [],
+              "first_expected_rank": 2,
+              "id": "q17",
+              "kind": "decision"
+            },
+            {
+              "answers_all_keyed": true,
+              "fallback_hits": [
+                {
+                  "class": "fallback",
+                  "id": "01M3JSQ0785BRCVGQ83YCP5KZR",
+                  "rank": 6
+                }
+              ],
+              "first_expected_rank": 1,
+              "id": "q18",
+              "kind": "decision"
+            },
+            {
+              "answers_all_keyed": true,
+              "fallback_hits": [],
+              "first_expected_rank": 1,
+              "id": "q19",
+              "kind": "decision"
+            },
+            {
+              "answers_all_keyed": true,
+              "fallback_hits": [],
+              "first_expected_rank": 1,
+              "id": "q20",
+              "kind": "decision"
+            },
+            {
+              "answers_all_keyed": true,
+              "fallback_hits": [],
+              "first_expected_rank": 1,
+              "id": "q21",
+              "kind": "decision"
+            },
+            {
+              "answers_all_keyed": true,
+              "fallback_hits": [],
+              "first_expected_rank": 1,
+              "id": "q22",
+              "kind": "decision"
+            },
+            {
+              "answers_all_keyed": true,
+              "fallback_hits": [],
+              "first_expected_rank": null,
+              "id": "q23",
+              "kind": "decision"
+            },
+            {
+              "answers_all_keyed": true,
+              "fallback_hits": [],
+              "first_expected_rank": 1,
+              "id": "q24",
+              "kind": "decision"
+            },
+            {
+              "answers_all_keyed": true,
+              "fallback_hits": [],
+              "first_expected_rank": 1,
+              "id": "q25",
+              "kind": "decision"
+            },
+            {
+              "answers_all_keyed": true,
+              "fallback_hits": [],
+              "first_expected_rank": 1,
+              "id": "q26",
+              "kind": "decision"
+            },
+            {
+              "answers_all_keyed": true,
+              "fallback_hits": [],
+              "first_expected_rank": 1,
+              "id": "q27",
+              "kind": "error"
+            },
+            {
+              "answers_all_keyed": false,
+              "fallback_hits": [
+                {
+                  "class": "fallback",
+                  "id": "01M3H4BJHZKYQY2EG1SPVDKK29",
+                  "rank": 1
+                }
+              ],
+              "first_expected_rank": 1,
+              "id": "q28",
+              "kind": "rule"
+            },
+            {
+              "answers_all_keyed": false,
+              "fallback_hits": [
+                {
+                  "class": "fallback",
+                  "id": "01KVCKTBXGQQVK8D1GQWJG0MHJ",
+                  "rank": 2
+                }
+              ],
+              "first_expected_rank": 2,
+              "id": "q29",
+              "kind": "rule"
+            },
+            {
+              "answers_all_keyed": true,
+              "fallback_hits": [],
+              "first_expected_rank": 1,
+              "id": "q30",
+              "kind": "decision"
+            },
+            {
+              "answers_all_keyed": true,
+              "fallback_hits": [],
+              "first_expected_rank": 1,
+              "id": "q31",
+              "kind": "decision"
+            },
+            {
+              "answers_all_keyed": true,
+              "fallback_hits": [],
+              "first_expected_rank": 2,
+              "id": "q32",
+              "kind": "context"
+            },
+            {
+              "answers_all_keyed": true,
+              "fallback_hits": [],
+              "first_expected_rank": 1,
+              "id": "q33",
+              "kind": "decision"
+            },
+            {
+              "answers_all_keyed": true,
+              "fallback_hits": [],
+              "first_expected_rank": 1,
+              "id": "q34",
+              "kind": "error"
+            },
+            {
+              "answers_all_keyed": true,
+              "fallback_hits": [],
+              "first_expected_rank": 1,
+              "id": "q35",
+              "kind": "error"
+            },
+            {
+              "answers_all_keyed": true,
+              "fallback_hits": [],
+              "first_expected_rank": 1,
+              "id": "q36",
+              "kind": "error"
+            },
+            {
+              "answers_all_keyed": true,
+              "fallback_hits": [],
+              "first_expected_rank": 1,
+              "id": "q37",
+              "kind": "error"
+            },
+            {
+              "answers_all_keyed": true,
+              "fallback_hits": [],
+              "first_expected_rank": 1,
+              "id": "q38",
+              "kind": "error"
+            },
+            {
+              "answers_all_keyed": true,
+              "fallback_hits": [],
+              "first_expected_rank": 1,
+              "id": "q39",
+              "kind": "error"
+            },
+            {
+              "answers_all_keyed": true,
+              "fallback_hits": [
+                {
+                  "class": "fallback",
+                  "id": "01M3JSQ0785BRCVGQ83YCP5KZR",
+                  "rank": 8
+                }
+              ],
+              "first_expected_rank": 1,
+              "id": "q40",
+              "kind": "error"
+            },
+            {
+              "answers_all_keyed": true,
+              "fallback_hits": [],
+              "first_expected_rank": 1,
+              "id": "q41",
+              "kind": "error"
+            },
+            {
+              "answers_all_keyed": true,
+              "fallback_hits": [
+                {
+                  "class": "fallback",
+                  "id": "01M3JSQ0785BRCVGQ83YCP5KZR",
+                  "rank": 3
+                }
+              ],
+              "first_expected_rank": 1,
+              "id": "q42",
+              "kind": "error"
+            },
+            {
+              "answers_all_keyed": true,
+              "fallback_hits": [],
+              "first_expected_rank": 1,
+              "id": "q43",
+              "kind": "error"
+            },
+            {
+              "answers_all_keyed": true,
+              "fallback_hits": [
+                {
+                  "class": "fallback",
+                  "id": "01M3JSQ0785BRCVGQ83YCP5KZR",
+                  "rank": 10
+                }
+              ],
+              "first_expected_rank": 1,
+              "id": "q44",
+              "kind": "error"
+            },
+            {
+              "answers_all_keyed": false,
+              "fallback_hits": [],
+              "first_expected_rank": 1,
+              "id": "q45",
+              "kind": "error"
+            },
+            {
+              "answers_all_keyed": true,
+              "fallback_hits": [],
+              "first_expected_rank": 1,
+              "id": "q46",
+              "kind": "error"
+            },
+            {
+              "answers_all_keyed": true,
+              "fallback_hits": [
+                {
+                  "class": "fallback",
+                  "id": "01M3JSQ0785BRCVGQ83YCP5KZR",
+                  "rank": 2
+                }
+              ],
+              "first_expected_rank": 4,
+              "id": "q47",
+              "kind": "error"
+            },
+            {
+              "answers_all_keyed": true,
+              "fallback_hits": [
+                {
+                  "class": "fallback",
+                  "id": "01M3JSQ0785BRCVGQ83YCP5KZR",
+                  "rank": 4
+                }
+              ],
+              "first_expected_rank": null,
+              "id": "q48",
+              "kind": "error"
+            },
+            {
+              "answers_all_keyed": true,
+              "fallback_hits": [],
+              "first_expected_rank": 1,
+              "id": "q49",
+              "kind": "error"
+            },
+            {
+              "answers_all_keyed": true,
+              "fallback_hits": [],
+              "first_expected_rank": 1,
+              "id": "q50",
+              "kind": "error"
+            },
+            {
+              "answers_all_keyed": true,
+              "fallback_hits": [],
+              "first_expected_rank": 1,
+              "id": "q51",
+              "kind": "context"
+            },
+            {
+              "answers_all_keyed": true,
+              "fallback_hits": [
+                {
+                  "class": "fallback",
+                  "id": "01KVCKTBXGQQVK8D1GQWJG0MHJ",
+                  "rank": 8
+                }
+              ],
+              "first_expected_rank": 1,
+              "id": "q52",
+              "kind": "context"
+            },
+            {
+              "answers_all_keyed": true,
+              "fallback_hits": [],
+              "first_expected_rank": 1,
+              "id": "q53",
+              "kind": "context"
+            },
+            {
+              "answers_all_keyed": false,
+              "fallback_hits": [
+                {
+                  "class": "fallback",
+                  "id": "01M3JSQ0785BRCVGQ83YCP5KZR",
+                  "rank": 9
+                }
+              ],
+              "first_expected_rank": null,
+              "id": "q54",
+              "kind": "commit"
+            },
+            {
+              "answers_all_keyed": false,
+              "fallback_hits": [
+                {
+                  "class": "fallback",
+                  "id": "01M3JSQ0785BRCVGQ83YCP5KZR",
+                  "rank": 6
+                },
+                {
+                  "class": "fallback",
+                  "id": "01KVCKTBXGQQVK8D1GQWJG0MHJ",
+                  "rank": 8
+                }
+              ],
+              "first_expected_rank": null,
+              "id": "q55",
+              "kind": "commit"
+            },
+            {
+              "answers_all_keyed": false,
+              "fallback_hits": [],
+              "first_expected_rank": 3,
+              "id": "q56",
+              "kind": "commit"
+            },
+            {
+              "answers_all_keyed": false,
+              "fallback_hits": [],
+              "first_expected_rank": 1,
+              "id": "q57",
+              "kind": "commit"
+            }
+          ],
+          "queries": 57,
+          "top_hubs": [
+            {
+              "class": "keyed",
+              "hub": true,
+              "id": "01KVJWHGS77876E3F7XTEJKCAY",
+              "key": "summary",
+              "nk": 19,
+              "percentile": 0.9954,
+              "string_keys": [
+                "reason",
+                "summary"
+              ],
+              "table": "decisions"
+            },
+            {
+              "class": "keyed",
+              "hub": true,
+              "id": "01KVCT6BGMW3HM1GF3JQHBXSR5",
+              "key": "summary",
+              "nk": 16,
+              "percentile": 0.9909,
+              "string_keys": [
+                "reason",
+                "summary"
+              ],
+              "table": "decisions"
+            },
+            {
+              "class": "keyed",
+              "hub": true,
+              "id": "01KVW79Z78VBP6N0AGAM75XA4E",
+              "key": "error",
+              "nk": 14,
+              "percentile": 0.9817,
+              "string_keys": [
+                "error",
+                "fix",
+                "root_cause"
+              ],
+              "table": "errors"
+            },
+            {
+              "class": "keyed",
+              "hub": true,
+              "id": "01M3GEF5V7JH4Z9RESFVPJM7KZ",
+              "key": "error",
+              "nk": 14,
+              "percentile": 0.9817,
+              "string_keys": [
+                "error",
+                "fix",
+                "root_cause"
+              ],
+              "table": "errors"
+            },
+            {
+              "class": "keyed",
+              "hub": true,
+              "id": "01KW2J0BGP7NFGA1GMX33D8AE5",
+              "key": "summary",
+              "nk": 12,
+              "percentile": 0.9726,
+              "string_keys": [
+                "reason",
+                "summary"
+              ],
+              "table": "decisions"
+            },
+            {
+              "class": "keyed",
+              "hub": true,
+              "id": "01KVVNEJH5DB0WDTENC1A9VJYE",
+              "key": "error",
+              "nk": 12,
+              "percentile": 0.9726,
+              "string_keys": [
+                "error",
+                "fix",
+                "root_cause"
+              ],
+              "table": "errors"
+            },
+            {
+              "class": "fallback",
+              "hub": true,
+              "id": "01M3JSQ0785BRCVGQ83YCP5KZR",
+              "key": null,
+              "nk": 11,
+              "percentile": 0.9635,
+              "string_keys": [
+                "_superseded_by",
+                "author",
+                "body",
+                "committed_at",
+                "sha",
+                "subject"
+              ],
+              "table": "commits"
+            },
+            {
+              "class": "keyed",
+              "hub": true,
+              "id": "01KVNF4Y1CZBSZSAPYC1KF6FQ8",
+              "key": "error",
+              "nk": 11,
+              "percentile": 0.9635,
+              "string_keys": [
+                "error",
+                "fix",
+                "root_cause"
+              ],
+              "table": "errors"
+            },
+            {
+              "class": "keyed",
+              "hub": true,
+              "id": "01KVVR0RB9E89KMTD0RZ9B8APD",
+              "key": "summary",
+              "nk": 10,
+              "percentile": 0.9315,
+              "string_keys": [
+                "summary",
+                "type"
+              ],
+              "table": "context"
+            },
+            {
+              "class": "keyed",
+              "hub": true,
+              "id": "01M3HQZE6JCV7FMG266RYH7PT4",
+              "key": "summary",
+              "nk": 10,
+              "percentile": 0.9315,
+              "string_keys": [
+                "summary",
+                "type"
+              ],
+              "table": "context"
+            },
+            {
+              "class": "keyed",
+              "hub": true,
+              "id": "01KVJQRTRRRH022NNG0H9MYYBA",
+              "key": "summary",
+              "nk": 10,
+              "percentile": 0.9315,
+              "string_keys": [
+                "reason",
+                "summary"
+              ],
+              "table": "decisions"
+            },
+            {
+              "class": "keyed",
+              "hub": true,
+              "id": "01KVVNPF8R0KXZAM27NV9K0W4T",
+              "key": "summary",
+              "nk": 10,
+              "percentile": 0.9315,
+              "string_keys": [
+                "reason",
+                "summary"
+              ],
+              "table": "decisions"
+            },
+            {
+              "class": "keyed",
+              "hub": true,
+              "id": "01KVVSB9GF34SKZRYM5BYSX0SJ",
+              "key": "summary",
+              "nk": 10,
+              "percentile": 0.9315,
+              "string_keys": [
+                "reason",
+                "summary"
+              ],
+              "table": "decisions"
+            },
+            {
+              "class": "keyed",
+              "hub": true,
+              "id": "01KVZY3154YQ7VTDZNYTTSQGC6",
+              "key": "error",
+              "nk": 10,
+              "percentile": 0.9315,
+              "string_keys": [
+                "error",
+                "fix",
+                "root_cause"
+              ],
+              "table": "errors"
+            },
+            {
+              "class": "keyed",
+              "hub": true,
+              "id": "01M38P8F71FF4XP483BVJXJEZY",
+              "key": "error",
+              "nk": 10,
+              "percentile": 0.9315,
+              "string_keys": [
+                "error",
+                "fix",
+                "root_cause"
+              ],
+              "table": "errors"
+            }
+          ],
+          "vector_only": {
+            "hit@1": 0.807,
+            "hit@10": 0.9298,
+            "mrr@10": 0.8505
+          }
+        },
+        "records_as_queries": {
+          "by_class": {
+            "fallback": {
+              "hub_rate": 0.0,
+              "hubs": 0,
+              "max_nk": 9,
+              "mean_nk": 6.3333,
+              "median_nk": 6.0,
+              "owners": 3,
+              "share_of_population": 0.0137,
+              "share_of_slots": 0.0087,
+              "share_of_slots_from_other_tables": 1.0,
+              "slot_lift": 0.6333,
+              "slots": 19,
+              "slots_from_other_tables": 19,
+              "zero_nk": 0,
+              "zero_nk_rate": 0.0
+            },
+            "keyed": {
+              "hub_rate": 0.0248,
+              "hubs": 3,
+              "max_nk": 36,
+              "mean_nk": 10.0909,
+              "median_nk": 8.0,
+              "owners": 121,
+              "share_of_population": 0.5525,
+              "share_of_slots": 0.5575,
+              "share_of_slots_from_other_tables": 0.5455,
+              "slot_lift": 1.0091,
+              "slots": 1221,
+              "slots_from_other_tables": 666,
+              "zero_nk": 5,
+              "zero_nk_rate": 0.0413
+            },
+            "what_if_fallback": {
+              "hub_rate": 0.0842,
+              "hubs": 8,
+              "max_nk": 37,
+              "mean_nk": 10.0,
+              "median_nk": 7.0,
+              "owners": 95,
+              "share_of_population": 0.4338,
+              "share_of_slots": 0.4338,
+              "share_of_slots_from_other_tables": 0.0,
+              "slot_lift": 1.0,
+              "slots": 950,
+              "slots_from_other_tables": 0,
+              "zero_nk": 4,
+              "zero_nk_rate": 0.0421
+            }
+          },
+          "by_table": {
+            "commits": {
+              "hubs": 8,
+              "max_nk": 37,
+              "mean_nk": 9.9896,
+              "owners": 96,
+              "share_of_population": 0.4384,
+              "share_of_slots": 0.4379,
+              "share_of_slots_from_other_tables": 0.0094,
+              "slots": 959,
+              "slots_from_other_tables": 9
+            },
+            "context": {
+              "hubs": 2,
+              "max_nk": 34,
+              "mean_nk": 15.2368,
+              "owners": 38,
+              "share_of_population": 0.1735,
+              "share_of_slots": 0.2644,
+              "share_of_slots_from_other_tables": 0.6218,
+              "slots": 579,
+              "slots_from_other_tables": 360
+            },
+            "decisions": {
+              "hubs": 1,
+              "max_nk": 36,
+              "mean_nk": 8.6964,
+              "owners": 56,
+              "share_of_population": 0.2557,
+              "share_of_slots": 0.2224,
+              "share_of_slots_from_other_tables": 0.4723,
+              "slots": 487,
+              "slots_from_other_tables": 230
+            },
+            "errors": {
+              "hubs": 0,
+              "max_nk": 23,
+              "mean_nk": 5.7407,
+              "owners": 27,
+              "share_of_population": 0.1233,
+              "share_of_slots": 0.0708,
+              "share_of_slots_from_other_tables": 0.4903,
+              "slots": 155,
+              "slots_from_other_tables": 76
+            },
+            "rules": {
+              "hubs": 0,
+              "max_nk": 6,
+              "mean_nk": 5.0,
+              "owners": 2,
+              "share_of_population": 0.0091,
+              "share_of_slots": 0.0046,
+              "share_of_slots_from_other_tables": 1.0,
+              "slots": 10,
+              "slots_from_other_tables": 10
+            }
+          },
+          "fallback_records": [
+            {
+              "class": "fallback",
+              "hub": false,
+              "id": "01M3JSQ0785BRCVGQ83YCP5KZR",
+              "key": null,
+              "nk": 9,
+              "percentile": 0.5525,
+              "string_keys": [
+                "_superseded_by",
+                "author",
+                "body",
+                "committed_at",
+                "sha",
+                "subject"
+              ],
+              "table": "commits"
+            },
+            {
+              "class": "fallback",
+              "hub": false,
+              "id": "01KVCKTBXGQQVK8D1GQWJG0MHJ",
+              "key": null,
+              "nk": 6,
+              "percentile": 0.3607,
+              "string_keys": [
+                "_seed",
+                "rule"
+              ],
+              "table": "rules"
+            },
+            {
+              "class": "fallback",
+              "hub": false,
+              "id": "01M3H4BJHZKYQY2EG1SPVDKK29",
+              "key": null,
+              "nk": 4,
+              "percentile": 0.2557,
+              "string_keys": [
+                "reason",
+                "rule"
+              ],
+              "table": "rules"
+            }
+          ],
+          "hub_threshold": 27.1024,
+          "k": 10,
+          "nk_mean": 10.0,
+          "nk_skewness": 1.2089,
+          "nk_std": 8.5512,
+          "owners": 219,
+          "queries": 219,
+          "top_hubs": [
+            {
+              "class": "what_if_fallback",
+              "hub": true,
+              "id": "01KVFDC629FXYVG0DA1PWEFZY8",
+              "key": "content",
+              "nk": 37,
+              "percentile": 0.9954,
+              "string_keys": [
+                "author",
+                "body",
+                "committed_at",
+                "content",
+                "sha",
+                "subject",
+                "summary"
+              ],
+              "table": "commits"
+            },
+            {
+              "class": "keyed",
+              "hub": true,
+              "id": "01KVVNPF8R0KXZAM27NV9K0W4T",
+              "key": "summary",
+              "nk": 36,
+              "percentile": 0.9909,
               "string_keys": [
                 "reason",
                 "summary"
@@ -4925,10 +6325,10 @@
             {
               "class": "what_if_fallback",
               "hub": true,
-              "id": "01KVGA2EER840FJHB8RW6C3PAA",
+              "id": "01KVFCX8V681EH5AVBNPXNFB06",
               "key": "content",
-              "nk": 27,
-              "percentile": 0.9269,
+              "nk": 35,
+              "percentile": 0.9817,
               "string_keys": [
                 "author",
                 "body",
@@ -4943,10 +6343,10 @@
             {
               "class": "what_if_fallback",
               "hub": true,
-              "id": "01KVJHRDQ9GYWYY7DMQ6G3CCAR",
+              "id": "01M38RXNEDPF5HHKFP7B5EDS88",
               "key": "content",
-              "nk": 27,
-              "percentile": 0.9269,
+              "nk": 35,
+              "percentile": 0.9817,
               "string_keys": [
                 "author",
                 "body",
@@ -4961,10 +6361,41 @@
             {
               "class": "what_if_fallback",
               "hub": true,
-              "id": "01KVJWHJXSAS9D1W6ZM611JSFV",
+              "id": "01KVVVJV4BACF6V0A1R4HYTK55",
               "key": "content",
-              "nk": 27,
-              "percentile": 0.9269,
+              "nk": 34,
+              "percentile": 0.9726,
+              "string_keys": [
+                "author",
+                "body",
+                "committed_at",
+                "content",
+                "sha",
+                "subject",
+                "summary"
+              ],
+              "table": "commits"
+            },
+            {
+              "class": "keyed",
+              "hub": true,
+              "id": "01KVYPGV6QN2ECPZFWKFXBC4CH",
+              "key": "summary",
+              "nk": 34,
+              "percentile": 0.9726,
+              "string_keys": [
+                "summary",
+                "type"
+              ],
+              "table": "context"
+            },
+            {
+              "class": "what_if_fallback",
+              "hub": true,
+              "id": "01M38RQ8Z2GE7DD61WDTD23924",
+              "key": "content",
+              "nk": 33,
+              "percentile": 0.968,
               "string_keys": [
                 "author",
                 "body",
@@ -4979,10 +6410,10 @@
             {
               "class": "what_if_fallback",
               "hub": true,
-              "id": "01KVPJSG5GEANPHB6KDM15519C",
+              "id": "01M38MP7VBAFNFPQEQY3VY8G8C",
               "key": "content",
-              "nk": 27,
-              "percentile": 0.9269,
+              "nk": 32,
+              "percentile": 0.9635,
               "string_keys": [
                 "author",
                 "body",
@@ -4997,10 +6428,10 @@
             {
               "class": "what_if_fallback",
               "hub": true,
-              "id": "01KVQSNHC8MAD5HW5E4QAHX73C",
+              "id": "01KVG6A0YP1VJ12JNDY01J2WRE",
               "key": "content",
-              "nk": 27,
-              "percentile": 0.9269,
+              "nk": 30,
+              "percentile": 0.9543,
               "string_keys": [
                 "author",
                 "body",
@@ -5011,46 +6442,297 @@
                 "summary"
               ],
               "table": "commits"
+            },
+            {
+              "class": "keyed",
+              "hub": true,
+              "id": "01KVVNEJ1E2CF1QZ8GDP1ZBMJM",
+              "key": "summary",
+              "nk": 30,
+              "percentile": 0.9543,
+              "string_keys": [
+                "summary",
+                "type"
+              ],
+              "table": "context"
+            },
+            {
+              "class": "what_if_fallback",
+              "hub": true,
+              "id": "01M38S3BCR25CXGT422W4BZV8H",
+              "key": "content",
+              "nk": 29,
+              "percentile": 0.9498,
+              "string_keys": [
+                "author",
+                "body",
+                "committed_at",
+                "content",
+                "sha",
+                "subject",
+                "summary"
+              ],
+              "table": "commits"
+            },
+            {
+              "class": "what_if_fallback",
+              "hub": false,
+              "id": "01KVFA8G9DFN7CAV1GZWR5KSXF",
+              "key": "content",
+              "nk": 27,
+              "percentile": 0.9361,
+              "string_keys": [
+                "author",
+                "body",
+                "committed_at",
+                "content",
+                "sha",
+                "subject",
+                "summary"
+              ],
+              "table": "commits"
+            },
+            {
+              "class": "keyed",
+              "hub": false,
+              "id": "01KVF2A3H914EE6F0QXD80N906",
+              "key": "summary",
+              "nk": 27,
+              "percentile": 0.9361,
+              "string_keys": [
+                "summary",
+                "type"
+              ],
+              "table": "context"
+            },
+            {
+              "class": "keyed",
+              "hub": false,
+              "id": "01KVQ0V5V9DHY3HAXS7QGWQPSJ",
+              "key": "summary",
+              "nk": 27,
+              "percentile": 0.9361,
+              "string_keys": [
+                "reason",
+                "summary"
+              ],
+              "table": "decisions"
+            },
+            {
+              "class": "keyed",
+              "hub": false,
+              "id": "01KVR1QDBVAFY13211FY4MTKQX",
+              "key": "summary",
+              "nk": 26,
+              "percentile": 0.9224,
+              "string_keys": [
+                "summary",
+                "type"
+              ],
+              "table": "context"
             }
           ]
         }
       }
     },
     "what_if": {
-      "dropped_chunk_vectors": 22,
-      "mean_cosine_to_stored_vector": 0.9596,
-      "min_cosine_to_stored_vector": 0.9107,
-      "questions_not_about_table": {
-        "questions": 52,
-        "questions_with_fewer_table_slots": 28,
-        "questions_with_more_table_slots": 7,
-        "questions_with_same_table_slots": 17,
-        "table_slots_after": 189,
-        "table_slots_before": 222,
-        "vector_only_after": {
-          "hit@1": 0.6923,
-          "hit@10": 0.9423,
-          "mrr@10": 0.8053
+      "prose": {
+        "chunk_vectors_after": 30,
+        "chunk_vectors_before": 22,
+        "mean_cosine_to_stored_vector": 0.9596,
+        "min_cosine_to_stored_vector": 0.9107,
+        "not_embeddable": 0,
+        "questions_not_about_table": {
+          "questions": 52,
+          "questions_with_fewer_table_slots": 20,
+          "questions_with_more_table_slots": 17,
+          "questions_with_same_table_slots": 15,
+          "sign_test": {
+            "method": "two-sided exact binomial over the questions whose table slots changed, ties dropped",
+            "p": 0.7428
+          },
+          "table_slots_after": 217,
+          "table_slots_before": 222,
+          "vector_only_after": {
+            "hit@1": 0.6923,
+            "hit@10": 0.9423,
+            "mrr@10": 0.7993
+          },
+          "vector_only_before": {
+            "hit@1": 0.6346,
+            "hit@10": 0.9423,
+            "mrr@10": 0.7679
+          }
         },
-        "vector_only_before": {
-          "hit@1": 0.6346,
-          "hit@10": 0.9423,
-          "mrr@10": 0.7679
+        "rewrite": "every key field removed; the other string values joined",
+        "rewritten": 95,
+        "table_before_after": {
+          "questions": {
+            "after": {
+              "hub_threshold": 7.435,
+              "nk_skewness": 1.8817,
+              "table": {
+                "hubs": 3,
+                "max_nk": 15,
+                "mean_nk": 2.5208,
+                "owners": 96,
+                "share_of_population": 0.4384,
+                "share_of_slots": 0.4246,
+                "slots": 242
+              }
+            },
+            "before": {
+              "hub_threshold": 7.6422,
+              "nk_skewness": 2.0824,
+              "table": {
+                "hubs": 6,
+                "max_nk": 15,
+                "mean_nk": 2.5521,
+                "owners": 96,
+                "share_of_population": 0.4384,
+                "share_of_slots": 0.4298,
+                "slots": 245
+              }
+            }
+          },
+          "records_as_queries": {
+            "after": {
+              "hub_threshold": 27.7718,
+              "nk_skewness": 1.5127,
+              "table": {
+                "hubs": 14,
+                "max_nk": 42,
+                "mean_nk": 13.25,
+                "owners": 96,
+                "share_of_population": 0.4384,
+                "share_of_slots": 0.5808,
+                "share_of_slots_from_other_tables": 0.4119,
+                "slots": 1272,
+                "slots_from_other_tables": 524
+              }
+            },
+            "before": {
+              "hub_threshold": 27.1972,
+              "nk_skewness": 1.5556,
+              "table": {
+                "hubs": 8,
+                "max_nk": 48,
+                "mean_nk": 11.5,
+                "owners": 96,
+                "share_of_population": 0.4384,
+                "share_of_slots": 0.5041,
+                "share_of_slots_from_other_tables": 0.4674,
+                "slots": 1104,
+                "slots_from_other_tables": 516
+              }
+            }
+          }
+        },
+        "text_bytes": {
+          "max": 2368.0,
+          "mean": 1071.0632,
+          "min": 162.0
         }
       },
-      "rewritten": 95,
       "table": "commits",
-      "without_fields": [
-        "full_text",
-        "content",
-        "text",
-        "description",
-        "message",
-        "summary",
-        "fact",
-        "error",
-        "statement"
-      ]
+      "text_poor": {
+        "chunk_vectors_after": 0,
+        "chunk_vectors_before": 22,
+        "mean_cosine_to_stored_vector": 0.539,
+        "min_cosine_to_stored_vector": 0.4814,
+        "not_embeddable": 0,
+        "questions_not_about_table": {
+          "questions": 52,
+          "questions_with_fewer_table_slots": 52,
+          "questions_with_more_table_slots": 0,
+          "questions_with_same_table_slots": 0,
+          "sign_test": {
+            "method": "two-sided exact binomial over the questions whose table slots changed, ties dropped",
+            "p": 4.441e-16
+          },
+          "table_slots_after": 9,
+          "table_slots_before": 222,
+          "vector_only_after": {
+            "hit@1": 0.8462,
+            "hit@10": 0.9615,
+            "mrr@10": 0.8874
+          },
+          "vector_only_before": {
+            "hit@1": 0.6346,
+            "hit@10": 0.9423,
+            "mrr@10": 0.7679
+          }
+        },
+        "rewrite": "every key field and every string value of more than one word removed; the remaining one-word values (ids, hashes, timestamps, tags) joined",
+        "rewritten": 95,
+        "table_before_after": {
+          "questions": {
+            "after": {
+              "hub_threshold": 9.5578,
+              "nk_skewness": 1.7067,
+              "table": {
+                "hubs": 1,
+                "max_nk": 11,
+                "mean_nk": 0.1146,
+                "owners": 96,
+                "share_of_population": 0.4384,
+                "share_of_slots": 0.0193,
+                "slots": 11
+              }
+            },
+            "before": {
+              "hub_threshold": 7.6422,
+              "nk_skewness": 2.0824,
+              "table": {
+                "hubs": 6,
+                "max_nk": 15,
+                "mean_nk": 2.5521,
+                "owners": 96,
+                "share_of_population": 0.4384,
+                "share_of_slots": 0.4298,
+                "slots": 245
+              }
+            }
+          },
+          "records_as_queries": {
+            "after": {
+              "hub_threshold": 27.1024,
+              "nk_skewness": 1.2089,
+              "table": {
+                "hubs": 8,
+                "max_nk": 37,
+                "mean_nk": 9.9896,
+                "owners": 96,
+                "share_of_population": 0.4384,
+                "share_of_slots": 0.4379,
+                "share_of_slots_from_other_tables": 0.0094,
+                "slots": 959,
+                "slots_from_other_tables": 9
+              }
+            },
+            "before": {
+              "hub_threshold": 27.1972,
+              "nk_skewness": 1.5556,
+              "table": {
+                "hubs": 8,
+                "max_nk": 48,
+                "mean_nk": 11.5,
+                "owners": 96,
+                "share_of_population": 0.4384,
+                "share_of_slots": 0.5041,
+                "share_of_slots_from_other_tables": 0.4674,
+                "slots": 1104,
+                "slots_from_other_tables": 516
+              }
+            }
+          }
+        },
+        "text_bytes": {
+          "max": 71.0,
+          "mean": 71.0,
+          "min": 71.0
+        }
+      }
     }
   },
   "recall": {
@@ -5465,7 +7147,7 @@
         "id": "q52",
         "kind": "context",
         "answers_all_keyed": true,
-        "first_expected_rank": 5,
+        "first_expected_rank": 4,
         "fallback_hits": []
       },
       {

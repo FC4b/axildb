@@ -16,12 +16,18 @@
 //! Populations:
 //! - `memory`: non-`_` tables only, the records the questions are about.
 //! - `index`: every vector, which is what recall's vector search draws from.
-//! - `what_if`: `memory`, with each keyed record of one table re-embedded as
-//!   if it had none of the key fields (default `commits`, which gives the
-//!   shape commits had before the hook stored `content` and `summary`: sha,
-//!   author, date, subject and body joined). A real database may hold only a
-//!   handful of fallback records; this puts a whole table through the
-//!   fallback to see whether that makes hubs.
+//! - `what_if_prose`: `memory`, with each keyed record of one table
+//!   re-embedded as if it had none of the key fields (default `commits`,
+//!   which gives the shape commits had before the hook stored `content` and
+//!   `summary`: sha, author, date, subject and body joined).
+//! - `what_if_text_poor`: the same, with every multi-word string removed as
+//!   well, so the join is only ids, hashes, timestamps and one-word tags: the
+//!   case where a fallback record has almost no prose.
+//!
+//! A real database may hold only a handful of fallback records; the what-ifs
+//! put a whole table through the fallback to see whether that makes hubs.
+//! Each rewritten record gets the vectors insert would give its new text,
+//! its own and, past one recall chunk, one per chunk.
 //!
 //! ```text
 //! cargo run --release -p axil-vector --features embed --example hubness -- \
@@ -58,7 +64,7 @@ enum Class {
     Keyed,
     Fallback,
     Internal,
-    /// A keyed record re-embedded through the fallback (the `what_if` view).
+    /// A keyed record re-embedded through the fallback (the what-if views).
     WhatIf,
 }
 
@@ -260,6 +266,15 @@ fn round(x: f64) -> f64 {
     (x * 10_000.0).round() / 10_000.0
 }
 
+/// `x` to `digits` significant digits, so a tiny p-value keeps its size.
+fn round_significant(x: f64, digits: i32) -> f64 {
+    if x == 0.0 || !x.is_finite() {
+        return x;
+    }
+    let scale = 10f64.powi(digits - 1 - x.abs().log10().floor() as i32);
+    (x * scale).round() / scale
+}
+
 /// The N_k distribution over a population, overall and per class.
 fn nk_report(nk: &[u32], owners: &[Owner], space: &Space, queries: usize, k: usize) -> Value {
     let members: Vec<usize> = (0..owners.len()).filter(|&o| space.member[o]).collect();
@@ -306,16 +321,17 @@ fn nk_report(nk: &[u32], owners: &[Owner], space: &Space, queries: usize, k: usi
         );
     }
 
-    let mut tables: BTreeMap<&str, (usize, u64, usize)> = BTreeMap::new();
+    let mut tables: BTreeMap<&str, (usize, u64, usize, u32)> = BTreeMap::new();
     for &o in &members {
         let row = tables.entry(owners[o].table.as_str()).or_default();
         row.0 += 1;
         row.1 += nk[o] as u64;
         row.2 += usize::from(nk[o] as f64 > hub_threshold);
+        row.3 = row.3.max(nk[o]);
     }
     let by_table: serde_json::Map<String, Value> = tables
         .into_iter()
-        .map(|(table, (n, slots, hubs))| {
+        .map(|(table, (n, slots, hubs, max_nk))| {
             let share_slots = if total_slots > 0 {
                 slots as f64 / total_slots as f64
             } else {
@@ -326,8 +342,10 @@ fn nk_report(nk: &[u32], owners: &[Owner], space: &Space, queries: usize, k: usi
                 json!({
                     "owners": n,
                     "share_of_population": round(n as f64 / members.len() as f64),
+                    "slots": slots,
                     "share_of_slots": round(share_slots),
                     "mean_nk": round(slots as f64 / n as f64),
+                    "max_nk": max_nk,
                     "hubs": hubs,
                 }),
             )
@@ -469,26 +487,28 @@ fn run_space(
         }
     }
     let mut records_report = nk_report(&nk_r, owners, space, record_queries, k);
-    let cross_share = |of: &mut dyn Iterator<Item = usize>| {
+    // Adds the slots a group of owners took from queries of another table,
+    // as a count and as a share of the group's slots.
+    let add_cross = |row: &mut Value, of: &mut dyn Iterator<Item = usize>| {
         let (slots, other) = of.fold((0u64, 0u64), |(s, c), o| {
             (s + u64::from(nk_r[o]), c + u64::from(cross[o]))
         });
-        (slots > 0).then(|| json!(round(other as f64 / slots as f64)))
+        if slots > 0 {
+            row["slots_from_other_tables"] = json!(other);
+            row["share_of_slots_from_other_tables"] = json!(round(other as f64 / slots as f64));
+        }
     };
     for class in Class::ALL {
-        let mut of = (0..owners.len()).filter(|&o| space.member[o] && space.class[o] == class);
-        if let Some(share) = cross_share(&mut of) {
-            records_report["by_class"][class.name()]["share_of_slots_from_other_tables"] = share;
+        if let Some(row) = records_report["by_class"].get_mut(class.name()) {
+            let mut of = (0..owners.len()).filter(|&o| space.member[o] && space.class[o] == class);
+            add_cross(row, &mut of);
         }
     }
-    let tables: Vec<String> = records_report["by_table"]
-        .as_object()
-        .map(|m| m.keys().cloned().collect())
-        .unwrap_or_default();
-    for table in tables {
-        let mut of = (0..owners.len()).filter(|&o| space.member[o] && owners[o].table == table);
-        if let Some(share) = cross_share(&mut of) {
-            records_report["by_table"][table.as_str()]["share_of_slots_from_other_tables"] = share;
+    if let Some(tables) = records_report["by_table"].as_object_mut() {
+        for (table, row) in tables.iter_mut() {
+            let mut of =
+                (0..owners.len()).filter(|&o| space.member[o] && owners[o].table == *table);
+            add_cross(row, &mut of);
         }
     }
 
@@ -540,6 +560,255 @@ fn rank_scores(top: &[usize], owners: &[Owner], expect: &[Vec<String>]) -> (f64,
         Some(r) => (f64::from(u8::from(r == 0)), 1.0, 1.0 / (r + 1) as f64),
         None => (0.0, 0.0, 0.0),
     }
+}
+
+/// How a what-if rewrites a keyed record's data before re-embedding it.
+#[derive(Clone, Copy)]
+enum Rewrite {
+    /// Every key field removed, so the join keeps the record's other strings,
+    /// prose included.
+    Prose,
+    /// Every key field and every string of more than one word removed, so the
+    /// join holds only ids, hashes, timestamps and one-word tags.
+    TextPoor,
+}
+
+impl Rewrite {
+    const ALL: [Rewrite; 2] = [Rewrite::Prose, Rewrite::TextPoor];
+
+    fn name(self) -> &'static str {
+        match self {
+            Rewrite::Prose => "prose",
+            Rewrite::TextPoor => "text_poor",
+        }
+    }
+
+    fn describe(self) -> &'static str {
+        match self {
+            Rewrite::Prose => "every key field removed; the other string values joined",
+            Rewrite::TextPoor => {
+                "every key field and every string value of more than one word removed; \
+                 the remaining one-word values (ids, hashes, timestamps, tags) joined"
+            }
+        }
+    }
+
+    fn apply(self, data: &Value) -> Value {
+        let mut data = data.clone();
+        if let Some(map) = data.as_object_mut() {
+            map.retain(|key, value| {
+                let keyed = util::SEARCHABLE_TEXT_KEYS.contains(&key.as_str());
+                let multi_word = value
+                    .as_str()
+                    .is_some_and(|s| s.split_whitespace().nth(1).is_some());
+                let dropped = keyed || (matches!(self, Rewrite::TextPoor) && multi_word);
+                !dropped
+            });
+        }
+        data
+    }
+}
+
+/// The population a what-if is compared against.
+struct Before<'a> {
+    space: &'a Space,
+    report: &'a Value,
+    tops: &'a [Vec<usize>],
+}
+
+/// Two-sided exact sign test: the chance of a split at least as uneven as
+/// `a` against `b` if either direction were equally likely (ties dropped).
+fn sign_test(a: usize, b: usize) -> f64 {
+    let n = a + b;
+    if n == 0 {
+        return 1.0;
+    }
+    let mut term = 0.5f64.powi(n as i32);
+    let mut tail = 0.0;
+    for i in 0..=a.min(b) {
+        tail += term;
+        term *= (n - i) as f64 / (i + 1) as f64;
+    }
+    (2.0 * tail).min(1.0)
+}
+
+/// Re-embeds each keyed record of `table` from its data after `rewrite`,
+/// which leaves `searchable_text` only the fallback, with the vectors insert
+/// would give that text: one for the record and, when the text is longer
+/// than one recall chunk, one per chunk. Runs both query sets over the
+/// result and compares it with `before`: the table's own numbers, and the
+/// questions not about the table, paired.
+#[allow(clippy::too_many_arguments)]
+fn what_if(
+    rewrite: Rewrite,
+    table: &str,
+    db: &Axil,
+    owners: &[Owner],
+    index: &HashMap<String, usize>,
+    questions: &[Question],
+    k: usize,
+    before: &Before,
+) -> (Value, Value) {
+    let old = before.space;
+    let mut rewritten: BTreeMap<usize, Vec<Vec<f32>>> = BTreeMap::new();
+    let mut not_embeddable = Vec::new();
+    let mut cosines = Vec::new();
+    let mut text_bytes = Vec::new();
+    for (o, owner) in owners.iter().enumerate() {
+        if owner.table != table || owner.class != Class::Keyed || !old.member[o] {
+            continue;
+        }
+        let data = rewrite.apply(&owner.data);
+        if classify(table, &data).0 != Class::Fallback {
+            continue;
+        }
+        let text = util::searchable_text(&data);
+        // Insert embeds only text longer than five bytes.
+        if text.len() <= 5 {
+            not_embeddable.push(o);
+            continue;
+        }
+        let own = normalize(db.embed_passage(&text).expect("embed what-if text"));
+        if let Some(p) = old.own[o] {
+            cosines.push(f64::from(dot(&own, &old.points[p].1)));
+        }
+        text_bytes.push(text.len() as f64);
+        let mut vectors = vec![own];
+        let chunks = util::overlapping_chunks(
+            &text,
+            util::RECALL_CHUNK_MAX_BYTES,
+            util::RECALL_CHUNK_OVERLAP_BYTES,
+        );
+        if chunks.len() > 1 {
+            for chunk in &chunks {
+                vectors.push(normalize(
+                    db.embed_passage(chunk).expect("embed what-if chunk"),
+                ));
+            }
+        }
+        rewritten.insert(o, vectors);
+    }
+
+    // The rewritten records lose every vector they had (chunks included)
+    // and get the ones built above; a record whose rewritten text insert
+    // would not embed leaves the population.
+    let mut member = old.member.clone();
+    not_embeddable.iter().for_each(|&o| member[o] = false);
+    let mut points = Vec::new();
+    let mut own = vec![None; owners.len()];
+    let mut chunks_before = 0usize;
+    for (p, (o, v)) in old.points.iter().enumerate() {
+        if rewritten.contains_key(o) || not_embeddable.contains(o) {
+            chunks_before += usize::from(old.own[*o] != Some(p));
+            continue;
+        }
+        if old.own[*o] == Some(p) {
+            own[*o] = Some(points.len());
+        }
+        points.push((*o, v.clone()));
+    }
+    let mut class = old.class.clone();
+    let mut chunks_after = 0usize;
+    let rewritten_count = rewritten.len();
+    for (o, vectors) in rewritten {
+        own[o] = Some(points.len());
+        chunks_after += vectors.len() - 1;
+        points.extend(vectors.into_iter().map(|v| (o, v)));
+        class[o] = Class::WhatIf;
+    }
+    let space = Space {
+        points,
+        own,
+        class,
+        member,
+    };
+    let (view, tops) = run_space(&space, owners, index, questions, k);
+
+    // Paired: the questions not answered by the rewritten table, before and
+    // after the rewrite. Does the table crowd them out?
+    let in_table = |o: &usize| owners[*o].table == table;
+    let mut paired = Paired::default();
+    for (qi, q) in questions.iter().enumerate() {
+        let about_table = q
+            .expect
+            .iter()
+            .flatten()
+            .any(|id| index.get(id).is_some_and(|&o| owners[o].table == table));
+        if about_table {
+            continue;
+        }
+        let slots_before = before.tops[qi].iter().filter(|o| in_table(o)).count();
+        let slots_after = tops[qi].iter().filter(|o| in_table(o)).count();
+        paired.questions += 1;
+        paired.slots_before += slots_before;
+        paired.slots_after += slots_after;
+        paired.fewer += usize::from(slots_after < slots_before);
+        paired.same += usize::from(slots_after == slots_before);
+        paired.more += usize::from(slots_after > slots_before);
+        paired
+            .before
+            .add(rank_scores(&before.tops[qi], owners, &q.expect));
+        paired.after.add(rank_scores(&tops[qi], owners, &q.expect));
+    }
+    let n = paired.questions.max(1) as f64;
+    let scores = |s: &RankTotals| {
+        json!({
+            "hit@1": round(s.hit1 / n),
+            format!("hit@{k}"): round(s.hitk / n),
+            format!("mrr@{k}"): round(s.rr / n),
+        })
+    };
+
+    // The table's own numbers in both populations, from the two reports.
+    let side = |report: &Value, set: &str| {
+        json!({
+            "nk_skewness": report[set]["nk_skewness"],
+            "hub_threshold": report[set]["hub_threshold"],
+            "table": report[set]["by_table"][table],
+        })
+    };
+    let compare = |set: &str| {
+        json!({
+            "before": side(before.report, set),
+            "after": side(&view, set),
+        })
+    };
+
+    let (mean_cos, _, _) = mean_std_skew(&cosines);
+    let (mean_bytes, _, _) = mean_std_skew(&text_bytes);
+    let summary = json!({
+        "rewrite": rewrite.describe(),
+        "rewritten": rewritten_count,
+        "not_embeddable": not_embeddable.len(),
+        "text_bytes": {
+            "mean": round(mean_bytes),
+            "min": text_bytes.iter().copied().fold(f64::INFINITY, f64::min),
+            "max": text_bytes.iter().copied().fold(0.0, f64::max),
+        },
+        "chunk_vectors_before": chunks_before,
+        "chunk_vectors_after": chunks_after,
+        "mean_cosine_to_stored_vector": round(mean_cos),
+        "min_cosine_to_stored_vector": round(cosines.iter().copied().fold(f64::INFINITY, f64::min)),
+        "table_before_after": {
+            "questions": compare("questions"),
+            "records_as_queries": compare("records_as_queries"),
+        },
+        "questions_not_about_table": {
+            "questions": paired.questions,
+            "table_slots_before": paired.slots_before,
+            "table_slots_after": paired.slots_after,
+            "questions_with_fewer_table_slots": paired.fewer,
+            "questions_with_same_table_slots": paired.same,
+            "questions_with_more_table_slots": paired.more,
+            "sign_test": {
+                "method": "two-sided exact binomial over the questions whose table slots changed, ties dropped",
+                "p": round_significant(sign_test(paired.fewer, paired.more), 4),
+            },
+            "vector_only_before": scores(&paired.before),
+            "vector_only_after": scores(&paired.after),
+        },
+    });
+    (view, summary)
 }
 
 fn main() {
@@ -668,8 +937,8 @@ fn main() {
         member: member(false),
     };
     let mut views = serde_json::Map::new();
-    let (report, memory_tops) = run_space(&memory, &owners, &index, &questions, args.k);
-    views.insert("memory".into(), report);
+    let (memory_report, memory_tops) = run_space(&memory, &owners, &index, &questions, args.k);
+    views.insert("memory".into(), memory_report.clone());
     let memory = Space {
         member: member(true),
         ..memory
@@ -685,120 +954,21 @@ fn main() {
 
     let mut what_if_report = Value::Null;
     if let Some(table) = &args.what_if {
-        // Re-embed each keyed record of `table` from its data without any
-        // key field, which leaves `searchable_text` only the fallback, and
-        // replace all of its vectors (chunks included) with that one.
-        let mut rewritten: HashMap<usize, Vec<f32>> = HashMap::new();
-        let mut cosines = Vec::new();
-        for (o, owner) in owners.iter().enumerate() {
-            if owner.table != *table || owner.class != Class::Keyed || !memory.member[o] {
-                continue;
-            }
-            let mut data = owner.data.clone();
-            if let Some(map) = data.as_object_mut() {
-                util::SEARCHABLE_TEXT_KEYS.iter().for_each(|k| {
-                    map.remove(*k);
-                });
-            }
-            if classify(table, &data).0 != Class::Fallback {
-                continue;
-            }
-            let text = util::searchable_text(&data);
-            if text.len() <= 5 {
-                continue;
-            }
-            let v = normalize(db.embed_passage(&text).expect("embed what-if text"));
-            if let Some(p) = memory.own[o] {
-                cosines.push(f64::from(dot(&v, &memory.points[p].1)));
-            }
-            rewritten.insert(o, v);
-        }
-        let mut points = Vec::new();
-        let mut own = vec![None; owners.len()];
-        let mut dropped_chunks = 0usize;
-        for (p, (o, v)) in memory.points.iter().enumerate() {
-            if rewritten.contains_key(o) {
-                dropped_chunks += usize::from(memory.own[*o] != Some(p));
-                continue;
-            }
-            if memory.own[*o] == Some(p) {
-                own[*o] = Some(points.len());
-            }
-            points.push((*o, v.clone()));
-        }
-        let mut class = memory.class.clone();
-        let rewritten_count = rewritten.len();
-        let mut ids: Vec<usize> = rewritten.keys().copied().collect();
-        ids.sort_unstable();
-        for o in ids {
-            own[o] = Some(points.len());
-            points.push((o, rewritten.remove(&o).unwrap_or_default()));
-            class[o] = Class::WhatIf;
-        }
-        let space = Space {
-            points,
-            own,
-            class,
-            member: memory.member.clone(),
+        let before = Before {
+            space: &memory,
+            report: &memory_report,
+            tops: &memory_tops,
         };
-        let (what_if, what_if_tops) = run_space(&space, &owners, &index, &questions, args.k);
-        views.insert("what_if".into(), what_if);
-
-        // Paired: the questions not answered by the rewritten table, before
-        // (memory view) and after the rewrite. Does the table crowd them out?
-        let in_table = |o: &usize| owners[*o].table == *table;
-        let mut paired = Paired::default();
-        for (qi, q) in questions.iter().enumerate() {
-            let about_table = q
-                .expect
-                .iter()
-                .flatten()
-                .any(|id| index.get(id).is_some_and(|&o| owners[o].table == *table));
-            if about_table {
-                continue;
-            }
-            let before = memory_tops[qi].iter().filter(|o| in_table(o)).count();
-            let after = what_if_tops[qi].iter().filter(|o| in_table(o)).count();
-            paired.questions += 1;
-            paired.slots_before += before;
-            paired.slots_after += after;
-            paired.fewer += usize::from(after < before);
-            paired.same += usize::from(after == before);
-            paired.more += usize::from(after > before);
-            paired
-                .before
-                .add(rank_scores(&memory_tops[qi], &owners, &q.expect));
-            paired
-                .after
-                .add(rank_scores(&what_if_tops[qi], &owners, &q.expect));
+        let mut summaries = serde_json::Map::new();
+        summaries.insert("table".into(), json!(table));
+        for rewrite in Rewrite::ALL {
+            let (view, summary) = what_if(
+                rewrite, table, &db, &owners, &index, &questions, args.k, &before,
+            );
+            views.insert(format!("what_if_{}", rewrite.name()), view);
+            summaries.insert(rewrite.name().into(), summary);
         }
-        let n = paired.questions.max(1) as f64;
-        let scores = |s: &RankTotals| {
-            json!({
-                "hit@1": round(s.hit1 / n),
-                format!("hit@{}", args.k): round(s.hitk / n),
-                format!("mrr@{}", args.k): round(s.rr / n),
-            })
-        };
-        let (mean, _, _) = mean_std_skew(&cosines);
-        what_if_report = json!({
-            "table": table,
-            "without_fields": util::SEARCHABLE_TEXT_KEYS,
-            "rewritten": rewritten_count,
-            "dropped_chunk_vectors": dropped_chunks,
-            "mean_cosine_to_stored_vector": round(mean),
-            "min_cosine_to_stored_vector": round(cosines.iter().copied().fold(f64::INFINITY, f64::min)),
-            "questions_not_about_table": {
-                "questions": paired.questions,
-                "table_slots_before": paired.slots_before,
-                "table_slots_after": paired.slots_after,
-                "questions_with_fewer_table_slots": paired.fewer,
-                "questions_with_same_table_slots": paired.same,
-                "questions_with_more_table_slots": paired.more,
-                "vector_only_before": scores(&paired.before),
-                "vector_only_after": scores(&paired.after),
-            },
-        });
+        what_if_report = Value::Object(summaries);
     }
 
     // Per-table counts, by class and key.

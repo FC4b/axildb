@@ -11,7 +11,9 @@ queries (hubness). Two measurements, on copies of one frozen snapshot:
           over the default vector index with the CLI's embedder. N_k (how many
           queries have a record in their top k) for the dogfood questions and
           for every record's own vector, split by fallback / keyed / internal,
-          plus a what-if that re-embeds every commit as if it had no key field.
+          plus two what-ifs that re-embed every commit through the fallback:
+          once with its other strings (prose), once with one-word strings only
+          (text-poor).
   recall  the real `axil recall` CLI (the dogfood ranked view): how often a
           fallback record takes a top-k slot for a question whose answers
           all have a key field.
@@ -22,7 +24,9 @@ Usage:
       [--axil axil] [--example-bin target/release/examples/hubness] \\
       [--label <snapshot name>] [--k 10] [--out benchmarks/results/hubness-<label>.json]
 
-Without --example-bin the example is built with cargo first.
+Without --example-bin the example is built with cargo first. The snapshot is
+only read: its memory.axil is hashed before anything else happens and checked
+again at the end, so the recorded hash is the frozen input's.
 """
 
 import argparse
@@ -40,6 +44,8 @@ DOGFOOD = ROOT / "benchmarks" / "dogfood-recall"
 
 
 def load_dogfood():
+    # Importing the dogfood runner must not leave a __pycache__ in the repo.
+    sys.dont_write_bytecode = True
     spec = importlib.util.spec_from_file_location("dogfood_run", DOGFOOD / "run.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -139,6 +145,9 @@ def main() -> int:
     source = snapshot / "memory.axil"
     if not source.exists():
         sys.exit(f"{source} not found")
+    # Hashed first: opening a database rewrites it, so a hash taken from a
+    # copy that anything has opened would not identify the snapshot.
+    source_sha = sha256(source)
     example = Path(args.example_bin) if args.example_bin else build_example()
     questions_path = DOGFOOD / "questions.jsonl"
     questions = [json.loads(l) for l in open(questions_path) if l.strip()]
@@ -162,6 +171,8 @@ def main() -> int:
         fallback = {r["id"] for r in vector["fallback_records"]}
         recall = recall_view(dogfood, args.axil, dogfood.copy_db(source, recall_dir),
                              questions, fallback, args.k, dogfood.FETCH)
+    if sha256(source) != source_sha:
+        sys.exit(f"{source} changed during the run; its hash no longer names the input")
 
     report = {
         "benchmark": "hubness",
@@ -169,7 +180,7 @@ def main() -> int:
         "snapshot_files": {
             p.name: p.stat().st_size for p in sorted(snapshot.iterdir()) if p.is_file()
         },
-        "memory_axil_sha256": sha256(source),
+        "memory_axil_sha256": source_sha,
         "questions": str(questions_path.relative_to(ROOT)),
         "axil": version,
         "method": {
@@ -181,9 +192,13 @@ def main() -> int:
                       "vector and exclude themselves; records created after the cutoff are "
                       "left out of every population",
             "hub": vector["hub_rule"],
-            "what_if": "every keyed commit re-embedded from its data without any key field "
-                       "(sha, author, date, subject, body joined: the shape commits had before "
-                       "the hook stored content/summary), replacing its vectors",
+            "what_if": "every keyed commit re-embedded through the fallback, its vectors "
+                       "replaced by the ones insert would build for the new text (its own, "
+                       "plus one per recall chunk past the first chunk's length). prose: "
+                       "every key field removed (sha, author, date, subject, body joined: "
+                       "the shape commits had before the hook stored content/summary). "
+                       "text_poor: every multi-word string removed too (sha, author, date "
+                       "joined), the case of a fallback record with almost no prose",
             "recall": "`axil recall --recall-format full`, the dogfood ranked view: fetch "
                       f"{dogfood.FETCH}, drop hits after the cutoff, keep the top k",
         },
