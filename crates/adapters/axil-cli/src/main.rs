@@ -13369,28 +13369,31 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                 sections.insert("recent_sessions".into(), json!(session_vals));
             }
 
-            // Top 5 decisions by importance (not just recency)
+            // Decisions and errors rank by importance decayed with age, the
+            // same order `--schema v1` and the MCP boot use, so an old but
+            // once-important record does not outrank this week's work.
+            let decay = load_config(&db_path).map(|c| c.decay).unwrap_or_default();
             let mut decisions = db.list("decisions").unwrap_or_default();
-            decisions.sort_by(|a, b| {
-                let ia = axil_core::importance::get_importance(&a.data);
-                let ib = axil_core::importance::get_importance(&b.data);
-                ib.partial_cmp(&ia).unwrap_or(std::cmp::Ordering::Equal)
-            });
+            axil_core::boot::sort_by_effective_importance(
+                &mut decisions,
+                decay.half_life_for("decisions"),
+                now,
+            );
             decisions.truncate(5);
             if !decisions.is_empty() {
                 let dec_vals: Vec<Value> = decisions.iter().map(row).collect();
                 sections.insert("decisions".into(), json!(dec_vals));
             }
 
-            // Errors by importance, split by lifecycle: the top 5 open ones
-            // are things to act on and fill early; the top 3 resolved ones
-            // are lessons (the error with its fix) and fill with the rest.
+            // Errors split by lifecycle: the top 5 open ones are things to
+            // act on and fill early; the top 3 resolved ones are lessons (the
+            // error with its fix) and fill with the rest.
             let mut errors = db.list("errors").unwrap_or_default();
-            errors.sort_by(|a, b| {
-                let ia = axil_core::importance::get_importance(&a.data);
-                let ib = axil_core::importance::get_importance(&b.data);
-                ib.partial_cmp(&ia).unwrap_or(std::cmp::Ordering::Equal)
-            });
+            axil_core::boot::sort_by_effective_importance(
+                &mut errors,
+                decay.half_life_for("errors"),
+                now,
+            );
             let (open_errors, resolved_errors): (Vec<_>, Vec<_>) = errors
                 .iter()
                 .partition(|r| axil_core::boot::is_open_error(&r.data));

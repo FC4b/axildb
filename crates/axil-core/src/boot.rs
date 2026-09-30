@@ -407,21 +407,9 @@ impl Axil {
             .into_iter()
             .filter(|r| record_in_scope(r, scope) && keep(r))
             .collect();
-        // Effective importance is computed lazily from age + half-life (a pure
-        // function), so boot ordering reflects current decay without relying on
-        // a background write-sweep having stamped `_effective_importance`. The
-        // decay config is resolved once per boot and threaded in, so this hot
-        // per-table loop doesn't re-read `axil.toml` from disk.
-        let half_life = decay.half_life_for(table);
-        records.sort_by(|a, b| {
-            // Clamp age at 0 so a future-dated (clock-skewed) record can't get a
-            // >1 decay factor and jump to the top of the ranking.
-            let age_a = ((now - a.created_at).num_seconds() as f64 / 86400.0).max(0.0);
-            let age_b = ((now - b.created_at).num_seconds() as f64 / 86400.0).max(0.0);
-            let ia = crate::importance::effective_importance(&a.data, age_a, half_life);
-            let ib = crate::importance::effective_importance(&b.data, age_b, half_life);
-            ib.partial_cmp(&ia).unwrap_or(std::cmp::Ordering::Equal)
-        });
+        // The decay config is resolved once per boot and threaded in, so this
+        // hot per-table loop doesn't re-read `axil.toml` from disk.
+        sort_by_effective_importance(&mut records, decay.half_life_for(table), now);
         records.truncate(n);
         records
             .iter()
@@ -523,6 +511,31 @@ fn record_in_scope(record: &crate::record::Record, scope: Option<&[String]>) -> 
         .and_then(|v| v.as_str())
         .unwrap_or("project");
     scope.iter().any(|s| s == record_scope)
+}
+
+/// Sort `records` highest effective importance first: stored importance
+/// decayed by age with `half_life_days` ([`crate::importance::effective_importance`]),
+/// the order boot ranks every table by.
+///
+/// Effective importance is computed here from age and half-life (a pure
+/// function), so the order reflects current decay without relying on a
+/// background sweep having stamped `_effective_importance`.
+pub fn sort_by_effective_importance(
+    records: &mut [Record],
+    half_life_days: f64,
+    now: DateTime<Utc>,
+) {
+    // Clamp age at 0 so a future-dated (clock-skewed) record can't get a >1
+    // decay factor and jump to the top of the ranking.
+    let score = |r: &Record| {
+        let age_days = ((now - r.created_at).num_seconds() as f64 / 86400.0).max(0.0);
+        crate::importance::effective_importance(&r.data, age_days, half_life_days)
+    };
+    records.sort_by(|a, b| {
+        score(b)
+            .partial_cmp(&score(a))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 }
 
 fn is_zero(n: &usize) -> bool {
@@ -1454,6 +1467,29 @@ mod tests {
         assert_eq!((kept.as_str(), cut), ("## H\n- one", 2));
         let (kept, cut) = take_fitting_lines(text, |_| false);
         assert_eq!((kept.as_str(), cut), ("", 4));
+    }
+
+    #[test]
+    fn effective_importance_lets_recent_work_outrank_old() {
+        let now = Utc::now();
+        let mut old = Record::new("decisions", json!({ "summary": "old", "_importance": 1.0 }));
+        old.created_at = now - chrono::Duration::days(180);
+        let recent = Record::new(
+            "decisions",
+            json!({ "summary": "recent", "_importance": 0.6 }),
+        );
+        let mut pinned = Record::new(
+            "decisions",
+            json!({ "summary": "pinned", "_importance_pinned": true }),
+        );
+        pinned.created_at = now - chrono::Duration::days(365);
+        let mut records = vec![old, recent, pinned];
+        sort_by_effective_importance(&mut records, 90.0, now);
+        let order: Vec<&str> = records
+            .iter()
+            .map(|r| r.data["summary"].as_str().unwrap())
+            .collect();
+        assert_eq!(order, ["pinned", "recent", "old"]);
     }
 
     #[test]
