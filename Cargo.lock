@@ -256,7 +256,7 @@ dependencies = [
 
 [[package]]
 name = "axil-core"
-version = "2.3.0"
+version = "3.0.0"
 dependencies = [
  "chacha20poly1305",
  "chrono",
@@ -326,7 +326,7 @@ dependencies = [
 
 [[package]]
 name = "axil-indexer"
-version = "2.2.2"
+version = "3.0.0"
 dependencies = [
  "axil-core",
  "chrono",

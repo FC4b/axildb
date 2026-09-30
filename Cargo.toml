@@ -108,14 +108,14 @@ repository = "https://github.com/FC4b/axildb"
 # fields, but each carries its own explicit `version` (independent versioning).
 # release-plz rewrites the version pins below as crates drift, so a released
 # crate's dependents pick up the new requirement automatically.
-axil-core = { path = "crates/axil-core", version = "2.3.0" }
+axil-core = { path = "crates/axil-core", version = "3.0.0" }
 axil-bundle = { path = "crates/axil-bundle", version = "2.1.4" }
 axil-vector = { path = "crates/engines/axil-vector", version = "2.3.0" }
 axil-graph = { path = "crates/engines/axil-graph", version = "2.1.4" }
 axil-fts = { path = "crates/engines/axil-fts", version = "2.1.4" }
 axil-timeseries = { path = "crates/engines/axil-timeseries", version = "2.1.4" }
 axil-memory = { path = "crates/extensions/axil-memory", version = "2.2.0" }
-axil-indexer = { path = "crates/extensions/axil-indexer", version = "2.2.2" }
+axil-indexer = { path = "crates/extensions/axil-indexer", version = "3.0.0" }
 axil-scip = { path = "crates/extensions/axil-scip", version = "2.1.4" }
 axil-docs = { path = "crates/extensions/axil-docs", version = "2.1.4" }
 axil-checkpoint = { path = "crates/extensions/axil-checkpoint", version = "2.1.4" }
