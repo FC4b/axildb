@@ -214,11 +214,11 @@ fn boot_rows_are_one_liners_within_budget() {
             .unwrap_or_default()
     };
     // Failures fill before decisions, strictly: no decision shows while a
-    // failure (capped at 5 before the budget) is cut.
+    // failure (capped at MAX_OPEN_ERRORS before the budget) is cut.
     let rows = rows_of("active_failures");
     assert!(!rows.is_empty(), "failures are never dropped");
     if !rows_of("recent_decisions").is_empty() {
-        assert_eq!(rows.len(), 5, "{out}");
+        assert_eq!(rows.len(), axil_core::boot::MAX_OPEN_ERRORS, "{out}");
         assert!(out["omitted_by_section"].get("active_failures").is_none());
     }
     for row in rows {

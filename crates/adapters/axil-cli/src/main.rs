@@ -13597,9 +13597,9 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                 sections.insert("decisions".into(), json!(dec_vals));
             }
 
-            // Errors split by lifecycle: the top 5 open ones are things to
-            // act on and fill early; the top 3 resolved ones are lessons (the
-            // error with its fix) and fill with the rest.
+            // Errors split by lifecycle: the top open ones (MAX_OPEN_ERRORS)
+            // are things to act on and fill early; the top 3 resolved ones are
+            // lessons (the error with its fix) and fill with the rest.
             let mut errors = db.list("errors").unwrap_or_default();
             axil_core::boot::sort_by_effective_importance(
                 &mut errors,
@@ -13610,7 +13610,11 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                 .iter()
                 .partition(|r| axil_core::boot::is_open_error(&r.data));
             if !open_errors.is_empty() {
-                let err_vals: Vec<Value> = open_errors.into_iter().take(5).map(row).collect();
+                let err_vals: Vec<Value> = open_errors
+                    .into_iter()
+                    .take(axil_core::boot::MAX_OPEN_ERRORS)
+                    .map(row)
+                    .collect();
                 sections.insert("errors".into(), json!(err_vals));
             }
             if !resolved_errors.is_empty() {

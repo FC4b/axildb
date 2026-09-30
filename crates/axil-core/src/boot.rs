@@ -86,11 +86,13 @@ pub const BOOT_CLIP_MIN_CHARS: usize = 24;
 
 /// Per-table caps on how many rows to include in each section before
 /// budget shaping. Prevents a chat-heavy DB from dumping 500 decisions
-/// into boot. Failures fill before decisions, so their cap is the smaller
-/// one: a long backlog of open errors must not crowd every decision out
-/// of a default-sized boot.
+/// into boot.
 const MAX_DECISIONS: usize = 10;
-const MAX_FAILURES: usize = 5;
+/// Open errors shown by boot, in every format. They fill before decisions,
+/// so this cap decides how much room decisions get: at the SessionStart
+/// hook's 800-token budget, five open errors left space for a single
+/// clipped decision on this repo's own memory; three leave room for several.
+pub const MAX_OPEN_ERRORS: usize = 3;
 const MAX_THREADS: usize = 10;
 const MAX_PREFERENCES: usize = 20;
 
@@ -231,7 +233,7 @@ impl Axil {
 
         // 3. active failures: unresolved errors only. Resolved errors stay
         // recallable as lessons, but they are not failures to act on.
-        let failures = self.boot_records("errors", MAX_FAILURES, &opts, &decay, now, |r| {
+        let failures = self.boot_records("errors", MAX_OPEN_ERRORS, &opts, &decay, now, |r| {
             is_open_error(&r.data)
         });
         sections.push(BootSection::ActiveFailures { content: failures });
