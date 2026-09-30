@@ -19,13 +19,14 @@
           "bytes": 12118,
           "est_tokens": 3030
         },
-        "schema_v1": {
+        "schema": {
           "cmd": "axil boot --schema v1",
           "exit": 0,
-          "bytes": 23101,
-          "est_tokens": 5776,
+          "bytes": 23041,
+          "est_tokens": 5761,
+          "schema_version": "1",
           "token_budget": 2000,
-          "token_budget_used": 5693,
+          "token_budget_used": 5678,
           "dropped_sections": [
             "confidence_notes",
             "preferences",
@@ -43,6 +44,7 @@
           "exit": 0,
           "bytes": 23100,
           "est_tokens": 5775,
+          "schema_version": "1",
           "token_budget": 2000,
           "token_budget_used": 5693,
           "dropped_sections": [
@@ -54,52 +56,74 @@
       }
     },
     "new": {
-      "binary": "axil 2.3.1 (axildb-v2.3.1-31-g77d42d8)",
+      "binary": "axil 2.3.1 (axildb-v2.3.1-34-g36f687f)",
       "surfaces": {
         "narrative": {
           "cmd": "axil boot --boot-format narrative",
           "exit": 0,
-          "bytes": 3925,
-          "est_tokens": 982
+          "bytes": 3999,
+          "est_tokens": 1000
         },
         "json": {
           "cmd": "axil boot",
           "exit": 0,
-          "bytes": 3922,
-          "est_tokens": 981,
-          "omitted_items": 12
+          "bytes": 3944,
+          "est_tokens": 986,
+          "omitted_items": 13,
+          "omitted_by_section": {
+            "architecture": 1,
+            "index_freshness": 1,
+            "lessons": 3,
+            "modules": 5,
+            "project": 1,
+            "recent_sessions": 2
+          }
         },
-        "schema_v1": {
-          "cmd": "axil boot --schema v1",
+        "schema": {
+          "cmd": "axil boot --schema v2",
           "exit": 0,
-          "bytes": 3926,
-          "est_tokens": 982,
+          "bytes": 3988,
+          "est_tokens": 997,
+          "schema_version": "2",
           "token_budget": 1000,
-          "token_budget_used": 982,
+          "token_budget_used": 997,
           "dropped_sections": [
             "confidence_notes",
+            "preferences",
             "open_threads"
           ],
-          "omitted_items": 6
+          "omitted_items": 17,
+          "omitted_by_section": {
+            "confidence_notes": 1,
+            "open_threads": 10,
+            "recent_decisions": 6
+          }
         },
         "hook": {
           "cmd": "axil boot --boot-format narrative --budget 800",
           "exit": 0,
-          "bytes": 3161,
-          "est_tokens": 791
+          "bytes": 3199,
+          "est_tokens": 800
         },
         "mcp_boot": {
           "cmd": "MCP tools/call boot {}",
           "exit": 0,
-          "bytes": 3925,
-          "est_tokens": 982,
+          "bytes": 3987,
+          "est_tokens": 997,
+          "schema_version": "2",
           "token_budget": 1000,
-          "token_budget_used": 982,
+          "token_budget_used": 997,
           "dropped_sections": [
             "confidence_notes",
+            "preferences",
             "open_threads"
           ],
-          "omitted_items": 6
+          "omitted_items": 17,
+          "omitted_by_section": {
+            "confidence_notes": 1,
+            "open_threads": 10,
+            "recent_decisions": 6
+          }
         }
       }
     }
@@ -107,23 +131,23 @@
   "est_tokens": {
     "narrative": {
       "old_est_tokens": 1486,
-      "new_est_tokens": 982
+      "new_est_tokens": 1000
     },
     "json": {
       "old_est_tokens": 3030,
-      "new_est_tokens": 981
+      "new_est_tokens": 986
     },
-    "schema_v1": {
-      "old_est_tokens": 5776,
-      "new_est_tokens": 982
+    "schema": {
+      "old_est_tokens": 5761,
+      "new_est_tokens": 997
     },
     "hook": {
       "old_est_tokens": 801,
-      "new_est_tokens": 791
+      "new_est_tokens": 800
     },
     "mcp_boot": {
       "old_est_tokens": 5775,
-      "new_est_tokens": 982
+      "new_est_tokens": 997
     }
   }
 }
