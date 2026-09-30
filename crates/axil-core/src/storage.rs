@@ -3,7 +3,7 @@ use std::path::Path;
 use chrono::Utc;
 use redb::{
     Database, MultimapTableDefinition, ReadOnlyDatabase, ReadTransaction, ReadableDatabase,
-    ReadableTable, ReadableTableMetadata, TableDefinition, WriteTransaction,
+    ReadableMultimapTable, ReadableTable, ReadableTableMetadata, TableDefinition, WriteTransaction,
 };
 
 use crate::error::{AxilError, Result};
@@ -42,11 +42,26 @@ const ENTITY_KEY_MEMBERS: TableDefinition<&str, Option<&str>> =
 /// redb table: storage-level marker name → value.
 const STORAGE_MARKERS: TableDefinition<&str, &str> = TableDefinition::new("_storage_markers");
 
-/// Marker present once the entity key index has been built from the existing
-/// `_entities` rows. Every later write maintains the index in its own
-/// transaction, so the marker means "the index is complete". Without it
-/// lookups report the index as unavailable and callers fall back to a scan.
+/// Marker naming the state of the entity key index.
+///
+/// `ready:<fingerprint>` once the index has been built, where the fingerprint
+/// is of the `_entities` entry of `table_index` as it stood when the index
+/// last matched it. Every write that maintains the index and changes that
+/// entry re-stamps the fingerprint in the same transaction. A writer that
+/// predates the index (an older binary on the same file) changes the entry
+/// without re-stamping it, so the mismatch shows at the next lookup and the
+/// index is treated as stale rather than trusted.
+///
+/// `failed:<fingerprint>:<id>` after a build stopped on row `<id>`, whose body
+/// does not decode, so later calls do not repeat the same doomed build until
+/// the list changes. Absent: never built, or dropped.
 const ENTITY_KEY_INDEX_MARKER: &str = "entity_key_index_v1";
+
+/// Marker value prefix for a built index; see [`ENTITY_KEY_INDEX_MARKER`].
+const ENTITY_KEY_READY: &str = "ready:";
+
+/// Marker value prefix for a failed build; see [`ENTITY_KEY_INDEX_MARKER`].
+const ENTITY_KEY_FAILED: &str = "failed:";
 
 /// redb table: key (string) → serialized JSON (bytes) for slow query log.
 const SLOW_QUERIES: TableDefinition<&str, &[u8]> = TableDefinition::new("_slow_queries");
@@ -151,6 +166,125 @@ fn entity_lookup_key(data: &serde_json::Value) -> Option<&str> {
         .or_else(|| data.get("name").and_then(|v| v.as_str()))
 }
 
+/// Result of [`Storage::lookup_entity_keys`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum EntityKeyLookup {
+    /// The index answered: each key found, mapped to the row a full scan
+    /// would pick. Keys with no row are absent.
+    Found(std::collections::HashMap<String, RecordId>),
+    /// The index is not built, its last build failed, or this handle does not
+    /// use it. Scan instead; [`Storage::ensure_entity_key_index`] builds it.
+    Unavailable,
+    /// The index disagrees with the rows: a writer that does not maintain it
+    /// (an older binary on the same file) changed `_entities` since it was
+    /// built. Scan instead, and rebuild it with
+    /// [`Storage::rebuild_entity_key_index`].
+    Stale,
+}
+
+impl EntityKeyLookup {
+    /// The resolved map when the index answered, else `None`.
+    pub fn into_found(self) -> Option<std::collections::HashMap<String, RecordId>> {
+        match self {
+            EntityKeyLookup::Found(found) => Some(found),
+            EntityKeyLookup::Unavailable | EntityKeyLookup::Stale => None,
+        }
+    }
+}
+
+/// Health of the entity key index, as [`Storage::entity_key_index_status`]
+/// reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EntityKeyIndexStatus {
+    /// Not built yet (it is built by the first auto-link that needs it), or
+    /// this handle does not use it.
+    Absent,
+    /// Built and in step with the `_entities` list.
+    Current,
+    /// Built, but the `_entities` list changed without it: a writer that does
+    /// not maintain it wrote to the file. Lookups fall back to scanning until
+    /// it is rebuilt.
+    Stale,
+    /// The last build stopped on an `_entities` row whose body does not
+    /// decode (corrupt, or sealed under an encryption key this handle does not
+    /// have), and the list has not changed since. Entity resolution scans
+    /// instead, as it did before the index existed.
+    Failed {
+        /// Id of the row that stopped the build.
+        row: String,
+    },
+}
+
+/// What [`Storage::rebuild_entity_key_index`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct EntityKeyIndexRebuild {
+    /// Distinct ids in the `_entities` list, all of which the index now
+    /// covers.
+    pub rows: usize,
+    /// `_entities` ids whose index entries had to be written or removed to
+    /// bring the index in step with the rows; 0 when it already was.
+    pub changed: usize,
+    /// Whether anything was committed: changed entries, or a fresh ready
+    /// stamp on an index that was stale or not built. `false` means the index
+    /// was already current and the call wrote nothing.
+    pub written: bool,
+}
+
+/// Fingerprint of the raw `_entities` entry of `table_index` (`None` when the
+/// table has no rows): its byte length and CRC-32, so comparing it costs one
+/// read of that entry and a checksum, with no JSON decode. The length alone
+/// changes with every insert or delete of an id of a different length; the
+/// checksum covers the rest, such as one id deleted and another of the same
+/// length appended.
+fn entity_list_fingerprint(list: Option<&[u8]>) -> String {
+    match list {
+        Some(bytes) => format!("{:x}.{:08x}", bytes.len(), crc32fast::hash(bytes)),
+        None => "empty".to_string(),
+    }
+}
+
+/// An `_entities` row whose body does not decode, which stops an index build.
+struct UndecodableEntityRow {
+    id: String,
+    error: AxilError,
+}
+
+/// Where the entity key index and the `_entities` rows disagree, as the
+/// entries that would bring the index in step.
+#[derive(Default)]
+struct EntityKeyDiff {
+    /// Distinct ids the `_entities` list holds.
+    rows: usize,
+    /// Member entries to write: id and the key its body carries (`None`: the
+    /// id is listed but has no key).
+    member_sets: Vec<(String, Option<String>)>,
+    /// Member entries of ids the list no longer holds.
+    member_removals: Vec<String>,
+    /// `(key, id)` pairs the key multimap lacks.
+    pair_inserts: Vec<(String, String)>,
+    /// `(key, id)` pairs no listed row carries any more.
+    pair_removals: Vec<(String, String)>,
+}
+
+impl EntityKeyDiff {
+    fn is_empty(&self) -> bool {
+        self.member_sets.is_empty()
+            && self.member_removals.is_empty()
+            && self.pair_inserts.is_empty()
+            && self.pair_removals.is_empty()
+    }
+
+    /// Distinct ids with at least one entry to write or remove.
+    fn rows_affected(&self) -> usize {
+        let mut ids: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        ids.extend(self.member_sets.iter().map(|(id, _)| id.as_str()));
+        ids.extend(self.member_removals.iter().map(String::as_str));
+        ids.extend(self.pair_inserts.iter().map(|(_, id)| id.as_str()));
+        ids.extend(self.pair_removals.iter().map(|(_, id)| id.as_str()));
+        ids.len()
+    }
+}
+
 /// Backing redb handle — either a writable database (the normal single-writer
 /// process) or a read-only view of a committed-but-unheld file.
 ///
@@ -188,6 +322,9 @@ pub struct Storage {
     /// [`crate::crypto`] for the wire format and honest scope.
     #[cfg(feature = "encryption")]
     cipher: Option<crate::crypto::Cipher>,
+    /// Set by [`Storage::set_entity_key_index_enabled`]: this handle neither
+    /// uses nor maintains the entity key index.
+    entity_key_index_off: std::sync::atomic::AtomicBool,
 }
 
 impl Storage {
@@ -234,6 +371,7 @@ impl Storage {
             changelog_cursor: std::sync::Mutex::new(ulid::Generator::new()),
             #[cfg(feature = "encryption")]
             cipher: None,
+            entity_key_index_off: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -258,6 +396,7 @@ impl Storage {
             changelog_cursor: std::sync::Mutex::new(ulid::Generator::new()),
             #[cfg(feature = "encryption")]
             cipher: None,
+            entity_key_index_off: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -402,23 +541,30 @@ impl Storage {
                 None
             };
 
+            let old_table: Option<String> = match records.get(id)? {
+                Some(guard) => self.decode_body(id, guard.value()).ok().map(|r| r.table),
+                None => None,
+            };
+            let left_entities =
+                old_table.as_deref() == Some(ENTITIES_TABLE) && record.table != ENTITIES_TABLE;
+            let entities_listed = record.table == ENTITIES_TABLE || left_entities;
+            // Checked before the `_entities` list changes below: the marker's
+            // fingerprint is of the list as the index last saw it.
+            let maintain = {
+                let idx = txn.open_table(TABLE_INDEX)?;
+                self.entity_index_write_begin(&txn, &idx, entities_listed)?
+            };
+
             // If this ID already exists under a different table, clean up the old index.
-            let mut left_entities = false;
-            if let Some(guard) = records.get(id)? {
-                let old_bytes: &[u8] = guard.value();
-                if let Ok(old_record) = self.decode_body(id, old_bytes) {
-                    if old_record.table != record.table {
-                        left_entities = old_record.table == ENTITIES_TABLE;
-                        let mut idx = txn.open_table(TABLE_INDEX)?;
-                        let mut old_ids = Self::read_index(&idx, &old_record.table)?;
-                        old_ids.retain(|rid| rid != &record.id);
-                        if old_ids.is_empty() {
-                            idx.remove(old_record.table.as_str())?;
-                        } else {
-                            let old_idx_bytes = serde_json::to_vec(&old_ids)?;
-                            idx.insert(old_record.table.as_str(), old_idx_bytes.as_slice())?;
-                        }
-                    }
+            if let Some(old_table) = old_table.filter(|t| *t != record.table) {
+                let mut idx = txn.open_table(TABLE_INDEX)?;
+                let mut old_ids = Self::read_index(&idx, &old_table)?;
+                old_ids.retain(|rid| rid != &record.id);
+                if old_ids.is_empty() {
+                    idx.remove(old_table.as_str())?;
+                } else {
+                    let old_idx_bytes = serde_json::to_vec(&old_ids)?;
+                    idx.insert(old_table.as_str(), old_idx_bytes.as_slice())?;
                 }
             }
 
@@ -441,7 +587,10 @@ impl Storage {
             } else {
                 EntityMembership::Keep
             };
-            self.sync_entity_key(&txn, id, membership, Some(&record.data))?;
+            self.sync_entity_key(&txn, maintain, id, membership, Some(&record.data))?;
+            if maintain && entities_listed {
+                Self::entity_index_write_finish(&txn, &idx)?;
+            }
 
             #[cfg(feature = "cdc")]
             self.append_changelog(
@@ -471,6 +620,8 @@ impl Storage {
         {
             let mut tbl = txn.open_table(RECORDS)?;
             let mut idx = txn.open_table(TABLE_INDEX)?;
+            let entities_listed = records.iter().any(|r| r.table == ENTITIES_TABLE);
+            let maintain = self.entity_index_write_begin(&txn, &idx, entities_listed)?;
 
             // Group records by table to minimize index reads.
             let mut table_ids: std::collections::HashMap<&str, Vec<RecordId>> =
@@ -493,7 +644,13 @@ impl Storage {
                 } else {
                     EntityMembership::Keep
                 };
-                self.sync_entity_key(&txn, record.id.as_str(), membership, Some(&record.data))?;
+                self.sync_entity_key(
+                    &txn,
+                    maintain,
+                    record.id.as_str(),
+                    membership,
+                    Some(&record.data),
+                )?;
 
                 #[cfg(feature = "cdc")]
                 self.append_changelog(
@@ -520,6 +677,9 @@ impl Storage {
                 ids.extend(to_add);
                 let idx_bytes = serde_json::to_vec(&ids)?;
                 idx.insert(*table_name, idx_bytes.as_slice())?;
+            }
+            if maintain && entities_listed {
+                Self::entity_index_write_finish(&txn, &idx)?;
             }
         }
         txn.commit()?;
@@ -570,6 +730,8 @@ impl Storage {
 
             // Remove from table index; drop the key if empty.
             let mut idx = txn.open_table(TABLE_INDEX)?;
+            let entities_listed = table_name == ENTITIES_TABLE;
+            let maintain = self.entity_index_write_begin(&txn, &idx, entities_listed)?;
             let mut ids = Self::read_index(&idx, &table_name)?;
             ids.retain(|rid| rid != id);
             if ids.is_empty() {
@@ -584,7 +746,10 @@ impl Storage {
             } else {
                 EntityMembership::Keep
             };
-            self.sync_entity_key(&txn, id.as_str(), membership, None)?;
+            self.sync_entity_key(&txn, maintain, id.as_str(), membership, None)?;
+            if maintain && entities_listed {
+                Self::entity_index_write_finish(&txn, &idx)?;
+            }
 
             #[cfg(feature = "cdc")]
             self.append_changelog(&txn, "delete", &table_name, id.as_str(), _cdc_before, None)?;
@@ -664,8 +829,13 @@ impl Storage {
             // The table (and so the id's list membership) is unchanged; only
             // the key can move, e.g. a provisional entity upgraded to its
             // canonical id.
+            let maintain = {
+                let idx = txn.open_table(TABLE_INDEX)?;
+                self.entity_index_write_begin(&txn, &idx, false)?
+            };
             self.sync_entity_key(
                 &txn,
+                maintain,
                 id.as_str(),
                 EntityMembership::Keep,
                 Some(&record.data),
@@ -764,36 +934,123 @@ impl Storage {
     /// Whether this handle may read and maintain the entity key index.
     ///
     /// The index holds entity names and canonical ids in cleartext, so a handle
-    /// with an encryption cipher neither uses nor maintains it: its writes drop
-    /// the ready marker instead (see [`Storage::sync_entity_key`]), and its
-    /// lookups fall back to decrypting and scanning the rows.
-    fn entity_key_index_enabled(&self) -> bool {
+    /// with an encryption cipher neither uses nor maintains it: its first write
+    /// discards the index (see [`Storage::entity_index_write_begin`]), and its
+    /// lookups fall back to decrypting and scanning the rows. The same holds
+    /// for a handle switched off with [`Storage::set_entity_key_index_enabled`].
+    pub fn entity_key_index_enabled(&self) -> bool {
         #[cfg(feature = "encryption")]
         if self.cipher.is_some() {
             return false;
         }
-        true
+        !self
+            .entity_key_index_off
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Stop (or resume) using the entity key index on this handle.
+    ///
+    /// While off, lookups report [`EntityKeyLookup::Unavailable`], nothing is
+    /// built, and the next write discards the index so no later handle trusts
+    /// an index that missed this handle's writes. Entity resolution then scans
+    /// `_entities` the way it did before the index existed, which is what a
+    /// comparison against that behaviour needs.
+    pub fn set_entity_key_index_enabled(&self, enabled: bool) {
+        self.entity_key_index_off
+            .store(!enabled, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Decide, at the start of a write transaction, whether it maintains the
+    /// entity key index. `idx` is the `table_index` table as it stands before
+    /// this write changes it; `lists_entities` says whether the write changes
+    /// the `_entities` entry.
+    ///
+    /// The index is maintained only while the marker says it is ready. A write
+    /// that changes the `_entities` list first compares the marker's
+    /// fingerprint with the list as it is now: a mismatch means a writer that
+    /// does not maintain the index changed the list, so the marker is removed
+    /// here and stays removed until a rebuild, even if later writes happen to
+    /// restore the list's bytes. The caller re-stamps the marker with
+    /// [`Storage::entity_index_write_finish`] after its own list change.
+    ///
+    /// A handle that does not use the index discards it: the marker and both
+    /// tables go in this transaction, so a later cleartext handle cannot trust
+    /// an index that missed this write, and entity names and canonical ids a
+    /// cleartext store indexed do not outlive a re-seal made under a cipher.
+    fn entity_index_write_begin<T: ReadableTable<&'static str, &'static [u8]>>(
+        &self,
+        txn: &WriteTransaction,
+        idx: &T,
+        lists_entities: bool,
+    ) -> Result<bool> {
+        if !self.entity_key_index_enabled() {
+            {
+                let mut markers = txn.open_table(STORAGE_MARKERS)?;
+                markers.remove(ENTITY_KEY_INDEX_MARKER)?;
+            }
+            txn.delete_table(ENTITY_KEY_MEMBERS)?;
+            txn.delete_multimap_table(ENTITY_KEY_INDEX)?;
+            return Ok(false);
+        }
+        let mut markers = txn.open_table(STORAGE_MARKERS)?;
+        let stamped = match markers.get(ENTITY_KEY_INDEX_MARKER)? {
+            Some(guard) => match guard.value().strip_prefix(ENTITY_KEY_READY) {
+                Some(fingerprint) => fingerprint.to_string(),
+                None => return Ok(false),
+            },
+            None => return Ok(false),
+        };
+        if !lists_entities {
+            return Ok(true);
+        }
+        if Self::entity_list_fingerprint_in(idx)? == stamped {
+            return Ok(true);
+        }
+        markers.remove(ENTITY_KEY_INDEX_MARKER)?;
+        Ok(false)
+    }
+
+    /// Re-stamp the ready marker with the fingerprint of the `_entities` list
+    /// a maintained write has just produced.
+    fn entity_index_write_finish<T: ReadableTable<&'static str, &'static [u8]>>(
+        txn: &WriteTransaction,
+        idx: &T,
+    ) -> Result<()> {
+        let value = format!(
+            "{ENTITY_KEY_READY}{}",
+            Self::entity_list_fingerprint_in(idx)?
+        );
+        let mut markers = txn.open_table(STORAGE_MARKERS)?;
+        markers.insert(ENTITY_KEY_INDEX_MARKER, value.as_str())?;
+        Ok(())
+    }
+
+    fn entity_list_fingerprint_in<T: ReadableTable<&'static str, &'static [u8]>>(
+        idx: &T,
+    ) -> Result<String> {
+        Ok(match idx.get(ENTITIES_TABLE)? {
+            Some(guard) => entity_list_fingerprint(Some(guard.value())),
+            None => entity_list_fingerprint(None),
+        })
     }
 
     /// Bring the entity key index up to date for one id, inside the write
     /// transaction that just changed its body or its `_entities` list
-    /// membership. `data` is the body `records` now holds for the id (`None`
-    /// once it is deleted).
+    /// membership. `maintain` is what [`Storage::entity_index_write_begin`]
+    /// decided for this transaction; `data` is the body `records` now holds
+    /// for the id (`None` once it is deleted).
     ///
     /// For an id that is not and does not become an `_entities` member this is
     /// a single point read.
     fn sync_entity_key(
         &self,
         txn: &WriteTransaction,
+        maintain: bool,
         id: &str,
         membership: EntityMembership,
         data: Option<&serde_json::Value>,
     ) -> Result<()> {
-        if !self.entity_key_index_enabled() {
-            // Anything this write changed is not reflected in the index, so it
-            // must stop claiming to be complete.
-            let mut markers = txn.open_table(STORAGE_MARKERS)?;
-            markers.remove(ENTITY_KEY_INDEX_MARKER)?;
+        if !maintain {
             return Ok(());
         }
         let mut members = txn.open_table(ENTITY_KEY_MEMBERS)?;
@@ -831,90 +1088,313 @@ impl Storage {
         Ok(())
     }
 
-    /// True once the entity key index has been built and is being maintained
-    /// (see [`Storage::ensure_entity_key_index`]). Always `false` on a handle
-    /// with an encryption cipher.
-    pub fn entity_key_index_ready(&self) -> Result<bool> {
-        if !self.entity_key_index_enabled() {
-            return Ok(false);
-        }
-        let txn = self.begin_read()?;
-        Self::entity_key_marker_present(&txn)
-    }
-
-    fn entity_key_marker_present(txn: &ReadTransaction) -> Result<bool> {
+    /// The marker's value, if any.
+    fn entity_key_marker(txn: &ReadTransaction) -> Result<Option<String>> {
         let markers = match txn.open_table(STORAGE_MARKERS) {
             Ok(t) => t,
-            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(false),
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
             Err(e) => return Err(e.into()),
         };
-        Ok(markers.get(ENTITY_KEY_INDEX_MARKER)?.is_some())
+        Ok(markers
+            .get(ENTITY_KEY_INDEX_MARKER)?
+            .map(|guard| guard.value().to_string()))
     }
 
-    /// Build the entity key index from the existing `_entities` rows unless it
-    /// is already built. Returns `true` when this call built it.
+    fn entity_key_status_in(txn: &ReadTransaction) -> Result<EntityKeyIndexStatus> {
+        let Some(marker) = Self::entity_key_marker(txn)? else {
+            return Ok(EntityKeyIndexStatus::Absent);
+        };
+        let idx = txn.open_table(TABLE_INDEX)?;
+        let current = Self::entity_list_fingerprint_in(&idx)?;
+        if let Some(stamped) = marker.strip_prefix(ENTITY_KEY_READY) {
+            return Ok(if stamped == current {
+                EntityKeyIndexStatus::Current
+            } else {
+                EntityKeyIndexStatus::Stale
+            });
+        }
+        if let Some((stamped, row)) = marker
+            .strip_prefix(ENTITY_KEY_FAILED)
+            .and_then(|rest| rest.split_once(':'))
+        {
+            if stamped == current {
+                return Ok(EntityKeyIndexStatus::Failed {
+                    row: row.to_string(),
+                });
+            }
+        }
+        // A failed build whose list has since changed, or a marker this
+        // version does not recognise: worth building again.
+        Ok(EntityKeyIndexStatus::Absent)
+    }
+
+    /// Where the entity key index stands; see [`EntityKeyIndexStatus`].
+    /// Always [`EntityKeyIndexStatus::Absent`] on a handle that does not use
+    /// the index (an encryption cipher, or switched off).
+    pub fn entity_key_index_status(&self) -> Result<EntityKeyIndexStatus> {
+        if !self.entity_key_index_enabled() {
+            return Ok(EntityKeyIndexStatus::Absent);
+        }
+        let txn = self.begin_read()?;
+        Self::entity_key_status_in(&txn)
+    }
+
+    /// True while the entity key index is built and in step with the
+    /// `_entities` list, i.e. [`Storage::entity_key_index_status`] is
+    /// [`EntityKeyIndexStatus::Current`].
+    pub fn entity_key_index_ready(&self) -> Result<bool> {
+        Ok(self.entity_key_index_status()? == EntityKeyIndexStatus::Current)
+    }
+
+    /// Build the entity key index unless it is already current or its last
+    /// build failed on the `_entities` list as it stands. Returns `true` when
+    /// this call built it.
     ///
-    /// The rebuild — clearing any partial index, indexing every listed row, and
-    /// setting the ready marker — commits as one write transaction, so a crash
-    /// leaves either the old state (no marker, callers keep scanning) or a
-    /// complete index. Idempotent; a no-op on read-only handles and on handles
-    /// with an encryption cipher. A body that fails to decode aborts the build
-    /// with that error and leaves the marker unset.
+    /// Callers build it where they would otherwise pay a full `_entities`
+    /// scan (auto-linking a new record), not on open, so commands that never
+    /// resolve entities never pay for, or commit, the build. A no-op on
+    /// read-only handles and on handles that do not use the index. See
+    /// [`Storage::rebuild_entity_key_index`] for the build itself.
     pub fn ensure_entity_key_index(&self) -> Result<bool> {
         if self.is_read_only() || !self.entity_key_index_enabled() {
             return Ok(false);
         }
-        if self.entity_key_index_ready()? {
-            return Ok(false);
+        match self.entity_key_index_status()? {
+            EntityKeyIndexStatus::Current | EntityKeyIndexStatus::Failed { .. } => Ok(false),
+            EntityKeyIndexStatus::Absent | EntityKeyIndexStatus::Stale => {
+                self.rebuild_entity_key_index().map(|_| true)
+            }
         }
-        let txn = self.begin_write()?;
-        {
-            txn.delete_table(ENTITY_KEY_MEMBERS)?;
-            txn.delete_multimap_table(ENTITY_KEY_INDEX)?;
-            let mut members = txn.open_table(ENTITY_KEY_MEMBERS)?;
-            let mut keys = txn.open_multimap_table(ENTITY_KEY_INDEX)?;
-            let idx = txn.open_table(TABLE_INDEX)?;
-            let records = txn.open_table(RECORDS)?;
-            let mut entries: Vec<(String, Option<String>)> = Vec::new();
-            for rid in Self::read_index(&idx, ENTITIES_TABLE)? {
-                let key = match records.get(rid.as_str())? {
-                    Some(guard) => {
-                        let record = self.decode_body(rid.as_str(), guard.value())?;
-                        entity_lookup_key(&record.data).map(str::to_string)
-                    }
-                    None => None,
-                };
-                entries.push((rid.0, key));
-            }
-            // Insert in key order: sorted B-tree inserts touch each page once
-            // instead of scattering across the tree.
-            entries.sort_unstable();
-            for (id, key) in &entries {
-                members.insert(id.as_str(), key.as_deref())?;
-            }
-            let mut by_key: Vec<(&str, &str)> = entries
-                .iter()
-                .filter_map(|(id, key)| Some((key.as_deref()?, id.as_str())))
-                .collect();
-            by_key.sort_unstable();
-            for (key, id) in by_key {
-                keys.insert(key, id)?;
-            }
-            let mut markers = txn.open_table(STORAGE_MARKERS)?;
-            markers.insert(ENTITY_KEY_INDEX_MARKER, "1")?;
-        }
-        txn.commit()?;
-        Ok(true)
     }
 
-    /// Discard the entity key index and its ready marker in one write
-    /// transaction.
+    /// Bring the entity key index in step with the `_entities` rows, whatever
+    /// state it is in, and stamp it ready.
     ///
-    /// Until [`Storage::ensure_entity_key_index`] rebuilds it (the next
-    /// writable [`Axil`](crate::Axil) open does),
-    /// [`Storage::lookup_entity_keys`] reports the index unavailable and
-    /// callers scan. Use it to repair an index a writer that predates it has
-    /// left stale.
+    /// Every listed row is decoded, as the scan the index replaces would, but
+    /// only the index entries that differ are written: a first build writes
+    /// them all, while repairing what an older binary changed writes about as
+    /// much as it changed. Deleting and refilling both tables instead would
+    /// allocate the whole index again on every repair, in a transaction that
+    /// cannot reuse the pages it frees, so each repair would grow the file.
+    /// When nothing differs and the marker is already current, the
+    /// transaction is aborted and nothing is written.
+    ///
+    /// The repair commits as one write transaction, so a crash leaves either
+    /// the old state or a complete index. A row whose body does not decode
+    /// stops it with that error; a separate transaction then records the row
+    /// in the marker ([`EntityKeyIndexStatus::Failed`]), so
+    /// [`Storage::ensure_entity_key_index`] does not repeat the build until
+    /// the list changes, and lookups keep scanning (which meets the same
+    /// row). Other errors are returned without being recorded, so a transient
+    /// one is retried. A no-op on a handle that does not use the index; fails
+    /// with [`AxilError::Busy`] on a read-only handle.
+    ///
+    /// This is also the repair for the one change the index cannot notice on
+    /// its own: an older binary rewriting an existing `_entities` row's
+    /// `canonical_id` or `name` in place leaves the `_entities` list's bytes
+    /// unchanged. Lookups catch it when a result points at the rewritten row;
+    /// [`Storage::verify_entity_key_index`] catches it everywhere.
+    pub fn rebuild_entity_key_index(&self) -> Result<EntityKeyIndexRebuild> {
+        if !self.entity_key_index_enabled() {
+            return Ok(EntityKeyIndexRebuild::default());
+        }
+        let txn = self.begin_write()?;
+        let synced = match self.sync_entity_key_index_in(&txn) {
+            Ok(synced) => synced,
+            Err(e) => {
+                txn.abort()?;
+                return Err(e);
+            }
+        };
+        match synced {
+            Ok(rebuild) => {
+                if rebuild.written {
+                    txn.commit()?;
+                } else {
+                    txn.abort()?;
+                }
+                Ok(rebuild)
+            }
+            Err(row) => {
+                txn.abort()?;
+                self.record_entity_key_failure(&row.id)?;
+                Err(row.error)
+            }
+        }
+    }
+
+    /// Write the index entries that differ from the rows inside `txn` and
+    /// stamp the ready marker. Returns what changed; the inner error names a
+    /// row whose body does not decode.
+    fn sync_entity_key_index_in(
+        &self,
+        txn: &WriteTransaction,
+    ) -> Result<std::result::Result<EntityKeyIndexRebuild, UndecodableEntityRow>> {
+        let idx = txn.open_table(TABLE_INDEX)?;
+        let records = txn.open_table(RECORDS)?;
+        let keyed = match self.entity_keys_of_rows(&idx, &records)? {
+            Ok(keyed) => keyed,
+            Err(row) => return Ok(Err(row)),
+        };
+        let mut members = txn.open_table(ENTITY_KEY_MEMBERS)?;
+        let mut keys = txn.open_multimap_table(ENTITY_KEY_INDEX)?;
+        let diff = Self::entity_key_diff(&keyed, Some(&members), Some(&keys))?;
+        for id in &diff.member_removals {
+            members.remove(id.as_str())?;
+        }
+        for (id, key) in &diff.member_sets {
+            members.insert(id.as_str(), key.as_deref())?;
+        }
+        for (key, id) in &diff.pair_removals {
+            keys.remove(key.as_str(), id.as_str())?;
+        }
+        for (key, id) in &diff.pair_inserts {
+            keys.insert(key.as_str(), id.as_str())?;
+        }
+        let ready = format!(
+            "{ENTITY_KEY_READY}{}",
+            Self::entity_list_fingerprint_in(&idx)?
+        );
+        let mut markers = txn.open_table(STORAGE_MARKERS)?;
+        let restamp = match markers.get(ENTITY_KEY_INDEX_MARKER)? {
+            Some(guard) => guard.value() != ready,
+            None => true,
+        };
+        if restamp {
+            markers.insert(ENTITY_KEY_INDEX_MARKER, ready.as_str())?;
+        }
+        let rebuild = EntityKeyIndexRebuild {
+            rows: diff.rows,
+            changed: diff.rows_affected(),
+            written: restamp || !diff.is_empty(),
+        };
+        Ok(Ok(rebuild))
+    }
+
+    /// Record in the marker that a build stopped on `row`, against the
+    /// `_entities` list as it stands.
+    fn record_entity_key_failure(&self, row: &str) -> Result<()> {
+        let txn = self.begin_write()?;
+        {
+            let idx = txn.open_table(TABLE_INDEX)?;
+            let value = format!(
+                "{ENTITY_KEY_FAILED}{}:{row}",
+                Self::entity_list_fingerprint_in(&idx)?
+            );
+            let mut markers = txn.open_table(STORAGE_MARKERS)?;
+            markers.insert(ENTITY_KEY_INDEX_MARKER, value.as_str())?;
+        }
+        txn.commit()?;
+        Ok(())
+    }
+
+    /// Each distinct id the `_entities` list holds, with the key its body
+    /// carries (`None`: the body has no key, or is gone). The inner error
+    /// names the first row whose body does not decode.
+    #[allow(clippy::type_complexity)]
+    fn entity_keys_of_rows<I, R>(
+        &self,
+        idx: &I,
+        records: &R,
+    ) -> Result<
+        std::result::Result<
+            std::collections::HashMap<String, Option<String>>,
+            UndecodableEntityRow,
+        >,
+    >
+    where
+        I: ReadableTable<&'static str, &'static [u8]>,
+        R: ReadableTable<&'static str, &'static [u8]>,
+    {
+        let listed = Self::read_index(idx, ENTITIES_TABLE)?;
+        let mut keyed = std::collections::HashMap::with_capacity(listed.len());
+        for rid in listed {
+            if keyed.contains_key(rid.as_str()) {
+                continue;
+            }
+            let key = match records.get(rid.as_str())? {
+                Some(guard) => match self.decode_body(rid.as_str(), guard.value()) {
+                    Ok(record) => entity_lookup_key(&record.data).map(str::to_string),
+                    Err(error) => return Ok(Err(UndecodableEntityRow { id: rid.0, error })),
+                },
+                None => None,
+            };
+            keyed.insert(rid.0, key);
+        }
+        Ok(Ok(keyed))
+    }
+
+    /// Compare the index tables (a missing one counts as empty) with the keys
+    /// the listed rows carry.
+    fn entity_key_diff<M, K>(
+        keyed: &std::collections::HashMap<String, Option<String>>,
+        members: Option<&M>,
+        keys: Option<&K>,
+    ) -> Result<EntityKeyDiff>
+    where
+        M: ReadableTable<&'static str, Option<&'static str>>,
+        K: ReadableMultimapTable<&'static str, &'static str>,
+    {
+        let mut indexed: std::collections::HashMap<String, Option<String>> =
+            std::collections::HashMap::with_capacity(keyed.len());
+        if let Some(members) = members {
+            for entry in members.iter()? {
+                let (id, key) = entry?;
+                indexed.insert(id.value().to_string(), key.value().map(str::to_string));
+            }
+        }
+        let mut pairs: std::collections::HashSet<(String, String)> =
+            std::collections::HashSet::with_capacity(keyed.len());
+        if let Some(keys) = keys {
+            for entry in keys.iter()? {
+                let (key, ids) = entry?;
+                let key = key.value().to_string();
+                for id in ids {
+                    pairs.insert((key.clone(), id?.value().to_string()));
+                }
+            }
+        }
+
+        let mut diff = EntityKeyDiff {
+            rows: keyed.len(),
+            ..EntityKeyDiff::default()
+        };
+        let mut wanted: std::collections::HashSet<(String, String)> =
+            std::collections::HashSet::with_capacity(keyed.len());
+        for (id, key) in keyed {
+            if indexed.get(id) != Some(key) {
+                diff.member_sets.push((id.clone(), key.clone()));
+            }
+            if let Some(key) = key {
+                let pair = (key.clone(), id.clone());
+                if !pairs.contains(&pair) {
+                    diff.pair_inserts.push(pair.clone());
+                }
+                wanted.insert(pair);
+            }
+        }
+        diff.member_removals = indexed
+            .into_keys()
+            .filter(|id| !keyed.contains_key(id))
+            .collect();
+        diff.pair_removals = pairs
+            .into_iter()
+            .filter(|pair| !wanted.contains(pair))
+            .collect();
+        // Sorted, so the writes walk each B-tree in key order instead of
+        // scattering across it.
+        diff.member_sets.sort_unstable();
+        diff.member_removals.sort_unstable();
+        diff.pair_inserts.sort_unstable();
+        diff.pair_removals.sort_unstable();
+        Ok(diff)
+    }
+
+    /// Discard the entity key index and its marker in one write transaction.
+    ///
+    /// Until it is built again ([`Storage::ensure_entity_key_index`], which
+    /// the next auto-link calls), [`Storage::lookup_entity_keys`] reports it
+    /// unavailable and callers scan.
     pub fn drop_entity_key_index(&self) -> Result<()> {
         let txn = self.begin_write()?;
         {
@@ -927,6 +1407,44 @@ impl Storage {
         Ok(())
     }
 
+    /// Check a current entity key index against the `_entities` rows it
+    /// covers. Returns `None` when the index is not current (nothing to
+    /// verify), else how many `_entities` ids have index entries that
+    /// disagree with their rows: a key that differs from the body's, or an
+    /// entry for an id the list no longer holds.
+    ///
+    /// Decodes every listed row, so it costs what the scan the index replaces
+    /// costs, and writes nothing. Diagnostics use it to catch in-place key
+    /// rewrites by a writer that does not maintain the index, which lookups
+    /// notice only when a result points at a rewritten row.
+    pub fn verify_entity_key_index(&self) -> Result<Option<usize>> {
+        if !self.entity_key_index_enabled() {
+            return Ok(None);
+        }
+        let txn = self.begin_read()?;
+        if Self::entity_key_status_in(&txn)? != EntityKeyIndexStatus::Current {
+            return Ok(None);
+        }
+        let idx = txn.open_table(TABLE_INDEX)?;
+        let records = txn.open_table(RECORDS)?;
+        let keyed = match self.entity_keys_of_rows(&idx, &records)? {
+            Ok(keyed) => keyed,
+            Err(row) => return Err(row.error),
+        };
+        let members = match txn.open_table(ENTITY_KEY_MEMBERS) {
+            Ok(table) => Some(table),
+            Err(redb::TableError::TableDoesNotExist(_)) => None,
+            Err(e) => return Err(e.into()),
+        };
+        let keys = match txn.open_multimap_table(ENTITY_KEY_INDEX) {
+            Ok(table) => Some(table),
+            Err(redb::TableError::TableDoesNotExist(_)) => None,
+            Err(e) => return Err(e.into()),
+        };
+        let diff = Self::entity_key_diff(&keyed, members.as_ref(), keys.as_ref())?;
+        Ok(Some(diff.rows_affected()))
+    }
+
     /// Resolve entity lookup keys to `_entities` record ids through the index.
     ///
     /// The answer is the one a full scan gives when it walks
@@ -935,20 +1453,43 @@ impl Storage {
     /// absent, and a key several rows share maps to the row listed last. The
     /// list order is read from `table_index` only when a key is shared.
     ///
-    /// Returns `Ok(None)` when the index is not available — not built yet,
-    /// or this handle has an encryption cipher — and the caller must scan.
-    pub fn lookup_entity_keys(
-        &self,
-        keys: &[&str],
-    ) -> Result<Option<std::collections::HashMap<String, RecordId>>> {
+    /// Before answering, the index is checked against the rows, so a writer
+    /// that does not maintain it (an older binary on the same file) cannot
+    /// make it answer wrongly:
+    ///
+    /// - The `_entities` list must still have the fingerprint the index was
+    ///   stamped with. Any insert or delete of an `_entities` row changes it.
+    ///   This costs one read of that entry and a CRC-32 over it, with no JSON
+    ///   decode.
+    /// - Every row returned is read back and must still carry the key it was
+    ///   found under. This catches an in-place rewrite of that row.
+    ///
+    /// Either failure returns [`EntityKeyLookup::Stale`]. One change stays
+    /// invisible here: an older binary rewriting some *other* row's key in
+    /// place to a requested one. The lookup then misses that row, or returns
+    /// the row a scan would have ranked below it, until a rebuild;
+    /// [`Storage::verify_entity_key_index`] is what finds it.
+    ///
+    /// Returns [`EntityKeyLookup::Unavailable`] when the index is not built,
+    /// its last build failed, or this handle does not use it.
+    pub fn lookup_entity_keys(&self, keys: &[&str]) -> Result<EntityKeyLookup> {
         if !self.entity_key_index_enabled() {
-            return Ok(None);
+            return Ok(EntityKeyLookup::Unavailable);
         }
         let txn = self.begin_read()?;
-        if !Self::entity_key_marker_present(&txn)? {
-            return Ok(None);
+        match Self::entity_key_status_in(&txn)? {
+            EntityKeyIndexStatus::Current => {}
+            EntityKeyIndexStatus::Stale => return Ok(EntityKeyLookup::Stale),
+            EntityKeyIndexStatus::Absent | EntityKeyIndexStatus::Failed { .. } => {
+                return Ok(EntityKeyLookup::Unavailable)
+            }
         }
-        let index = txn.open_multimap_table(ENTITY_KEY_INDEX)?;
+        let index = match txn.open_multimap_table(ENTITY_KEY_INDEX) {
+            Ok(index) => index,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(EntityKeyLookup::Stale),
+            Err(e) => return Err(e.into()),
+        };
+        let records = txn.open_table(RECORDS)?;
         let mut found = std::collections::HashMap::with_capacity(keys.len());
         // Last position of each id in the `_entities` list, loaded on the
         // first shared key.
@@ -978,11 +1519,20 @@ impl Storage {
                         .max_by_key(|rid| positions.get(rid).copied())
                 }
             };
-            if let Some(id) = winner {
-                found.insert(key.to_string(), id);
+            let Some(id) = winner else { continue };
+            let still_keyed = match records.get(id.as_str())? {
+                Some(guard) => {
+                    let record = self.decode_body(id.as_str(), guard.value())?;
+                    entity_lookup_key(&record.data) == Some(key)
+                }
+                None => false,
+            };
+            if !still_keyed {
+                return Ok(EntityKeyLookup::Stale);
             }
+            found.insert(key.to_string(), id);
         }
-        Ok(Some(found))
+        Ok(EntityKeyLookup::Found(found))
     }
 
     // ── diagnostic log operations ──────────────────────────────────────
@@ -1510,6 +2060,112 @@ impl Storage {
     }
 }
 
+/// Writes that bypass the entity key index the way a binary that predates it
+/// does, so tests can put a store in the state such a binary leaves.
+#[cfg(test)]
+impl Storage {
+    /// Insert the way a binary that predates the entity key index does:
+    /// `records` and `table_index` only, leaving the index and its marker
+    /// untouched.
+    pub(crate) fn older_writer_insert(&self, record: &Record) {
+        let txn = self.begin_write().unwrap();
+        {
+            let mut records = txn.open_table(RECORDS).unwrap();
+            let mut idx = txn.open_table(TABLE_INDEX).unwrap();
+            let old_table = records
+                .get(record.id.as_str())
+                .unwrap()
+                .map(|g| Record::from_bytes(g.value()).unwrap().table);
+            if let Some(old_table) = old_table.filter(|t| *t != record.table) {
+                let mut old_ids = Storage::read_index(&idx, &old_table).unwrap();
+                old_ids.retain(|rid| rid != &record.id);
+                if old_ids.is_empty() {
+                    idx.remove(old_table.as_str()).unwrap();
+                } else {
+                    let bytes = serde_json::to_vec(&old_ids).unwrap();
+                    idx.insert(old_table.as_str(), bytes.as_slice()).unwrap();
+                }
+            }
+            let bytes = record.to_bytes().unwrap();
+            records
+                .insert(record.id.as_str(), bytes.as_slice())
+                .unwrap();
+            let mut ids = Storage::read_index(&idx, &record.table).unwrap();
+            if !ids.contains(&record.id) {
+                ids.push(record.id.clone());
+            }
+            let bytes = serde_json::to_vec(&ids).unwrap();
+            idx.insert(record.table.as_str(), bytes.as_slice()).unwrap();
+        }
+        txn.commit().unwrap();
+    }
+
+    /// Delete the way a binary that predates the entity key index does.
+    pub(crate) fn older_writer_delete(&self, id: &RecordId) {
+        let txn = self.begin_write().unwrap();
+        {
+            let mut records = txn.open_table(RECORDS).unwrap();
+            let table = match records.get(id.as_str()).unwrap() {
+                Some(g) => Record::from_bytes(g.value()).unwrap().table,
+                None => return,
+            };
+            records.remove(id.as_str()).unwrap();
+            let mut idx = txn.open_table(TABLE_INDEX).unwrap();
+            let mut ids = Storage::read_index(&idx, &table).unwrap();
+            ids.retain(|rid| rid != id);
+            if ids.is_empty() {
+                idx.remove(table.as_str()).unwrap();
+            } else {
+                let bytes = serde_json::to_vec(&ids).unwrap();
+                idx.insert(table.as_str(), bytes.as_slice()).unwrap();
+            }
+        }
+        txn.commit().unwrap();
+    }
+
+    /// Update in place the way a binary that predates the entity key index
+    /// does (the SCIP canonical_id rewrite, `merge_entities`).
+    pub(crate) fn older_writer_update(&self, id: &RecordId, data: serde_json::Value) {
+        let txn = self.begin_write().unwrap();
+        {
+            let mut records = txn.open_table(RECORDS).unwrap();
+            let mut record =
+                Record::from_bytes(records.get(id.as_str()).unwrap().unwrap().value()).unwrap();
+            record.data = data;
+            let bytes = record.to_bytes().unwrap();
+            records.insert(id.as_str(), bytes.as_slice()).unwrap();
+        }
+        txn.commit().unwrap();
+    }
+
+    /// Overwrite a row's stored body with raw bytes, as corruption or a
+    /// foreign writer might, leaving every list and index alone.
+    pub(crate) fn older_writer_put_raw(&self, id: &RecordId, bytes: &[u8]) {
+        let txn = self.begin_write().unwrap();
+        {
+            let mut records = txn.open_table(RECORDS).unwrap();
+            records.insert(id.as_str(), bytes).unwrap();
+        }
+        txn.commit().unwrap();
+    }
+
+    /// Drop an id from the `_entities` list and `records` without decoding
+    /// its body (which may not decode).
+    pub(crate) fn older_writer_delete_raw(&self, id: &RecordId) {
+        let txn = self.begin_write().unwrap();
+        {
+            let mut records = txn.open_table(RECORDS).unwrap();
+            records.remove(id.as_str()).unwrap();
+            let mut idx = txn.open_table(TABLE_INDEX).unwrap();
+            let mut ids = Storage::read_index(&idx, ENTITIES_TABLE).unwrap();
+            ids.retain(|rid| rid != id);
+            let bytes = serde_json::to_vec(&ids).unwrap();
+            idx.insert(ENTITIES_TABLE, bytes.as_slice()).unwrap();
+        }
+        txn.commit().unwrap();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1841,38 +2497,77 @@ mod tests {
         }
 
         /// The entity key index would hold entity names in cleartext, so an
-        /// encrypted handle neither uses nor maintains it, and its writes
-        /// retire an index built earlier — a later cleartext handle must scan
-        /// rather than trust an index that missed those writes.
+        /// encrypted handle neither uses nor maintains it. Its first write
+        /// discards the whole index, so names a cleartext store indexed do
+        /// not outlive a re-seal made under the cipher, and a later cleartext
+        /// handle cannot trust an index that missed that write.
         #[test]
-        fn entity_key_index_is_off_under_a_cipher() {
+        fn entity_key_index_is_discarded_under_a_cipher() {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("enc.axil");
-            {
+            let secret = {
                 let storage = Storage::open(&path).unwrap();
                 storage.ensure_entity_key_index().unwrap();
                 storage
                     .insert(&Record::new("_entities", json!({"canonical_id": "redis"})))
                     .unwrap();
+                let secret = storage
+                    .insert(&Record::new(
+                        "_entities",
+                        json!({"canonical_id": "acme-merger-codename"}),
+                    ))
+                    .unwrap();
                 assert!(storage.entity_key_index_ready().unwrap());
-            }
+                secret
+            };
             {
                 let storage = Storage::open(&path).unwrap().with_cipher(key_a());
                 assert!(!storage.ensure_entity_key_index().unwrap());
-                assert!(storage.lookup_entity_keys(&["redis"]).unwrap().is_none());
+                assert_eq!(
+                    storage.lookup_entity_keys(&["redis"]).unwrap(),
+                    EntityKeyLookup::Unavailable
+                );
+                // Re-seal the sensitive row: an upsert under the cipher (a
+                // cleartext body cannot be decrypted, so update or delete
+                // would refuse it).
+                let mut resealed = Record::new("_entities", json!({"canonical_id": "redacted"}));
+                resealed.id = secret.clone();
+                storage.insert(&resealed).unwrap();
+                let txn = storage.begin_read().unwrap();
+                assert!(matches!(
+                    txn.open_table(ENTITY_KEY_MEMBERS),
+                    Err(redb::TableError::TableDoesNotExist(_))
+                ));
+                assert!(matches!(
+                    txn.open_multimap_table(ENTITY_KEY_INDEX),
+                    Err(redb::TableError::TableDoesNotExist(_))
+                ));
+                assert!(Storage::entity_key_marker(&txn).unwrap().is_none());
                 storage
                     .insert(&Record::new("_entities", json!({"canonical_id": "auth"})))
                     .unwrap();
-                let txn = storage.begin_read().unwrap();
-                let members = txn.open_table(ENTITY_KEY_MEMBERS).unwrap();
-                assert_eq!(members.len().unwrap(), 1, "only the cleartext row");
             }
             let storage = Storage::open(&path).unwrap();
-            assert!(!storage.entity_key_index_ready().unwrap());
-            // The sealed body can't be indexed without the key: the rebuild
-            // fails and leaves lookups on the scan path.
+            assert_eq!(
+                storage.entity_key_index_status().unwrap(),
+                EntityKeyIndexStatus::Absent
+            );
+            // The sealed body can't be indexed without the key: the build
+            // fails, lookups stay on the scan path, and the failure is
+            // remembered so the next call does not decode the rows again.
             assert!(storage.ensure_entity_key_index().is_err());
-            assert!(storage.lookup_entity_keys(&["redis"]).unwrap().is_none());
+            assert_eq!(
+                storage.entity_key_index_status().unwrap(),
+                EntityKeyIndexStatus::Failed {
+                    row: secret.as_str().to_string()
+                },
+                "the first sealed row in list order stopped the build"
+            );
+            assert!(!storage.ensure_entity_key_index().unwrap());
+            assert_eq!(
+                storage.lookup_entity_keys(&["redis"]).unwrap(),
+                EntityKeyLookup::Unavailable
+            );
         }
 
         /// CDC value-capture bodies are sealed in the `_changelog` tape (not
@@ -2069,13 +2764,18 @@ mod tests {
         keys.extend(oracle.keys().cloned());
         keys.push("never-stored".to_string());
         let key_refs: Vec<&str> = keys.iter().map(String::as_str).collect();
-        let indexed = storage
-            .lookup_entity_keys(&key_refs)
-            .unwrap()
-            .unwrap_or_else(|| panic!("{context}: index unavailable"));
+        let indexed = match storage.lookup_entity_keys(&key_refs).unwrap() {
+            EntityKeyLookup::Found(found) => found,
+            other => panic!("{context}: index not usable: {other:?}"),
+        };
         assert_eq!(
             indexed, oracle,
             "{context}: index lookups differ from a full scan"
+        );
+        assert_eq!(
+            storage.verify_entity_key_index().unwrap(),
+            Some(0),
+            "{context}: verification disagrees with a matching index"
         );
     }
 
@@ -2140,6 +2840,22 @@ mod tests {
         storage
     }
 
+    /// The property that matters while the index may be stale: whenever it
+    /// answers at all, it answers what a full scan would.
+    fn assert_index_never_wrong(storage: &Storage, context: &str) {
+        let oracle = scan_oracle(storage);
+        let mut keys: Vec<String> = KEY_POOL.iter().map(|k| k.to_string()).collect();
+        keys.extend(oracle.keys().cloned());
+        let key_refs: Vec<&str> = keys.iter().map(String::as_str).collect();
+        if let EntityKeyLookup::Found(found) = storage.lookup_entity_keys(&key_refs).unwrap() {
+            assert_eq!(found, oracle, "{context}: a stale index answered wrongly");
+        }
+    }
+
+    /// Random writes, some of them by a writer that does not maintain the
+    /// index. While the index is trusted every lookup must match a full scan;
+    /// after an older writer's insert or delete it must either still match or
+    /// decline to answer, until it is rebuilt.
     #[test]
     fn entity_key_index_matches_full_scan_under_random_writes() {
         const TABLES: [&str; 3] = ["_entities", "_entities", "other"];
@@ -2152,9 +2868,11 @@ mod tests {
             // Every id ever written, deleted or not, so later steps also hit
             // missing and cross-table ids.
             let mut ids: Vec<RecordId> = Vec::new();
+            // False from an older writer's write until the next rebuild.
+            let mut trusted = true;
 
-            for step in 0..120 {
-                let what = match rng.below(10) {
+            for step in 0..160 {
+                let what = match rng.below(13) {
                     // New `_entities` row (possibly a foreign id, possibly a
                     // key another row already has).
                     0..=2 => {
@@ -2214,19 +2932,31 @@ mod tests {
                         // index must survive as is.
                         drop(storage);
                         let ro = Storage::open_read_only(&path).unwrap();
-                        assert_index_matches_scan(
-                            &ro,
-                            &format!("seed {seed} step {step} read-only"),
-                        );
+                        let context = format!("seed {seed} step {step} read-only");
+                        if trusted {
+                            assert_index_matches_scan(&ro, &context);
+                        } else {
+                            assert_index_never_wrong(&ro, &context);
+                        }
                         drop(ro);
                         storage = open_indexed(&path);
+                        // `ensure` rebuilds only what the marker shows to be
+                        // stale; an older writer's delete of a row listed
+                        // under two tables leaves the list's bytes alone.
+                        if !trusted {
+                            storage.rebuild_entity_key_index().unwrap();
+                        }
+                        trusted = true;
                         "reopen"
                     }
                     8 => {
                         // Lose the index, keep writing, then rebuild it on the
                         // next open.
                         storage.drop_entity_key_index().unwrap();
-                        assert!(storage.lookup_entity_keys(&["redis"]).unwrap().is_none());
+                        assert_eq!(
+                            storage.lookup_entity_keys(&["redis"]).unwrap(),
+                            EntityKeyLookup::Unavailable
+                        );
                         let id = random_new_id(&mut rng, &mut counter);
                         let body = random_entity_body(&mut rng);
                         storage
@@ -2235,7 +2965,31 @@ mod tests {
                         ids.push(id);
                         drop(storage);
                         storage = open_indexed(&path);
+                        trusted = true;
                         "rebuild"
+                    }
+                    // An older binary inserts a fresh row or deletes any row.
+                    10 => {
+                        let id = RecordId::new();
+                        let table = *rng.pick(&TABLES);
+                        let body = random_entity_body(&mut rng);
+                        storage.older_writer_insert(&record_with(table, id.clone(), body));
+                        ids.push(id);
+                        trusted = false;
+                        "older insert"
+                    }
+                    11 if !ids.is_empty() => {
+                        let id = rng.pick(&ids).clone();
+                        storage.older_writer_delete(&id);
+                        trusted = false;
+                        "older delete"
+                    }
+                    // Repair the way auto-linking does once it sees the index
+                    // decline: rebuild it.
+                    12 if !trusted => {
+                        storage.rebuild_entity_key_index().unwrap();
+                        trusted = true;
+                        "repair"
                     }
                     _ => {
                         let id = random_new_id(&mut rng, &mut counter);
@@ -2246,13 +3000,18 @@ mod tests {
                         "insert other"
                     }
                 };
-                assert_index_matches_scan(&storage, &format!("seed {seed} step {step} ({what})"));
+                let context = format!("seed {seed} step {step} ({what})");
+                if trusted {
+                    assert_index_matches_scan(&storage, &context);
+                } else {
+                    assert_index_never_wrong(&storage, &context);
+                }
             }
         }
     }
 
     #[test]
-    fn entity_key_index_is_built_on_open_for_a_store_without_one() {
+    fn entity_key_index_is_built_for_a_store_without_one() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("legacy.axil");
         {
@@ -2279,20 +3038,30 @@ mod tests {
             // and no marker.
             storage.drop_entity_key_index().unwrap();
             assert!(!storage.entity_key_index_ready().unwrap());
-            assert!(storage.lookup_entity_keys(&["redis"]).unwrap().is_none());
+            assert_eq!(
+                storage.lookup_entity_keys(&["redis"]).unwrap(),
+                EntityKeyLookup::Unavailable
+            );
         }
 
         // Read-only handles never build it; they keep reporting "scan".
         {
             let ro = Storage::open_read_only(&path).unwrap();
             assert!(!ro.ensure_entity_key_index().unwrap());
-            assert!(ro.lookup_entity_keys(&["redis"]).unwrap().is_none());
+            assert_eq!(
+                ro.lookup_entity_keys(&["redis"]).unwrap(),
+                EntityKeyLookup::Unavailable
+            );
         }
 
         let storage = Storage::open(&path).unwrap();
         assert!(
+            !storage.entity_key_index_ready().unwrap(),
+            "opening does not build"
+        );
+        assert!(
             storage.ensure_entity_key_index().unwrap(),
-            "first open builds"
+            "the first ensure builds"
         );
         assert!(
             !storage.ensure_entity_key_index().unwrap(),
@@ -2302,7 +3071,11 @@ mod tests {
         assert_index_matches_scan(&storage, "after migration");
         // The later of the two `redis` rows wins even though the earlier one
         // has the larger id.
-        let found = storage.lookup_entity_keys(&["redis"]).unwrap().unwrap();
+        let found = storage
+            .lookup_entity_keys(&["redis"])
+            .unwrap()
+            .into_found()
+            .unwrap();
         let winner = storage.get(&found["redis"]).unwrap().unwrap();
         assert_eq!(winner.data["tag"], 2);
     }
@@ -2317,14 +3090,255 @@ mod tests {
         storage
             .update(&id, json!({"canonical_id": "redis"}))
             .unwrap();
-        assert!(storage
-            .lookup_entity_keys(&["redis"])
-            .unwrap()
-            .unwrap()
-            .is_empty());
+        assert_eq!(
+            storage.lookup_entity_keys(&["redis"]).unwrap(),
+            EntityKeyLookup::Found(Default::default())
+        );
         let txn = storage.begin_read().unwrap();
         if let Ok(members) = txn.open_table(ENTITY_KEY_MEMBERS) {
             assert!(members.get(id.as_str()).unwrap().is_none());
         }
+    }
+
+    /// Two entity rows under different keys plus a built index, for the
+    /// older-writer scenarios below.
+    fn indexed_pair() -> (Storage, tempfile::TempDir, RecordId, RecordId) {
+        let (storage, dir) = temp_storage();
+        let redis = storage
+            .insert(&Record::new("_entities", json!({"canonical_id": "redis"})))
+            .unwrap();
+        let kafka = storage
+            .insert(&Record::new("_entities", json!({"canonical_id": "kafka"})))
+            .unwrap();
+        assert!(storage.ensure_entity_key_index().unwrap());
+        assert_index_matches_scan(&storage, "before the older writer");
+        (storage, dir, redis, kafka)
+    }
+
+    /// An older binary adds an entity the index has never seen. Trusting the
+    /// index would report the key absent, and auto-linking would create a
+    /// duplicate entity.
+    #[test]
+    fn entity_key_index_declines_after_an_older_writer_inserts() {
+        let (storage, _dir, _redis, _kafka) = indexed_pair();
+        let broker = Record::new("_entities", json!({"canonical_id": "kafka_broker"}));
+        storage.older_writer_insert(&broker);
+
+        assert_eq!(
+            storage.lookup_entity_keys(&["kafka_broker"]).unwrap(),
+            EntityKeyLookup::Stale
+        );
+        assert_eq!(
+            storage.entity_key_index_status().unwrap(),
+            EntityKeyIndexStatus::Stale
+        );
+        assert!(storage.ensure_entity_key_index().unwrap(), "stale rebuilds");
+        let found = storage
+            .lookup_entity_keys(&["kafka_broker"])
+            .unwrap()
+            .into_found()
+            .unwrap();
+        assert_eq!(found["kafka_broker"], broker.id);
+        assert_index_matches_scan(&storage, "after the rebuild");
+    }
+
+    /// An older binary deletes an entity. Trusting the index would link new
+    /// mentions to the deleted id.
+    #[test]
+    fn entity_key_index_declines_after_an_older_writer_deletes() {
+        let (storage, _dir, _redis, kafka) = indexed_pair();
+        storage.older_writer_delete(&kafka);
+        assert_eq!(
+            storage.lookup_entity_keys(&["kafka"]).unwrap(),
+            EntityKeyLookup::Stale
+        );
+        storage.rebuild_entity_key_index().unwrap();
+        assert_index_matches_scan(&storage, "after the rebuild");
+    }
+
+    /// A maintained write after an older writer's must not re-stamp the
+    /// marker over the gap: the index stays untrusted until it is rebuilt,
+    /// even when the list later returns to bytes it once had.
+    #[test]
+    fn entity_key_index_stays_untrusted_after_later_maintained_writes() {
+        let (storage, _dir, redis, _kafka) = indexed_pair();
+        let broker = Record::new("_entities", json!({"canonical_id": "kafka_broker"}));
+        storage.older_writer_insert(&broker);
+        // Leaves the list exactly as the marker last saw it, but the index
+        // never learned about `redis` being rewritten below.
+        storage.delete(&broker.id).unwrap();
+        storage.older_writer_update(&redis, json!({"canonical_id": "valkey"}));
+        storage
+            .insert(&Record::new("_entities", json!({"canonical_id": "pool"})))
+            .unwrap();
+        assert_eq!(
+            storage.lookup_entity_keys(&["valkey"]).unwrap(),
+            EntityKeyLookup::Unavailable
+        );
+        assert!(storage.ensure_entity_key_index().unwrap());
+        assert_index_matches_scan(&storage, "after the rebuild");
+    }
+
+    /// An older binary rewrites the key of a row the index would return
+    /// (SCIP's provisional -> canonical upgrade, `merge_entities`). The list
+    /// is unchanged, so only reading the row back catches it.
+    #[test]
+    fn entity_key_index_declines_when_a_returned_row_was_rewritten() {
+        let (storage, _dir, redis, _kafka) = indexed_pair();
+        storage.older_writer_update(&redis, json!({"canonical_id": "valkey"}));
+        assert_eq!(
+            storage.lookup_entity_keys(&["redis"]).unwrap(),
+            EntityKeyLookup::Stale
+        );
+        assert_eq!(storage.verify_entity_key_index().unwrap(), Some(1));
+        storage.rebuild_entity_key_index().unwrap();
+        assert_index_matches_scan(&storage, "after the rebuild");
+    }
+
+    /// The one older-writer change a lookup cannot see: a row rewritten in
+    /// place *to* a requested key. Verification finds it, and a rebuild
+    /// repairs it.
+    #[test]
+    fn entity_key_index_verification_finds_a_key_rewritten_onto_a_row() {
+        let (storage, _dir, _redis, kafka) = indexed_pair();
+        storage.older_writer_update(&kafka, json!({"canonical_id": "rabbitmq"}));
+        assert_eq!(
+            storage.lookup_entity_keys(&["rabbitmq"]).unwrap(),
+            EntityKeyLookup::Found(Default::default()),
+            "documented blind spot: the index has not seen the new key"
+        );
+        assert_eq!(storage.verify_entity_key_index().unwrap(), Some(1));
+        storage.rebuild_entity_key_index().unwrap();
+        assert_index_matches_scan(&storage, "after the rebuild");
+    }
+
+    /// A repair writes only the entries that disagree with the rows, and an
+    /// index already in step commits nothing: refilling both tables on every
+    /// repair is what grew the file each time an older binary wrote.
+    #[test]
+    fn entity_key_index_repair_writes_only_what_changed() {
+        let (storage, _dir) = temp_storage();
+        for i in 0..40 {
+            storage
+                .insert(&Record::new(
+                    "_entities",
+                    json!({"canonical_id": format!("entity_{i}")}),
+                ))
+                .unwrap();
+        }
+        let first = storage.rebuild_entity_key_index().unwrap();
+        assert_eq!(
+            first,
+            EntityKeyIndexRebuild {
+                rows: 40,
+                changed: 40,
+                written: true
+            }
+        );
+        let again = storage.rebuild_entity_key_index().unwrap();
+        assert_eq!(
+            again,
+            EntityKeyIndexRebuild {
+                rows: 40,
+                changed: 0,
+                written: false
+            },
+            "an index in step is left alone"
+        );
+
+        let added = Record::new("_entities", json!({"canonical_id": "kafka_broker"}));
+        storage.older_writer_insert(&added);
+        let rewritten = storage.list("_entities", 1, 3).unwrap().remove(0);
+        storage.older_writer_update(&rewritten.id, json!({"canonical_id": "valkey"}));
+        let deleted = storage.list("_entities", 1, 7).unwrap().remove(0);
+        storage.older_writer_delete(&deleted.id);
+        assert_eq!(
+            storage.entity_key_index_status().unwrap(),
+            EntityKeyIndexStatus::Stale
+        );
+        let repair = storage.rebuild_entity_key_index().unwrap();
+        assert_eq!(
+            repair,
+            EntityKeyIndexRebuild {
+                rows: 40,
+                changed: 3,
+                written: true
+            },
+            "one added, one rewritten, one deleted"
+        );
+        assert_index_matches_scan(&storage, "after the repair");
+
+        // An id an older binary added and dropped again costs the repair
+        // nothing; only the row it kept is indexed.
+        let transient = Record::new("_entities", json!({"entity": "no key"}));
+        storage.older_writer_insert(&transient);
+        storage.older_writer_insert(&Record::new("_entities", json!({"name": "pool"})));
+        storage.older_writer_delete(&transient.id);
+        let stamped = storage.rebuild_entity_key_index().unwrap();
+        assert!(stamped.written && stamped.changed == 1);
+        assert!(storage.entity_key_index_ready().unwrap());
+    }
+
+    /// A build that fails is remembered against the list it failed on: the
+    /// next `ensure` skips it, and a change to the list makes it try again.
+    #[test]
+    fn entity_key_index_remembers_a_failed_build_until_the_list_changes() {
+        let (storage, _dir) = temp_storage();
+        let good = storage
+            .insert(&Record::new("_entities", json!({"canonical_id": "redis"})))
+            .unwrap();
+        let bad = Record::new("_entities", json!({"canonical_id": "broken"}));
+        storage.older_writer_insert(&bad);
+        storage.older_writer_put_raw(&bad.id, b"not a record");
+
+        assert!(storage.ensure_entity_key_index().is_err());
+        assert_eq!(
+            storage.entity_key_index_status().unwrap(),
+            EntityKeyIndexStatus::Failed {
+                row: bad.id.as_str().to_string()
+            }
+        );
+        assert!(!storage.ensure_entity_key_index().unwrap(), "not retried");
+        assert_eq!(
+            storage.lookup_entity_keys(&["redis"]).unwrap(),
+            EntityKeyLookup::Unavailable
+        );
+
+        storage.older_writer_delete_raw(&bad.id);
+        assert_eq!(
+            storage.entity_key_index_status().unwrap(),
+            EntityKeyIndexStatus::Absent,
+            "the list changed, so the failure no longer applies"
+        );
+        assert!(storage.ensure_entity_key_index().unwrap());
+        let found = storage
+            .lookup_entity_keys(&["redis"])
+            .unwrap()
+            .into_found()
+            .unwrap();
+        assert_eq!(found["redis"], good);
+    }
+
+    /// A handle switched off neither answers nor maintains, and its writes
+    /// retire the index so a later handle cannot trust what it missed.
+    #[test]
+    fn entity_key_index_switched_off_discards_on_write() {
+        let (storage, _dir, _redis, _kafka) = indexed_pair();
+        storage.set_entity_key_index_enabled(false);
+        assert_eq!(
+            storage.lookup_entity_keys(&["redis"]).unwrap(),
+            EntityKeyLookup::Unavailable
+        );
+        assert!(!storage.ensure_entity_key_index().unwrap());
+        storage
+            .insert(&Record::new("_entities", json!({"canonical_id": "pool"})))
+            .unwrap();
+        storage.set_entity_key_index_enabled(true);
+        assert_eq!(
+            storage.entity_key_index_status().unwrap(),
+            EntityKeyIndexStatus::Absent
+        );
+        assert!(storage.ensure_entity_key_index().unwrap());
+        assert_index_matches_scan(&storage, "after switching back on");
     }
 }

@@ -20,6 +20,9 @@ ureq = { workspace = true, optional = true }
 # Non-optional: k-widening is part of the default recall feature set.
 flate2 = { workspace = true }
 sha2 = "0.10"
+# Fingerprint of the `_entities` id list for the entity key index. Already in
+# the dependency graph through flate2, so it adds no crate to the build.
+crc32fast = "1"
 regex = "1"
 # AEAD for opt-in encryption-at-rest (record bodies). Pure-Rust XChaCha20-Poly1305
 # — no AES-NI assumption. `getrandom` pulls the OS CSPRNG for per-write nonces.
