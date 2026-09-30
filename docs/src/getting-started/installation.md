@@ -74,6 +74,56 @@ cargo install --path crates/adapters/axil-cli --features full   # everything
 > prebuilt binary (`cargo binstall` / archive download), which bundles a
 > matching runtime.
 
+## Mixing binary versions on one database
+
+Agent hooks run the `axil` that comes first on your `PATH` (usually
+`~/.cargo/bin/axil`). If you or an agent also run a build from a checkout
+(`./target/release/axil`) against the same database, two versions take turns
+writing it. So whenever you start using a build from a checkout, install it on
+your `PATH` at the same time:
+
+```bash
+cargo install --path crates/adapters/axil-cli   # from the same checkout
+```
+
+Mixing versions doesn't corrupt anything, but the graph file makes it cost
+time. Newer builds keep per-node adjacency tables next to the edges in
+`memory.axil.graph`, and older builds write edges without updating them. The
+first graph operation of a newer build after an older one has written brings
+the tables up to date:
+
+| What the older build did since | What the newer build does first | CPU on the 161k-edge dogfood snapshot |
+|---|---|---|
+| Nothing | Checks a stamp (three lookups) | — |
+| Only added edges (`link`, `store`, `ingest-scip`) | Reads just the added edges | 0.03 s after one `link` |
+| Deleted any edge (`delete` of a linked record, `unlink`, `compact`) | Decodes every edge and diffs them against the tables | 0.49 s |
+| Nothing ever: the tables don't exist yet | Builds them once (322,746 entries) | 1.05 s |
+
+For comparison, the older build spends 0.52-0.62 s of CPU loading every edge
+on each command that touches the graph. These are user + sys seconds measured
+on a heavily loaded machine, so treat them as rough; see
+`benchmarks/results/graph-adjacency-size-2026-09-30.json` in the repository.
+The work runs in whichever process gets there first, often a hook with a short
+timeout. If that process is killed partway through, the work it committed is
+kept and the next one finishes the rest.
+
+The tables also take room in the file. A file has two sizes: its length, which
+`ls` and `axil info` show, and the disk it takes up, which `du` shows. redb
+lengthens a file without writing the new part, and filesystems such as APFS
+and ext4 give that unwritten part no disk until it is used. On the same
+snapshot, building the tables fit in free pages the file already had: the data
+in it went from 70.5 MB to 119.2 MB (redb's count of pages in use) while its
+length and its disk use both stayed at 120.7 MB. A later `ingest-scip` that
+added 25,507 edges then took the length to 241.4 MB and the disk use to
+144.0 MB; the older build stays at 120.7 MB for both. redb doubles a file of
+this size when it runs out of free pages.
+
+`axil compact` compacts the graph file only when at most 40% of the disk it
+takes up holds data, as after deleting many edges. The files above hold data
+in 97-99% of theirs, so it leaves them alone. Compacting copies of them
+anyway gave back 1.3-3.1% of their disk use and, because redb doubled each
+packed file again when closing it, left them 16-97% longer.
+
 ## Picking components
 
 Axil is assembled from three extensibility tiers — [Engines, Extensions, and Adapters](../extending/overview.md) — each behind a compile-time Cargo feature on `axil-cli`:

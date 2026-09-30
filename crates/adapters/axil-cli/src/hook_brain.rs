@@ -1156,7 +1156,10 @@ impl HookCtx {
 
     /// The brain's own binary for a lookup, with the slow-query log off:
     /// logging a slow read is a write, and a hook's reads must not write
-    /// under the harness's kill timeout.
+    /// under the harness's kill timeout. The one exception is the graph's
+    /// first read after an older binary wrote edges, which brings its
+    /// adjacency tables up to date in commits a kill can't leave half done
+    /// (see `GraphEngine::prepare` in axil-graph).
     fn axil_cmd(&self) -> Command {
         let mut cmd = Command::new(&self.exe);
         cmd.env("AXIL_SLOW_QUERY_LOG", "0");

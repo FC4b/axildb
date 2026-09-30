@@ -995,6 +995,8 @@ enum Command {
 
     /// Memory lifecycle: hard-delete expired/superseded records and clean
     /// orphaned edges/vectors/FTS, reclaiming space. Does NOT downsample.
+    /// Then compacts the graph file when at most 40% of its disk use holds
+    /// data (reported under `graph_file`).
     Compact {
         /// Instead of compacting, delete the companion file left behind by a
         /// removed Engine: `vector`, `graph`, `timeseries`, or `fts`. The core
@@ -6288,6 +6290,43 @@ fn attach_detected_engines(mut builder: axil_core::AxilBuilder) -> Result<axil_c
     Ok(builder)
 }
 
+/// Give the free pages in the database's `.graph` file back to the
+/// filesystem, for `axil compact`; see [`axil_graph::compact_graph_store`]
+/// for when it does. The database must be closed. `None` when there is no
+/// graph file to compact: none on disk, the graph Engine disabled in
+/// `axil.toml`, or a build without it.
+///
+/// Records were already purged by then, so a failure here is reported in
+/// the result, not raised.
+fn compact_graph_file(path: &Path) -> Option<serde_json::Value> {
+    #[cfg(feature = "graph")]
+    {
+        let config = path
+            .parent()
+            .and_then(|dir| axil_core::load_config_from(dir).ok())
+            .unwrap_or_default();
+        if config.is_engine_disabled("graph") {
+            return None;
+        }
+        match axil_graph::compact_graph_store(path) {
+            Ok(report) => report.map(|r| serde_json::to_value(r).unwrap()),
+            Err(e) if e.is_busy() => Some(json!({
+                "compacted": false,
+                "skipped": "another process has the graph store open; run `axil compact` again once it is done",
+            })),
+            Err(e) => {
+                eprintln!("axil: warning: graph file not compacted: {e}");
+                Some(json!({ "compacted": false, "error": e.to_string() }))
+            }
+        }
+    }
+    #[cfg(not(feature = "graph"))]
+    {
+        let _ = path;
+        None
+    }
+}
+
 /// Open a database with all detected plugins.
 fn open_with_all_detected(path: &Path) -> Result<Axil> {
     let builder = attach_detected_engines(Axil::open(path))?;
@@ -8456,7 +8495,14 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             } else {
                 let db = open_with_all_detected(&db_path)?;
                 let report = db.compact().context("compact failed")?;
-                out.print(&serde_json::to_value(&report).unwrap());
+                // The graph file compacts only through the one writable
+                // handle, which the open database holds.
+                drop(db);
+                let mut value = serde_json::to_value(&report).unwrap();
+                if let Some(graph_file) = compact_graph_file(&db_path) {
+                    value["graph_file"] = graph_file;
+                }
+                out.print(&value);
                 Ok(EXIT_OK)
             }
         }
