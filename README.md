@@ -13,7 +13,7 @@
 
 *A memory that compounds: every session it learns, links, and prunes — so your agent starts tomorrow smarter than it ended today.*
 
-**Built in Rust · local-first · single ~5–10MB binary · vector + graph + full-text + time-series · MCP · up to ~94% fewer context tokens on real-repo workloads**
+**Built in Rust · local-first · single binary · vector + graph + full-text + time-series · MCP · up to ~94% fewer context tokens on real-repo workloads**
 
 [![CI](https://github.com/FC4b/axildb/actions/workflows/ci.yml/badge.svg)](https://github.com/FC4b/axildb/actions/workflows/ci.yml)
 [![License: PolyForm NC](https://img.shields.io/badge/license-PolyForm--NC-blue.svg)](LICENSE)
@@ -41,7 +41,7 @@ Your coding agent is brilliant and amnesiac. Every session it re-reads the same 
 Good agent memory has to be four things — navigable, fast, fresh, and compounding. Axil is all four, locally, for the code domain:
 
 - 🕸️ **Navigable** — not a flat log but a graph you can walk: a knowledge graph of typed edges, a SCIP **code-graph** (real callers/callees, not keyword guesses), and **version-pinned dependency-doc memory** (your *exact* lib versions, zero network) — fused with vector, full-text, and time-series in one `.axil` file. Ask "where is X" and get a pointer in **~100 tokens**, not a stack of file reads.
-- ⚡ **Fast** — a file you embed, not a server you run: no Postgres, no cloud, no daemon. **<100 ms** commands from a ~5–10 MB binary, zero network hop, fully offline.
+- ⚡ **Fast** — a file you embed, not a server you run: no Postgres, no cloud, no daemon. One local binary over one local file, zero network hop, fully offline.
 - 🔄 **Fresh** — memory that keeps up with the code: background hooks auto-capture decisions and errors as you work, and SCIP + dep-doc **drift detection** refreshes indexes only when they've gone stale (`--if-stale`) — recall tracks the code as it moves.
 - 🧠 **Compounding** — memory that gets *better* across sessions, not just bigger: active forgetting (decay + reinforcement), a belief system, consolidation that supersedes near-duplicates and nominates conflicting updates for review, and structured checkpoints — all rule-based, **no LLM required**.
 - 🔗 **One memory, every tool** — the same portable `.axil` brain is read *and* written by Claude Code, OpenAI Codex, GitHub Copilot CLI, Factory Droid, Google Antigravity, Qwen Code, OpenCode, Cursor, any MCP client, or your own Rust. No vendor lock-in.
@@ -204,7 +204,7 @@ The honest version — what you'd otherwise reach for, what it costs you, and wh
 |----------------------|-------------------|------|
 | **A markdown notes file** | No retrieval or ranking — it grows unbounded and you paste the *whole* thing into context every turn | Ranked recall + active forgetting; hands the agent the *right* memory, not all of it |
 | **A vector DB** (pgvector, Chroma) | A service to run, and vectors *only* — no graph, no full-text, no cognition; you bolt an LLM on for extraction | One embedded file fuses vector + graph + full-text + time-series; rule-based cognition, **no LLM required** |
-| **An LLM-memory framework** (Mem0, Zep, Letta) | Needs an LLM **and** external databases just to store a memory; lower recall in our tests ([below](#benchmarks)) | No LLM, no server, no daemon — a ~5–10 MB binary, 100% offline, higher recall |
+| **An LLM-memory framework** (Mem0, Zep, Letta) | Needs an LLM **and** external databases just to store a memory; lower recall in our tests ([below](#benchmarks)) | No LLM, no server, no daemon — a single binary, 100% offline, higher recall |
 | **A managed context engine** (Redis Iris / Agent Memory) | A cloud account and four managed services — or self-hosting Python + Docker + Redis + background workers — plus an LLM key just to extract memories | One offline binary, algorithmic extraction — no account, no cloud, no LLM |
 | **A single-file doc store** (Memvid) | Local and single-file like Axil — but a smart *doc* store: no knowledge graph, no entity extraction, no memory types | Structured agent memory: code-graph, entity inference, 5 memory types, consolidation |
 
@@ -226,7 +226,7 @@ The third hero panel — **"finds the right code"** — is a mechanical check on
 
 ## What you get
 
-Everything below normally means standing up a vector DB **and** Neo4j **and** Elasticsearch **and** an LLM extraction pipeline. Axil is all of it in **one ~5–10 MB binary, no server, no LLM** — with real agent cognition, not just storage:
+Everything below normally means standing up a vector DB **and** Neo4j **and** Elasticsearch **and** an LLM extraction pipeline. Axil is all of it in **one binary, no server, no LLM** — with real agent cognition, not just storage:
 
 **🧠 Cognitive memory (no LLM required)** — 5 memory types (working, semantic, episodic, procedural, preference) · auto-importance scoring · active forgetting (decay + reinforcement) · belief system · auto-capture of errors & decisions · near-duplicate superseding & conflict candidates.
 
@@ -260,10 +260,10 @@ Everything below normally means standing up a vector DB **and** Neo4j **and** El
 
 And it's small and fast where it counts:
 
-- **100% needle-recall (6/6), CI-enforced** — every build runs [`scripts/needle-recall-gate.sh`](scripts/needle-recall-gate.sh): a planted fact must come back in the top-5 with its distinctive token intact, or the build fails.
+- **100% needle-recall (31/31), CI-enforced** — every PR runs [`scripts/needle-recall-gate.sh`](scripts/needle-recall-gate.sh): each of the 31 planted facts must come back in the top-5, and at least 90% of them with their distinctive token intact, or the build fails *(31/31 recalled and intact on the current build; the script prints the counts)*.
 - **~173× faster vector search** than SQLite + sqlite-vec at 100k vectors, once a long-lived process (the MCP or HTTP server) has built the HNSW graph; a one-shot CLI call scans exactly instead, up to 100k vectors *(in-tree [`sqlite-compare`](benchmarks/sqlite-compare) harness; CI gates a reduced-n speedup floor, the 100k figure is a local run)*.
 - Competitive recall at a fraction of the per-query token budget *(estimate — assumes ~950 tokens/query; see [methodology](docs/src/advanced/benchmarks.md))*.
-- **<100 ms** commands from a **~5–10 MB** offline binary — no LLM call, no network, no daemon.
+- **One offline binary** — no LLM call, no network hop, no daemon to keep running.
 
 > *Competitor figures (MemPalace, Hindsight, Mem0, Zep, Memvid) are cited from the published LongMemEval landscape as of April 2026 — recall@5 for the no-LLM systems, end-to-end QA accuracy for the LLM/server ones — not measured by Axil.* Axil's LongMemEval harness is **in-tree** at [`benchmarks/longmemeval`](benchmarks/longmemeval); both Axil figures are committed 500-question baselines — Recall-QTC **93.5%** ([`qtc-500.json`](benchmarks/results/qtc-500.json)) and Recall-fusion **91.5%** ([`fusion-500.json`](benchmarks/results/fusion-500.json)) — re-measured 2026-06-27 on the current build (`bge-small`, top-k 5, ONNX Runtime CUDA on an RTX 3080). The LongMemEval-S dataset is out-of-tree, so the CI gate skips-loud (a green run never means it re-verified); re-run locally with the dataset present. Search is an exact scan below 20k vectors (100k in a one-shot CLI call), so a rerun reproduces these figures. The `sqlite-compare`, **needle-recall**, and Criterion hot-path harnesses are all in-tree (the first two CI-gated). → Full tables, per-category breakdown, and methodology: **[Benchmarks](docs/src/advanced/benchmarks.md)**.
 
@@ -277,12 +277,12 @@ After the one-command setup above, **the loop runs itself** — every session, w
    │   1. BOOT     │ ───▶ │    2. WORK         │ ───▶ │   3. CHECKPOINT     │
    │ inject recent │      │ recall on demand   │      │ write "resume here" │
    │ context from  │      │ + auto-capture     │      │ so the next session │
-   │ .axil &lt;100 ms │      │ decisions &amp; errors │      │ resumes, not restart│
+   │ the .axil file│      │ decisions &amp; errors │      │ resumes, not restart│
    └───────────────┘      └────────────────────┘      └─────────────────────┘
           ▲                                                       │
           ╰──────────────  next session boots from it  ◀──────────╯
 
-   one .axil file · no server · no LLM · &lt;100 ms · 100% offline
+   one .axil file · no server · no LLM · no daemon · 100% offline
 </pre>
 </div>
 
