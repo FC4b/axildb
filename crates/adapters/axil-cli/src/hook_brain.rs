@@ -2121,6 +2121,12 @@ pub(crate) fn drain(db: &Path) -> Result<i32> {
 /// On a filesystem that refuses OS locks (some network, FUSE or container
 /// mounts) it falls back to the protocol older axils use: the file is
 /// created exclusively, carries a bare pid, and is judged stale by its age.
+///
+/// On Unix a spawned child gets a copy of every open handle until it execs,
+/// and the OS lock goes only with the last copy. In a process that spawns
+/// from one thread while another takes or drops this lock, the lock can
+/// outlive the drop by that moment, and a drainer that checks then sees it
+/// held.
 struct DrainLock {
     path: PathBuf,
     /// The OS-locked handle, or `None` when the lock is held by the file's
@@ -3820,6 +3826,29 @@ mod tests {
             .unwrap();
     }
 
+    /// Serializes the drain lock tests. One of them spawns a process, and on
+    /// Unix a child holds a copy of every handle open in this process until
+    /// it execs, the OS lock of a handle another test just dropped included.
+    fn drain_lock_serial() -> std::sync::MutexGuard<'static, ()> {
+        static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        SERIAL.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// `DrainLock::acquire` where this process has just released the OS lock.
+    /// Any other test in this binary that spawns a process can hold a copy of
+    /// the released handle for a moment (see `drain_lock_serial`), so a
+    /// `None` is retried briefly; a lock that is never released still fails.
+    fn acquire_after_release(dir: &Path) -> Option<DrainLock> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let lock = DrainLock::acquire(dir);
+            if lock.is_some() || std::time::Instant::now() > deadline {
+                return lock;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     /// Not a test on its own: `drain_lock_freed_when_holder_is_killed` runs
     /// the test binary on just this function to get a second process that
     /// holds the lock until it is killed.
@@ -3838,6 +3867,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn drain_lock_freed_when_holder_is_killed() {
+        let _serial = drain_lock_serial();
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path();
         let mut child = Command::new(std::env::current_exe().unwrap())
@@ -3877,6 +3907,7 @@ mod tests {
 
     #[test]
     fn drain_lock_live_holder_with_old_mtime_is_not_stolen() {
+        let _serial = drain_lock_serial();
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path();
         let held = DrainLock::acquire(dir).expect("free lock");
@@ -3886,21 +3917,23 @@ mod tests {
         assert!(DrainLock::acquire(dir).is_none());
         assert!(dir.join("drain.lock").exists());
         drop(held);
-        assert!(DrainLock::acquire(dir).is_some());
+        assert!(acquire_after_release(dir).is_some());
     }
 
     #[test]
     fn drain_lock_honors_an_older_axil_until_stale() {
+        let _serial = drain_lock_serial();
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path();
         let path = dir.join("drain.lock");
         // What an older drainer writes: a bare pid, and no OS lock.
         std::fs::write(&path, "4242").unwrap();
+        // This takes the OS lock, finds the live legacy holder and lets go.
         assert!(DrainLock::acquire(dir).is_none());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "4242");
 
         age_file(&path, DRAIN_LOCK_STALE_SECS + 60);
-        let lock = DrainLock::acquire(dir).expect("a stale legacy lock is taken over");
+        let lock = acquire_after_release(dir).expect("a stale legacy lock is taken over");
         assert!(lock_body(&lock).starts_with(DRAIN_LOCK_TAG));
         drop(lock);
     }
@@ -3926,6 +3959,7 @@ mod tests {
 
     #[test]
     fn drain_lock_without_os_locks_falls_back_to_the_age_rule() {
+        let _serial = drain_lock_serial();
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path();
         let path = dir.join("drain.lock");
