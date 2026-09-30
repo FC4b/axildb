@@ -109,6 +109,10 @@ the end-of-session heal pass and bare `axil heal` — set
 `[lifecycle.tables.<t>] compact = "never"` to exempt an append-only table
 entirely (see [Memory Hygiene](../advanced/memory-hygiene.md)).
 
+It then compacts the graph file when at most 40% of the disk it takes up
+holds data, as after many edges were deleted, and reports the file's length
+and disk use before and after in `graph_file`.
+
 ```bash
 axil compact
 ```
@@ -119,7 +123,7 @@ Rebuild drifted indexes or roll up old data. Run deliberately — check
 `axil doctor` first.
 
 ```bash
-axil heal --compact     # same as `axil compact`
+axil heal --compact     # `axil compact`'s purge, without the graph file
 axil heal --reindex     # rebuild all indexes from the canonical records (slow)
 axil heal --orphans     # clean orphaned companion entries only
 axil heal --dry-run     # print what would be fixed, change nothing

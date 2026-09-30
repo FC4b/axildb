@@ -979,15 +979,10 @@ impl GraphEngine {
     /// the file's lock, and callers can wait for it as they do for the core
     /// database's.
     pub fn open(db_path: impl AsRef<Path>) -> Result<Self> {
-        let graph_path = companion_path(db_path.as_ref(), ".graph");
-        let graph_db = Database::create(&graph_path).map_err(|e| match e {
-            redb::DatabaseError::DatabaseAlreadyOpen => AxilError::Busy,
-            e => AxilError::Plugin(Box::new(std::io::Error::other(format!(
-                "failed to open graph store at {}: {e}",
-                graph_path.display()
-            )))),
-        })?;
-        Self::from_database(graph_db)
+        Self::from_database(open_graph_file(&companion_path(
+            db_path.as_ref(),
+            ".graph",
+        ))?)
     }
 
     /// Wrap an open store, creating its tables if it is new.
@@ -1806,6 +1801,152 @@ impl AxilBuilderGraphExt for AxilBuilder {
 /// Re-export for CLI: check if a graph store exists for the given database.
 pub fn has_graph_store(db_path: &Path) -> bool {
     companion_path(db_path, ".graph").exists()
+}
+
+/// Open the graph file at `graph_path` for writing, creating it if absent.
+/// [`AxilError::Busy`] when another handle has it open.
+fn open_graph_file(graph_path: &Path) -> Result<Database> {
+    Database::create(graph_path).map_err(|e| match e {
+        redb::DatabaseError::DatabaseAlreadyOpen => AxilError::Busy,
+        e => AxilError::Plugin(Box::new(std::io::Error::other(format!(
+            "failed to open graph store at {}: {e}",
+            graph_path.display()
+        )))),
+    })
+}
+
+// ── File compaction ─────────────────────────────────────────────────
+
+/// What [`compact_graph_store`] found in a `.graph` file and did to it.
+///
+/// `size_bytes` is the file's length, what `ls` and `axil info` show.
+/// `disk_bytes` is the disk it takes up. redb lengthens a file without
+/// writing the new part, so where the filesystem keeps unwritten ranges as
+/// holes (APFS, ext4, XFS, btrfs) the two differ. It is the allocated
+/// blocks on Unix and the length elsewhere.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct GraphFileCompaction {
+    /// Whether the file was rewritten.
+    pub compacted: bool,
+    /// Why it was left as it was, when it was.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skipped: Option<String>,
+    /// Bytes of pages redb had in use before compaction.
+    pub in_use_bytes: u64,
+    /// The file's length before.
+    pub size_bytes_before: u64,
+    /// The disk the file took up before.
+    pub disk_bytes_before: u64,
+    /// The file's length after, once redb closed it.
+    pub size_bytes_after: u64,
+    /// The disk the file took up after, once redb closed it.
+    pub disk_bytes_after: u64,
+}
+
+/// The disk a file takes up: its allocated blocks where the platform
+/// reports them, its length elsewhere.
+fn disk_bytes(meta: &std::fs::Metadata) -> u64 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        meta.blocks() * 512
+    }
+    #[cfg(not(unix))]
+    {
+        meta.len()
+    }
+}
+
+/// Most of a `.graph` file's disk use, in percent, that may hold data for
+/// [`compact_graph_store`] to compact it.
+const COMPACT_MAX_IN_USE_PERCENT: u64 = 40;
+
+/// Rewrite the `.graph` file of the database at `db_path` with its pages
+/// packed at the front, giving the free ones back to the filesystem, when
+/// at most 40% of the disk it takes up holds data. `Ok(None)` when the
+/// database has no graph store.
+///
+/// The store must be closed: redb compacts only through the one writable
+/// handle, so drop every engine on it first. [`AxilError::Busy`] when
+/// another handle, in this process or another, has it open.
+///
+/// # Why only when mostly free
+///
+/// redb 3.1.3 writes its allocator state on every close, and that commit
+/// needs fresh pages. A compacted file has none left, and redb grows a
+/// file smaller than one region (4 GiB at the default 4 KiB page) by
+/// doubling it, so the file comes out of the close about twice as long as
+/// the data it holds. The new half is never written: on filesystems that
+/// keep unwritten ranges as holes it takes no disk, but elsewhere, and in
+/// a copy that doesn't keep holes, it takes its full length. Below half,
+/// the result is no larger than before by length or disk use on any
+/// filesystem. The margin down to 40% keeps a file just compacted on a
+/// filesystem without holes, which then holds data in about half its
+/// disk, from being compacted again by every run.
+///
+/// The files this engine writes are mostly full until many edges are
+/// deleted: on copies of the 161,373-edge dogfood snapshot, 96.9-98.7% of
+/// their disk use held data. Compacting them anyway gave back 1.3-3.1% of
+/// the disk and left them 16-97% longer, after about 10 s of work each on
+/// a busy machine (benchmarks/results/graph-adjacency-size-2026-09-30.json).
+///
+/// # If it is interrupted
+///
+/// Compaction moves pages in ordinary atomic commits, so a killed
+/// compaction loses no data; as after any killed writer, redb repairs the
+/// file on its next open. Compaction changes where the tables' pages sit,
+/// not what they hold, so the adjacency tables stay current.
+pub fn compact_graph_store(db_path: impl AsRef<Path>) -> Result<Option<GraphFileCompaction>> {
+    let path = companion_path(db_path.as_ref(), ".graph");
+    let io = |e: std::io::Error| {
+        AxilError::Plugin(Box::new(std::io::Error::new(
+            e.kind(),
+            format!("graph store at {}: {e}", path.display()),
+        )))
+    };
+    let before = match std::fs::metadata(&path) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(io(e)),
+    };
+    let (size_bytes_before, disk_bytes_before) = (before.len(), disk_bytes(&before));
+
+    let mut db = open_graph_file(&path)?;
+    let in_use_bytes = {
+        let txn = db.begin_write()?;
+        let stats = txn.stats()?;
+        txn.abort()?;
+        stats.allocated_pages() * stats.page_size() as u64
+    };
+    let skipped = if in_use_bytes.saturating_mul(100)
+        <= disk_bytes_before.saturating_mul(COMPACT_MAX_IN_USE_PERCENT)
+    {
+        db.compact().map_err(|e| {
+            AxilError::Plugin(Box::new(std::io::Error::other(format!(
+                "failed to compact graph store at {}: {e}",
+                path.display()
+            ))))
+        })?;
+        None
+    } else {
+        Some(format!(
+            "{in_use_bytes} of the file's {disk_bytes_before} bytes of disk hold data; \
+             compaction runs only when at most {COMPACT_MAX_IN_USE_PERCENT}% do"
+        ))
+    };
+    // The size only settles once redb's closing commit has run.
+    drop(db);
+
+    let after = std::fs::metadata(&path).map_err(io)?;
+    Ok(Some(GraphFileCompaction {
+        compacted: skipped.is_none(),
+        skipped,
+        in_use_bytes,
+        size_bytes_before,
+        disk_bytes_before,
+        size_bytes_after: after.len(),
+        disk_bytes_after: disk_bytes(&after),
+    }))
 }
 
 #[cfg(test)]
@@ -3137,6 +3278,113 @@ mod adjacency_parity_tests {
         assert!(g.neighbor_ids(&b, None, Direction::In).is_empty());
         assert_eq!(g.get_edge(&second.id).unwrap().edge_type, "likes");
         assert_eq!(pending_ops(&g), 0);
+    }
+
+    /// `n` edges `e000000..` from `a<i>` to `b<i>`, each with `pad` bytes of
+    /// properties, so their ids and both endpoints sort in creation order.
+    fn padded_edges(n: usize, pad: usize) -> Vec<Edge> {
+        (0..n)
+            .map(|i| {
+                let mut e = Edge::new(
+                    RecordId(format!("a{i:06}")),
+                    "rel",
+                    RecordId(format!("b{i:06}")),
+                    json!({ "pad": "x".repeat(pad) }),
+                );
+                e.id = RecordId(format!("e{i:06}"));
+                e
+            })
+            .collect()
+    }
+
+    #[test]
+    fn compacting_a_store_with_most_edges_deleted_gives_back_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = graph_path(&dir);
+        let edges = padded_edges(3000, 400);
+        let (gone, kept) = edges.split_at(2700);
+        {
+            let g = GraphEngine::open(&path).unwrap();
+            g.add_edges(&edges, true).unwrap();
+            let txn = g.graph_db.begin_write().unwrap();
+            {
+                let mut w = DiskWriter::open(&txn).unwrap();
+                for e in gone {
+                    assert!(w.remove(e.id.as_str()).unwrap());
+                }
+                w.finish().unwrap();
+            }
+            txn.commit().unwrap();
+        }
+
+        let r = compact_graph_store(&path).unwrap().unwrap();
+        assert!(r.compacted, "{r:?}");
+        assert!(r.skipped.is_none());
+        assert!(r.disk_bytes_after < r.disk_bytes_before, "{r:?}");
+        assert!(r.size_bytes_after <= r.size_bytes_before, "{r:?}");
+        // What the closing commit leaves is not worth compacting again.
+        let again = compact_graph_store(&path).unwrap().unwrap();
+        assert!(!again.compacted, "{again:?}");
+
+        let g = GraphEngine::open(&path).unwrap();
+        assert!(g.adjacency_is_current().unwrap());
+        assert_eq!(g.edge_count(), kept.len());
+        for e in kept {
+            let stored = g.get_edge(&e.id).unwrap();
+            assert_eq!(stored.properties, e.properties);
+            assert_eq!(
+                g.neighbor_ids(&e.from, None, Direction::Out),
+                vec![e.to.clone()]
+            );
+            assert_eq!(
+                g.neighbor_ids(&e.to, None, Direction::In),
+                vec![e.from.clone()]
+            );
+        }
+        for e in gone {
+            assert!(g.get_edge(&e.id).is_none());
+            assert!(g.neighbor_ids(&e.from, None, Direction::Both).is_empty());
+        }
+        assert_eq!(pending_ops(&g), 0);
+    }
+
+    #[test]
+    fn compaction_leaves_a_mostly_full_store_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = graph_path(&dir);
+        let edges = padded_edges(3000, 400);
+        GraphEngine::open(&path)
+            .unwrap()
+            .add_edges(&edges, true)
+            .unwrap();
+
+        let r = compact_graph_store(&path).unwrap().unwrap();
+        assert!(!r.compacted, "{r:?}");
+        assert!(r.skipped.is_some());
+        assert!(
+            r.in_use_bytes * 100 > r.disk_bytes_before * COMPACT_MAX_IN_USE_PERCENT,
+            "{r:?}"
+        );
+
+        let g = GraphEngine::open(&path).unwrap();
+        assert_eq!(g.edge_count(), edges.len());
+        assert!(g.adjacency_is_current().unwrap());
+    }
+
+    #[test]
+    fn compaction_of_an_open_store_is_busy_and_of_a_missing_one_is_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = graph_path(&dir);
+        assert_eq!(compact_graph_store(&path).unwrap(), None);
+        assert!(!has_graph_store(&path), "compaction created a store");
+
+        let g = GraphEngine::open(&path).unwrap();
+        match compact_graph_store(&path) {
+            Err(e) => assert!(e.is_busy(), "expected Busy, got {e}"),
+            Ok(r) => panic!("compacted a store another handle holds: {r:?}"),
+        }
+        drop(g);
+        assert!(compact_graph_store(&path).unwrap().is_some());
     }
 
     #[test]

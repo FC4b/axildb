@@ -112,7 +112,7 @@ Rough magnitudes (see [Indexing & Scale](../advanced/indexing-and-scale.md) for 
 |-----------|----------------|------------------------|
 | `memory.axil` | record JSON + indexes | 10-50 MB |
 | `memory.axil.vec` | 384-dim float32 embeddings | ~15 MB (fp32) / ~4 MB (int8) |
-| `memory.axil.graph` | edge JSON, plus two adjacency entries per edge | 1-5 MB |
+| `memory.axil.graph` | edge JSON, plus two adjacency entries per edge | Depends on edges, not records: about 740 bytes per edge, measured as 119.2 MB of data for the dogfood store's 161,373 edges (`benchmarks/results/graph-adjacency-size-2026-09-30.json`) |
 | `memory.axil.fts/` | Tantivy postings + positions | 20-100 MB |
 
 The FTS directory tends to be the largest at scale; `int8` embeddings

@@ -102,18 +102,27 @@ the tables up to date:
 For comparison, the older build spends 0.52-0.62 s of CPU loading every edge
 on each command that touches the graph. These are user + sys seconds measured
 on a heavily loaded machine, so treat them as rough; see
-[`benchmarks/results/graph-adjacency-size-2026-09-30.json`](https://github.com/FC4b/axildb/blob/main/benchmarks/results/graph-adjacency-size-2026-09-30.json).
+`benchmarks/results/graph-adjacency-size-2026-09-30.json` in the repository.
 The work runs in whichever process gets there first, often a hook with a short
 timeout. If that process is killed partway through, the work it committed is
 kept and the next one finishes the rest.
 
-The tables also take room in the file. On the same snapshot, building them fit
-in the file's free pages, so it stayed at 120.7 MB. A later `ingest-scip` that
-added 25,507 edges then took the file's length to 241.4 MB (the older build
-stays at 120.7 MB): redb doubles a file of this size when it runs out of free
-pages. Only 23.4 MB more disk was actually used, because the rest of the new
-length stays unwritten (sparse) until it's needed. `ls` and `axil info` show
-the full length.
+The tables also take room in the file. A file has two sizes: its length, which
+`ls` and `axil info` show, and the disk it takes up, which `du` shows. redb
+lengthens a file without writing the new part, and filesystems such as APFS
+and ext4 give that unwritten part no disk until it is used. On the same
+snapshot, building the tables fit in free pages the file already had: the data
+in it went from 70.5 MB to 119.2 MB (redb's count of pages in use) while its
+length and its disk use both stayed at 120.7 MB. A later `ingest-scip` that
+added 25,507 edges then took the length to 241.4 MB and the disk use to
+144.0 MB; the older build stays at 120.7 MB for both. redb doubles a file of
+this size when it runs out of free pages.
+
+`axil compact` compacts the graph file only when at most 40% of the disk it
+takes up holds data, as after deleting many edges. The files above hold data
+in 97-99% of theirs, so it leaves them alone. Compacting copies of them
+anyway gave back 1.3-3.1% of their disk use and, because redb doubled each
+packed file again when closing it, left them 16-97% longer.
 
 ## Picking components
 

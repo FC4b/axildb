@@ -62,6 +62,18 @@ only an explicit `axil compact` / `axil heal --compact` deletes.
 Orphan cleanup (dangling edges/vectors/FTS entries) still runs either
 way — it repairs referential integrity and never deletes records.
 
+After the purge, `axil compact` (the command, not `db.compact()` or
+`axil heal --compact`) closes the database and compacts the graph file,
+`memory.axil.graph`, when at most 40% of the disk it takes up holds data,
+as after many edges were deleted. The output's `graph_file` object reports
+the file's length (`size_bytes_*`, what `ls` shows) and disk use
+(`disk_bytes_*`, what `du` shows) before and after, or why it was
+skipped. The threshold is there because redb doubles a packed file's
+length when it closes it: compacting a mostly full file gives back little
+disk and leaves it longer (see `compact_graph_store` in `axil-graph`).
+Compaction needs the file to itself, so while another process has it
+open (an MCP server, a hook) it is skipped and reported as such.
+
 ## What supersession catches
 
 On insert, a record at similarity ≥ `healing.supersede_similarity_threshold`
@@ -123,7 +135,7 @@ file mucking).
 
 | Flag | Effect |
 |------|--------|
-| `--compact` | Just compact (same as `axil compact`) |
+| `--compact` | Just compact (as `axil compact`, but without compacting the graph file) |
 | `--reindex` | Rebuild all indexes from the canonical records |
 | `--orphans` | Clean orphaned companion entries only |
 | `--dry-run` | Print what would be fixed, change nothing |
