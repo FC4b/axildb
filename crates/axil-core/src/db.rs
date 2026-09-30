@@ -7289,15 +7289,27 @@ impl Axil {
         }
 
         let refs: Vec<&str> = chunks.iter().map(String::as_str).collect();
-        let Ok(vectors) = embedder.embed_batch(&refs) else {
-            return;
-        };
-        if vectors.len() != chunks.len() {
-            return;
-        }
+        let batched = embedder
+            .embed_batch(&refs)
+            .ok()
+            .filter(|vectors| vectors.len() == refs.len());
         for (i, range) in pending {
+            // One text that fails to embed fails the whole batch. Embed each
+            // result on its own then, so only a result that fails by itself
+            // keeps its unblended score.
+            let own;
+            let vectors = match &batched {
+                Some(all) => &all[range],
+                None => {
+                    let Ok(vectors) = embedder.embed_batch(&refs[range]) else {
+                        continue;
+                    };
+                    own = vectors;
+                    own.as_slice()
+                }
+            };
             let mut best: f32 = 0.0;
-            for vec in &vectors[range] {
+            for vec in vectors {
                 let sim = cosine(query_vec, q_norm, vec);
                 if sim > best {
                     best = sim;
@@ -8281,22 +8293,82 @@ mod tests {
 
     // ── QTC helpers ────────────────────────────────────────────────────
 
+    fn bag_of_bytes(text: &str) -> Vec<f32> {
+        let mut v = vec![0.0f32; 8];
+        for b in text.bytes() {
+            v[usize::from(b % 8)] += 1.0;
+        }
+        v
+    }
+
     /// Bag-of-bytes embedder that counts its batch calls.
     struct CountingEmbedder(std::sync::atomic::AtomicUsize);
 
     impl crate::plugin::TextEmbedder for CountingEmbedder {
         fn embed(&self, text: &str) -> Result<Vec<f32>> {
-            let mut v = vec![0.0f32; 8];
-            for b in text.bytes() {
-                v[usize::from(b % 8)] += 1.0;
-            }
-            Ok(v)
+            Ok(bag_of_bytes(text))
         }
 
         fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
             self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             texts.iter().map(|t| self.embed(t)).collect()
         }
+    }
+
+    /// Bag-of-bytes embedder that refuses any text containing "poison", so a
+    /// batch holding one fails as a whole.
+    struct PoisonedEmbedder;
+
+    impl crate::plugin::TextEmbedder for PoisonedEmbedder {
+        fn embed(&self, text: &str) -> Result<Vec<f32>> {
+            if text.contains("poison") {
+                return Err(crate::error::AxilError::InvalidQuery(
+                    "poisoned text".into(),
+                ));
+            }
+            Ok(bag_of_bytes(text))
+        }
+    }
+
+    fn qtc_results(texts: &[&str]) -> Vec<crate::scoring::RecallResult> {
+        texts
+            .iter()
+            .enumerate()
+            .map(|(i, t)| crate::scoring::RecallResult {
+                record: Record::new("notes", json!({ "summary": t })),
+                score: 0.1 * i as f32,
+                explanation: crate::scoring::ScoreExplanation {
+                    signals: Vec::new(),
+                    summary: String::new(),
+                    query_class: None,
+                },
+            })
+            .collect()
+    }
+
+    /// The score query-time chunking gives `before` when its chunks are
+    /// embedded in a call of their own, as they were before batching.
+    fn qtc_score_per_record(
+        before: &crate::scoring::RecallResult,
+        query: &[f32],
+        embedder: &dyn crate::plugin::TextEmbedder,
+        qtc: &crate::scoring::QtcConfig,
+    ) -> f32 {
+        let text = crate::util::searchable_text(&before.record.data);
+        if text.trim().is_empty() {
+            return before.score;
+        }
+        let chunks = chunk_by_chars(&text, qtc.chunk_chars, qtc.stride_chars);
+        let refs: Vec<&str> = chunks.iter().map(String::as_str).collect();
+        let Ok(vectors) = embedder.embed_batch(&refs) else {
+            return before.score;
+        };
+        let q_norm = l2_norm(query);
+        let best = vectors
+            .iter()
+            .map(|v| cosine(query, q_norm, v))
+            .fold(0.0f32, f32::max);
+        qtc.alpha * best + (1.0 - qtc.alpha) * before.score
     }
 
     #[test]
@@ -8315,51 +8387,57 @@ mod tests {
             "",
             "another record about chunks",
         ];
-        let results = || -> Vec<crate::scoring::RecallResult> {
-            texts
-                .iter()
-                .enumerate()
-                .map(|(i, t)| crate::scoring::RecallResult {
-                    record: Record::new("notes", json!({ "summary": t })),
-                    score: 0.1 * i as f32,
-                    explanation: crate::scoring::ScoreExplanation {
-                        signals: Vec::new(),
-                        summary: String::new(),
-                        query_class: None,
-                    },
-                })
-                .collect()
-        };
         let embedder = CountingEmbedder(std::sync::atomic::AtomicUsize::new(0));
         let query = crate::plugin::TextEmbedder::embed(&embedder, "chunk text").unwrap();
 
-        let mut got = results();
+        let mut got = qtc_results(&texts);
         db.apply_query_time_chunks(&mut got, &query, &embedder, &qtc);
         assert_eq!(embedder.0.load(std::sync::atomic::Ordering::SeqCst), 1);
 
-        // Each result scored on its own, as before batching.
-        let q_norm = l2_norm(&query);
-        for (got, before) in got.iter().zip(results()) {
-            let text = crate::util::searchable_text(&before.record.data);
-            if text.trim().is_empty() {
-                assert_eq!(got.score, before.score);
-                continue;
-            }
-            let best = chunk_by_chars(&text, qtc.chunk_chars, qtc.stride_chars)
-                .iter()
-                .map(|c| {
-                    cosine(
-                        &query,
-                        q_norm,
-                        &crate::plugin::TextEmbedder::embed(&embedder, c).unwrap(),
-                    )
-                })
-                .fold(0.0f32, f32::max);
-            let expected = qtc.alpha * best + (1.0 - qtc.alpha) * before.score;
+        for (got, before) in got.iter().zip(qtc_results(&texts)) {
+            let expected = qtc_score_per_record(&before, &query, &embedder, &qtc);
             assert!(
                 (got.score - expected).abs() < 1e-6,
-                "{text}: {} vs {expected}",
+                "{:?}: {} vs {expected}",
+                before.record.data,
                 got.score
+            );
+        }
+    }
+
+    #[test]
+    fn a_failed_batch_rescores_the_other_results_one_at_a_time() {
+        let (db, _dir) = temp_db();
+        let qtc = crate::scoring::QtcConfig {
+            top_k: 20,
+            chunk_chars: 40,
+            stride_chars: 30,
+            alpha: 0.7,
+        };
+        let texts = [
+            "short text",
+            "a poison record that fails to embed",
+            "a much longer text that spans several chunks of forty characters each",
+            "another record about chunks",
+        ];
+        let query = bag_of_bytes("chunk text");
+
+        let mut got = qtc_results(&texts);
+        db.apply_query_time_chunks(&mut got, &query, &PoisonedEmbedder, &qtc);
+
+        let before = qtc_results(&texts);
+        assert_eq!(
+            got[1].score, before[1].score,
+            "the failed one is not blended"
+        );
+        for i in [0, 2, 3] {
+            let expected = qtc_score_per_record(&before[i], &query, &PoisonedEmbedder, &qtc);
+            assert_ne!(expected, before[i].score);
+            assert!(
+                (got[i].score - expected).abs() < 1e-6,
+                "{}: {} vs {expected}",
+                texts[i],
+                got[i].score
             );
         }
     }

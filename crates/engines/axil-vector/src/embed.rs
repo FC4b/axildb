@@ -383,19 +383,23 @@ impl Embedder {
     }
 
     /// Batch embed multiple texts, in as few ONNX inference calls as memory
-    /// allows.
+    /// and padding allow.
     ///
-    /// Texts are tokenized together, sorted by length so each call pads as
-    /// little as possible, and grouped under [`ATTENTION_BUDGET`]; results come
-    /// back in input order. One call over many texts is several times faster
-    /// than one call per text.
+    /// Texts are tokenized together and split into calls of similar length,
+    /// so short texts are not padded to a long one, each call under a cap on
+    /// attention memory and on padded tokens (16 texts of 512 tokens); a text
+    /// over a cap runs alone. Results come back in input order.
     #[cfg(feature = "embed")]
     pub fn embed_batch_impl(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, String> {
-        self.embed_batch_within(texts, ATTENTION_BUDGET)
+        self.embed_batch_within(texts, BatchLimits::DEFAULT)
     }
 
     #[cfg(feature = "embed")]
-    fn embed_batch_within(&self, texts: &[&str], budget: usize) -> Result<Vec<Vec<f32>>, String> {
+    fn embed_batch_within(
+        &self,
+        texts: &[&str],
+        limits: BatchLimits,
+    ) -> Result<Vec<Vec<f32>>, String> {
         if texts.is_empty() {
             return Ok(vec![]);
         }
@@ -409,21 +413,9 @@ impl Embedder {
             .encode_batch(texts.to_vec(), true)
             .map_err(|e| format!("batch tokenization failed: {e}"))?;
 
-        let mut order: Vec<usize> = (0..encodings.len()).collect();
-        order.sort_by_key(|&i| encodings[i].get_ids().len());
-
+        let lengths: Vec<usize> = encodings.iter().map(|e| e.get_ids().len()).collect();
         let mut results: Vec<Vec<f32>> = vec![Vec::new(); encodings.len()];
-        let mut group: Vec<usize> = Vec::new();
-        for &i in &order {
-            // Sorted ascending, so this text is the longest the group would hold.
-            let len = encodings[i].get_ids().len().max(1);
-            if !group.is_empty() && (group.len() + 1).saturating_mul(len * len) > budget {
-                self.run_group(runtime, &encodings, &group, &mut results)?;
-                group.clear();
-            }
-            group.push(i);
-        }
-        if !group.is_empty() {
+        for group in plan_batches(&lengths, limits) {
             self.run_group(runtime, &encodings, &group, &mut results)?;
         }
         Ok(results)
@@ -550,13 +542,69 @@ impl Embedder {
     }
 }
 
-/// Cap on `texts × longest² (tokens)` for one batched inference call.
-/// Attention memory grows with the batch size times the square of its longest
-/// sequence: padding a batch of long texts to 8,192 tokens (nomic, bge-m3)
-/// OOM-killed a 16 GB machine. This fits 16 texts of 512 tokens per call; a
-/// single text longer than the budget still runs, alone.
-#[cfg(feature = "embed")]
-const ATTENTION_BUDGET: usize = 16 * 512 * 512;
+/// Caps on one batched inference call, in tokens.
+///
+/// Every text in a call is padded to the call's longest, and the model runs
+/// over the padded positions as well as the real ones.
+#[cfg(any(feature = "embed", test))]
+#[derive(Debug, Clone, Copy)]
+struct BatchLimits {
+    /// Cap on `texts × longest²`. Attention memory grows with the batch size
+    /// times the square of its longest sequence: padding a batch of long
+    /// texts to 8,192 tokens (nomic, bge-m3) OOM-killed a 16 GB machine.
+    attention: usize,
+    /// Cap on `texts × longest`, the positions the model computes over.
+    padded_tokens: usize,
+}
+
+#[cfg(any(feature = "embed", test))]
+impl BatchLimits {
+    /// 16 texts of 512 tokens per call, by either cap. A single text over a
+    /// cap still runs, alone.
+    const DEFAULT: Self = Self {
+        attention: 16 * 512 * 512,
+        padded_tokens: 16 * 512,
+    };
+}
+
+/// Splits texts, given their token lengths, into inference calls; returns
+/// each call's indices into `lengths`, every index in exactly one call.
+///
+/// Texts are taken shortest first. A call closes before a text that would
+/// break a cap in `limits`, or that would pad the call to more than 5/4 of
+/// its real tokens. The model computes over padding too: twenty 100-token
+/// texts in one call with a 500-token text run over 10,500 positions for
+/// 2,500 real tokens, and recall embeds a window of mostly short records in
+/// one batch.
+#[cfg(any(feature = "embed", test))]
+fn plan_batches(lengths: &[usize], limits: BatchLimits) -> Vec<Vec<usize>> {
+    let mut order: Vec<usize> = (0..lengths.len()).collect();
+    order.sort_by_key(|&i| lengths[i]);
+
+    let mut groups = Vec::new();
+    let mut group: Vec<usize> = Vec::new();
+    let mut real_tokens = 0usize;
+    for i in order {
+        // Sorted ascending, so this text is the longest the group would hold
+        // and sets its padded length.
+        let len = lengths[i].max(1);
+        let padded = (group.len() + 1).saturating_mul(len);
+        let real = real_tokens + len;
+        let fits = padded.saturating_mul(len) <= limits.attention
+            && padded <= limits.padded_tokens
+            && padded.saturating_mul(4) <= real.saturating_mul(5);
+        if !group.is_empty() && !fits {
+            groups.push(std::mem::take(&mut group));
+            real_tokens = 0;
+        }
+        group.push(i);
+        real_tokens += len;
+    }
+    if !group.is_empty() {
+        groups.push(group);
+    }
+    groups
+}
 
 /// L2-normalize a vector in place.
 #[cfg(feature = "embed")]
@@ -904,6 +952,10 @@ mod tests {
         );
     }
 
+    fn cosine(a: &[f32], b: &[f32]) -> f32 {
+        a.iter().zip(b).map(|(x, y)| x * y).sum()
+    }
+
     #[test]
     fn a_batch_matches_one_text_at_a_time_across_groups() {
         let model = EmbeddingModel::BgeSmall;
@@ -919,17 +971,176 @@ mod tests {
             "a medium length sentence about recall and hooks",
             "x",
             "store decisions immediately rather than batching them at the end",
+            "a medium length sentence about memory and decay",
         ];
-        // A budget of one 64-token row forces several inference calls.
-        let batched = embedder.embed_batch_within(&texts, 64 * 64).unwrap();
-        assert_eq!(batched.len(), texts.len());
-        for (text, got) in texts.iter().zip(&batched) {
-            let alone = embedder.embed(text).unwrap();
-            let cos: f32 = alone.iter().zip(got).map(|(a, b)| a * b).sum();
+        let tokenizer = &embedder.runtime().unwrap().tokenizer;
+        let lengths: Vec<usize> = texts
+            .iter()
+            .map(|t| tokenizer.encode(*t, true).unwrap().get_ids().len())
+            .collect();
+        // The default limits split these by padding; a budget of one 64-token
+        // row splits them by attention memory.
+        let tight = BatchLimits {
+            attention: 64 * 64,
+            padded_tokens: usize::MAX,
+        };
+        for limits in [BatchLimits::DEFAULT, tight] {
+            assert!(plan_batches(&lengths, limits).len() > 1);
+            let batched = embedder.embed_batch_within(&texts, limits).unwrap();
+            assert_eq!(batched.len(), texts.len());
+            for (text, got) in texts.iter().zip(&batched) {
+                let alone = embedder.embed(text).unwrap();
+                let cos = cosine(&alone, got);
+                assert!(
+                    cos > 0.9999,
+                    "{text:?} came back as a different vector ({cos}) under {limits:?}"
+                );
+            }
+        }
+    }
+
+    /// Recall rescores a window of records by each one's best chunk cosine to
+    /// the query. Embedding every record's chunks in one batch has to give the
+    /// scores that one batch per record gives.
+    #[test]
+    fn a_recall_window_scores_the_same_in_one_batch_as_one_per_record() {
+        let model = EmbeddingModel::BgeSmall;
+        if !crate::download::is_model_available(&model) {
+            eprintln!("skipped: {} is not installed", model.name());
+            return;
+        }
+        let embedder = Embedder::new_with_pool(model, 1).unwrap();
+        let long = "the pool times out when every worker holds a connection. ".repeat(28);
+        let records: Vec<Vec<String>> = vec![
+            vec!["Fixed auth timeout bug".into()],
+            vec![long[..1200].to_string(), long[900..].to_string()],
+            vec!["Decided to store decisions right after they are made.".into()],
+            vec!["Decided to keep the hooks quiet while the database is busy.".into()],
+            vec!["hooks".into()],
+            vec![
+                "Recall rescores the top twenty candidates by chunk similarity, \
+                 blending the best chunk cosine into the fused score."
+                    .into(),
+            ],
+            vec![long[..600].to_string()],
+        ];
+        let query = embedder
+            .embed_query("why does the connection pool time out")
+            .unwrap();
+        let best = |vectors: &[Vec<f32>]| {
+            vectors
+                .iter()
+                .map(|v| cosine(&query, v))
+                .fold(0.0f32, f32::max)
+        };
+
+        let all: Vec<&str> = records.iter().flatten().map(String::as_str).collect();
+        let tokenizer = &embedder.runtime().unwrap().tokenizer;
+        let lengths: Vec<usize> = all
+            .iter()
+            .map(|t| tokenizer.encode(*t, true).unwrap().get_ids().len())
+            .collect();
+        let padded_call = plan_batches(&lengths, BatchLimits::DEFAULT)
+            .into_iter()
+            .any(|g| g.iter().any(|&i| lengths[i] != lengths[g[0]]));
+        assert!(padded_call, "some call pads one record's text to another's");
+
+        let batched = embedder.embed_batch_impl(&all).unwrap();
+        let mut offset = 0;
+        for chunks in &records {
+            let refs: Vec<&str> = chunks.iter().map(String::as_str).collect();
+            let per_record = best(&embedder.embed_batch_impl(&refs).unwrap());
+            let in_window = best(&batched[offset..offset + chunks.len()]);
+            offset += chunks.len();
             assert!(
-                cos > 0.9999,
-                "{text:?} came back as a different vector ({cos})"
+                (per_record - in_window).abs() < 1e-5,
+                "{:?}: {per_record} per record vs {in_window} in one batch",
+                chunks[0]
             );
         }
+    }
+}
+
+/// Batch planning is pure arithmetic over token lengths, so these run without
+/// the `embed` feature or a model.
+#[cfg(test)]
+mod batch_plan_tests {
+    use super::{plan_batches, BatchLimits};
+
+    fn padded(lengths: &[usize], group: &[usize]) -> usize {
+        group.len() * group.iter().map(|&i| lengths[i]).max().unwrap()
+    }
+
+    fn real(lengths: &[usize], group: &[usize]) -> usize {
+        group.iter().map(|&i| lengths[i]).sum()
+    }
+
+    fn assert_partition(groups: &[Vec<usize>], n: usize) {
+        let mut all: Vec<usize> = groups.iter().flatten().copied().collect();
+        all.sort_unstable();
+        assert_eq!(all, (0..n).collect::<Vec<_>>(), "every text in one call");
+    }
+
+    #[test]
+    fn short_texts_are_not_padded_to_a_long_one() {
+        // A recall window: mostly short records and one long one. All twenty
+        // fit in one call by both caps (20 × 400 ≤ 16 × 512 padded tokens,
+        // 20 × 400² ≤ 16 × 512² attention), so only padding splits them.
+        let mut lengths = vec![12, 30, 400, 18, 9, 25, 60, 80, 45, 14];
+        lengths.extend([20, 22, 35, 70, 90, 110, 16, 28, 40, 55]);
+        let groups = plan_batches(&lengths, BatchLimits::DEFAULT);
+        assert_partition(&groups, lengths.len());
+        let long = groups.iter().find(|g| g.contains(&2)).unwrap();
+        assert_eq!(long, &vec![2], "the long text runs on its own");
+        for g in &groups {
+            assert!(
+                padded(&lengths, g) * 4 <= real(&lengths, g) * 5,
+                "{g:?} pads more than a quarter over its real tokens"
+            );
+        }
+    }
+
+    #[test]
+    fn texts_of_one_length_share_a_call_up_to_the_padded_token_cap() {
+        // 40 × 300 tokens is under the attention cap (40 × 300² ≤ 16 × 512²)
+        // and pads nothing, but runs over more positions than the cap allows.
+        let lengths = vec![300; 40];
+        let groups = plan_batches(&lengths, BatchLimits::DEFAULT);
+        assert_partition(&groups, lengths.len());
+        assert_eq!(groups.len(), 2);
+        for g in &groups {
+            assert!(padded(&lengths, g) <= 16 * 512);
+        }
+    }
+
+    #[test]
+    fn a_text_over_the_budget_runs_alone() {
+        // 8,192 tokens (nomic, bge-m3) is over the attention cap on its own.
+        let lengths = vec![8192, 20, 8192, 24, 22];
+        let groups = plan_batches(&lengths, BatchLimits::DEFAULT);
+        assert_partition(&groups, lengths.len());
+        for long in [0, 2] {
+            let g = groups.iter().find(|g| g.contains(&long)).unwrap();
+            assert_eq!(g, &vec![long]);
+        }
+        assert!(
+            groups.iter().any(|g| g.len() == 3),
+            "the short ones share one"
+        );
+    }
+
+    #[test]
+    fn the_attention_cap_splits_long_texts_of_one_length() {
+        // 20 × 1,024² is over the attention cap; the padded-token cap alone
+        // would allow 8 of them per call, the attention cap 4.
+        let lengths = vec![1024; 20];
+        let groups = plan_batches(&lengths, BatchLimits::DEFAULT);
+        assert_partition(&groups, lengths.len());
+        assert!(groups.iter().all(|g| g.len() == 4));
+    }
+
+    #[test]
+    fn no_texts_plan_no_calls() {
+        assert!(plan_batches(&[], BatchLimits::DEFAULT).is_empty());
     }
 }
