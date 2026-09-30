@@ -23,6 +23,7 @@ Bypass Axil only for a user-named exact file/line, a command/test output you jus
 - Close an error once it is fixed: `axil resolve <error-id> --by <fix-record-id>`
 - Store architecture learned while reading: `axil store context '{"type":"architecture","summary":"<what you learned>","files":["<path>"]}'`
 - Before a final response after substantive work, write a checkpoint: `axil checkpoint '{"state":"<where things stand>","next_steps":["<remaining work>"],"references":[{"kind":"file","ref":"<path>"}]}'`
+- Axil holds project knowledge: architecture, gotchas, file- and symbol-anchored facts, errors with their cause and fix, decisions with their reason, and the code graph. Notes about how the user likes you to work belong to your harness's own memory where it has one (such as Claude Code's auto-memory); don't mirror them into Axil.
 <!-- AXIL:END -->
 
 

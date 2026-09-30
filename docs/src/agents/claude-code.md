@@ -34,6 +34,34 @@ This creates:
 3. **Manual store**: The agent stores decisions, errors, and summaries via `axil store`
 4. **Recall**: `axil recall` retrieves relevant context using vector + graph + recency scoring
 
+## Compaction
+
+Claude Code sends `SessionStart` again after a compaction (source `compact`,
+auto or manual) and after `/clear`. Axil registers `SessionStart` with no
+matcher, so every source reaches the hook, which re-injects `axil boot`,
+including the latest checkpoint's "Resume Here" block, as
+`additionalContext`. `PostCompact` is not registered: Claude Code documents
+no `additionalContext` for it, so it has no way to put the boot in front of
+the model.
+
+## Coexisting with auto-memory
+
+Claude Code keeps its own auto-memory: notes indexed by a `MEMORY.md` that is
+loaded into every conversation. The installed `CLAUDE.md` section and the
+skills split the work so nothing is written twice:
+
+| Axil | Claude Code auto-memory |
+|------|------------------------|
+| Architecture: how modules connect | How the user likes to work |
+| Gotchas and facts tied to a file or symbol (`--code-ref`) | Corrections of the agent's behavior |
+| Errors with root cause and fix; decisions with their reason | Standing personal preferences |
+| The code graph (`code-search`, SCIP edges) | |
+
+Preference and feedback notes stay in auto-memory and are not mirrored into
+Axil. `axil install` writes one note there itself
+(`feedback_axil_proactive.md`, indexed from `MEMORY.md`): a pointer that says
+to use Axil first and store as you go, not a copy of any Axil record.
+
 ## Agent workflow
 
 ```

@@ -103,6 +103,7 @@ axil activity --days 7           # Daily counts
 3. **After fixing bugs**: store error + fix, link them
 4. **At session end**: summarize what was done
 5. **When decisions change**: store new decision, link as "supersedes" old one
+6. **Leave user preferences to your harness**: if the agent keeps its own user memory (Claude Code's auto-memory, for one), notes about how the user likes you to work stay there and aren't mirrored into Axil. Axil is for project knowledge: architecture, gotchas, file/symbol-anchored facts, errors with their cause and fix, decisions with their reason, the code graph.
 
 ## Generating Problem Reports
 

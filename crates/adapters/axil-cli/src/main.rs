@@ -5528,6 +5528,7 @@ In the {project_name} project, axil (`.axil/memory.axil`) is the persistent brai
   - `axil store context '{{"type":"architecture",...}}'` after learning how something works
   - `axil checkpoint '{{"state":"<where things stand>","next_steps":["<remaining work>"]}}'` after finishing a task
 - Don't wait for the user to say "update axil memory" — that means I already missed the moment.
+- Keep the split: apart from this pointer to axil, project knowledge (architecture, gotchas, file/symbol-anchored facts, errors with cause and fix, decisions with reason, the code graph) goes to axil, and notes about how the user wants me to work stay in this auto-memory. Neither is mirrored into the other.
 "#
     )
 }
@@ -19774,9 +19775,16 @@ const AXIL_COMMANDS: &str = r#"- `axil boot` — load previous session context
 - `axil store errors '{"error":"<what>","fix":"<how>"}'` — save gotchas
 - `axil checkpoint '{"state":"<where things stand>","next_steps":["<remaining work>"]}'` — write a resume-able checkpoint at end of work"#;
 
+/// What Axil keeps and what it leaves to the harness's own user memory,
+/// shared by every agent instruction template so installs for different
+/// agents from one build say the same thing. Worded for any harness: some
+/// keep their own notes about the user (Claude Code's auto-memory, for one),
+/// and a note kept in both places drifts.
+const AXIL_MEMORY_SPLIT: &str = "Axil holds project knowledge: architecture, gotchas, file- and symbol-anchored facts, errors with their cause and fix, decisions with their reason, and the code graph. Notes about how the user likes you to work belong to your harness's own memory where it has one (such as Claude Code's auto-memory); don't mirror them into Axil.";
+
 fn agent_instructions_cursor(db_path: &Path) -> String {
-    format!("# Axil Agent Memory\n\nThis project uses Axil for persistent agent memory at `{db}`.\n\n## Commands\n{cmds}\n\n## Search/Query Gate\nBefore `rg`, `grep`, `git grep`, `find`, `fd`, `ls`, `tree`, or any broad project query, run `axil recall`, `axil code-search`, or `axil fts` first. Then open the files Axil returns and verify current code.\n\n## Workflow\n1. Start: run `axil boot`\n2. Work: store decisions and errors as you go\n3. End: write a checkpoint (run `axil checkpoint`)\n",
-        db = db_path.display(), cmds = AXIL_COMMANDS)
+    format!("# Axil Agent Memory\n\nThis project uses Axil for persistent agent memory at `{db}`.\n\n## Commands\n{cmds}\n\n## Search/Query Gate\nBefore `rg`, `grep`, `git grep`, `find`, `fd`, `ls`, `tree`, or any broad project query, run `axil recall`, `axil code-search`, or `axil fts` first. Then open the files Axil returns and verify current code.\n\n## Workflow\n1. Start: run `axil boot`\n2. Work: store decisions and errors as you go\n3. End: write a checkpoint (run `axil checkpoint`)\n\n{split}\n",
+        db = db_path.display(), cmds = AXIL_COMMANDS, split = AXIL_MEMORY_SPLIT)
 }
 
 fn agent_instructions_windsurf(db_path: &Path) -> String {
@@ -19809,8 +19817,10 @@ Bypass Axil only for a user-named exact file/line, a command/test output you jus
 - Close an error once it is fixed: `axil resolve <error-id> --by <fix-record-id>`
 - Store architecture learned while reading: `axil store context '{{"type":"architecture","summary":"<what you learned>","files":["<path>"]}}'`
 - Before a final response after substantive work, write a checkpoint: `axil checkpoint '{{"state":"<where things stand>","next_steps":["<remaining work>"],"references":[{{"kind":"file","ref":"<path>"}}]}}'`
+- {split}
 "#,
-        db = db_path.display()
+        db = db_path.display(),
+        split = AXIL_MEMORY_SPLIT
     )
 }
 
@@ -20421,6 +20431,24 @@ mod agents_md_drift {
             "AGENTS.md AXIL block drifted from agent_instructions_codex(); \
              regenerate AGENTS.md (re-run the Codex integration installer) and commit it."
         );
+    }
+
+    // Cursor, Windsurf, Aider and Antigravity get agent_instructions_cursor;
+    // Codex and AGENTS.md readers get agent_instructions_codex. Two installs
+    // from one build must not disagree on what belongs in Axil.
+    #[test]
+    fn every_instruction_template_states_the_memory_split() {
+        let db = Path::new("/PLACEHOLDER");
+        for (name, body) in [
+            ("cursor", agent_instructions_cursor(db)),
+            ("windsurf", agent_instructions_windsurf(db)),
+            ("codex", agent_instructions_codex(db)),
+        ] {
+            assert!(
+                body.contains(AXIL_MEMORY_SPLIT),
+                "{name} instructions lack the Axil / harness-memory split"
+            );
+        }
     }
 }
 
