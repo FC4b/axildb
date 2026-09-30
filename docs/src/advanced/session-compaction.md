@@ -147,21 +147,32 @@ library `remember()` API exposes the same cap via
 
 ### Bounding a boot context
 
-`axil boot` is budget-shaped too, with a priority-ordered drop policy:
+`axil boot` is budget-shaped too. Every format has a default budget of
+1,000 tokens (estimated as `ceil(bytes / 4)`), and `--budget N` changes it:
 
 ```bash
 axil boot --budget 1500
 ```
 
-Boot assembles fixed, ordered sections (current scope → constraints →
-recent decisions → active failures → open threads → preferences →
-confidence notes). When the estimated total exceeds the budget, it drops
-sections in **reverse priority order** — lowest-value first — and never
-drops the four load-bearing sections (scope, constraints, decisions,
-failures). Anything dropped is reported in a `dropped_sections` list so
-the caller can see "we omitted X to stay in budget." The default budget
-is picked to fit comfortably in a small prompt window. The contract
-lives in [`crates/axil-core/src/boot.rs`](../../../crates/axil-core/src/boot.rs).
+Each item is one line, `id · age · status · summary`, with the summary
+clipped; `axil get <id>` expands a row. Sections fill in **priority
+order**, row by row, until the budget is spent: the Resume Here block,
+then pinned rules, then open errors, then decisions, then everything else
+(topic recall, sessions, resolved-error lessons, architecture notes, …).
+A row that does not fit is left out rather than cut mid-sentence, and an
+oversized Resume Here block keeps its leading lines. The narrative format
+ends with a note counting what was left out; JSON reports it as
+`omitted_items`.
+
+`axil boot --schema v1` (and the MCP `boot` tool) returns fixed, ordered
+sections (current scope → constraints → recent decisions → active failures
+→ open threads → preferences → confidence notes) and fills them in the
+same priority order. The four load-bearing sections (scope, constraints,
+decisions, failures) are never dropped, but the budget holds inside them
+too: their rows are cut once it is spent. A lower-priority section with no
+row left is dropped and named in `dropped_sections`. The contract lives in
+[`crates/axil-core/src/boot.rs`](../../../crates/axil-core/src/boot.rs).
+`scripts/boot-tokens.py` measures each boot surface on a database copy.
 
 Token estimation is a pluggable seam
 ([`crates/axil-core/src/token.rs`](../../../crates/axil-core/src/token.rs)):

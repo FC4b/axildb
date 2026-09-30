@@ -98,10 +98,22 @@ a later note fixed an error. The agent that did the fix can.
 Get startup context for an agent session.
 
 ```bash
-axil boot
-axil boot --files src/auth.rs
+axil boot                                   # JSON
+axil boot --boot-format narrative           # plain text, as the session hook injects it
+axil boot --files src/auth.rs               # also push memories about these files
 axil boot --entities auth-module
+axil boot --budget 2000                     # default 1000 tokens, estimated as bytes/4
+axil boot --schema v1                       # the stable BootContext schema (also MCP `boot`)
 ```
+
+Each item is one line, `id · age · status · summary` (for example
+`01M3… · 2d · open · vector store left in needs-repair state…`); run
+`axil get <id>` to expand one. Sections fill in priority order until the
+budget is spent: Resume Here, pinned rules, open errors, decisions, then
+the rest. Open errors are those not yet marked resolved; resolved ones show
+up lower down as lessons (`error → fix`). Modules whose index summary is
+only a parser fallback (a line count or a file's first comment) are left
+out.
 
 ## rule / rules
 
