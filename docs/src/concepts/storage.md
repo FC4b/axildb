@@ -30,7 +30,7 @@ the main database:
 |------|-------|---------------|-----------------|
 | `memory.axil` | core (redb) | All records, prefixed internal tables, Extension tables | **No** — the database itself |
 | `memory.axil.vec` | `axil-vector` | HNSW graph + raw embeddings (mmap-friendly) | Yes — re-embed source records via `axil heal --reindex` |
-| `memory.axil.graph` | `axil-graph` | Edge index for fast neighbor lookup | Yes — rebuilds from edge records |
+| `memory.axil.graph` | `axil-graph` | The edges themselves, plus per-node adjacency tables derived from them for neighbor lookup | **No** — edges are stored only here. The adjacency tables rebuild from the edges on their own (see [Mixing binary versions](../getting-started/installation.md#mixing-binary-versions-on-one-database)) |
 | `memory.axil.fts/` | `axil-fts` | Tantivy index directory | Yes — rebuilds from record text via `axil heal --reindex` |
 | `memory.axil.ts` | `axil-timeseries` | Time-series index (created_at b-tree) | Yes — rebuilds on demand |
 
@@ -112,7 +112,7 @@ Rough magnitudes (see [Indexing & Scale](../advanced/indexing-and-scale.md) for 
 |-----------|----------------|------------------------|
 | `memory.axil` | record JSON + indexes | 10-50 MB |
 | `memory.axil.vec` | 384-dim float32 embeddings | ~15 MB (fp32) / ~4 MB (int8) |
-| `memory.axil.graph` | edge records | 1-5 MB |
+| `memory.axil.graph` | edge JSON, plus two adjacency entries per edge | 1-5 MB |
 | `memory.axil.fts/` | Tantivy postings + positions | 20-100 MB |
 
 The FTS directory tends to be the largest at scale; `int8` embeddings

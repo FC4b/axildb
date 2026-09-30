@@ -1,0 +1,68 @@
+{
+  "change": "on-disk graph adjacency tables (adj_out / adj_in multimaps in the .graph file): checked once per open, catch-up of edges an older binary added, chunked diff sync, key-sorted batch inserts",
+  "date": "2026-09-30",
+  "snapshot": "benchmarks/dogfood-recall/data/snap-prefix (copy of this repo's .axil): 161,373 edges, .graph edges-only, 120,713,216 bytes",
+  "binaries": {
+    "base": "axil 2.3.1 built from dev 65d45ff (no adjacency tables; loads every edge into memory on first graph use)",
+    "new": "this branch, release build"
+  },
+  "method": "Each case runs on its own APFS clone (cp -c -R) of the snapshot. size_bytes = st_size, the logical length that ls and `axil info` report. allocated_bytes = st_blocks * 512, the disk actually used: redb grows a file by set_len, which leaves an unwritten, sparse tail. cpu_s = user + sys seconds from /usr/bin/time -p for that one command. The machine had a 1-minute load average of 86-102 from other jobs during the runs, so cpu_s is indicative only and no wall time is recorded. The probe record for `edges` is entity 01KVCKTC05AJ45EYK82SFWRM6A; `link` goes between decisions 01KVCT6BGMW3HM1GF3JQHBXSR5 and 01KVEVDNRTAZW4NCMX1YHJRS5R.",
+  "cases": {
+    "first_graph_use": {
+      "command": "axil edges <entity> on the edges-only snapshot (the new binary builds the adjacency tables, 322,746 entries)",
+      "new": { "size_bytes": 120713216, "allocated_bytes": 120713216, "cpu_s": 1.05 },
+      "base": { "size_bytes": 120713216, "allocated_bytes": 120713216, "cpu_s": 0.59 },
+      "new_second_call_cpu_s": 0.02
+    },
+    "ingest_scip_on_migrated_copy": {
+      "command": "axil ingest-scip .axil/index-rust.scip; both binaries wrote 25,507 new edges and deduplicated 176,527",
+      "new": { "size_bytes": 241422336, "allocated_bytes": 144068608, "cpu_s": 3.43 },
+      "base": { "size_bytes": 120713216, "allocated_bytes": 120713216, "cpu_s": 3.83 },
+      "note": "The new binary's one ingest transaction copies most pages of both adjacency tables. Once the free pages inside the file run out, redb doubles a file this size (single region) rather than growing it by what it needs, so the logical length went from 120.7 MB to 241.4 MB while the disk used grew by 23.4 MB. Sorting batch inserts by key does not change this: redb copies a page once per transaction and edits the copy in place after that, whatever the insert order."
+    },
+    "ingest_scip_on_unmigrated_copy": {
+      "command": "same ingest with the new binary straight on the edges-only snapshot (build the tables, then ingest, in one process)",
+      "new": { "size_bytes": 241422336, "allocated_bytes": 144019456, "cpu_s": 4.59 }
+    },
+    "binary_switching": {
+      "command": "three rounds of: base binary `axil link`, then `axil edges <entity>` (new binary on the new copy, base binary on the base copy)",
+      "new": {
+        "size_bytes_after_each_round": [120713216, 120713216, 120713216],
+        "edges_cpu_s_each_round": [0.03, 0.03, 0.03]
+      },
+      "base": {
+        "size_bytes_after_each_round": [120713216, 120713216, 120713216],
+        "edges_cpu_s_each_round": [0.56, 0.52, 0.62]
+      },
+      "note": "The new binary catches up by reading only the edges after the stamped greatest id."
+    },
+    "older_binary_delete_then_read": {
+      "command": "base binary `axil delete` of the linked decision (removes its edges), then `axil edges <entity>`; the new binary has to diff every edge",
+      "new": { "size_bytes": 120713216, "allocated_bytes": 120713216, "cpu_s": 0.49 },
+      "base": { "size_bytes": 120713216, "allocated_bytes": 120713216, "cpu_s": 0.52 }
+    }
+  },
+  "redb_stats": {
+    "method": "WriteTransaction::stats() on a copy",
+    "stored_bytes": {
+      "base_after_first_use": 40867810,
+      "new_after_first_use": 62209836,
+      "base_after_ingest": 47423013,
+      "new_after_ingest": 72336055
+    },
+    "metadata_bytes": {
+      "base_after_first_use": 2293912,
+      "new_after_first_use": 6181138,
+      "base_after_ingest": 2640038,
+      "new_after_ingest": 7061123
+    }
+  },
+  "redb_compact_on_copies": {
+    "method": "redb 3.1.3 Database::compact() repeated until it reports no progress, on a copy of each file; size_bytes before -> after",
+    "base_after_first_use": [120713216, 140914688],
+    "new_after_first_use": [120713216, 238231552],
+    "base_after_ingest": [120713216, 161161216],
+    "new_after_ingest": [241422336, 139595776],
+    "conclusion": "compact() grew the logical length in 3 of 4 cases, so `axil compact` does not call it on the .graph file"
+  }
+}

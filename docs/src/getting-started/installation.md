@@ -74,6 +74,47 @@ cargo install --path crates/adapters/axil-cli --features full   # everything
 > prebuilt binary (`cargo binstall` / archive download), which bundles a
 > matching runtime.
 
+## Mixing binary versions on one database
+
+Agent hooks run the `axil` that comes first on your `PATH` (usually
+`~/.cargo/bin/axil`). If you or an agent also run a build from a checkout
+(`./target/release/axil`) against the same database, two versions take turns
+writing it. So whenever you start using a build from a checkout, install it on
+your `PATH` at the same time:
+
+```bash
+cargo install --path crates/adapters/axil-cli   # from the same checkout
+```
+
+Mixing versions doesn't corrupt anything, but the graph file makes it cost
+time. Newer builds keep per-node adjacency tables next to the edges in
+`memory.axil.graph`, and older builds write edges without updating them. The
+first graph operation of a newer build after an older one has written brings
+the tables up to date:
+
+| What the older build did since | What the newer build does first | CPU on the 161k-edge dogfood snapshot |
+|---|---|---|
+| Nothing | Checks a stamp (three lookups) | — |
+| Only added edges (`link`, `store`, `ingest-scip`) | Reads just the added edges | 0.03 s after one `link` |
+| Deleted any edge (`delete` of a linked record, `unlink`, `compact`) | Decodes every edge and diffs them against the tables | 0.49 s |
+| Nothing ever: the tables don't exist yet | Builds them once (322,746 entries) | 1.05 s |
+
+For comparison, the older build spends 0.52-0.62 s of CPU loading every edge
+on each command that touches the graph. These are user + sys seconds measured
+on a heavily loaded machine, so treat them as rough; see
+[`benchmarks/results/graph-adjacency-size-2026-09-30.json`](https://github.com/FC4b/axildb/blob/main/benchmarks/results/graph-adjacency-size-2026-09-30.json).
+The work runs in whichever process gets there first, often a hook with a short
+timeout. If that process is killed partway through, the work it committed is
+kept and the next one finishes the rest.
+
+The tables also take room in the file. On the same snapshot, building them fit
+in the file's free pages, so it stayed at 120.7 MB. A later `ingest-scip` that
+added 25,507 edges then took the file's length to 241.4 MB (the older build
+stays at 120.7 MB): redb doubles a file of this size when it runs out of free
+pages. Only 23.4 MB more disk was actually used, because the rest of the new
+length stays unwritten (sparse) until it's needed. `ls` and `axil info` show
+the full length.
+
 ## Picking components
 
 Axil is assembled from three extensibility tiers — [Engines, Extensions, and Adapters](../extending/overview.md) — each behind a compile-time Cargo feature on `axil-cli`:
