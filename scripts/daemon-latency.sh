@@ -16,17 +16,19 @@
 # Every sample uses a fresh session id, so no per-session sentinel skips a
 # lookup, and every lookup is checked to have run (a busy database would
 # otherwise look fast). A prompt recall that hits the hook's own 1800 ms
-# deadline injects nothing; it still counts, as a `deadline_hits` sample. The database is a COPY of --snapshot inside a scratch
-# project whose tree is `git archive HEAD` of this checkout, so recall's
-# freshness scan walks and hashes a real source tree. The snapshot is only
-# read. SessionStart fires `scip refresh` and `maintain` in the background;
+# deadline injects nothing; it still counts, as a `deadline_hits` sample.
+# The database is a COPY of --snapshot inside a scratch project whose tree
+# is `git archive HEAD` of this checkout, so recall's freshness scan walks
+# and hashes a real source tree. The snapshot is only read. SessionStart
+# fires `scip refresh` and `maintain` in the background;
 # their lock files are refreshed before each sample so those children skip at
 # once instead of indexing or holding the database into the next sample (the
 # hook never waits on them, so this does not shorten what is measured).
 #
 # With the freshness_timing example built, it also times the freshness scan
 # every recall and boot run (stale_file_paths / check_freshness) on the same
-# copy and tree.
+# copy and tree, and weighs it against the warm daemon's 50 ms p50 gate
+# (freshness_scan.budget_share).
 #
 # Usage:
 #   scripts/daemon-latency.sh [-n 50] [--out results.json] [--snapshot DIR]
@@ -56,7 +58,7 @@ while [ $# -gt 0 ]; do
         --out) OUT="$2"; shift 2 ;;
         --snapshot) SNAPSHOT="$2"; shift 2 ;;
         --label) LABEL="$2"; shift 2 ;;
-        -h|--help) sed -n '2,40p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,42p' "$0"; exit 0 ;;
         *) echo "[daemon-latency] unknown argument: $1" >&2; exit 1 ;;
     esac
 done
@@ -286,10 +288,44 @@ if fbin and os.access(fbin, os.X_OK):
               file=sys.stderr)
 
 
+# The scan is weighed against the budget it has to fit: the warm daemon's
+# gate, a hook query p50 under 50 ms. Not against this run's one-shot hook,
+# whose time is mostly process start, embedder load and engine open; a warm
+# process no longer pays those, but it still runs the scan on every recall.
+# A one-shot hook is a fresh process, so its own cost is close to the first
+# call in a process, not the warm p50, and that is reported alongside.
+WARM_GATE_P50_MS = 50
 recall_p50 = results.get("user_prompt_recall", {}).get("p50_ms")
-if freshness and recall_p50:
-    scan = freshness["stale_file_paths_ms"]["p50"]
-    freshness["share_of_prompt_hook_p50"] = round(scan / recall_p50, 3)
+tree_files = 0
+for dirpath, dirnames, filenames in os.walk(proj):
+    dirnames[:] = [d for d in dirnames if d != ".axil"]
+    tree_files += len(filenames)
+if freshness:
+    scan = freshness["stale_file_paths_ms"]
+    inputs = ["stale_file_paths_ms above"]
+    if recall_p50:
+        inputs.append("cases.user_prompt_recall.p50_ms")
+    share = {
+        "derived_from": " and ".join(inputs) + (", both" if len(inputs) > 1 else ",")
+                        + " from this run",
+        "warm_gate_p50_ms": WARM_GATE_P50_MS,
+        "share_of_warm_gate_budget": {
+            "p50": round(scan["p50"] / WARM_GATE_P50_MS, 3),
+            "p95": round(scan["p95"] / WARM_GATE_P50_MS, 3),
+        },
+        "one_shot_scan_ms": scan["first"],
+        "note": ("share_of_warm_gate_budget is the scan's warm p50 and p95 over "
+                 "the 50 ms p50 gate (the gate has no p95 bound); the scan grows "
+                 f"with the tree (it scans {freshness.get('disk_files')} of the "
+                 f"tree's {tree_files} files here). Whether a warm process needs "
+                 "a freshness cache is decided on its own warm numbers, not on "
+                 "this one-shot run. "
+                 "one_shot_scan_ms is the first call in a process (one sample), "
+                 "about what each one-shot hook pays."),
+    }
+    if recall_p50:
+        share["one_shot_share_of_prompt_hook_p50"] = round(scan["first"] / recall_p50, 3)
+    freshness["budget_share"] = share
 
 
 def sh(*cmd):
@@ -305,10 +341,6 @@ if platform.system() == "Darwin":
                f"{sh('sysctl', '-n', 'hw.ncpu')} cores, "
                f"{int(sh('sysctl', '-n', 'hw.memsize') or 0) // 2**30} GiB, "
                f"macOS {platform.mac_ver()[0]}")
-tree_files = 0
-for dirpath, dirnames, filenames in os.walk(proj):
-    dirnames[:] = [d for d in dirnames if d != ".axil"]
-    tree_files += len(filenames)
 snap_bytes = {f: os.path.getsize(os.path.join(snapshot, f))
               for f in sorted(os.listdir(snapshot))
               if os.path.isfile(os.path.join(snapshot, f))}

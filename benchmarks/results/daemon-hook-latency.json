@@ -141,6 +141,16 @@
     },
     "stale_files": 93,
     "method": "crates/extensions/axil-indexer/examples/freshness_timing.rs on the same copy and tree: the calls recall (stale_file_paths) and boot (check_freshness) make",
-    "share_of_prompt_hook_p50": 0.014
+    "budget_share": {
+      "derived_from": "stale_file_paths_ms above and cases.user_prompt_recall.p50_ms of this run (2026-09-29T03:02:14Z, 65d45ff), by the formula in scripts/daemon-latency.sh; computed after the run, not re-measured",
+      "warm_gate_p50_ms": 50,
+      "share_of_warm_gate_budget": {
+        "p50": 0.42,
+        "p95": 0.598
+      },
+      "one_shot_scan_ms": 75.7,
+      "note": "share_of_warm_gate_budget is the scan's warm p50 and p95 over the 50 ms p50 gate (the gate has no p95 bound); the scan grows with the tree (it scans 433 of the tree's 617 files here). Whether a warm process needs a freshness cache is decided on its own warm numbers, not on this one-shot run. one_shot_scan_ms is the first call in a process (one sample), about what each one-shot hook pays.",
+      "one_shot_share_of_prompt_hook_p50": 0.052
+    }
   }
 }
