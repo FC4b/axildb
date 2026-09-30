@@ -46,7 +46,16 @@ and says so, instead of quietly recalling by keyword only:
 
 To rebuild the store, move the file to another directory (a
 `memory.axil.vec.<name>` file next to the database is read as a named vector
-space), then run `axil init <db>` and `axil heal --reindex`.
+space), then run `axil init <db>` and `axil heal --reindex`. `init` sizes the
+new store for the embedding model set in `axil.toml`
+(`[database] embedding_model`, bge-small when unset).
+
+`heal` never creates or resizes a vector store. With no store, `heal --reindex`
+reports `vector_store: {"status": "missing"}` and the `init` command to run
+instead of restoring nothing silently. A store sized for a different model
+than the configured one fails to open; `heal` then stops and names
+`axil reembed --model <model> --field <field>` or the `init` + `heal --reindex`
+route above.
 
 ### health-report
 

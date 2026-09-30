@@ -1340,15 +1340,54 @@ impl HookCtx {
         chrono::Utc::now().timestamp() - commit_ts < 3600
     }
 
+    /// `file_path` relative to the launch dir, or unchanged when it lies
+    /// outside it.
     fn rel_path(&self, file_path: &str) -> String {
         let p = Path::new(file_path);
         let rel = p
             .strip_prefix(&self.project_dir)
             .map(|r| r.to_path_buf())
-            .unwrap_or_else(|_| p.to_path_buf());
-        // Store forward slashes so rel paths match the structural index on
-        // every platform.
-        rel.to_string_lossy().replace('\\', "/")
+            .ok()
+            .or_else(|| strip_resolved(p, &self.project_dir))
+            .unwrap_or_else(|| p.to_path_buf());
+        slash_path(&rel)
+    }
+
+    /// The Axil project the session's edits belong to: the directory holding
+    /// the `.axil/` of the database this hook writes to. `find_db` walks up
+    /// from the launch dir, so in a monorepo started from a subdirectory
+    /// this sits above it. Without a database, the launch dir.
+    fn project_root(&self) -> &Path {
+        self.db
+            .as_deref()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .unwrap_or(&self.project_dir)
+    }
+
+    /// `file_path` as the session manifest records it: relative to
+    /// [`Self::project_root`], with forward slashes. `None` when the edit is
+    /// not this session's own work: outside the project (a scratch dir such
+    /// as `/private/tmp`), in an agent worktree under `.claude/worktrees/`
+    /// that the session does not itself run in, or a directory rather than a
+    /// file (the project dir itself would be an empty line). Subagents report
+    /// their edits under the parent's session id, so the first two arrive
+    /// here. A relative path is taken as relative to the launch dir, which is
+    /// where the harness runs.
+    fn manifest_path(&self, file_path: &str) -> Option<String> {
+        let root = normalize_lexically(self.project_root());
+        let launch = normalize_lexically(&self.project_dir);
+        let path = normalize_lexically(&launch.join(file_path));
+        let rel = path
+            .strip_prefix(&root)
+            .map(Path::to_path_buf)
+            .ok()
+            .or_else(|| strip_resolved(&path, &root))?;
+        if rel.as_os_str().is_empty() || path.is_dir() || in_foreign_worktree(&rel, &root, &launch)
+        {
+            return None;
+        }
+        Some(slash_path(&rel))
     }
 
     // ── User prompt: inject <context> block from recall ──────────────
@@ -1738,6 +1777,12 @@ impl HookCtx {
     /// Track the edit manifest and accumulate content snippets for the
     /// end-of-session entity extraction.
     fn post_edit_log(&self, file_path: &str, snippet: Option<&str>) -> Result<()> {
+        // An edit that is not this session's own work (a subagent's, in its
+        // worktree or a scratch dir) would block the Stop and land in the
+        // session's files_changed.
+        let Some(rel) = self.manifest_path(file_path) else {
+            return Ok(());
+        };
         // An edited manifest or lockfile can change dependency versions:
         // re-ingest the docs of whatever changed (a no-op when nothing did).
         // Checked before the skip below, which drops lockfiles.
@@ -1750,7 +1795,7 @@ impl HookCtx {
         if is_skipped_path(file_path) {
             return Ok(());
         }
-        append_line(&self.sfile("manifest"), &self.rel_path(file_path));
+        append_line(&self.sfile("manifest"), &rel);
         if let Some(text) = snippet {
             if !text.is_empty() {
                 append_line(&self.sfile("content"), truncate_utf8(text, 500));
@@ -2704,6 +2749,84 @@ fn find_db(start: &Path) -> Option<PathBuf> {
     None
 }
 
+/// A path with forward slashes, so stored paths match the structural index
+/// on every platform.
+fn slash_path(p: &Path) -> String {
+    p.to_string_lossy().replace('\\', "/")
+}
+
+/// `p` with `.` components dropped and each `..` folded into its parent,
+/// without touching the filesystem (the file may not exist yet). A `..` at
+/// the root stays at the root.
+fn normalize_lexically(p: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for c in p.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => match out.components().next_back() {
+                Some(Component::Normal(_)) => {
+                    out.pop();
+                }
+                Some(Component::RootDir | Component::Prefix(_)) => {}
+                _ => out.push(c),
+            },
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// `p` relative to `root` when the plain prefix check missed only because
+/// one side goes through a symlink (on macOS `/tmp` is `/private/tmp`). The
+/// file, and even its directory, may not exist yet (a pre-edit event, a new
+/// file in a new directory), so the deepest ancestor that exists is resolved
+/// and the rest appended.
+fn strip_resolved(p: &Path, root: &Path) -> Option<PathBuf> {
+    if !p.is_absolute() {
+        return None;
+    }
+    let root = std::fs::canonicalize(root).ok()?;
+    let mut existing = p;
+    let mut missing = Vec::new();
+    let resolved = loop {
+        if let Ok(resolved) = std::fs::canonicalize(existing) {
+            break resolved;
+        }
+        missing.push(existing.file_name()?);
+        existing = existing.parent()?;
+    };
+    let full = missing
+        .iter()
+        .rev()
+        .fold(resolved, |dir, name| dir.join(name));
+    full.strip_prefix(&root).ok().map(Path::to_path_buf)
+}
+
+/// Whether `rel` (relative to `root`) lies in an agent worktree,
+/// `.claude/worktrees/<name>/`, that the session launched from `launch`
+/// does not run in. The innermost such worktree owns the file, so a session
+/// running in a worktree still counts its own edits there but not those in
+/// a worktree nested inside it.
+fn in_foreign_worktree(rel: &Path, root: &Path, launch: &Path) -> bool {
+    let parts: Vec<_> = rel.components().collect();
+    let owner = (0..parts.len())
+        .rev()
+        .find(|&i| {
+            parts[i].as_os_str() == ".claude"
+                && parts
+                    .get(i + 1)
+                    .is_some_and(|c| c.as_os_str() == "worktrees")
+                && i + 2 < parts.len()
+        })
+        .map(|i| {
+            parts[..i + 3]
+                .iter()
+                .fold(root.to_path_buf(), |dir, c| dir.join(c))
+        });
+    owner.is_some_and(|worktree| !launch.starts_with(worktree))
+}
+
 /// Skip non-code paths: logs, lockfiles, build artifacts, the DB itself.
 fn is_skipped_path(path: &str) -> bool {
     let p = path.replace('\\', "/");
@@ -3271,6 +3394,239 @@ fn spawn_detached(exe: &Path, args: &[String], cwd: &Path, log: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A context for `project` whose session files live in `tmp`, with no
+    /// database, so nothing is enqueued or spawned.
+    fn edit_ctx(project: &Path, tmp: &Path) -> HookCtx {
+        edit_ctx_with_db(project, None, tmp)
+    }
+
+    /// Like [`edit_ctx`], writing to `db`. The file need not exist: the
+    /// edits these tests log enqueue nothing.
+    fn edit_ctx_with_db(project: &Path, db: Option<PathBuf>, tmp: &Path) -> HookCtx {
+        let sid = "edit-log-test".to_string();
+        HookCtx {
+            dialect: Dialect::Claude,
+            event: HookEvent {
+                kind: EventKind::PostTool,
+                session_id: sid.clone(),
+                cwd: None,
+                prompt: None,
+                stop_hook_active: false,
+                tool: None,
+            },
+            sid: sid.clone(),
+            project_dir: project.to_path_buf(),
+            exe: PathBuf::from("axil"),
+            db,
+            tmp: tmp.to_path_buf(),
+            files: SessionFiles {
+                tmp: tmp.to_path_buf(),
+                sid,
+            },
+        }
+    }
+
+    #[test]
+    fn edits_outside_the_project_are_not_logged() {
+        let project = tempfile::tempdir().unwrap();
+        let session = tempfile::tempdir().unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let ctx = edit_ctx(project.path(), session.path());
+
+        let outside = scratch.path().join("notes.md");
+        ctx.post_edit_log(outside.to_str().unwrap(), Some("scratch text"))
+            .unwrap();
+
+        assert!(ctx.files.manifest_lines().is_empty());
+        assert!(!ctx.sfile("content").exists(), "no snippet either");
+    }
+
+    #[test]
+    fn edits_in_agent_worktrees_are_not_logged() {
+        let project = tempfile::tempdir().unwrap();
+        let session = tempfile::tempdir().unwrap();
+        let ctx = edit_ctx(project.path(), session.path());
+
+        let worktree = project.path().join(".claude/worktrees/agent-1/src/lib.rs");
+        ctx.post_edit_log(worktree.to_str().unwrap(), None).unwrap();
+        ctx.post_edit_log(".claude/worktrees/agent-1/src/main.rs", None)
+            .unwrap();
+        ctx.post_edit_log("./.claude/worktrees/agent-1/README.md", None)
+            .unwrap();
+
+        assert!(ctx.files.manifest_lines().is_empty());
+    }
+
+    #[test]
+    fn edits_in_the_project_are_logged_relative() {
+        let project = tempfile::tempdir().unwrap();
+        let session = tempfile::tempdir().unwrap();
+        let ctx = edit_ctx(project.path(), session.path());
+
+        let file = project.path().join("src/lib.rs");
+        ctx.post_edit_log(file.to_str().unwrap(), Some("fn main() {}"))
+            .unwrap();
+        ctx.post_edit_log("src/main.rs", None).unwrap();
+        // A settings file under .claude/ is the project's, not a worktree's.
+        let settings = project.path().join(".claude/settings.json");
+        ctx.post_edit_log(settings.to_str().unwrap(), None).unwrap();
+
+        assert_eq!(
+            ctx.files.manifest_lines(),
+            vec!["src/lib.rs", "src/main.rs", ".claude/settings.json"]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn edits_through_a_symlinked_project_dir_are_logged_relative() {
+        let real = tempfile::tempdir().unwrap();
+        let links = tempfile::tempdir().unwrap();
+        let session = tempfile::tempdir().unwrap();
+        let link = links.path().join("project");
+        std::os::unix::fs::symlink(real.path(), &link).unwrap();
+        std::fs::create_dir(real.path().join("src")).unwrap();
+        let ctx = edit_ctx(&link, session.path());
+
+        // The harness names the project by its link, the edit by its real
+        // path; the file itself does not exist yet, nor, for the second, its
+        // directory.
+        let real_root = std::fs::canonicalize(real.path()).unwrap();
+        let file = real_root.join("src/new.rs");
+        ctx.post_edit_log(file.to_str().unwrap(), None).unwrap();
+        let deep = real_root.join("new/dir/mod.rs");
+        ctx.post_edit_log(deep.to_str().unwrap(), None).unwrap();
+        // And the other way round: the edit through the link.
+        let via_link = link.join("new/other.rs");
+        let real_ctx = edit_ctx(&real_root, session.path());
+        real_ctx
+            .post_edit_log(via_link.to_str().unwrap(), None)
+            .unwrap();
+
+        assert_eq!(
+            ctx.files.manifest_lines(),
+            vec!["src/new.rs", "new/dir/mod.rs", "new/other.rs"]
+        );
+    }
+
+    #[test]
+    fn edits_that_escape_the_project_or_name_a_directory_are_not_logged() {
+        let project = tempfile::tempdir().unwrap();
+        let session = tempfile::tempdir().unwrap();
+        let ctx = edit_ctx(project.path(), session.path());
+
+        ctx.post_edit_log("../other/src/lib.rs", None).unwrap();
+        ctx.post_edit_log("src/../../other/x.rs", None).unwrap();
+        ctx.post_edit_log(project.path().to_str().unwrap(), None)
+            .unwrap();
+        let dir = project.path().join("src");
+        std::fs::create_dir(&dir).unwrap();
+        ctx.post_edit_log(dir.to_str().unwrap(), None).unwrap();
+
+        assert!(ctx.files.manifest_lines().is_empty());
+    }
+
+    #[test]
+    fn edits_anywhere_in_the_axil_project_count_from_a_subdir_launch() {
+        let root = tempfile::tempdir().unwrap();
+        let session = tempfile::tempdir().unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let sub = root.path().join("sub");
+        let db = root.path().join(".axil/memory.axil");
+        // A monorepo session started in `sub/`: `find_db` walked up to the
+        // database at the repo root, so the whole repo is the project.
+        let ctx = edit_ctx_with_db(&sub, Some(db), session.path());
+
+        let readme = root.path().join("README.md");
+        ctx.post_edit_log(readme.to_str().unwrap(), None).unwrap();
+        ctx.post_edit_log(sub.join("a.rs").to_str().unwrap(), None)
+            .unwrap();
+        ctx.post_edit_log("b.rs", None).unwrap();
+        ctx.post_edit_log("../docs/c.md", None).unwrap();
+        // Still not the project's: outside it, or in an agent worktree.
+        ctx.post_edit_log(scratch.path().join("x.rs").to_str().unwrap(), None)
+            .unwrap();
+        let worktree = root.path().join(".claude/worktrees/agent-1/src/lib.rs");
+        ctx.post_edit_log(worktree.to_str().unwrap(), None).unwrap();
+
+        assert_eq!(
+            ctx.files.manifest_lines(),
+            vec!["README.md", "sub/a.rs", "sub/b.rs", "docs/c.md"]
+        );
+    }
+
+    #[test]
+    fn a_session_running_in_a_worktree_logs_its_own_edits() {
+        let root = tempfile::tempdir().unwrap();
+        let session = tempfile::tempdir().unwrap();
+        let own = root.path().join(".claude/worktrees/me");
+        let db = root.path().join(".axil/memory.axil");
+        let ctx = edit_ctx_with_db(&own, Some(db), session.path());
+
+        ctx.post_edit_log(own.join("src/a.rs").to_str().unwrap(), None)
+            .unwrap();
+        ctx.post_edit_log("src/b.rs", None).unwrap();
+        ctx.post_edit_log(root.path().join("src/main.rs").to_str().unwrap(), None)
+            .unwrap();
+        // Another agent's worktree, and one nested in this session's own.
+        let other = root.path().join(".claude/worktrees/other/src/c.rs");
+        ctx.post_edit_log(other.to_str().unwrap(), None).unwrap();
+        let nested = own.join(".claude/worktrees/sub-agent/src/d.rs");
+        ctx.post_edit_log(nested.to_str().unwrap(), None).unwrap();
+
+        assert_eq!(
+            ctx.files.manifest_lines(),
+            vec![
+                ".claude/worktrees/me/src/a.rs",
+                ".claude/worktrees/me/src/b.rs",
+                "src/main.rs"
+            ]
+        );
+    }
+
+    #[test]
+    fn foreign_worktrees() {
+        let root = Path::new("/repo");
+        let main = Path::new("/repo");
+        let in_tree = Path::new("/repo/.claude/worktrees/me");
+        for (rel, launch, foreign) in [
+            ("src/main.rs", main, false),
+            (".claude/settings.json", main, false),
+            (".claude/worktrees/agent-1/src/lib.rs", main, true),
+            (".claude/worktrees/me/src/lib.rs", in_tree, false),
+            (
+                ".claude/worktrees/me/.claude/worktrees/x/a.rs",
+                in_tree,
+                true,
+            ),
+            (".claude/worktrees/other/a.rs", in_tree, true),
+            ("src/main.rs", in_tree, false),
+        ] {
+            assert_eq!(
+                in_foreign_worktree(Path::new(rel), root, launch),
+                foreign,
+                "{rel} from {}",
+                launch.display()
+            );
+        }
+    }
+
+    #[test]
+    fn lexical_normalization() {
+        for (raw, want) in [
+            ("/a/./b/../c", "/a/c"),
+            ("/a/b/../../..", "/"),
+            ("a/../../b", "../b"),
+            ("./x", "x"),
+        ] {
+            assert_eq!(
+                normalize_lexically(Path::new(raw)),
+                Path::new(want),
+                "{raw}"
+            );
+        }
+    }
 
     #[test]
     fn skipped_paths_cover_artifacts_and_db() {

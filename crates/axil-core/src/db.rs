@@ -4566,6 +4566,11 @@ impl Axil {
     }
 
     /// Run built-in micro-benchmarks.
+    ///
+    /// With a vector index, the first search runs untimed by the per-search
+    /// loop and is reported as `vector_index_warmup`: it may build the index's
+    /// search structure, a one-off cost that would otherwise be averaged into
+    /// `vector_search_*`.
     pub fn bench(&self) -> Result<BenchReport> {
         let mut results = Vec::new();
 
@@ -4611,6 +4616,20 @@ impl Axil {
         if let Some(ref vi) = self.vector_index {
             let dims = vi.dimensions();
             let query: Vec<f32> = (0..dims).map(|i| (i as f32 * 0.01).sin()).collect();
+            // An index may build its search structure on the first query (the
+            // HNSW graph is built lazily above the exact-scan size). Averaged
+            // into the loop below, that one-off cost would pass for per-search
+            // latency, so it is timed and reported on its own.
+            let start = std::time::Instant::now();
+            let _ = vi.search(&query, 5)?;
+            let warmup_elapsed = start.elapsed();
+            results.push(BenchResult {
+                name: "vector_index_warmup".to_string(),
+                ops_per_sec: 1.0 / warmup_elapsed.as_secs_f64(),
+                avg_ms: warmup_elapsed.as_secs_f64() * 1000.0,
+                iterations: 1,
+            });
+
             let search_count = 100;
             let start = std::time::Instant::now();
             for _ in 0..search_count {
@@ -7266,6 +7285,84 @@ mod tests {
         fn on_record_delete(&self, _id: &RecordId) -> Result<()> {
             Ok(())
         }
+    }
+
+    /// A vector index whose first search is slow, like an HNSW index that
+    /// builds its graph on first use. Counts every search.
+    struct LazyBuildIndex {
+        build: std::time::Duration,
+        searches: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl crate::plugin::VectorIndex for LazyBuildIndex {
+        fn add(&self, _id: RecordId, _vector: &[f32]) -> Result<()> {
+            Ok(())
+        }
+        fn search(&self, _query: &[f32], _top_k: usize) -> Result<Vec<(RecordId, f32)>> {
+            use std::sync::atomic::Ordering;
+            if self.searches.fetch_add(1, Ordering::SeqCst) == 0 {
+                std::thread::sleep(self.build);
+            }
+            Ok(Vec::new())
+        }
+        fn count(&self) -> usize {
+            0
+        }
+        fn dimensions(&self) -> usize {
+            4
+        }
+    }
+
+    impl crate::plugin::Engine for LazyBuildIndex {
+        fn name(&self) -> &str {
+            "lazy-build-vector"
+        }
+        fn capabilities(&self) -> Vec<crate::plugin::Capability> {
+            vec![crate::plugin::Capability::VectorSearch]
+        }
+        fn on_record_insert(&self, _record: &Record) -> Result<()> {
+            Ok(())
+        }
+        fn on_record_delete(&self, _id: &RecordId) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn bench_reports_the_first_vector_search_apart_from_the_timed_ones() {
+        let build = std::time::Duration::from_millis(300);
+        let searches = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let dir = tempfile::tempdir().unwrap();
+        let db = Axil::open(dir.path().join("bench-warmup.axil"))
+            .with_vector_index(Box::new(LazyBuildIndex {
+                build,
+                searches: searches.clone(),
+            }))
+            .build()
+            .unwrap();
+
+        let report = db.bench().unwrap();
+        let find = |prefix: &str| {
+            report
+                .benchmarks
+                .iter()
+                .find(|b| b.name.starts_with(prefix))
+                .unwrap_or_else(|| panic!("no {prefix} result in {:?}", report.benchmarks))
+        };
+        let warmup = find("vector_index_warmup");
+        let timed = find("vector_search_");
+
+        assert_eq!(warmup.iterations, 1);
+        assert!(warmup.avg_ms >= build.as_secs_f64() * 1000.0, "{warmup:?}");
+        assert_eq!(
+            searches.load(std::sync::atomic::Ordering::SeqCst),
+            1 + timed.iterations,
+            "one warm-up search, then the timed ones"
+        );
+        // Averaged in, the build alone would put every timed search at
+        // build / iterations or more.
+        let build_share_ms = build.as_secs_f64() * 1000.0 / timed.iterations as f64;
+        assert!(timed.avg_ms < build_share_ms, "{timed:?}");
     }
 
     #[test]

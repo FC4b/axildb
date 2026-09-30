@@ -496,10 +496,13 @@ enum Command {
     Init {
         /// Path for the new database (overrides --db).
         path: Option<PathBuf>,
-        /// Vector dimensions (default: 384 for bge-small; use 768 for bge-base/nomic).
+        /// Vector dimensions for the default vector store. Defaults to the
+        /// dimensions of the embedding model set in axil.toml
+        /// (`[database] embedding_model`; bge-small, 384, when unset), which
+        /// is the size every later open expects.
         #[cfg(feature = "vector")]
-        #[arg(long, default_value = "384")]
-        vector_dims: usize,
+        #[arg(long)]
+        vector_dims: Option<usize>,
     },
 
     /// Install Axil agent memory in the current project.
@@ -560,10 +563,13 @@ enum Command {
         /// Also print setup instructions for a generic AI agent.
         #[arg(long, value_name = "AGENT")]
         agent: Option<String>,
-        /// Vector dimensions (default: 384 for bge-small; use 768 for bge-base/nomic).
+        /// Vector dimensions for the default vector store. Defaults to the
+        /// dimensions of the embedding model set in axil.toml
+        /// (`[database] embedding_model`; bge-small, 384, when unset), which
+        /// is the size every later open expects.
         #[cfg(feature = "vector")]
-        #[arg(long, default_value = "384")]
-        vector_dims: usize,
+        #[arg(long)]
+        vector_dims: Option<usize>,
         /// Print every file/entry that would be written without touching the filesystem (12.1).
         #[arg(long)]
         dry_run: bool,
@@ -6053,6 +6059,75 @@ fn resolve_embedding_model(db_path: &Path) -> axil_vector::models::EmbeddingMode
     axil_vector::models::EmbeddingModel::BgeSmall
 }
 
+/// Tell the user that probing the default vector store repaired it: the
+/// writer that last had it open died before closing it.
+#[cfg(feature = "vector")]
+fn note_vector_store_repaired(db_path: &Path) {
+    eprintln!(
+        "axil: vector store {} was not closed cleanly; repaired it",
+        axil_vector::vector_db_path(db_path).display()
+    );
+}
+
+/// Check the default vector store before `heal` opens the database, since
+/// heal re-embeds records missing from a store and can neither create one nor
+/// resize one.
+///
+/// A store sized for another model fails every open, so that is an error
+/// naming the commands that rebuild it at the configured model's size. A
+/// missing store (with the engine enabled) returns a note: `--reindex` would
+/// otherwise report zero embeddings restored as if nothing were wrong. A store
+/// that cannot be probed is left to the open, which reports busy or degraded.
+#[cfg(feature = "embed")]
+fn heal_vector_store_check(
+    db_path: &Path,
+    config: &axil_core::AxilConfig,
+) -> Result<Option<String>> {
+    if config.is_engine_disabled("vec") {
+        return Ok(None);
+    }
+    let Ok(probe) = axil_vector::probe_vector_store(db_path) else {
+        return Ok(None);
+    };
+    // This probe repairs a store a killed writer left dirty, so the later
+    // attach probe finds it clean: the notice has to come from here.
+    if let axil_vector::VectorStoreProbe::Ready { repaired: true, .. } = probe {
+        note_vector_store_repaired(db_path);
+    }
+    let model = resolve_embedding_model(db_path);
+    let vec_path = axil_vector::vector_db_path(db_path);
+    match probe {
+        axil_vector::VectorStoreProbe::Missing => Ok(Some(format!(
+            "no vector store at {}, so heal cannot restore embeddings. Run `axil init {}` \
+             to create one sized for {} ({} dimensions), then `axil heal --reindex` again",
+            vec_path.display(),
+            db_path.display(),
+            model.name(),
+            model.dimensions(),
+        ))),
+        axil_vector::VectorStoreProbe::Ready { dimensions, .. }
+            if dimensions != model.dimensions() =>
+        {
+            anyhow::bail!(
+                "{} holds {dimensions}-dimension vectors, but the embedding model {} \
+                 (axil.toml `[database] embedding_model`, bge-small when unset) makes \
+                 {}-dimension ones, and heal cannot resize a store. \
+                 Rebuild it with `axil --db {} reembed --model {} --field <field>`, or \
+                 move {} to another directory and run `axil init {}` then \
+                 `axil heal --reindex`",
+                vec_path.display(),
+                model.name(),
+                model.dimensions(),
+                db_path.display(),
+                model.name(),
+                vec_path.display(),
+                db_path.display(),
+            )
+        }
+        axil_vector::VectorStoreProbe::Ready { .. } => Ok(None),
+    }
+}
+
 /// Reject a raw vector bound for the *default* vector space unless it has the
 /// text embedder's dimension. The default space belongs to the embedder: every
 /// open attaches it at the model's dimension, so a store created (or written)
@@ -6142,10 +6217,7 @@ fn attach_detected_engines(mut builder: axil_core::AxilBuilder) -> Result<axil_c
                 Ok(axil_vector::VectorStoreProbe::Missing) => {}
                 Ok(axil_vector::VectorStoreProbe::Ready { repaired, .. }) => {
                     if repaired {
-                        eprintln!(
-                            "axil: vector store {} was not closed cleanly; repaired it",
-                            axil_vector::vector_db_path(&path).display()
-                        );
+                        note_vector_store_repaired(&path);
                     }
                     // Attach vector index + embedder together so auto-embed on insert works.
                     #[cfg(feature = "embed")]
@@ -6663,6 +6735,44 @@ fn open_with_fts(path: &Path) -> Result<Axil> {
     builder.build().context("failed to open database")
 }
 
+/// Dimensions for the default vector store that `init` / `install` create:
+/// `--vector-dims` when given, else the configured embedding model's. Every
+/// later open attaches that model and refuses a store of any other size, so a
+/// fixed default would leave a non-bge-small database unopenable.
+///
+/// An explicit size that the configured model does not produce is kept, since
+/// axil.toml may be written after init, but warned about: until the config
+/// names a model of that size, every open in this build refuses the store.
+#[cfg(feature = "vector")]
+fn init_vector_dims(db_path: &Path, explicit: Option<usize>) -> usize {
+    #[cfg(feature = "embed")]
+    {
+        let model = resolve_embedding_model(db_path);
+        match explicit {
+            Some(dims) if dims != model.dimensions() => {
+                eprintln!(
+                    "warning: --vector-dims {dims} does not match the embedding model {} \
+                     ({} dimensions; axil.toml `[database] embedding_model`, bge-small \
+                     when unset). Opening this database fails until axil.toml names a \
+                     {dims}-dimension model",
+                    model.name(),
+                    model.dimensions(),
+                );
+                dims
+            }
+            Some(dims) => dims,
+            None => model.dimensions(),
+        }
+    }
+    // Without an embedder no model is ever attached (opens read the stored
+    // size), so any size opens; use the default model's.
+    #[cfg(not(feature = "embed"))]
+    {
+        let _ = db_path;
+        explicit.unwrap_or_else(|| axil_vector::models::EmbeddingModel::BgeSmall.dimensions())
+    }
+}
+
 /// Open with all features enabled (for init).
 #[cfg(feature = "vector")]
 fn open_with_all_features(path: &Path, vector_dims: usize) -> Result<Axil> {
@@ -6899,7 +7009,9 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                 .ok_or_else(|| anyhow::anyhow!("path required: axil init <path> or --db <path>"))?;
 
             #[cfg(feature = "vector")]
-            let _db = open_with_all_features(&db_path, vector_dims)?;
+            let dims = init_vector_dims(&db_path, vector_dims);
+            #[cfg(feature = "vector")]
+            let _db = open_with_all_features(&db_path, dims)?;
             #[cfg(not(feature = "vector"))]
             let _db = open_with_all_features(&db_path)?;
 
@@ -6913,11 +7025,17 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             #[cfg(feature = "fts")]
             features.push("fts");
 
-            out.print(&json!({
+            #[allow(unused_mut)]
+            let mut result = json!({
                 "path": db_path.display().to_string(),
                 "created": true,
                 "features": features,
-            }));
+            });
+            #[cfg(feature = "vector")]
+            {
+                result["vector_dims"] = json!(dims);
+            }
+            out.print(&result);
             Ok(EXIT_OK)
         }
 
@@ -7300,7 +7418,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
 
             // Create the database
             #[cfg(feature = "vector")]
-            let _db = open_with_all_features(&db_path, vector_dims)?;
+            let _db = open_with_all_features(&db_path, init_vector_dims(&db_path, vector_dims))?;
             #[cfg(not(feature = "vector"))]
             let _db = open_with_all_features(&db_path)?;
 
@@ -10446,6 +10564,10 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
         } => {
             let db_path = require_db(&db_opt)?;
             let config = load_config(&db_path)?;
+            #[cfg(feature = "embed")]
+            let missing_vector_store = heal_vector_store_check(&db_path, &config)?;
+            #[cfg(not(feature = "embed"))]
+            let missing_vector_store: Option<String> = None;
             let db = open_with_all_detected(&db_path)?;
 
             // If specific flags are given, run only those actions
@@ -10545,6 +10667,10 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                     "healed": !dry_run && !actions.is_empty(),
                     "actions": actions,
                 });
+                if let (true, Some(note)) = (reindex, &missing_vector_store) {
+                    out.status(&format!("axil: {note}"));
+                    output["vector_store"] = json!({ "status": "missing", "fix": note });
+                }
                 insert_degraded(&mut output, &db);
                 out.print(&output);
             } else {
