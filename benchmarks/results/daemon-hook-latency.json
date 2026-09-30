@@ -4,6 +4,10 @@
   "date": "2026-09-29T03:02:14Z",
   "git_commit": "65d45ff",
   "axil_version": "axil 2.3.1 (axildb-v2.3.1-25-g65d45ff-dirty)",
+  "uncommitted_changes": {
+    "paths": null,
+    "note": "not recorded: this run predates the field. axil_version ends in -dirty, so the binary was built from a checkout with uncommitted changes to tracked files and is not exactly git_commit"
+  },
   "build": "release",
   "machine": "Apple M1 Pro, 10 cores, 16 GiB, macOS 26.6",
   "load_average_1m": {

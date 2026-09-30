@@ -102,6 +102,19 @@ for k in ("AXIL_DB", "AXIL_BIN", "FRESHNESS_BIN"):
     env.pop(k, None)
 
 
+def sh(*cmd):
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True).stdout.strip()
+    except OSError:
+        return ""
+
+
+# Tracked files that differ from HEAD as the run starts. The measured binary
+# was most likely built from this checkout, so it may carry these changes
+# (its --version then ends in -dirty) while git_commit names HEAD alone.
+uncommitted = [p for p in sh("git", "-C", root, "diff", "--name-only", "HEAD").splitlines() if p]
+
+
 def fnv1a(s):
     h = 0xCBF29CE484222325
     for b in s.encode():
@@ -328,13 +341,6 @@ if freshness:
     freshness["budget_share"] = share
 
 
-def sh(*cmd):
-    try:
-        return subprocess.run(cmd, capture_output=True, text=True).stdout.strip()
-    except OSError:
-        return ""
-
-
 machine = platform.platform()
 if platform.system() == "Darwin":
     machine = (f"{sh('sysctl', '-n', 'machdep.cpu.brand_string')}, "
@@ -356,6 +362,12 @@ report = {
     "date": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     "git_commit": sh("git", "-C", root, "rev-parse", "--short", "HEAD"),
     "axil_version": sh(axil, "--version"),
+    "uncommitted_changes": {
+        "paths": uncommitted,
+        "note": ("tracked files that differed from git_commit when the run started; "
+                 "a binary built from this checkout may include them, and its "
+                 "axil_version then ends in -dirty"),
+    },
     "build": build,
     "machine": machine,
     "load_average_1m": {"before": round(load_before[0], 2), "after": round(load_after[0], 2)},
