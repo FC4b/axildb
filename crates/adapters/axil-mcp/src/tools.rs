@@ -453,7 +453,7 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
         ToolDefinition {
             name: "boot".into(),
             description: format!(
-                "Return a stable BootContext (schema_version \"{}\"): current_scope, constraints, recent_decisions, active_failures (open errors), open_threads, preferences, confidence_notes. Every row is one string (`id · age · status · summary`, expand with `get`); the budget cuts rows, then lower-priority sections.",
+                "Return a stable BootContext (schema_version \"{}\"): current_scope, constraints, recent_decisions, active_failures (open errors), open_threads, preferences, confidence_notes. Every row is one string (`id · age · status · summary`, expand with `get`). Rows fill in strict priority order (scope, constraints, active_failures, recent_decisions, then the rest) until the budget is spent; omitted_by_section names what was cut.",
                 axil_core::BOOT_SCHEMA_VERSION
             ),
             input_schema: json!({

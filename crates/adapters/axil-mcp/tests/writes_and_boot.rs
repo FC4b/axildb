@@ -196,13 +196,31 @@ fn boot_rows_are_one_liners_within_budget() {
         "rows were cut: {out}"
     );
 
+    let by_section: u64 = out["omitted_by_section"]
+        .as_object()
+        .expect("omitted_by_section names the cut sections")
+        .values()
+        .filter_map(serde_json::Value::as_u64)
+        .sum();
+    assert_eq!(by_section, out["omitted_items"].as_u64().unwrap());
+
     let sections = out["sections"].as_array().unwrap();
-    let failures = sections
-        .iter()
-        .find(|s| s["kind"] == "active_failures")
-        .expect("failures are never dropped");
-    let rows = failures["content"].as_array().unwrap();
-    assert!(!rows.is_empty());
+    let rows_of = |kind: &str| {
+        sections
+            .iter()
+            .find(|s| s["kind"] == kind)
+            .and_then(|s| s["content"].as_array())
+            .cloned()
+            .unwrap_or_default()
+    };
+    // Failures fill before decisions, strictly: no decision shows while a
+    // failure (capped at 5 before the budget) is cut.
+    let rows = rows_of("active_failures");
+    assert!(!rows.is_empty(), "failures are never dropped");
+    if !rows_of("recent_decisions").is_empty() {
+        assert_eq!(rows.len(), 5, "{out}");
+        assert!(out["omitted_by_section"].get("active_failures").is_none());
+    }
     for row in rows {
         let row = row.as_str().expect("rows are one-line strings");
         let fields: Vec<&str> = row.splitn(4, " · ").collect();

@@ -30,15 +30,20 @@
 //!
 //! Callers pass `token_budget`, in tokens estimated by
 //! [`crate::token::DEFAULT_TOKEN_ESTIMATOR`] (`ceil(bytes / 4)`, a heuristic)
-//! over the serialized context. Sections fill in priority order — scope
-//! (with the Resume Here block), constraints, active failures, recent
-//! decisions, then the rest — row by row, so the budget holds inside the
-//! four load-bearing sections too: they are never dropped, but their rows
-//! are cut once the budget runs out. Lower-priority sections that cannot
-//! fit a single row are dropped and named in `dropped_sections`; cut rows
-//! are counted in `omitted_items`. `token_budget_used` estimates the whole
-//! serialized context, and stays within the budget unless the envelope and
-//! empty section skeletons alone exceed it.
+//! over the serialized context. [`fill_by_priority`] picks the rows in
+//! strict priority order — the Resume Here block (scope), constraints,
+//! active failures, recent decisions, then open threads, preferences and
+//! confidence notes — row by row. The first row that does not fit is
+//! clipped to the space left and ends the fill, so no row is ever shown
+//! while a higher-priority one is left out.
+//! The four load-bearing sections are never dropped, only trimmed; a
+//! lower-priority section left without a row is dropped and named in
+//! `dropped_sections`. Cut rows are counted in `omitted_items` and, per
+//! section, in `omitted_by_section`. Every candidate is checked against the
+//! real serialized context, so `token_budget_used` stays within the budget
+//! unless the envelope and empty section skeletons alone exceed it.
+
+use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -73,6 +78,11 @@ pub const BOOT_ROW_SUMMARY_CHARS: usize = 160;
 /// Longest rule text a boot row carries, in chars. Rules are always-apply
 /// constraints, so they get more room than other rows before clipping.
 pub const BOOT_RULE_CHARS: usize = 400;
+
+/// Fewest summary chars a row clipped to the budget keeps. Shorter than
+/// this a summary no longer says what the row is about, so the row is left
+/// out instead.
+pub const BOOT_CLIP_MIN_CHARS: usize = 24;
 
 /// Per-table caps on how many rows to include in each section before
 /// budget shaping. Prevents a chat-heavy DB from dumping 500 decisions
@@ -142,37 +152,6 @@ impl BootSection {
             Self::ConfidenceNotes { .. } => 6,
         }
     }
-
-    /// Scope, constraints, failures and decisions are load-bearing for
-    /// planning: the budget trims their rows but never removes them.
-    fn droppable(&self) -> bool {
-        self.priority() >= 4
-    }
-
-    /// The section with every budget-trimmable part emptied: what it costs
-    /// before any row is added. `ConfidenceNotes` is kept or dropped whole,
-    /// so its skeleton is itself.
-    fn skeleton(&self) -> BootSection {
-        match self {
-            Self::CurrentScope { content } => {
-                let mut content = content.clone();
-                if let Some(obj) = content.as_object_mut() {
-                    obj.remove("extension_blocks");
-                }
-                Self::CurrentScope { content }
-            }
-            Self::Constraints { .. } => Self::Constraints {
-                content: json!({ "rules": [] }),
-            },
-            Self::RecentDecisions { .. } => Self::RecentDecisions { content: vec![] },
-            Self::ActiveFailures { .. } => Self::ActiveFailures { content: vec![] },
-            Self::OpenThreads { .. } => Self::OpenThreads { content: vec![] },
-            Self::Preferences { .. } => Self::Preferences { content: vec![] },
-            Self::ConfidenceNotes { content } => Self::ConfidenceNotes {
-                content: content.clone(),
-            },
-        }
-    }
 }
 
 /// Returned from `Axil::boot()`. Deterministic order, stable schema,
@@ -187,10 +166,15 @@ pub struct BootContext {
     /// Kinds that were dropped to fit the budget, lowest priority first.
     /// Empty when every section kept at least one row.
     pub dropped_sections: Vec<String>,
-    /// Rows, and lines of extension blocks, cut from kept sections to fit
-    /// the budget. Omitted when nothing was cut.
+    /// Rows, and lines of extension blocks, cut to fit the budget. Omitted
+    /// when nothing was cut.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub omitted_items: usize,
+    /// `omitted_items` per section kind (an extension block by its id), so
+    /// a reader can tell which sections lost rows. Omitted when nothing was
+    /// cut.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub omitted_by_section: BTreeMap<String, usize>,
     /// Engines found on disk that this handle could not attach (see
     /// [`Axil::degraded_engines`]). Omitted when every Engine is attached.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -201,10 +185,11 @@ impl Axil {
     /// Assemble a boot context from current DB state.
     ///
     /// Returns a `BootContext` with sections in fixed order and rows as
-    /// one-liners. Sections fill in priority order (scope, constraints,
+    /// one-liners. Rows fill in strict priority order within
+    /// `opts.token_budget` (see [`fill_by_priority`]): scope, constraints,
     /// active failures, recent decisions, open threads, preferences,
-    /// confidence notes) until `opts.token_budget` is spent: rows that do
-    /// not fit are cut, and a lower-priority section left without a row is
+    /// confidence notes. The first row that does not fit is clipped and
+    /// ends the fill; a lower-priority section left without a row is
     /// dropped. The top four sections are never dropped.
     pub fn boot(&self, opts: BootOptions) -> Result<BootContext> {
         let budget = opts
@@ -265,9 +250,8 @@ impl Axil {
             content: confidence,
         });
 
-        // ── Budget discipline: fill sections in priority order, row by
-        // row, cutting rows (and dropping only droppable sections) once
-        // the budget is spent. ─────────────────────────────────────
+        // ── Budget discipline: fill rows by priority, cutting rows (and
+        // dropping only droppable sections) once the budget is spent. ──
         let mut ctx = BootContext {
             schema_version: BOOT_SCHEMA_VERSION,
             generated_at: now,
@@ -276,6 +260,7 @@ impl Axil {
             sections: Vec::new(),
             dropped_sections: Vec::new(),
             omitted_items: 0,
+            omitted_by_section: BTreeMap::new(),
             degraded: self.degraded_engines().to_vec(),
         };
         fit_to_budget(&mut ctx, sections, &crate::token::DEFAULT_TOKEN_ESTIMATOR);
@@ -689,225 +674,325 @@ pub fn preference_row(record: &Record, now: DateTime<Utc>) -> String {
     )
 }
 
-/// The longest prefix of whole lines of `text` that `fits` accepts, and how
-/// many lines were left out. Lines are tried in order and the first that
-/// does not fit ends the prefix, so the kept part always reads as the
-/// block's opening rather than a selection with holes in it.
-pub fn take_fitting_lines(text: &str, mut fits: impl FnMut(&str) -> bool) -> (String, usize) {
-    let lines: Vec<&str> = text.lines().collect();
-    let mut kept = 0;
-    for n in 1..=lines.len() {
-        if !fits(&lines[..n].join("\n")) {
-            break;
-        }
-        kept = n;
-    }
-    (lines[..kept].join("\n"), lines.len() - kept)
+/// One section offered to [`fill_by_priority`].
+#[derive(Debug, Clone)]
+pub struct FillSlot {
+    /// Name reported when rows are left out (`omitted_by_section`).
+    pub name: String,
+    /// Rows in display order: one-line records, or a prose block's lines.
+    pub rows: Vec<String>,
+    /// Whether a row that does not fit whole may be shortened to fit
+    /// ([`clip_row`]). Off for a row that is structured data, not text.
+    pub clippable: bool,
 }
 
-/// Estimated tokens of a section's serialized form, kind tag included.
-fn section_cost(s: &BootSection, cost: &dyn Fn(&str) -> usize) -> usize {
-    cost(&serde_json::to_string(s).unwrap_or_default())
-}
-
-/// Keep `rows` in order while each fits in `remaining`; a row that does not
-/// fit is skipped (a shorter one after it may still fit). Returns the kept
-/// rows and how many were cut.
-fn fit_rows(
-    rows: &[Value],
-    remaining: &mut usize,
-    cost: &dyn Fn(&str) -> usize,
-) -> (Vec<Value>, usize) {
-    let mut kept = Vec::new();
-    let mut cut = 0;
-    for row in rows {
-        let c = cost(&row.to_string());
-        if c <= *remaining {
-            *remaining -= c;
-            kept.push(row.clone());
-        } else {
-            cut += 1;
+impl FillSlot {
+    /// A clippable slot.
+    pub fn new(name: impl Into<String>, rows: Vec<String>) -> Self {
+        Self {
+            name: name.into(),
+            rows,
+            clippable: true,
         }
-    }
-    (kept, cut)
-}
-
-/// Keep `{id, text}` extension blocks in order while they fit; a block that
-/// does not fit whole keeps its leading lines ([`take_fitting_lines`]).
-/// Returns the kept blocks and how many lines were cut.
-fn fit_blocks(
-    blocks: &[Value],
-    remaining: &mut usize,
-    cost: &dyn Fn(&str) -> usize,
-) -> (Vec<Value>, usize) {
-    let with_text = |block: &Value, text: &str| {
-        let mut b = block.clone();
-        b["text"] = Value::String(text.to_string());
-        b
-    };
-    let key_cost = cost(r#","extension_blocks":[]"#);
-    let mut kept = Vec::new();
-    let mut cut = 0;
-    for block in blocks {
-        let overhead = if kept.is_empty() { key_cost } else { 0 };
-        let whole = cost(&block.to_string()) + overhead;
-        if whole <= *remaining {
-            *remaining -= whole;
-            kept.push(block.clone());
-            continue;
-        }
-        let text = block.get("text").and_then(Value::as_str).unwrap_or("");
-        let avail = remaining.saturating_sub(overhead);
-        let (prefix, left_out) =
-            take_fitting_lines(text, |p| cost(&with_text(block, p).to_string()) <= avail);
-        if prefix.is_empty() {
-            cut += text.lines().count().max(1);
-            continue;
-        }
-        let trimmed = with_text(block, &prefix);
-        *remaining = remaining.saturating_sub(cost(&trimmed.to_string()) + overhead);
-        cut += left_out;
-        kept.push(trimmed);
-    }
-    (kept, cut)
-}
-
-/// Fill a section's trimmable part (rows, rules, extension blocks) into
-/// `remaining`, whose skeleton cost the caller has already reserved.
-/// Returns the fitted section, how many rows it kept, and how many it cut.
-fn fill_section(
-    section: &BootSection,
-    remaining: &mut usize,
-    cost: &dyn Fn(&str) -> usize,
-) -> (BootSection, usize, usize) {
-    match section {
-        BootSection::CurrentScope { content } => {
-            let mut content = content.clone();
-            let blocks = content
-                .as_object_mut()
-                .and_then(|o| o.remove("extension_blocks"));
-            let (kept, cut) = match blocks {
-                Some(Value::Array(blocks)) => fit_blocks(&blocks, remaining, cost),
-                _ => (Vec::new(), 0),
-            };
-            let rows = kept.len();
-            if let (false, Some(obj)) = (kept.is_empty(), content.as_object_mut()) {
-                obj.insert("extension_blocks".to_string(), Value::Array(kept));
-            }
-            (BootSection::CurrentScope { content }, rows, cut)
-        }
-        BootSection::Constraints { content } => {
-            let rules = content
-                .get("rules")
-                .and_then(Value::as_array)
-                .cloned()
-                .unwrap_or_default();
-            let (kept, cut) = fit_rows(&rules, remaining, cost);
-            let rows = kept.len();
-            let mut content = content.clone();
-            content["rules"] = Value::Array(kept);
-            (BootSection::Constraints { content }, rows, cut)
-        }
-        BootSection::RecentDecisions { content } => {
-            let (kept, cut) = fit_rows(content, remaining, cost);
-            let rows = kept.len();
-            (BootSection::RecentDecisions { content: kept }, rows, cut)
-        }
-        BootSection::ActiveFailures { content } => {
-            let (kept, cut) = fit_rows(content, remaining, cost);
-            let rows = kept.len();
-            (BootSection::ActiveFailures { content: kept }, rows, cut)
-        }
-        BootSection::OpenThreads { content } => {
-            let (kept, cut) = fit_rows(content, remaining, cost);
-            let rows = kept.len();
-            (BootSection::OpenThreads { content: kept }, rows, cut)
-        }
-        BootSection::Preferences { content } => {
-            let (kept, cut) = fit_rows(content, remaining, cost);
-            let rows = kept.len();
-            (BootSection::Preferences { content: kept }, rows, cut)
-        }
-        BootSection::ConfidenceNotes { .. } => (section.clone(), 0, 0),
     }
 }
 
-/// Fill `sections` into `ctx` in priority order within `ctx.token_budget`,
-/// then record what was dropped, how many rows were cut, and the estimated
-/// size of the whole serialized context.
+/// What [`fill_by_priority`] shows of each slot: `None` leaves the section
+/// out, `Some(rows)` shows it with those rows (the last one possibly
+/// clipped). An empty slot can be shown with no rows.
+pub type FillSelection = Vec<Option<Vec<String>>>;
+
+/// Choose the rows of `slots` (given highest priority first) to show within
+/// a budget that `fits` checks on the real rendering of a selection.
 ///
-/// Costs are summed per piece (envelope, section skeletons, rows), each
-/// rounded up by the estimator, so the sum never undercounts the
-/// serialized whole.
+/// Rows fill in strict priority order: every row of a slot before any row
+/// of the next slot, and a slot with no rows at all is offered as the
+/// section's bare presence. The first row that does not fit whole is
+/// clipped to fit when its slot allows it, and ends the fill either way,
+/// so no row is ever shown while a higher-priority one is left out or
+/// shortened. `fits` is called on exactly the selection returned, so the
+/// result fits unless the empty selection alone does not.
+pub fn fill_by_priority(
+    slots: &[FillSlot],
+    mut fits: impl FnMut(&[Option<Vec<String>>]) -> bool,
+) -> FillSelection {
+    let everything: FillSelection = slots.iter().map(|s| Some(s.rows.clone())).collect();
+    if fits(&everything) {
+        return everything;
+    }
+    let mut sel: FillSelection = vec![None; slots.len()];
+    for (i, slot) in slots.iter().enumerate() {
+        if slot.rows.is_empty() {
+            sel[i] = Some(Vec::new());
+            if fits(&sel) {
+                continue;
+            }
+            sel[i] = None;
+            return sel;
+        }
+        for row in &slot.rows {
+            let mut fits_with = |candidate: &str| {
+                sel[i]
+                    .get_or_insert_with(Vec::new)
+                    .push(candidate.to_string());
+                let ok = fits(&sel);
+                if let Some(rows) = &mut sel[i] {
+                    rows.pop();
+                    if rows.is_empty() {
+                        sel[i] = None;
+                    }
+                }
+                ok
+            };
+            let shown = if slot.clippable {
+                clip_row(row, &mut fits_with)
+            } else {
+                fits_with(row).then(|| row.clone())
+            };
+            let Some(shown) = shown else { return sel };
+            let whole = shown == *row;
+            sel[i].get_or_insert_with(Vec::new).push(shown);
+            if !whole {
+                return sel;
+            }
+        }
+    }
+    sel
+}
+
+/// Rows of each slot that `selection` leaves out, as `(name, count)` for
+/// the names that lost any, in slot order; slots sharing a name (two
+/// extension blocks with one id) are summed. A clipped row counts as shown.
+pub fn omitted_by_slot(
+    slots: &[FillSlot],
+    selection: &[Option<Vec<String>>],
+) -> Vec<(String, usize)> {
+    let mut out: Vec<(String, usize)> = Vec::new();
+    for (slot, shown) in slots.iter().zip(selection) {
+        let cut = slot.rows.len() - shown.as_ref().map_or(0, Vec::len);
+        if cut == 0 {
+            continue;
+        }
+        match out.iter_mut().find(|(name, _)| *name == slot.name) {
+            Some((_, total)) => *total += cut,
+            None => out.push((slot.name.clone(), cut)),
+        }
+    }
+    out
+}
+
+/// `row` shortened until `fits` accepts it: its summary — the text after
+/// the third field separator, after the last one when it has fewer, or
+/// the whole line when it has none — is cut on a char boundary and ends in
+/// `…`, so the leading `id · age · status` stay whole. Returns `row` itself
+/// when it already fits, and `None` when even [`BOOT_CLIP_MIN_CHARS`] chars
+/// of summary do not.
+pub fn clip_row(row: &str, mut fits: impl FnMut(&str) -> bool) -> Option<String> {
+    if fits(row) {
+        return Some(row.to_string());
+    }
+    let head_len = row
+        .match_indices(BOOT_ROW_SEP)
+        .take(3)
+        .last()
+        .map_or(0, |(i, sep)| i + sep.len());
+    let (head, summary) = row.split_at(head_len);
+    let ends: Vec<usize> = summary.char_indices().map(|(i, _)| i).collect();
+    if ends.len() <= BOOT_CLIP_MIN_CHARS {
+        return None;
+    }
+    // `ends[k]` is where the first `k` chars end; the clipped form's cost
+    // never falls as `k` grows, so the longest fit is a binary search.
+    let clipped = |k: usize| format!("{head}{}…", summary[..ends[k]].trim_end());
+    let (mut lo, mut hi) = (BOOT_CLIP_MIN_CHARS, ends.len() - 1);
+    if !fits(&clipped(lo)) {
+        return None;
+    }
+    while lo < hi {
+        let mid = (lo + hi).div_ceil(2);
+        if fits(&clipped(mid)) {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    Some(clipped(lo))
+}
+
+/// Where a fill slot's rows go back in the context.
+enum SlotHome {
+    /// Lines of the `block`-th extension block of the `CurrentScope` section.
+    Block(usize),
+    /// Rows of the section at this index.
+    Rows(usize),
+    /// The whole content of the section at this index, as one row.
+    Whole(usize),
+}
+
+/// A section's rows as the strings [`fill_by_priority`] works on.
+fn row_strings(rows: &[Value]) -> Vec<String> {
+    rows.iter()
+        .map(|v| v.as_str().map_or_else(|| v.to_string(), String::from))
+        .collect()
+}
+
+/// Fill `sections` into `ctx` within `ctx.token_budget` by
+/// [`fill_by_priority`], then record what was dropped and cut and the
+/// estimated size of the whole serialized context.
 fn fit_to_budget(
     ctx: &mut BootContext,
     sections: Vec<BootSection>,
     estimator: &dyn TokenEstimator,
 ) {
-    let cost = |s: &str| estimator.estimate_tokens(s);
-    let skeletons: Vec<BootSection> = sections.iter().map(BootSection::skeleton).collect();
-
-    // The envelope (everything outside `sections`) is never cut. Price it
-    // at its largest: every droppable section named as dropped, and the
-    // widest possible counters.
-    let envelope = {
-        let mut e = ctx.clone();
-        e.dropped_sections = sections
-            .iter()
-            .filter(|s| s.droppable())
-            .map(|s| s.kind_str().to_string())
-            .collect();
-        e.omitted_items = usize::MAX;
-        e.token_budget_used = usize::MAX;
-        cost(&serde_json::to_string(&e).unwrap_or_default())
-    };
-    let mut remaining = ctx.token_budget.saturating_sub(envelope);
-    // Reserve every load-bearing section's skeleton up front, so a long
-    // resume block cannot leave a later load-bearing section without room
-    // to appear at all.
-    for sk in skeletons.iter().filter(|s| !s.droppable()) {
-        remaining = remaining.saturating_sub(section_cost(sk, &cost));
-    }
-
     let mut order: Vec<usize> = (0..sections.len()).collect();
     order.sort_by_key(|&i| sections[i].priority());
-    let mut kept: Vec<Option<BootSection>> = vec![None; sections.len()];
-    let mut dropped: Vec<usize> = Vec::new();
-    let mut omitted = 0usize;
-    for i in order {
-        let droppable = sections[i].droppable();
-        let skeleton_cost = section_cost(&skeletons[i], &cost);
-        if droppable {
-            if skeleton_cost > remaining {
-                dropped.push(i);
-                continue;
+
+    let mut slots: Vec<FillSlot> = Vec::new();
+    let mut homes: Vec<SlotHome> = Vec::new();
+    for &i in &order {
+        let s = &sections[i];
+        match s {
+            BootSection::CurrentScope { content } => {
+                let blocks = content.get("extension_blocks").and_then(Value::as_array);
+                for (b, block) in blocks.into_iter().flatten().enumerate() {
+                    let id = block
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .unwrap_or("extension");
+                    let text = block.get("text").and_then(Value::as_str).unwrap_or("");
+                    let lines = text.lines().map(String::from).collect();
+                    slots.push(FillSlot::new(id, lines));
+                    homes.push(SlotHome::Block(b));
+                }
             }
-            remaining -= skeleton_cost;
+            BootSection::Constraints { content } => {
+                let rules = content.get("rules").and_then(Value::as_array);
+                let rows = rules.map_or_else(Vec::new, |r| row_strings(r));
+                slots.push(FillSlot::new(s.kind_str(), rows));
+                homes.push(SlotHome::Rows(i));
+            }
+            BootSection::ActiveFailures { content }
+            | BootSection::RecentDecisions { content }
+            | BootSection::OpenThreads { content }
+            | BootSection::Preferences { content } => {
+                slots.push(FillSlot::new(s.kind_str(), row_strings(content)));
+                homes.push(SlotHome::Rows(i));
+            }
+            BootSection::ConfidenceNotes { content } => {
+                slots.push(FillSlot {
+                    clippable: false,
+                    ..FillSlot::new(s.kind_str(), vec![content.to_string()])
+                });
+                homes.push(SlotHome::Whole(i));
+            }
         }
-        let before = remaining;
-        let (fitted, rows, cut) = fill_section(&sections[i], &mut remaining, &cost);
-        if droppable && rows == 0 && cut > 0 {
-            // None of its rows fit: drop the section rather than show an
-            // empty shell of it, and hand its skeleton back.
-            remaining = before + skeleton_cost;
-            dropped.push(i);
-            continue;
-        }
-        omitted += cut;
-        kept[i] = Some(fitted);
     }
 
-    dropped.sort_by_key(|&i| std::cmp::Reverse(sections[i].priority()));
-    ctx.dropped_sections = dropped
+    let original_blocks: Vec<Value> = sections
         .iter()
-        .map(|&i| sections[i].kind_str().to_string())
-        .collect();
-    ctx.sections = kept.into_iter().flatten().collect();
-    ctx.omitted_items = omitted;
+        .find_map(|s| match s {
+            BootSection::CurrentScope { content } => {
+                content.get("extension_blocks")?.as_array().cloned()
+            }
+            _ => None,
+        })
+        .unwrap_or_default();
+
+    let render = |sel: &[Option<Vec<String>>]| -> BootContext {
+        let mut blocks: Vec<Value> = Vec::new();
+        let mut rows: Vec<Option<Vec<Value>>> = vec![None; sections.len()];
+        let mut whole = vec![false; sections.len()];
+        for ((slot, home), kept) in slots.iter().zip(&homes).zip(sel) {
+            let Some(kept) = kept else { continue };
+            match *home {
+                SlotHome::Block(b) => {
+                    let mut block = original_blocks[b].clone();
+                    // A block shown whole keeps its exact text (trailing
+                    // newline included); a cut one is its kept lines.
+                    if *kept != slot.rows {
+                        block["text"] = Value::String(kept.join("\n"));
+                    }
+                    blocks.push(block);
+                }
+                SlotHome::Rows(i) => {
+                    rows[i] = Some(kept.iter().cloned().map(Value::String).collect());
+                }
+                SlotHome::Whole(i) => whole[i] = true,
+            }
+        }
+
+        // Scope, constraints, failures and decisions are load-bearing for
+        // planning: always shown, only their rows trimmed. The rest are
+        // shown only when the fill kept them.
+        let mut shown: Vec<BootSection> = Vec::new();
+        let mut dropped: Vec<usize> = Vec::new();
+        for (i, section) in sections.iter().enumerate() {
+            let kept = rows[i].take();
+            let fitted = match section {
+                BootSection::CurrentScope { content } => {
+                    let mut content = content.clone();
+                    if let Some(obj) = content.as_object_mut() {
+                        obj.remove("extension_blocks");
+                        if !blocks.is_empty() {
+                            let blocks = std::mem::take(&mut blocks);
+                            obj.insert("extension_blocks".into(), Value::Array(blocks));
+                        }
+                    }
+                    Some(BootSection::CurrentScope { content })
+                }
+                BootSection::Constraints { content } => {
+                    let mut content = content.clone();
+                    content["rules"] = Value::Array(kept.unwrap_or_default());
+                    Some(BootSection::Constraints { content })
+                }
+                BootSection::ActiveFailures { .. } => Some(BootSection::ActiveFailures {
+                    content: kept.unwrap_or_default(),
+                }),
+                BootSection::RecentDecisions { .. } => Some(BootSection::RecentDecisions {
+                    content: kept.unwrap_or_default(),
+                }),
+                BootSection::OpenThreads { .. } => {
+                    kept.map(|content| BootSection::OpenThreads { content })
+                }
+                BootSection::Preferences { .. } => {
+                    kept.map(|content| BootSection::Preferences { content })
+                }
+                BootSection::ConfidenceNotes { content } => {
+                    whole[i].then(|| BootSection::ConfidenceNotes {
+                        content: content.clone(),
+                    })
+                }
+            };
+            match fitted {
+                Some(section) => shown.push(section),
+                None => dropped.push(i),
+            }
+        }
+        dropped.sort_by_key(|&i| std::cmp::Reverse(sections[i].priority()));
+
+        let omitted = omitted_by_slot(&slots, sel);
+        let mut out = ctx.clone();
+        out.sections = shown;
+        out.dropped_sections = dropped
+            .iter()
+            .map(|&i| sections[i].kind_str().to_string())
+            .collect();
+        out.omitted_items = omitted.iter().map(|(_, n)| n).sum();
+        out.omitted_by_section = omitted.into_iter().collect();
+        // Sized with the widest value `token_budget_used` can end up with,
+        // so the final context is never bigger than the one checked.
+        out.token_budget_used = out.token_budget;
+        out
+    };
+    let size =
+        |c: &BootContext| estimator.estimate_tokens(&serde_json::to_string(c).unwrap_or_default());
+    let budget = ctx.token_budget;
+    let selection = fill_by_priority(&slots, |sel| size(&render(sel)) <= budget);
+    *ctx = render(&selection);
     // Twice: the first pass sizes the context with a placeholder count, the
     // second with the count itself.
     for _ in 0..2 {
-        ctx.token_budget_used = cost(&serde_json::to_string(&*ctx).unwrap_or_default());
+        ctx.token_budget_used = size(ctx);
     }
 }
 
@@ -1481,12 +1566,215 @@ mod tests {
     }
 
     #[test]
-    fn take_fitting_lines_keeps_a_prefix() {
-        let text = "## H\n- one\n- two\n- three";
-        let (kept, cut) = take_fitting_lines(text, |p| p.len() <= 12);
-        assert_eq!((kept.as_str(), cut), ("## H\n- one", 2));
-        let (kept, cut) = take_fitting_lines(text, |_| false);
-        assert_eq!((kept.as_str(), cut), ("", 4));
+    fn clip_row_keeps_the_leading_fields() {
+        let row = "01ABC · 2d · open · the summary that is far too long to fit whole here";
+        let clipped = clip_row(row, |r| r.len() <= 50).unwrap();
+        assert!(
+            clipped.starts_with("01ABC · 2d · open · the summary"),
+            "{clipped}"
+        );
+        assert!(clipped.ends_with('…') && clipped.len() <= 50, "{clipped}");
+        // Fits whole: returned as is.
+        assert_eq!(clip_row(row, |_| true).as_deref(), Some(row));
+        // Too little room for the fields plus a readable summary.
+        assert_eq!(clip_row(row, |r| r.len() <= 30), None);
+        // Prose without separators clips from its start, on char boundaries.
+        let prose = "- **State:** résumé — naïve text that goes on and on and on";
+        let clipped = clip_row(prose, |r| r.len() <= 40).unwrap();
+        assert!(
+            prose.starts_with(clipped.trim_end_matches('…')),
+            "{clipped}"
+        );
+    }
+
+    fn slot(name: &str, rows: &[&str]) -> FillSlot {
+        FillSlot::new(name, rows.iter().map(|r| r.to_string()).collect())
+    }
+
+    /// Bytes of a selection rendered as one line per row, the simplest
+    /// stand-in for a real renderer.
+    fn bytes(sel: &[Option<Vec<String>>]) -> usize {
+        sel.iter().flatten().flatten().map(|r| r.len() + 1).sum()
+    }
+
+    #[test]
+    fn fill_stops_at_the_first_row_that_misses() {
+        let long = "x".repeat(200);
+        let slots = [
+            slot("rules", &[&format!("R1 · 1d · pinned · {long}")]),
+            slot(
+                "decisions",
+                &["D1 · 1d · active · short", "D2 · 1d · active · short"],
+            ),
+        ];
+        let sel = fill_by_priority(&slots, |s| bytes(s) <= 120);
+        // The rule is clipped to the room left, and the shorter decisions
+        // after it are not shown in its place.
+        let rules = sel[0].as_ref().expect("the rule is shown, clipped");
+        assert!(rules[0].starts_with("R1 · 1d · pinned · xxx") && rules[0].ends_with('…'));
+        assert!(sel[1].is_none(), "{sel:?}");
+        assert_eq!(
+            omitted_by_slot(&slots, &sel),
+            vec![("decisions".to_string(), 2)]
+        );
+    }
+
+    /// At every budget the selection is a prefix of all rows in fill
+    /// order: every row before the last one shown is whole, and only the
+    /// last may be clipped.
+    #[test]
+    fn fill_shows_a_prefix_of_the_rows_in_priority_order() {
+        let long = |p: &str| format!("{p} · 1d · open · {}", "words that run on ".repeat(6));
+        let (e1, e2, e3) = (long("E1"), long("E2"), long("E3"));
+        let slots = [
+            slot(
+                "checkpoint",
+                &["## Resume Here", "- **State:** mid-refactor"],
+            ),
+            slot("rules", &["R1 · 9d · pinned · always ask first"]),
+            slot("errors", &[&e1, &e2, &e3]),
+            slot(
+                "decisions",
+                &["D1 · 1d · active · a", "D2 · 1d · active · b"],
+            ),
+            slot("recent_sessions", &["S1 · 1d · recent · a"]),
+        ];
+        let all: Vec<&String> = slots.iter().flat_map(|s| &s.rows).collect();
+        for budget in 0..700 {
+            let sel = fill_by_priority(&slots, |s| bytes(s) <= budget);
+            let shown: Vec<&String> = sel.iter().flatten().flatten().collect();
+            assert!(bytes(&sel) <= budget, "budget {budget}");
+            for (k, row) in shown.iter().enumerate() {
+                if k + 1 < shown.len() {
+                    assert_eq!(*row, all[k], "budget {budget}: row {k} out of order or cut");
+                } else if *row != all[k] {
+                    let kept = row.strip_suffix('…').expect("a clipped row ends in …");
+                    assert!(
+                        all[k].starts_with(kept.trim_end()),
+                        "budget {budget}: {row}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fill_returns_everything_when_it_fits_and_shows_empty_slots() {
+        let slots = [
+            slot("errors", &["E1 · 1d · open · a"]),
+            slot("topic_recall", &[]),
+        ];
+        let sel = fill_by_priority(&slots, |_| true);
+        assert_eq!(
+            sel,
+            vec![Some(vec!["E1 · 1d · open · a".to_string()]), Some(vec![])]
+        );
+        // Budget for the row but not the empty slot's key.
+        let sel = fill_by_priority(&slots, |s| s[1].is_none());
+        assert_eq!(
+            sel,
+            vec![Some(vec!["E1 · 1d · open · a".to_string()]), None]
+        );
+    }
+
+    /// Long pinned rules and open errors, short decisions, threads and
+    /// preferences: at every budget, a section shows rows only when every
+    /// row of every higher-priority section is shown whole, and confidence
+    /// notes (lowest priority) only when nothing was cut.
+    #[test]
+    fn a_small_budget_never_hides_a_higher_priority_row() {
+        let (db, _dir) = temp_db();
+        for i in 0..2 {
+            let rule = format!("Rule {i}: always check the rule text. ").repeat(9);
+            db.insert("rules", json!({ "rule": rule, "_importance_pinned": true }))
+                .unwrap();
+        }
+        for i in 0..3 {
+            let error = format!("Open error {i} keeps happening in the boot path. ").repeat(4);
+            db.insert("errors", json!({ "error": error })).unwrap();
+        }
+        for i in 0..6 {
+            db.insert("decisions", json!({ "summary": format!("decision {i}") }))
+                .unwrap();
+        }
+        for i in 0..3 {
+            db.insert("context", json!({ "summary": format!("thread {i}") }))
+                .unwrap();
+        }
+        for i in 0..2 {
+            db.insert(
+                "preferences",
+                json!({ "key": format!("k{i}"), "value": "v" }),
+            )
+            .unwrap();
+        }
+        let boot = |budget: usize| {
+            db.boot(BootOptions {
+                token_budget: Some(budget),
+                ..Default::default()
+            })
+            .unwrap()
+        };
+        let fill_order = [
+            "constraints",
+            "active_failures",
+            "recent_decisions",
+            "open_threads",
+            "preferences",
+        ];
+        let rows_of = |ctx: &BootContext, kind: &str| -> Vec<Value> {
+            match section(ctx, kind) {
+                Some(BootSection::Constraints { content }) => {
+                    content["rules"].as_array().cloned().unwrap_or_default()
+                }
+                _ => rows(ctx, kind).to_vec(),
+            }
+        };
+        let full = boot(100_000);
+        let full_rows: Vec<Vec<Value>> = fill_order.iter().map(|k| rows_of(&full, k)).collect();
+        let counts: Vec<usize> = full_rows.iter().map(Vec::len).collect();
+        assert_eq!(counts, vec![2, 3, 6, 3, 2]);
+        assert!(section(&full, "confidence_notes").is_some());
+
+        for budget in (60..1500).step_by(7) {
+            let ctx = boot(budget);
+            let mut complete = true;
+            for (kind, full) in fill_order.iter().zip(&full_rows) {
+                let shown = rows_of(&ctx, kind);
+                if !complete {
+                    assert!(
+                        shown.is_empty(),
+                        "budget {budget}: {kind} shows a row while a higher-priority row is cut"
+                    );
+                    continue;
+                }
+                // Rows of equal importance may swap places between boots,
+                // so a row counts as whole when the full boot has it at all.
+                for (j, row) in shown.iter().enumerate() {
+                    if !full.contains(row) {
+                        assert_eq!(j + 1, shown.len(), "budget {budget}: {kind} row {j}: {row}");
+                        assert!(row.as_str().unwrap().ends_with('…'), "{row}");
+                        complete = false;
+                    }
+                }
+                complete &= shown.len() == full.len();
+            }
+            if section(&ctx, "confidence_notes").is_some() {
+                assert!(complete && ctx.omitted_items == 0, "budget {budget}");
+            }
+            let per_section: usize = ctx.omitted_by_section.values().sum();
+            assert_eq!(per_section, ctx.omitted_items, "budget {budget}");
+            // Any row shown was checked against the budget; with none shown
+            // the envelope and empty skeletons alone may overshoot it.
+            if rows_of(&ctx, "constraints").is_empty() {
+                continue;
+            }
+            assert!(
+                ctx.token_budget_used <= budget,
+                "budget {budget}: used {}",
+                ctx.token_budget_used
+            );
+        }
     }
 
     #[test]

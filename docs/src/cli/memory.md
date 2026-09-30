@@ -108,14 +108,17 @@ axil boot --schema v2                       # the stable BootContext schema (als
 
 Each item is one line, `id · age · status · summary` (for example
 `01M3… · 2d · open · vector store left in needs-repair state…`); run
-`axil get <id>` to expand one. Sections fill in priority order until the
-budget is spent: Resume Here, pinned rules, open errors, decisions, then
-the rest. `--schema v2` rows are one-line strings (`schema_version`
-`"2"`); schema 1, a whole record per row, is no longer produced, so
-`--schema v1` is an error. Open errors are those not yet marked resolved; resolved ones show
-up lower down as lessons (`error → fix`). Modules whose index summary is
-only a parser fallback (a line count or a file's first comment) are left
-out.
+`axil get <id>` to expand one. Sections fill in strict priority order
+until the budget is spent: Resume Here, pinned rules, open errors,
+decisions, then the rest. The first row that does not fit is clipped and
+ends the fill, so no row shows while a higher-priority one is cut; the
+narrative ends with a note naming the sections that lost rows, and JSON
+reports `omitted_items` and `omitted_by_section`. `--schema v2` rows are
+one-line strings (`schema_version` `"2"`); schema 1, a whole record per
+row, is no longer produced, so `--schema v1` is an error. Open errors are
+those not yet marked resolved; resolved ones show up lower down as lessons
+(`error → fix`). Modules whose index summary is only a parser fallback (a
+line count or a file's first comment) are left out.
 
 ## rule / rules
 

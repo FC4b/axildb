@@ -155,19 +155,23 @@ axil boot --budget 1500
 ```
 
 Each item is one line, `id · age · status · summary`, with the summary
-clipped; `axil get <id>` expands a row. Sections fill in **priority
-order**, row by row, until the budget is spent: the Resume Here block,
-then pinned rules, then open errors, then decisions, then everything else
-(topic recall, sessions, resolved-error lessons, architecture notes, …).
-A row that does not fit is left out rather than cut mid-sentence, and an
-oversized Resume Here block keeps its leading lines. The narrative format
-ends with a note counting what was left out; JSON reports it as
-`omitted_items`.
+clipped; `axil get <id>` expands a row. Sections fill in **strict
+priority order**, row by row, until the budget is spent: the Resume Here
+block, then pinned rules, then open errors, then decisions, then
+everything else (topic recall, sessions, resolved-error lessons,
+architecture notes, …). The first row that does not fit is shortened to
+the room left — its `id · age · status` stay whole and its summary ends
+in `…`; a summary that would drop under 24 chars is left out instead —
+and ends the fill, so no row is shown while a higher-priority row is cut.
+An oversized Resume Here block keeps its leading lines. The narrative
+format ends with a note naming the sections that lost rows; JSON reports
+them as `omitted_items` and, per section, `omitted_by_section`.
 
 `axil boot --schema v2` (and the MCP `boot` tool) returns fixed, ordered
 sections (current scope → constraints → recent decisions → active failures
 → open threads → preferences → confidence notes) and fills them in the
-same priority order. Its `schema_version` is `"2"`: every row is a
+same strict priority order (scope, constraints, active failures, recent
+decisions, then the rest). Its `schema_version` is `"2"`: every row is a
 one-line string, where schema 1 carried whole records; `--schema v1` is no
 longer produced and is an error. The four load-bearing sections (scope,
 constraints, decisions, failures) are never dropped, but the budget holds
