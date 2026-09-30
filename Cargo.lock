@@ -477,6 +477,7 @@ name = "axil-vector"
 version = "2.3.0"
 dependencies = [
  "axil-core",
+ "chrono",
  "criterion",
  "hnsw_rs",
  "ort",

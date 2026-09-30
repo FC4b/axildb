@@ -7,6 +7,22 @@ pub fn record_text(record: &Record) -> String {
     searchable_text(&record.data)
 }
 
+/// The fields [`searchable_text`] reads, in priority order. The first one
+/// holding a string is the record's text. A record with none of them falls
+/// back to every string value joined, ids and timestamps included; exported
+/// so diagnostics can tell those records apart without copying the list.
+pub const SEARCHABLE_TEXT_KEYS: &[&str] = &[
+    "full_text",
+    "content",
+    "text",
+    "description",
+    "message",
+    "summary",
+    "fact",
+    "error",
+    "statement",
+];
+
 /// Extract the best long-form text for retrieval and embedding.
 ///
 /// Prefers richer fields such as `full_text` and `content` before shorter
@@ -16,17 +32,7 @@ pub fn searchable_text(data: &serde_json::Value) -> String {
     match data {
         serde_json::Value::String(s) => s.clone(),
         serde_json::Value::Object(map) => {
-            for key in &[
-                "full_text",
-                "content",
-                "text",
-                "description",
-                "message",
-                "summary",
-                "fact",
-                "error",
-                "statement",
-            ] {
+            for key in SEARCHABLE_TEXT_KEYS {
                 if let Some(serde_json::Value::String(s)) = map.get(*key) {
                     return s.clone();
                 }
@@ -45,6 +51,15 @@ pub fn searchable_text(data: &serde_json::Value) -> String {
 pub fn value_text(data: &serde_json::Value) -> String {
     searchable_text(data)
 }
+
+/// Longest recall chunk, in bytes. A record whose [`searchable_text`] is
+/// longer gets one extra vector per [`overlapping_chunks`] piece at these
+/// sizes, besides its own; exported so diagnostics that rebuild a record's
+/// vectors split its text the same way insert does.
+pub const RECALL_CHUNK_MAX_BYTES: usize = 1600;
+
+/// Bytes each recall chunk shares with the one before it.
+pub const RECALL_CHUNK_OVERLAP_BYTES: usize = 400;
 
 /// Split long text into overlapping chunks for retrieval scoring.
 ///
