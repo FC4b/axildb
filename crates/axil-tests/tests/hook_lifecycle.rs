@@ -258,10 +258,12 @@ fn a_completed_task_gets_one_store_reminder() {
             "tool_response": {},
         }))
     };
+    // Nothing is stored in this project, so each newly completed task gets the
+    // reminder once.
     assert!(task("1", "in_progress").trim().is_empty());
-    assert!(task("1", "completed").contains("run axil store"));
+    assert!(task("1", "completed").contains("axil store"));
     assert!(task("1", "completed").trim().is_empty(), "once per task");
-    assert!(task("2", "completed").contains("run axil store"));
+    assert!(task("2", "completed").contains("axil store"));
 }
 
 #[test]
