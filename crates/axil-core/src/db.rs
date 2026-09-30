@@ -17,6 +17,7 @@ use crate::plugin::{
 };
 use crate::record::{Record, RecordId};
 use crate::storage::Storage;
+use crate::util::{RECALL_CHUNK_MAX_BYTES, RECALL_CHUNK_OVERLAP_BYTES};
 
 /// Scoped-alias table. Distinct from axil-memory's
 /// `_entity_aliases` (which uses the `{entity, alias}` schema for
@@ -24,8 +25,6 @@ use crate::storage::Storage;
 /// shapes and must not be merged.
 pub const SCIP_ALIAS_TABLE: &str = "_scip_aliases";
 const RECALL_CHUNKS_TABLE: &str = "_recall_chunks";
-const RECALL_CHUNK_MAX_BYTES: usize = 1600;
-const RECALL_CHUNK_OVERLAP_BYTES: usize = 400;
 
 /// Marker row written once after `migrate_entity_canonical_id` finishes.
 /// Presence of the marker lets `Axil::open()` skip the full-table scan

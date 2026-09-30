@@ -52,6 +52,15 @@ pub fn value_text(data: &serde_json::Value) -> String {
     searchable_text(data)
 }
 
+/// Longest recall chunk, in bytes. A record whose [`searchable_text`] is
+/// longer gets one extra vector per [`overlapping_chunks`] piece at these
+/// sizes, besides its own; exported so diagnostics that rebuild a record's
+/// vectors split its text the same way insert does.
+pub const RECALL_CHUNK_MAX_BYTES: usize = 1600;
+
+/// Bytes each recall chunk shares with the one before it.
+pub const RECALL_CHUNK_OVERLAP_BYTES: usize = 400;
+
 /// Split long text into overlapping chunks for retrieval scoring.
 ///
 /// For short text this returns a single chunk. Chunks respect UTF-8
