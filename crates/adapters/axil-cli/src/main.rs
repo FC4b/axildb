@@ -13631,29 +13631,36 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                         "modules": proj.data.get("module_count").cloned().unwrap_or(Value::Null),
                     }));
 
-                    // Top modules by file count
+                    // Top modules by file count, one line each. A module
+                    // whose summary is only parser fallback ("N lines of
+                    // Rust code", a first comment) says nothing worth a
+                    // boot line, so it is skipped.
+                    let file_count = |m: &axil_core::Record| {
+                        m.data
+                            .get("files")
+                            .and_then(Value::as_array)
+                            .map_or(0, Vec::len)
+                    };
                     let mut modules = db.list("_idx_modules").unwrap_or_default();
-                    modules.sort_by(|a, b| {
-                        let ca = a
-                            .data
-                            .get("file_count")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(0);
-                        let cb = b
-                            .data
-                            .get("file_count")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(0);
-                        cb.cmp(&ca)
-                    });
-                    if !modules.is_empty() {
-                        let mod_vals: Vec<Value> = modules.iter().take(5).map(|m| {
-                            json!({
-                                "path": m.data.get("path").cloned().unwrap_or(Value::Null),
-                                "files": m.data.get("file_count").cloned().unwrap_or(Value::Null),
-                                "summary": m.data.get("summary").cloned().unwrap_or(Value::Null),
-                            })
-                        }).collect();
+                    modules.sort_by_key(|m| std::cmp::Reverse(file_count(m)));
+                    let mod_vals: Vec<Value> = modules
+                        .iter()
+                        .filter_map(|m| {
+                            let summary = axil_indexer::parser::confident_summary(&m.data)?;
+                            let path = m.data.get("path").and_then(Value::as_str).unwrap_or("?");
+                            let files = file_count(m);
+                            Some(json!(format!(
+                                "{path}{sep}{files} files{sep}{}",
+                                axil_core::boot::clip_one_line(
+                                    &summary,
+                                    axil_core::boot::BOOT_ROW_SUMMARY_CHARS
+                                ),
+                                sep = axil_core::boot::BOOT_ROW_SEP,
+                            )))
+                        })
+                        .take(5)
+                        .collect();
+                    if !mod_vals.is_empty() {
                         sections.insert("modules".into(), json!(mod_vals));
                     }
                 }
