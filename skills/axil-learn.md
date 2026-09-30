@@ -20,8 +20,10 @@ Use this skill at the end of a unit of work (feature complete, bug fixed, decisi
 1. **Review the session.** Skim the recent conversation for:
    - Design decisions (chose A over B, with rationale)
    - Errors hit and how they were fixed
-   - User corrections ("no, do it this way")
-   - Non-obvious gotchas discovered
+   - User corrections about the project ("no, that module is deprecated", "we pin that crate because…")
+   - Non-obvious gotchas discovered, especially ones tied to a file or symbol (`axil store … --code-ref <path:line>`)
+
+   Corrections about how the user wants *you* to work (tone, workflow, "stop asking before running tests") are not project knowledge. In Claude Code they belong to its auto-memory, which keeps them already; don't mirror them into Axil.
 
 2. **Store each atomic learning** in the right table — one record per discrete item:
 
@@ -74,6 +76,7 @@ This reads the `errors` table, groups near-identical failures, and for any seen 
 - Info already in CLAUDE.md
 - Raw debug output
 - Anything the checkpoint `references[]` can point to instead
+- The user's preferences and feedback on how you work (Claude Code's auto-memory holds those; Axil holds the project: architecture, gotchas, file/symbol-anchored facts, errors with their cause and fix, decisions with their reason, the code graph)
 
 ## Why This Matters
 

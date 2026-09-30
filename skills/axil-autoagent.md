@@ -70,6 +70,7 @@ axil fts "<exact term>" --limit 5
 | Design decisions | Why you chose approach A over B |
 | Gotchas | Things that broke unexpectedly, non-obvious patterns |
 | Build/test fixes | Compilation errors and their solutions |
+| File- or symbol-anchored facts | "`load_config` reads the env only once, at startup", stored with `--code-ref src/config.rs:42` |
 | Implementation plans | Steps you plan to take for a multi-step task |
 
 ## What NOT to Store
@@ -78,6 +79,11 @@ axil fts "<exact term>" --limit 5
 - Trivial one-line changes
 - Information already in CLAUDE.md
 - Temporary debugging output
+- The user's preferences and feedback on how you work. Claude Code's auto-memory (`MEMORY.md`) keeps those; Axil keeps the project (architecture, gotchas, file/symbol-anchored facts, errors with their cause and fix, decisions with their reason, the code graph). Don't mirror one into the other.
+
+## After a Compaction
+
+The SessionStart hook fires again when Claude Code compacts the conversation, so `axil boot` (with the latest checkpoint's "Resume Here") is re-injected on its own. Recall anything specific the summary dropped instead of re-running discovery.
 
 ## Rules
 

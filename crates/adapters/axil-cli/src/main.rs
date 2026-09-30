@@ -4026,6 +4026,7 @@ fn scip_entity_pass(
                     .or_else(|| record.data.get("fact"))
                     .cloned()
                     .unwrap_or_else(|| truncate_value(&record.data, 150)),
+                "line": context_line(&record.table, Some(&record.data)),
                 "importance": axil_core::importance::get_importance(&record.data),
                 "match": "entity_graph",
                 "source": "entity_graph",
@@ -5536,6 +5537,7 @@ In the {project_name} project, axil (`.axil/memory.axil`) is the persistent brai
   - `axil store context '{{"type":"architecture",...}}'` after learning how something works
   - `axil checkpoint '{{"state":"<where things stand>","next_steps":["<remaining work>"]}}'` after finishing a task
 - Don't wait for the user to say "update axil memory" — that means I already missed the moment.
+- Keep the split: apart from this pointer to axil, project knowledge (architecture, gotchas, file/symbol-anchored facts, errors with cause and fix, decisions with reason, the code graph) goes to axil, and notes about how the user wants me to work stay in this auto-memory. Neither is mirrored into the other.
 "#
     )
 }
@@ -14626,6 +14628,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                                 .or_else(|| record.data.get("fact"))
                                 .cloned()
                                 .unwrap_or_else(|| truncate_value(&record.data, 150)),
+                            "line": context_line(&record.table, Some(&record.data)),
                             "importance": axil_core::importance::get_importance(&record.data),
                             "match": "exact",
                         }));
@@ -14661,6 +14664,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                                 .or_else(|| record.data.get("fact"))
                                 .cloned()
                                 .unwrap_or_else(|| truncate_value(&record.data, 150)),
+                            "line": context_line(&record.table, Some(&record.data)),
                             "importance": axil_core::importance::get_importance(&record.data),
                             "match": "semantic",
                             "similarity": round4(*score),
@@ -18057,6 +18061,118 @@ fn pick_summary(data: Option<&Value>) -> Option<&str> {
     None
 }
 
+/// Bytes of record text one injected context line may carry, across all of
+/// its parts. The packers count bytes / 4 as tokens, so this is roughly 60
+/// tokens per hit by that heuristic.
+const CONTEXT_LINE_MAX_BYTES: usize = 240;
+
+/// One hit's text in an injected context block (the prompt hook's
+/// `<context>` block and the pre-edit `recall-for-file` lines): the fields
+/// that carry the record's "why", cut to fit [`CONTEXT_LINE_MAX_BYTES`]
+/// together.
+///
+/// - `errors`: `error → fix (root cause)`. A question about an error usually
+///   names what broke; what it needs back is the fix and the cause, which
+///   the first field alone never reaches.
+/// - `decisions`: `summary — reason`.
+/// - `commits`: the subject line.
+/// - anything else: [`pick_summary`].
+///
+/// Kept apart from `pick_summary` on purpose: the LLM reranker and the
+/// compact/oneline recall formats want one field, not a composed line.
+/// Whitespace runs collapse to one space so a hit stays one line. `None`
+/// when the record has nothing to show.
+fn context_line(table: &str, data: Option<&Value>) -> Option<String> {
+    let d = data?;
+    let field = |keys: &[&str]| -> Option<String> {
+        keys.iter()
+            .filter_map(|k| d.get(*k).and_then(Value::as_str))
+            .map(collapse_whitespace)
+            .find(|s| !s.is_empty())
+    };
+    // (text, separator before it, closer after it)
+    let segments: Vec<(Option<String>, &str, &str)> = match table {
+        "errors" => {
+            let cause = field(&["root_cause", "cause"]);
+            // A cause that opens with its own parenthesis, such as an
+            // enumerated "(1) ...", would read "((1) ..."; label it instead.
+            let open = if cause.as_deref().is_some_and(|c| c.starts_with('(')) {
+                " (cause: "
+            } else {
+                " ("
+            };
+            vec![
+                (field(&["error", "summary", "description"]), "", ""),
+                (field(&["fix", "resolution"]), " → ", ""),
+                (cause, open, ")"),
+            ]
+        }
+        "decisions" => vec![
+            (field(&["summary", "decision", "description"]), "", ""),
+            (field(&["reason", "rationale"]), " — ", ""),
+        ],
+        "commits" => vec![(field(&["subject", "summary"]), "", "")],
+        _ => vec![(pick_summary(Some(d)).map(collapse_whitespace), "", "")],
+    };
+
+    let mut kept: Vec<(String, &str, &str)> = Vec::with_capacity(segments.len());
+    for (text, before, after) in segments {
+        let Some(text) = text.filter(|t| !t.is_empty()) else {
+            continue;
+        };
+        // A field that repeats an earlier one adds nothing.
+        if kept.iter().any(|(k, _, _)| *k == text) {
+            continue;
+        }
+        // Decorations only make sense after a head: with the first field
+        // missing, the next one leads the line bare.
+        if kept.is_empty() {
+            kept.push((text, "", ""));
+        } else {
+            kept.push((text, before, after));
+        }
+    }
+    if kept.is_empty() {
+        return None;
+    }
+
+    let decoration: usize = kept.iter().map(|(_, b, a)| b.len() + a.len()).sum();
+    let texts: Vec<&str> = kept.iter().map(|(t, _, _)| t.as_str()).collect();
+    let cut = fair_cut(&texts, CONTEXT_LINE_MAX_BYTES.saturating_sub(decoration));
+    let mut line = String::new();
+    for ((_, before, after), text) in kept.iter().zip(cut) {
+        line.push_str(before);
+        line.push_str(&text);
+        line.push_str(after);
+    }
+    Some(line)
+}
+
+/// Collapse every whitespace run (newlines included) to one space and trim.
+fn collapse_whitespace(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Cut `parts` to fit `budget` bytes together, max-min fairly: a part
+/// shorter than an equal share keeps all of itself, and what it leaves goes
+/// to the longer parts. Each cut part ends in `...` (see [`truncate_str`]).
+fn fair_cut(parts: &[&str], budget: usize) -> Vec<String> {
+    let mut order: Vec<usize> = (0..parts.len()).collect();
+    order.sort_by_key(|&i| parts[i].len());
+    let mut caps = vec![0usize; parts.len()];
+    let mut left = budget;
+    for (n, &i) in order.iter().enumerate() {
+        let share = left / (parts.len() - n);
+        caps[i] = parts[i].len().min(share);
+        left -= caps[i];
+    }
+    parts
+        .iter()
+        .zip(caps)
+        .map(|(part, cap)| truncate_str(part, cap))
+        .collect()
+}
+
 // ── Query expansion (12.5) ──────────────────────────────────────────────────
 
 /// Expand a query with alias synonyms + one-hop graph-neighbor terms. Best-effort;
@@ -19290,11 +19406,12 @@ fn chunk_text(text: &str, max_bytes: usize) -> Vec<String> {
 /// Output shape:
 /// ```xml
 /// <context source="axil">
-///   [decisions] Short summary (id=01KP...)
-///   [errors] Short summary (id=01KP...)
+///   [decisions] Summary — reason (id=01KP...)
+///   [errors] What broke → fix (root cause) (id=01KP...)
 /// </context>
 /// ```
-/// Returns an empty string when there are no results so hooks can stay silent.
+/// Each memory line is [`context_line`]. Returns an empty string when there
+/// are no results so hooks can stay silent.
 ///
 /// Escapes XML-special characters (`<`, `>`, `&`) in recalled text so a stored
 /// memory containing `</context>` or XML-like instructions cannot break out of
@@ -19323,7 +19440,7 @@ fn format_context_block(values: &[Value], budget: Option<usize>, warnings: &[Str
             continue;
         }
         // Nothing displayable: skip rather than inject a "(no summary)" line.
-        let Some(summary) = pick_summary(v.get("data")).map(|s| truncate_str(s, 240)) else {
+        let Some(summary) = context_line(table, v.get("data")) else {
             continue;
         };
         other_lines.push(format!(
@@ -19985,9 +20102,16 @@ const AXIL_COMMANDS: &str = r#"- `axil boot` — load previous session context
 - `axil store errors '{"error":"<what>","fix":"<how>"}'` — save gotchas
 - `axil checkpoint '{"state":"<where things stand>","next_steps":["<remaining work>"]}'` — write a resume-able checkpoint at end of work"#;
 
+/// What Axil keeps and what it leaves to the harness's own user memory,
+/// shared by every agent instruction template so installs for different
+/// agents from one build say the same thing. Worded for any harness: some
+/// keep their own notes about the user (Claude Code's auto-memory, for one),
+/// and a note kept in both places drifts.
+const AXIL_MEMORY_SPLIT: &str = "Axil holds project knowledge: architecture, gotchas, file- and symbol-anchored facts, errors with their cause and fix, decisions with their reason, and the code graph. Notes about how the user likes you to work belong to your harness's own memory where it has one (such as Claude Code's auto-memory); don't mirror them into Axil.";
+
 fn agent_instructions_cursor(db_path: &Path) -> String {
-    format!("# Axil Agent Memory\n\nThis project uses Axil for persistent agent memory at `{db}`.\n\n## Commands\n{cmds}\n\n## Search/Query Gate\nBefore `rg`, `grep`, `git grep`, `find`, `fd`, `ls`, `tree`, or any broad project query, run `axil recall`, `axil code-search`, or `axil fts` first. Then open the files Axil returns and verify current code.\n\n## Workflow\n1. Start: run `axil boot`\n2. Work: store decisions and errors as you go\n3. End: write a checkpoint (run `axil checkpoint`)\n",
-        db = db_path.display(), cmds = AXIL_COMMANDS)
+    format!("# Axil Agent Memory\n\nThis project uses Axil for persistent agent memory at `{db}`.\n\n## Commands\n{cmds}\n\n## Search/Query Gate\nBefore `rg`, `grep`, `git grep`, `find`, `fd`, `ls`, `tree`, or any broad project query, run `axil recall`, `axil code-search`, or `axil fts` first. Then open the files Axil returns and verify current code.\n\n## Workflow\n1. Start: run `axil boot`\n2. Work: store decisions and errors as you go\n3. End: write a checkpoint (run `axil checkpoint`)\n\n{split}\n",
+        db = db_path.display(), cmds = AXIL_COMMANDS, split = AXIL_MEMORY_SPLIT)
 }
 
 fn agent_instructions_windsurf(db_path: &Path) -> String {
@@ -20020,8 +20144,10 @@ Bypass Axil only for a user-named exact file/line, a command/test output you jus
 - Close an error once it is fixed: `axil resolve <error-id> --by <fix-record-id>`
 - Store architecture learned while reading: `axil store context '{{"type":"architecture","summary":"<what you learned>","files":["<path>"]}}'`
 - Before a final response after substantive work, write a checkpoint: `axil checkpoint '{{"state":"<where things stand>","next_steps":["<remaining work>"],"references":[{{"kind":"file","ref":"<path>"}}]}}'`
+- {split}
 "#,
-        db = db_path.display()
+        db = db_path.display(),
+        split = AXIL_MEMORY_SPLIT
     )
 }
 
@@ -20633,6 +20759,24 @@ mod agents_md_drift {
              regenerate AGENTS.md (re-run the Codex integration installer) and commit it."
         );
     }
+
+    // Cursor, Windsurf, Aider and Antigravity get agent_instructions_cursor;
+    // Codex and AGENTS.md readers get agent_instructions_codex. Two installs
+    // from one build must not disagree on what belongs in Axil.
+    #[test]
+    fn every_instruction_template_states_the_memory_split() {
+        let db = Path::new("/PLACEHOLDER");
+        for (name, body) in [
+            ("cursor", agent_instructions_cursor(db)),
+            ("windsurf", agent_instructions_windsurf(db)),
+            ("codex", agent_instructions_codex(db)),
+        ] {
+            assert!(
+                body.contains(AXIL_MEMORY_SPLIT),
+                "{name} instructions lack the Axil / harness-memory split"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -20922,6 +21066,110 @@ mod recall_summary_tests {
 
         // Nothing displayable at all: no block, so the hook stays silent.
         assert!(format_context_block(&hits[..1], None, &[]).is_empty());
+    }
+
+    #[test]
+    fn context_lines_carry_the_why_per_table() {
+        let error = json!({"error": "build broke", "root_cause": "stale lockfile", "fix": "cargo update"});
+        assert_eq!(
+            context_line("errors", Some(&error)).as_deref(),
+            Some("build broke → cargo update (stale lockfile)")
+        );
+        let decision = json!({"summary": "use redb", "reason": "embedded and ACID"});
+        assert_eq!(
+            context_line("decisions", Some(&decision)).as_deref(),
+            Some("use redb — embedded and ACID")
+        );
+        // A commit shows its subject, never its body.
+        let commit = json!({"subject": "fix the probe", "body": "a long body", "sha": "abc"});
+        assert_eq!(context_line("commits", Some(&commit)).as_deref(), Some("fix the probe"));
+        // Every other table is pick_summary's field.
+        let rule = json!({"rule": "consult Axil first", "reason": "not shown"});
+        assert_eq!(context_line("rules", Some(&rule)).as_deref(), Some("consult Axil first"));
+        let note = json!({"type": "gotcha", "summary": "rustfmt\n  rewrites   everything"});
+        assert_eq!(
+            context_line("context", Some(&note)).as_deref(),
+            Some("rustfmt rewrites everything")
+        );
+        assert_eq!(context_line("errors", Some(&json!({"files": ["a.rs"]}))), None);
+        assert_eq!(context_line("errors", None), None);
+    }
+
+    #[test]
+    fn context_lines_without_a_head_or_with_repeats_stay_readable() {
+        let no_error = json!({"fix": "pin the version", "root_cause": "a yanked crate"});
+        assert_eq!(
+            context_line("errors", Some(&no_error)).as_deref(),
+            Some("pin the version (a yanked crate)")
+        );
+        let cause_only = json!({"error": "", "root_cause": "a yanked crate"});
+        assert_eq!(context_line("errors", Some(&cause_only)).as_deref(), Some("a yanked crate"));
+        let fix_only = json!({"error": "tests hang", "resolution": "raise the timeout"});
+        assert_eq!(
+            context_line("errors", Some(&fix_only)).as_deref(),
+            Some("tests hang → raise the timeout")
+        );
+        let same = json!({"summary": "ship it", "reason": "ship it"});
+        assert_eq!(context_line("decisions", Some(&same)).as_deref(), Some("ship it"));
+        // A cause that opens with its own parenthesis gets a label, not "((".
+        let listed = json!({"error": "open wrote", "fix": "skip it", "root_cause": "(1) a commit (2) a flush"});
+        assert_eq!(
+            context_line("errors", Some(&listed)).as_deref(),
+            Some("open wrote → skip it (cause: (1) a commit (2) a flush)")
+        );
+        let long_listed = json!({"error": "e".repeat(300), "root_cause": format!("(1) {}", "c".repeat(300))});
+        let line = context_line("errors", Some(&long_listed)).unwrap();
+        assert!(line.len() <= CONTEXT_LINE_MAX_BYTES, "{} bytes", line.len());
+        assert!(line.contains(" (cause: (1) "), "{line}");
+    }
+
+    #[test]
+    fn context_lines_split_one_bound_across_their_parts() {
+        let long = |c: char| c.to_string().repeat(500);
+        let error = json!({"error": long('e'), "fix": long('f'), "root_cause": long('c')});
+        let line = context_line("errors", Some(&error)).unwrap();
+        assert!(line.len() <= CONTEXT_LINE_MAX_BYTES, "{} bytes: {line}", line.len());
+        // Every part keeps a share: no field is starved by the one before it.
+        for c in ['e', 'f', 'c'] {
+            let kept = line.chars().filter(|&x| x == c).count();
+            assert!(kept >= 60, "{c}: {kept} in {line}");
+        }
+        assert!(line.contains(" → ") && line.ends_with("...)"), "{line}");
+
+        // A short part keeps all of itself; the long one gets what it leaves.
+        let decision = json!({"summary": "short head", "reason": long('r')});
+        let line = context_line("decisions", Some(&decision)).unwrap();
+        assert!(line.starts_with("short head — rrr"), "{line}");
+        assert!(line.len() <= CONTEXT_LINE_MAX_BYTES, "{} bytes", line.len());
+        assert!(line.len() >= CONTEXT_LINE_MAX_BYTES - 4, "{} bytes", line.len());
+
+        // Cuts land on char boundaries.
+        let wide = json!({"summary": "漢".repeat(200), "reason": "字".repeat(200)});
+        let line = context_line("decisions", Some(&wide)).unwrap();
+        assert!(line.len() <= CONTEXT_LINE_MAX_BYTES, "{} bytes", line.len());
+        assert!(line.contains('漢') && line.contains('字'), "{line}");
+    }
+
+    #[test]
+    fn context_block_lines_use_the_per_table_shape() {
+        let hits = vec![
+            json!({"id": "E", "table": "errors", "data": {
+                "error": "hook counters reset", "root_cause": "state lived per turn",
+                "fix": "keep it per session"}}),
+            json!({"id": "D", "table": "decisions", "data": {
+                "summary": "one hook binary", "reason": "the <bash> copy drifted"}}),
+        ];
+        let block = format_context_block(&hits, Some(2000), &[]);
+        assert!(
+            block.contains(
+                "  [errors] hook counters reset → keep it per session (state lived per turn) (id=E)"
+            ),
+            "{block}"
+        );
+        assert!(
+            block.contains("  [decisions] one hook binary — the &lt;bash&gt; copy drifted (id=D)"),
+            "{block}"
+        );
     }
 }
 

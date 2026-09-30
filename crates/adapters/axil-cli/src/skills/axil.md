@@ -55,6 +55,7 @@ axil --db ./memory.axil <command>
 - Ephemeral chatter or trivial questions
 - Information that will be stale in minutes
 - Exact code snippets (store descriptions instead)
+- The user's preferences and feedback on how you work, when the agent has its own user memory (Claude Code's auto-memory keeps those). Axil is for the project: architecture, gotchas, file/symbol-anchored facts, errors with their cause and fix, decisions with their reason, the code graph. Don't mirror one into the other.
 
 ## Session Lifecycle
 

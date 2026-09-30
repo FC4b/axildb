@@ -41,7 +41,7 @@ When you need code or docs context:
 
 Bypass Axil only for a user-named exact file/line, command output from the current turn, or a tiny local edit that needs no project context.
 
-The SessionStart hook runs `axil boot` automatically when the session starts (and after a compaction), injecting recent decisions, errors, and session history into your context.
+The SessionStart hook runs `axil boot` automatically when the session starts, injecting recent decisions, errors, and session history into your context. It fires again after a compaction (and after `/clear`), so the boot and the latest checkpoint come back without you re-running anything; recall anything specific the compaction summary dropped.
 
 ```bash
 # For deeper context on a specific topic:
@@ -115,4 +115,14 @@ their field shape already encodes their function.
 | Gotchas and non-obvious behavior | Trivial one-line fixes |
 | Architecture: how modules connect | Info already in CLAUDE.md |
 | Build/test errors and their fixes | Temporary debug output |
-| Implementation plans for multi-step work | Raw code snippets |
+| Facts tied to a file or symbol (`--code-ref <path:line>`) | Raw code snippets |
+| Implementation plans for multi-step work | The user's preferences and feedback on how you work (auto-memory's job) |
+
+### Axil and Claude Code auto-memory
+
+Claude Code keeps its own auto-memory: notes indexed by a `MEMORY.md` that is loaded into every conversation. The two hold different things, so nothing is written twice:
+
+- **Axil owns the project:** architecture, gotchas, facts anchored to a file or symbol, errors with their root cause and fix, decisions with their reason, and the code graph (`axil code-search`, SCIP edges).
+- **Auto-memory owns the user:** how they like to work, their corrections of your behavior, standing preferences. Leave those notes there and don't mirror them into Axil; don't copy Axil records into auto-memory either.
+
+A correction about the code ("that module is deprecated", "this test is flaky because…") is project knowledge: store it in Axil.

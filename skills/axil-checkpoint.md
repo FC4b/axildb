@@ -12,7 +12,7 @@ This is the Axil-native form of the conversational `/handoff` pattern. Same prin
 
 ## When to Trigger
 
-- **Context is getting full** — snapshot before compaction so nothing is lost.
+- **Context is getting full** — snapshot before compaction so nothing is lost. After the compaction, Claude Code's SessionStart hook fires again and `axil boot` replays this checkpoint as "Resume Here", so the resume point survives the summary.
 - **Mid-session breakpoint** — pausing work, want a clean resume point.
 - **Session end** — pair with `axil store context` for the wrap-up summary; add `--final` to mark this as the closing checkpoint.
 - **Handing off to a different agent** — Claude → Codex / Cursor / etc.
