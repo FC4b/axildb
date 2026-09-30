@@ -1,0 +1,258 @@
+{
+ "benchmark": "dogfood-recall",
+ "date": "2026-09-30",
+ "snapshot": "benchmarks/dogfood-recall/data/snap-prefix (frozen, healed copy of this repo's .axil; every run copies it first)",
+ "method": "python3 benchmarks/dogfood-recall/run.py --snapshot <snap-prefix> --top-k K --fetch K; baseline = axil at dev 65d45ff; variants = an eval-only build of axil-core with the QTC window and candidate pool switchable by env var (not committed). Runs in one group were made together, because recall weighs recency.",
+ "variants": {
+  "dev": "top-20 QTC window by fused score; pool max(top_k*8, 40)",
+  "all": "QTC blend on every candidate, short records scored from their stored vector; fixed pool 40",
+  "window-p40/p80": "dev window, fixed pool 40 / 80",
+  "vecsignal": "no QTC blend; chunk cosine only raises the vector signal",
+  "relgate": "window = top 20 by fused score minus the recency and temporal terms",
+  "relgate-r": "window = top 20 by fused score minus the recency term (shipped)",
+  "-fast": "short records scored from their own stored vector instead of query-time chunks"
+ },
+ "k10_group_1": {
+  "dev": {
+   "hit@1": 0.684,
+   "hit@5": 0.912,
+   "hit@10": 0.947,
+   "mrr@10": 0.79,
+   "recall_all@10": 0.93,
+   "ndcg@10": 0.812,
+   "hook_hit": 0.895,
+   "hook_tokens": 279.75,
+   "hook_hits_per_1k_tokens": 3.198,
+   "n": 57
+  },
+  "all-p40": {
+   "hit@1": 0.649,
+   "hit@5": 0.877,
+   "hit@10": 0.912,
+   "mrr@10": 0.753,
+   "recall_all@10": 0.895,
+   "ndcg@10": 0.776,
+   "hook_hit": 0.86,
+   "hook_tokens": 280.548,
+   "hook_hits_per_1k_tokens": 3.064,
+   "n": 57
+  }
+ },
+ "k10_group_2": {
+  "dev": {
+   "hit@1": 0.684,
+   "hit@5": 0.912,
+   "hit@10": 0.947,
+   "mrr@10": 0.79,
+   "recall_all@10": 0.93,
+   "ndcg@10": 0.812,
+   "hook_hit": 0.895,
+   "hook_tokens": 280.36,
+   "hook_hits_per_1k_tokens": 3.191,
+   "n": 57
+  },
+  "window-legacy": {
+   "hit@1": 0.684,
+   "hit@5": 0.912,
+   "hit@10": 0.947,
+   "mrr@10": 0.79,
+   "recall_all@10": 0.93,
+   "ndcg@10": 0.812,
+   "hook_hit": 0.895,
+   "hook_tokens": 280.36,
+   "hook_hits_per_1k_tokens": 3.191,
+   "n": 57
+  },
+  "window-p40": {
+   "hit@1": 0.684,
+   "hit@5": 0.912,
+   "hit@10": 0.93,
+   "mrr@10": 0.778,
+   "recall_all@10": 0.912,
+   "ndcg@10": 0.798,
+   "hook_hit": 0.895,
+   "hook_tokens": 280.36,
+   "hook_hits_per_1k_tokens": 3.191,
+   "n": 57
+  },
+  "vecsignal-p40": {
+   "hit@1": 0.333,
+   "hit@5": 0.544,
+   "hit@10": 0.667,
+   "mrr@10": 0.433,
+   "recall_all@10": 0.632,
+   "ndcg@10": 0.476,
+   "hook_hit": 0.526,
+   "hook_tokens": 308.702,
+   "hook_hits_per_1k_tokens": 1.705,
+   "n": 57
+  },
+  "relgate-legacy": {
+   "hit@1": 0.684,
+   "hit@5": 0.912,
+   "hit@10": 0.947,
+   "mrr@10": 0.788,
+   "recall_all@10": 0.93,
+   "ndcg@10": 0.811,
+   "hook_hit": 0.895,
+   "hook_tokens": 279.711,
+   "hook_hits_per_1k_tokens": 3.199,
+   "n": 57
+  },
+  "relgate-p40": {
+   "hit@1": 0.684,
+   "hit@5": 0.912,
+   "hit@10": 0.93,
+   "mrr@10": 0.781,
+   "recall_all@10": 0.912,
+   "ndcg@10": 0.801,
+   "hook_hit": 0.895,
+   "hook_tokens": 279.711,
+   "hook_hits_per_1k_tokens": 3.199,
+   "n": 57
+  }
+ },
+ "group_3": {
+  "dev-k10": {
+   "hit@1": 0.684,
+   "hit@5": 0.912,
+   "hit@10": 0.93,
+   "mrr@10": 0.789,
+   "recall_all@10": 0.912,
+   "ndcg@10": 0.808,
+   "hook_hit": 0.895,
+   "hook_tokens": 280.36,
+   "hook_hits_per_1k_tokens": 3.191,
+   "n": 57
+  },
+  "window-p80-k10": {
+   "hit@1": 0.684,
+   "hit@5": 0.912,
+   "hit@10": 0.93,
+   "mrr@10": 0.789,
+   "recall_all@10": 0.912,
+   "ndcg@10": 0.808,
+   "hook_hit": 0.895,
+   "hook_tokens": 286.158,
+   "hook_hits_per_1k_tokens": 3.127,
+   "n": 57
+  },
+  "relgate-p80-k10": {
+   "hit@1": 0.684,
+   "hit@5": 0.912,
+   "hit@10": 0.947,
+   "mrr@10": 0.789,
+   "recall_all@10": 0.93,
+   "ndcg@10": 0.811,
+   "hook_hit": 0.895,
+   "hook_tokens": 283.136,
+   "hook_hits_per_1k_tokens": 3.16,
+   "n": 57
+  },
+  "dev-k5": {
+   "hit@1": 0.684,
+   "hit@5": 0.895,
+   "hit@10": 0.895,
+   "mrr@10": 0.772,
+   "recall_all@10": 0.86,
+   "ndcg@10": 0.782,
+   "hook_hit": 0.895,
+   "hook_tokens": 280.36,
+   "hook_hits_per_1k_tokens": 3.191,
+   "n": 57
+  },
+  "window-p80-k5": {
+   "hit@1": 0.684,
+   "hit@5": 0.895,
+   "hit@10": 0.895,
+   "mrr@10": 0.782,
+   "recall_all@10": 0.86,
+   "ndcg@10": 0.79,
+   "hook_hit": 0.895,
+   "hook_tokens": 286.158,
+   "hook_hits_per_1k_tokens": 3.127,
+   "n": 57
+  },
+  "relgate-p80-k5": {
+   "hit@1": 0.684,
+   "hit@5": 0.895,
+   "hit@10": 0.895,
+   "mrr@10": 0.781,
+   "recall_all@10": 0.86,
+   "ndcg@10": 0.789,
+   "hook_hit": 0.895,
+   "hook_tokens": 283.136,
+   "hook_hits_per_1k_tokens": 3.16,
+   "n": 57
+  }
+ },
+ "group_4": {
+  "dev-k10": {
+   "hit@1": 0.684,
+   "hit@5": 0.912,
+   "hit@10": 0.93,
+   "mrr@10": 0.789,
+   "recall_all@10": 0.912,
+   "ndcg@10": 0.808,
+   "hook_hit": 0.895,
+   "hook_tokens": 280.36,
+   "hook_hits_per_1k_tokens": 3.191,
+   "n": 57
+  },
+  "relgate-r-p80-k10": {
+   "hit@1": 0.684,
+   "hit@5": 0.912,
+   "hit@10": 0.947,
+   "mrr@10": 0.789,
+   "recall_all@10": 0.93,
+   "ndcg@10": 0.811,
+   "hook_hit": 0.895,
+   "hook_tokens": 283.136,
+   "hook_hits_per_1k_tokens": 3.16,
+   "n": 57
+  },
+  "relgate-r-fast-p80-k10": {
+   "hit@1": 0.649,
+   "hit@5": 0.912,
+   "hit@10": 0.947,
+   "mrr@10": 0.764,
+   "recall_all@10": 0.93,
+   "ndcg@10": 0.793,
+   "hook_hit": 0.877,
+   "hook_tokens": 282.206,
+   "hook_hits_per_1k_tokens": 3.108,
+   "n": 57
+  },
+  "window-fast-p80-k10": {
+   "hit@1": 0.649,
+   "hit@5": 0.912,
+   "hit@10": 0.93,
+   "mrr@10": 0.764,
+   "recall_all@10": 0.912,
+   "ndcg@10": 0.789,
+   "hook_hit": 0.877,
+   "hook_tokens": 286.004,
+   "hook_hits_per_1k_tokens": 3.067,
+   "n": 57
+  },
+  "relgate-r-fast-p80-k5": {
+   "hit@1": 0.649,
+   "hit@5": 0.877,
+   "hit@10": 0.877,
+   "mrr@10": 0.753,
+   "recall_all@10": 0.842,
+   "ndcg@10": 0.765,
+   "hook_hit": 0.877,
+   "hook_tokens": 282.206,
+   "hook_hits_per_1k_tokens": 3.108,
+   "n": 57
+  }
+ },
+ "conclusions": [
+  "Blending every candidate (all) lowers hit@5 0.912 -> 0.877 and MRR@10 0.790 -> 0.753: without the window, records with a high cosine and nothing else in their favour outrank the answers.",
+  "Removing the blend (vecsignal) drops hit@5 to 0.544: the windowed blend is the strongest ranking step on this corpus.",
+  "A fixed pool of 40 costs top-10 recall one question (hit@10 0.947 -> 0.930); 80 matches dev at k=10.",
+  "relgate-r with pool 80 matches dev on hit@1/hit@5/MRR and recovers one question at top 10 (hit@10 and recall_all@10 0.930 -> 0.947, 0.912 -> 0.930); hook hit unchanged.",
+  "Scoring short records from their stored vector (-fast) lowers hit@1 0.684 -> 0.649: stored vectors of code proxies and file summaries embed other text than searchable_text."
+ ]
+}

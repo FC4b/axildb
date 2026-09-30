@@ -25,6 +25,12 @@ use crate::util::{RECALL_CHUNK_MAX_BYTES, RECALL_CHUNK_OVERLAP_BYTES};
 /// shapes and must not be merged.
 pub const SCIP_ALIAS_TABLE: &str = "_scip_aliases";
 const RECALL_CHUNKS_TABLE: &str = "_recall_chunks";
+/// Candidates recall draws before scoring: vector search and FTS each fetch
+/// twice this many hits. Fixed rather than scaled by `top_k`, so every
+/// `top_k` up to this size ranks the same pool and returns a prefix of the
+/// same list. 80 is the pool a top-10 recall used to get; on the dogfood eval
+/// a pool of 40 cost top-10 recall a question.
+const RECALL_CANDIDATE_POOL: usize = 80;
 
 /// Marker row written once after `migrate_entity_canonical_id` finishes.
 /// Presence of the marker lets `Axil::open()` skip the full-table scan
@@ -4943,9 +4949,12 @@ impl Axil {
             cfg.query_keywords = crate::scoring::extract_keywords(&effective_query);
         }
 
-        // B: widen candidate pool so downstream fusion / rerank
-        // has enough raw material; minor CPU cost, meaningful recall lift.
-        let fetch_k = top_k.saturating_mul(8).max(40);
+        // A fixed candidate pool, so the ranking does not depend on how many
+        // results were asked for: recall(q, 10) is the first 10 of
+        // recall(q, 25) for any top_k up to the pool. Graph proximity scores a
+        // candidate by its links to the rest of the pool, so a pool that grew
+        // with top_k lifted well-connected records over the answer at large k.
+        let fetch_k = RECALL_CANDIDATE_POOL.max(top_k);
         // Step 1: Vector search when an embedder + vector index are available.
         // Fall back to other retrieval signals instead of erroring out.
         let query_vec = if let (Some(embedder), Some(vi)) =
@@ -5167,13 +5176,19 @@ impl Axil {
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
 
-        // Query-Time Chunk reranking (optional). Rescores the top-K candidates
-        // using chunk-level embeddings of their text, then resorts. Applied
-        // BEFORE truncation so a chunk-match can promote a session that was
-        // barely outside top_k under fused-score-only ranking.
+        // Query-Time Chunk reranking (optional). Blends the best chunk cosine
+        // into the scores of the most relevant candidates, then resorts.
+        // Applied BEFORE truncation so a chunk match can promote a record that
+        // was just outside top_k.
         if let (Some(qtc), Some(q_vec)) = (cfg.qtc.as_ref(), query_vec.as_ref()) {
             if let Some(embedder) = self.embedder.as_ref() {
-                self.apply_query_time_chunks(&mut scored_results, q_vec, embedder.as_ref(), qtc);
+                self.apply_query_time_chunks(
+                    &mut scored_results,
+                    q_vec,
+                    embedder.as_ref(),
+                    qtc,
+                    &cfg,
+                );
                 scored_results.sort_by(|a, b| {
                     b.score
                         .partial_cmp(&a.score)
@@ -7213,39 +7228,36 @@ impl Axil {
         Ok(())
     }
 
-    /// Query-Time Chunk reranking: rescores the top-K recall candidates by
-    /// finding the chunk-level embedding that best matches the query and
-    /// blending its cosine into the fused score.
+    /// Query-Time Chunk reranking: blends the best chunk-level cosine against
+    /// the query into the fused score of a window of candidates, as
+    /// `alpha * best_chunk + (1 - alpha) * fused`.
     ///
-    /// Fast path: if the candidate already has index-time chunks registered
-    /// in `_recall_chunk_ids`, we look up their pre-computed vectors via
-    /// `VectorIndex::get_vector` and never touch the embedder. This is the
-    /// hot path for any dataset that goes through `insert_batch_raw` /
-    /// `insert`, since `sync_recall_chunks_for_record` already populates
-    /// both the `_recall_chunks` table and the vector index.
+    /// The window is the `qtc.top_k` most relevant candidates: ranked by fused
+    /// score with the recency term taken out. Recency still counts in every
+    /// final score, but it no longer decides who gets the blend. When the
+    /// window followed the plain fused order, recency dominated it (a
+    /// fresh commit gained about 0.14), so an old record that matched the query
+    /// best could sit outside and never be rescored. Blending every candidate
+    /// instead removed the window but also its gate: records with a high cosine
+    /// and nothing else in their favour (file summaries, code proxies) then
+    /// outranked the answers, and dogfood hit@5 fell from 0.91 to 0.88.
     ///
-    /// Slow path: when no index-time chunks exist (short records, or
-    /// databases that were built without vector + FTS at insert time),
-    /// fall back to chunking the record's text at query time and embedding
-    /// each chunk on the fly.
+    /// Records long enough to be chunked at insert are scored from their
+    /// chunks' stored vectors; shorter ones have their `searchable_text`
+    /// chunked and embedded now. The record's own stored vector is no
+    /// substitute: for code proxies and file summaries it embeds different
+    /// text, and using it cost the dogfood eval's hit@1 about 3.5 points.
     ///
-    /// Writes back `alpha * best_chunk_cosine + (1-alpha) * fused_score` into
-    /// each scored result. Caller is responsible for the subsequent re-sort.
-    ///
-    /// Why not index-time chunking alone: on corpora where each session has
-    /// one timestamp, promoting chunks to first-class result candidates makes
-    /// every chunk of a recent session share that timestamp — recency-max-pool
-    /// then pins the top-K to the latest sessions regardless of content. QTC
-    /// sidesteps this by keeping session-level records as the ranked unit and
-    /// only using chunk embeddings for scoring.
+    /// Caller is responsible for the subsequent re-sort.
     fn apply_query_time_chunks(
         &self,
         results: &mut [crate::scoring::RecallResult],
         query_vec: &[f32],
         embedder: &dyn crate::plugin::TextEmbedder,
         qtc: &crate::scoring::QtcConfig,
+        cfg: &crate::scoring::RecallConfig,
     ) {
-        if results.is_empty() || qtc.chunk_chars == 0 {
+        if results.is_empty() || qtc.chunk_chars == 0 || qtc.top_k == 0 {
             return;
         }
 
@@ -7255,23 +7267,46 @@ impl Axil {
         }
 
         let alpha = qtc.alpha.clamp(0.0, 1.0);
-        let rerank_n = results.len().min(qtc.top_k);
+        let relevance: Vec<f32> = results
+            .iter()
+            .map(|r| {
+                let recency = crate::scoring::recency_decay(
+                    &r.record.created_at,
+                    &cfg.now,
+                    cfg.recency_half_life_hours,
+                );
+                r.score - cfg.weights.recency * recency
+            })
+            .collect();
+        let mut window: Vec<usize> = (0..results.len()).collect();
+        window.sort_by(|a, b| {
+            relevance[*b]
+                .partial_cmp(&relevance[*a])
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        window.truncate(qtc.top_k);
 
-        // Results without stored chunk vectors are chunked here and embedded
-        // together in one batched call; a call per result cost up to
+        let blend = |result: &mut crate::scoring::RecallResult, best: f32| {
+            result.score = alpha * best + (1.0 - alpha) * result.score;
+            result
+                .explanation
+                .signals
+                .push(("qtc_best_chunk".to_string(), best));
+        };
+
+        // Window results without stored chunk vectors are chunked here and
+        // embedded together in one batched call; a call per result cost up to
         // `top_k` model runs per recall.
         let mut pending: Vec<(usize, std::ops::Range<usize>)> = Vec::new();
         let mut chunks: Vec<String> = Vec::new();
-        for (i, result) in results.iter_mut().take(rerank_n).enumerate() {
-            // Fast path: read pre-computed chunk vectors stored at insert.
+        for i in window {
+            let result = &mut results[i];
             if let Some(best) =
                 self.qtc_best_cosine_from_stored_chunks(&result.record, query_vec, q_norm)
             {
-                result.score = alpha * best + (1.0 - alpha) * result.score;
+                blend(result, best);
                 continue;
             }
-
-            // Slow path: chunk at query time.
             let text = crate::util::searchable_text(&result.record.data);
             if text.trim().is_empty() {
                 continue;
@@ -7308,15 +7343,11 @@ impl Axil {
                     own.as_slice()
                 }
             };
-            let mut best: f32 = 0.0;
-            for vec in vectors {
-                let sim = cosine(query_vec, q_norm, vec);
-                if sim > best {
-                    best = sim;
-                }
-            }
-            let result = &mut results[i];
-            result.score = alpha * best + (1.0 - alpha) * result.score;
+            let best = vectors
+                .iter()
+                .map(|vec| cosine(query_vec, q_norm, vec))
+                .fold(0.0f32, f32::max);
+            blend(&mut results[i], best);
         }
     }
 
@@ -8391,7 +8422,7 @@ mod tests {
         let query = crate::plugin::TextEmbedder::embed(&embedder, "chunk text").unwrap();
 
         let mut got = qtc_results(&texts);
-        db.apply_query_time_chunks(&mut got, &query, &embedder, &qtc);
+        db.apply_query_time_chunks(&mut got, &query, &embedder, &qtc, &Default::default());
         assert_eq!(embedder.0.load(std::sync::atomic::Ordering::SeqCst), 1);
 
         for (got, before) in got.iter().zip(qtc_results(&texts)) {
@@ -8423,7 +8454,7 @@ mod tests {
         let query = bag_of_bytes("chunk text");
 
         let mut got = qtc_results(&texts);
-        db.apply_query_time_chunks(&mut got, &query, &PoisonedEmbedder, &qtc);
+        db.apply_query_time_chunks(&mut got, &query, &PoisonedEmbedder, &qtc, &Default::default());
 
         let before = qtc_results(&texts);
         assert_eq!(

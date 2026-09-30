@@ -198,25 +198,39 @@ but no model is enabled out of the box. See
 
 ## Step 4c — Query-Time Chunking (QTC)
 
-When `RecallConfig.qtc = Some(QtcConfig { .. })`, the top-K session-level
-candidates are re-embedded at query time in overlapping windows
-(default 1200 chars, 900-char stride = 25% overlap). The best chunk's
-cosine similarity is blended with the fused score:
+When `RecallConfig.qtc = Some(QtcConfig { .. })`, the `top_k` (default 20)
+most relevant candidates in `Axil::recall`'s pool get their best chunk's
+cosine similarity against the query blended with their fused score:
 
 ```
 new_score = alpha * best_chunk_cosine + (1 - alpha) * fused_score
 ```
 
-Defaults are tuned on LongMemEval-S (top_k=20, alpha=0.7) and hit a
-97.3% hit rate / 94.0% recall at the oracle ceiling on long documents.
+"Most relevant" means ranked by fused score with the recency term taken
+out. Recency still counts in every final score, but it does not decide who
+gets the blend: when the window followed the plain fused order, a fresh
+record could crowd out an old one that matched the query best, and the old
+one was never rescored. The window itself stays: blending every candidate
+lets records whose only strength is a high cosine (file summaries, code
+proxies) outrank the answers, which cost the dogfood eval's hit@5 about
+three points.
+
+A record long enough to be chunked at insert (over 1600 bytes) is scored
+from its stored chunk vectors; a shorter one is cut into overlapping windows
+(default 1200 chars, 900-char stride = 25% overlap) and embedded at query
+time.
+
+`Axil::recall` also draws a fixed candidate pool (80 per source, doubled for
+the fetch) instead of one scaled by `top_k`, so a smaller `top_k` returns a
+prefix of a larger one.
+
+`top_k=20` and `alpha=0.7` were tuned on LongMemEval-S.
 
 QTC fixes the long-document problem: when the answer sits beyond the
-indexed embedding's effective window, index-time chunking suffers from
-shared-timestamp collisions (every chunk has the same `created_at`).
-QTC sidesteps this by chunking only the small top-K post-fusion.
-
-QTC is opt-in because it costs additional embedding calls. Enable it
-for document-heavy stores; leave it off for short-record workloads.
+indexed embedding's effective window, ranking index-time chunks as results
+suffers from shared-timestamp collisions (every chunk has the same
+`created_at`). QTC sidesteps this by keeping records as the ranked unit and
+using chunk vectors only to score them.
 
 ## Step 5 — Graph traversal (optional)
 

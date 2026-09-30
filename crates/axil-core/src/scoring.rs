@@ -160,12 +160,12 @@ pub struct RecallConfig {
     pub min_confidence: Option<f32>,
     /// Minimum importance threshold (0.0–1.0). Records below this are excluded.
     pub min_importance: Option<f32>,
-    /// Query-Time Chunk reranking. When `Some(top_k)`, after session-level
-    /// candidates are scored the top-K are re-scored by embedding their text
-    /// in overlapping windows at query time and blending the best-chunk
-    /// cosine with the fused score. Lifts recall on long documents where the
-    /// answer sits beyond the indexed embedding window, without the shared-
-    /// timestamp pitfall of index-time chunking. `None` disables QTC.
+    /// Query-Time Chunk reranking. When `Some`, the most relevant candidates
+    /// (by fused score without recency) have their best chunk-level cosine
+    /// against the query blended with their fused score. Lifts recall on long
+    /// documents where the answer sits beyond the indexed embedding window,
+    /// without the shared-timestamp pitfall of ranking index-time chunks as
+    /// results. `None` disables QTC.
     pub qtc: Option<QtcConfig>,
     /// Near-duplicate collapse before truncation to `top_k`.
     pub dedup: DedupConfig,
@@ -224,7 +224,8 @@ impl Default for DedupConfig {
 /// Parameters for Query-Time Chunk reranking.
 #[derive(Debug, Clone)]
 pub struct QtcConfig {
-    /// Number of top candidates to rescore with chunk-level embeddings.
+    /// How many candidates get the chunk blend: the most relevant ones by
+    /// fused score with the recency term taken out.
     pub top_k: usize,
     /// Max characters per chunk window.
     pub chunk_chars: usize,
