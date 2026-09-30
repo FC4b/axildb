@@ -152,6 +152,64 @@ fn boot_reports_token_budget_usage() {
 }
 
 #[test]
+fn boot_defaults_to_the_core_budget() {
+    let (_tmp, path) = temp_db_path();
+    let server = McpServer::open(&path).unwrap();
+    let out = dispatch_json(&server, "boot", json!({}));
+    assert_eq!(out["token_budget"], axil_core::DEFAULT_TOKEN_BUDGET);
+}
+
+/// The MCP tool shares `Axil::boot`, so its rows are one-liners and its
+/// budget holds inside the never-dropped sections, like `axil boot --schema v1`.
+#[test]
+fn boot_rows_are_one_liners_within_budget() {
+    let (_tmp, path) = temp_db_path();
+    let server = McpServer::open(&path).unwrap();
+    let db = server.db_for_tests();
+    let long = "plenty of words that cost tokens ".repeat(30);
+    for i in 0..20 {
+        db.insert(
+            "decisions",
+            json!({ "summary": format!("decision {i} {long}") }),
+        )
+        .unwrap();
+        db.insert("errors", json!({ "error": format!("error {i} {long}") }))
+            .unwrap();
+    }
+    db.insert(
+        "errors",
+        json!({ "error": "fixed long ago", "resolved": true }),
+    )
+    .unwrap();
+
+    let out = dispatch_json(&server, "boot", json!({"budget": 600}));
+    let text = serde_json::to_string(&out).unwrap();
+    assert!(
+        text.len().div_ceil(4) <= 600,
+        "serialized {} bytes",
+        text.len()
+    );
+    assert!(
+        out["omitted_items"].as_u64().unwrap_or(0) > 0,
+        "rows were cut: {out}"
+    );
+
+    let sections = out["sections"].as_array().unwrap();
+    let failures = sections
+        .iter()
+        .find(|s| s["kind"] == "active_failures")
+        .expect("failures are never dropped");
+    let rows = failures["content"].as_array().unwrap();
+    assert!(!rows.is_empty());
+    for row in rows {
+        let row = row.as_str().expect("rows are one-line strings");
+        let fields: Vec<&str> = row.splitn(4, " · ").collect();
+        assert_eq!(fields.len(), 4, "{row}");
+        assert_eq!(fields[2], "open", "resolved errors are not failures: {row}");
+    }
+}
+
+#[test]
 fn tool_definitions_include_new_tools() {
     // The MCP server's tool listing must advertise every new tool; this
     // is what Cursor / Claude Code discovers via tools/list.
