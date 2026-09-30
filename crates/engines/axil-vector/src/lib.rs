@@ -819,9 +819,12 @@ pub fn vector_store_unavailable(
             vec_path.display()
         ),
         // Not "rename it in place": a `<db>.vec.<name>` file next to the
-        // database is read as a named vector space.
+        // database is read as a named vector space. `axil init` sizes the new
+        // store for the embedding model in axil.toml, the size every later
+        // open expects; `--vector-dims` would have to repeat that by hand.
         fix: format!(
-            "move {} to another directory, then run `axil init {}` and \
+            "move {} to another directory, then run `axil init {}` (it creates \
+             an empty store sized for the embedding model set in axil.toml) and \
              `axil heal --reindex` to re-embed your memory records",
             vec_path.display(),
             db_path.display()
