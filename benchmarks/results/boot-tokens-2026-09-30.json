@@ -1,0 +1,129 @@
+{
+  "what": "size of each `axil boot` surface on one database, old binary vs new",
+  "date": "2026-09-30",
+  "snapshot": "benchmarks/dogfood-recall/data/snap-prefix (copy)",
+  "token_estimate": "ceil(bytes / 4) of the output (Axil's bytes/4 budget heuristic), not a tokenizer count",
+  "runs": {
+    "old": {
+      "binary": "axil 2.3.1 (axildb-v2.3.1-25-g65d45ff)",
+      "surfaces": {
+        "narrative": {
+          "cmd": "axil boot --boot-format narrative",
+          "exit": 0,
+          "bytes": 5942,
+          "est_tokens": 1486
+        },
+        "json": {
+          "cmd": "axil boot",
+          "exit": 0,
+          "bytes": 12118,
+          "est_tokens": 3030
+        },
+        "schema_v1": {
+          "cmd": "axil boot --schema v1",
+          "exit": 0,
+          "bytes": 23101,
+          "est_tokens": 5776,
+          "token_budget": 2000,
+          "token_budget_used": 5693,
+          "dropped_sections": [
+            "confidence_notes",
+            "preferences",
+            "open_threads"
+          ]
+        },
+        "hook": {
+          "cmd": "axil boot --boot-format narrative --budget 800",
+          "exit": 0,
+          "bytes": 3204,
+          "est_tokens": 801
+        },
+        "mcp_boot": {
+          "cmd": "MCP tools/call boot {}",
+          "exit": 0,
+          "bytes": 23100,
+          "est_tokens": 5775,
+          "token_budget": 2000,
+          "token_budget_used": 5693,
+          "dropped_sections": [
+            "confidence_notes",
+            "preferences",
+            "open_threads"
+          ]
+        }
+      }
+    },
+    "new": {
+      "binary": "axil 2.3.1 (axildb-v2.3.1-31-g77d42d8)",
+      "surfaces": {
+        "narrative": {
+          "cmd": "axil boot --boot-format narrative",
+          "exit": 0,
+          "bytes": 3925,
+          "est_tokens": 982
+        },
+        "json": {
+          "cmd": "axil boot",
+          "exit": 0,
+          "bytes": 3922,
+          "est_tokens": 981,
+          "omitted_items": 12
+        },
+        "schema_v1": {
+          "cmd": "axil boot --schema v1",
+          "exit": 0,
+          "bytes": 3926,
+          "est_tokens": 982,
+          "token_budget": 1000,
+          "token_budget_used": 982,
+          "dropped_sections": [
+            "confidence_notes",
+            "open_threads"
+          ],
+          "omitted_items": 6
+        },
+        "hook": {
+          "cmd": "axil boot --boot-format narrative --budget 800",
+          "exit": 0,
+          "bytes": 3161,
+          "est_tokens": 791
+        },
+        "mcp_boot": {
+          "cmd": "MCP tools/call boot {}",
+          "exit": 0,
+          "bytes": 3925,
+          "est_tokens": 982,
+          "token_budget": 1000,
+          "token_budget_used": 982,
+          "dropped_sections": [
+            "confidence_notes",
+            "open_threads"
+          ],
+          "omitted_items": 6
+        }
+      }
+    }
+  },
+  "est_tokens": {
+    "narrative": {
+      "old_est_tokens": 1486,
+      "new_est_tokens": 982
+    },
+    "json": {
+      "old_est_tokens": 3030,
+      "new_est_tokens": 981
+    },
+    "schema_v1": {
+      "old_est_tokens": 5776,
+      "new_est_tokens": 982
+    },
+    "hook": {
+      "old_est_tokens": 801,
+      "new_est_tokens": 791
+    },
+    "mcp_boot": {
+      "old_est_tokens": 5775,
+      "new_est_tokens": 982
+    }
+  }
+}
