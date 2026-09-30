@@ -26,7 +26,8 @@
 //!   post file-edit   — manifest + snippet accumulation
 //!   post shell       — heartbeat, commit capture, error capture
 //!   post file-read   — fallback capture after empty recalls
-//!   post todo-update — store reminder when a task completes
+//!   post todo-update — store reminder when a task completes and nothing
+//!                      narrative was stored in the last hour
 //!   stop             — narrative guard. Stop fires every turn, so it keeps
 //!                      the session's state; dialects with no session-end
 //!                      event also queue the session close here
@@ -1651,11 +1652,14 @@ impl HookCtx {
                 stderr,
             }) => self.post_shell(command, *exit_code, stdout, stderr),
             Some(ToolAction::Todo { completed_count }) => {
-                self.post_todo_store_reminder(*completed_count)
+                if let Some(reminder) = self.todo_store_reminder(*completed_count) {
+                    self.emit_context(reminder);
+                }
+                Ok(())
             }
             Some(ToolAction::TaskCompleted { task_id }) => {
-                if self.claim(&format!("task-{}", fnv1a(task_id))) {
-                    self.emit_context(STORE_REMINDER);
+                if let Some(reminder) = self.task_store_reminder(task_id) {
+                    self.emit_context(reminder);
                 }
                 Ok(())
             }
@@ -1904,22 +1908,43 @@ impl HookCtx {
         }
     }
 
-    /// When a todo flips to completed, inject the store reminder BEFORE the
-    /// agent moves on. Dialects with a whole-list todo tool (`TodoWrite`
-    /// and kin) report a completed count; Claude Code's task tools report
-    /// one `TaskUpdate` per task instead (see `TaskCompleted`).
-    fn post_todo_store_reminder(&self, completed: i64) -> Result<()> {
+    /// The store reminder for a whole-list todo tool (`TodoWrite` and kin),
+    /// which reports how many todos are completed: due when that count grew
+    /// and nothing narrative was stored (see [`Self::unstored_reminder`]).
+    /// Claude Code's task tools report one `TaskUpdate` per task instead
+    /// (see [`Self::task_store_reminder`]).
+    fn todo_store_reminder(&self, completed: i64) -> Option<&'static str> {
         let sentinel = self.sfile("todos");
         let last: i64 = std::fs::read_to_string(&sentinel)
             .ok()
             .and_then(|s| s.trim().parse().ok())
             .unwrap_or(0);
+        // Record the count whether or not the reminder fires, so a later
+        // update never re-announces a completion already seen.
         let _ = std::fs::write(&sentinel, completed.to_string());
-
-        if completed > last {
-            self.emit_context(STORE_REMINDER);
+        if completed <= last {
+            return None;
         }
-        Ok(())
+        self.unstored_reminder()
+    }
+
+    /// The store reminder for one task marked completed, at most once per
+    /// task id. The id is claimed even when the reminder stays silent, so a
+    /// later update of the same task can't fire it.
+    fn task_store_reminder(&self, task_id: &str) -> Option<&'static str> {
+        if !self.claim(&format!("task-{}", fnv1a(task_id))) {
+            return None;
+        }
+        self.unstored_reminder()
+    }
+
+    /// [`STORE_REMINDER`] when no narrative row was stored in the last hour.
+    /// Fails closed like the 5-edit nudge: a lookup that failed (say, a busy
+    /// database) is not "nothing stored", so it stays silent. Callers ask
+    /// only once a new completion is seen, because the lookup is a child
+    /// process on a synchronous hook.
+    fn unstored_reminder(&self) -> Option<&'static str> {
+        (self.count_recent_narrative() == Some(0)).then_some(STORE_REMINDER)
     }
 
     // ── Stop and session end ──────────────────────────────────────────
@@ -1978,7 +2003,10 @@ impl HookCtx {
     }
 }
 
-const STORE_REMINDER: &str = "You just marked a task completed. BEFORE doing anything else, run axil store with a summary of what you did and why. This is mandatory for every completed task.";
+/// Shown only when a task completes with nothing narrative stored in the
+/// last hour, so it asks for the store that is missing rather than one per
+/// task.
+const STORE_REMINDER: &str = "A task was marked completed and nothing was stored in Axil in the last hour. If it settled a decision, hit a gotcha or fixed an error, store that now (axil store decisions|errors|context '{...}'), or write an axil checkpoint if the work is wrapping up.";
 
 /// True when this project's Claude Code settings route SessionEnd to the
 /// brain, which `axil install` does from this version on.
@@ -3190,6 +3218,117 @@ mod tests {
         assert!(is_empty_axil_output("(no code proxies matched 'q')"));
         assert!(!is_empty_axil_output("[{\"id\":\"x\"}]"));
         assert!(!is_empty_axil_output("hit: src/main.rs:42"));
+    }
+
+    /// What the stubbed `axil since 1h` lookup does.
+    #[cfg(unix)]
+    enum Since {
+        Prints(&'static str),
+        Fails,
+    }
+
+    /// A brain whose own binary is a stub script, so the narrative lookup
+    /// can find a store, find none, or fail the way a busy database does.
+    /// Every call the stub gets is appended to `<dir>/calls`.
+    #[cfg(unix)]
+    fn stub_brain(dir: &Path, since: Since) -> HookCtx {
+        use std::os::unix::fs::PermissionsExt;
+        let calls = dir.join("calls");
+        let tail = match since {
+            Since::Prints(out) => format!("cat <<'EOF'\n{out}\nEOF\n"),
+            Since::Fails => "exit 1\n".to_string(),
+        };
+        let exe = dir.join("axil-stub");
+        std::fs::write(
+            &exe,
+            format!("#!/bin/sh\necho \"$@\" >> '{}'\n{tail}", calls.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        HookCtx {
+            dialect: Dialect::Claude,
+            event: HookEvent {
+                kind: EventKind::PostTool,
+                session_id: "s1".into(),
+                cwd: None,
+                prompt: None,
+                stop_hook_active: false,
+                tool: None,
+            },
+            sid: "s1".into(),
+            project_dir: dir.to_path_buf(),
+            exe,
+            // Never opened: the stub answers for it.
+            db: Some(dir.join("memory.axil")),
+            tmp: dir.to_path_buf(),
+            files: SessionFiles {
+                tmp: dir.to_path_buf(),
+                sid: "s1".into(),
+            },
+        }
+    }
+
+    #[cfg(unix)]
+    fn stub_calls(dir: &Path) -> Vec<String> {
+        std::fs::read_to_string(dir.join("calls"))
+            .map(|s| s.lines().map(str::to_string).collect())
+            .unwrap_or_default()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn task_reminder_only_when_nothing_was_stored() {
+        // Nothing stored in the last hour: remind, once per task.
+        let dir = tempfile::tempdir().unwrap();
+        let brain = stub_brain(dir.path(), Since::Prints(r#"[{"table": "_sessions"}]"#));
+        assert_eq!(brain.task_store_reminder("7"), Some(STORE_REMINDER));
+        assert_eq!(brain.task_store_reminder("7"), None);
+        assert_eq!(stub_calls(dir.path()).len(), 1, "a claimed task never looks again");
+        assert!(stub_calls(dir.path())[0].ends_with("since 1h"));
+
+        // A decision stored: silent, and the task is still claimed.
+        let dir = tempfile::tempdir().unwrap();
+        let brain = stub_brain(dir.path(), Since::Prints(r#"[{"table": "decisions"}]"#));
+        assert_eq!(brain.task_store_reminder("7"), None);
+        let brain = stub_brain(dir.path(), Since::Prints("[]"));
+        assert_eq!(brain.task_store_reminder("7"), None, "an old completion must not fire");
+
+        // A busy database is not "nothing stored": silent.
+        let dir = tempfile::tempdir().unwrap();
+        let brain = stub_brain(dir.path(), Since::Fails);
+        assert_eq!(brain.task_store_reminder("7"), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn todo_reminder_only_when_nothing_was_stored() {
+        let dir = tempfile::tempdir().unwrap();
+        let brain = stub_brain(dir.path(), Since::Prints("[]"));
+        assert_eq!(brain.todo_store_reminder(1), Some(STORE_REMINDER));
+        // No new completion: no lookup at all, and no reminder.
+        assert_eq!(brain.todo_store_reminder(1), None);
+        assert_eq!(brain.todo_store_reminder(0), None);
+        assert_eq!(stub_calls(dir.path()).len(), 1);
+
+        // A store present: silent, but the count still moves on.
+        let dir = tempfile::tempdir().unwrap();
+        let brain = stub_brain(dir.path(), Since::Prints(r#"[{"table": "errors"}]"#));
+        assert_eq!(brain.todo_store_reminder(2), None);
+        let brain = stub_brain(dir.path(), Since::Prints("[]"));
+        assert_eq!(brain.todo_store_reminder(2), None, "an old completion must not fire");
+        assert_eq!(brain.todo_store_reminder(3), Some(STORE_REMINDER));
+
+        // Busy database: silent.
+        let dir = tempfile::tempdir().unwrap();
+        let brain = stub_brain(dir.path(), Since::Fails);
+        assert_eq!(brain.todo_store_reminder(1), None);
+
+        // No database at all: no lookup, no reminder.
+        let dir = tempfile::tempdir().unwrap();
+        let mut brain = stub_brain(dir.path(), Since::Prints("[]"));
+        brain.db = None;
+        assert_eq!(brain.todo_store_reminder(1), None);
+        assert!(stub_calls(dir.path()).is_empty());
     }
 
     #[test]
