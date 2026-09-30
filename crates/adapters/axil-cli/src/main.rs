@@ -2249,10 +2249,14 @@ enum Command {
 
     /// Session boot context — curated wake-up context for agent sessions.
     ///
-    /// Combines recent sessions, decisions, errors, and architecture notes
-    /// into a single context payload for session initialization.
+    /// Combines the resume block, rules, open errors, decisions, recent
+    /// sessions and architecture notes into one payload, one line per item
+    /// (`id · age · status · summary`; `axil get <id>` expands a row).
     Boot {
-        /// Maximum token budget for output (estimate: 1 token ≈ 4 bytes).
+        /// Token budget for the output, estimated as ceil(bytes / 4); `0` or
+        /// omitted means the default (1000). Sections fill in priority order —
+        /// Resume Here, rules, open errors, decisions, then the rest — and
+        /// rows that do not fit are left out.
         #[arg(long)]
         budget: Option<usize>,
         /// Boot output format: json (default), narrative (plain text), compact.
@@ -13330,38 +13334,36 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                 return Ok(EXIT_OK);
             }
 
+            let budget_tokens = budget
+                .filter(|&b| b > 0)
+                .unwrap_or(axil_core::DEFAULT_TOKEN_BUDGET);
             let mut sections = serde_json::Map::new();
+            // Every record-backed section below is one row per item,
+            // `id · age · status · summary`; `axil get <id>` expands a row.
+            let now = chrono::Utc::now();
+            let row = |r: &axil_core::Record| json!(axil_core::boot::record_row(r, now));
 
-            // Pinned rules + high-importance constraints. These are loaded
-            // FIRST so the agent sees them before any other context. The
-            // narrative renderer prints them at the top, never dropped.
+            // Pinned rules + high-importance constraints. They fill right
+            // after the resume block, before any other context.
             let mut rules = db.list("rules").unwrap_or_default();
             rules.retain(|r| {
                 axil_core::importance::is_pinned(&r.data)
                     || axil_core::importance::get_importance(&r.data) >= 0.9
             });
             if !rules.is_empty() {
-                let rule_vals: Vec<Value> = rules
-                    .iter()
-                    .map(|r| {
-                        json!({
-                            "id": r.id.to_string(),
-                            "rule": r.data.get("rule").cloned().unwrap_or(Value::Null),
-                        })
-                    })
-                    .collect();
+                let rule_vals: Vec<Value> = rules.iter().map(row).collect();
                 sections.insert("rules".into(), json!(rule_vals));
             }
 
             // The newest sessions, one line each: the full file and entity
             // lists cost tokens, and `axil get <id>` has them.
-            let now = chrono::Utc::now();
             let session_vals: Vec<Value> = db
                 .storage()
                 .list_newest("_sessions", 3)
                 .unwrap_or_default()
                 .iter()
                 .filter_map(|r| boot_session_line(r, now))
+                .map(Value::String)
                 .collect();
             if !session_vals.is_empty() {
                 sections.insert("recent_sessions".into(), json!(session_vals));
@@ -13376,27 +13378,33 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             });
             decisions.truncate(5);
             if !decisions.is_empty() {
-                let dec_vals: Vec<Value> = decisions
-                    .iter()
-                    .map(|r| truncate_record_json(r, 200))
-                    .collect();
+                let dec_vals: Vec<Value> = decisions.iter().map(row).collect();
                 sections.insert("decisions".into(), json!(dec_vals));
             }
 
-            // Top 5 errors by importance
+            // Errors by importance, split by lifecycle: the top 5 open ones
+            // are things to act on and fill early; the top 3 resolved ones
+            // are lessons (the error with its fix) and fill with the rest.
             let mut errors = db.list("errors").unwrap_or_default();
             errors.sort_by(|a, b| {
                 let ia = axil_core::importance::get_importance(&a.data);
                 let ib = axil_core::importance::get_importance(&b.data);
                 ib.partial_cmp(&ia).unwrap_or(std::cmp::Ordering::Equal)
             });
-            errors.truncate(5);
-            if !errors.is_empty() {
-                let err_vals: Vec<Value> = errors
-                    .iter()
-                    .map(|r| truncate_record_json(r, 200))
-                    .collect();
+            let (open_errors, resolved_errors): (Vec<_>, Vec<_>) = errors
+                .iter()
+                .partition(|r| axil_core::boot::is_open_error(&r.data));
+            if !open_errors.is_empty() {
+                let err_vals: Vec<Value> = open_errors.into_iter().take(5).map(row).collect();
                 sections.insert("errors".into(), json!(err_vals));
+            }
+            if !resolved_errors.is_empty() {
+                let lesson_vals: Vec<Value> = resolved_errors
+                    .into_iter()
+                    .take(3)
+                    .map(|r| json!(boot_error_row(r, now)))
+                    .collect();
+                sections.insert("lessons".into(), json!(lesson_vals));
             }
 
             // Current beliefs (top 5, non-doubted)
@@ -13501,8 +13509,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                 .filter(|r| r.data.get("type").and_then(Value::as_str) == Some("architecture"))
                 .collect();
             if !arch.is_empty() {
-                let arch_vals: Vec<Value> =
-                    arch.iter().map(|r| truncate_record_json(r, 200)).collect();
+                let arch_vals: Vec<Value> = arch.iter().map(|r| row(r)).collect();
                 sections.insert("architecture".into(), json!(arch_vals));
             }
 
@@ -13518,19 +13525,11 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                     let mut cfg = axil_core::RecallConfig::default();
                     cfg.qtc = Some(axil_core::scoring::QtcConfig::default());
                     if let Ok(results) = db.recall(topic_query, 5, Some(cfg)) {
+                        // Mixed tables, so the status slot names the table;
+                        // rows stay in recall's rank order.
                         let topic_vals: Vec<Value> = results
                             .iter()
-                            .map(|rr| {
-                                json!({
-                                    "id": rr.record.id.to_string(),
-                                    "score": round4(rr.score),
-                                    "table": rr.record.table,
-                                    "summary": rr.record.data.get("summary")
-                                        .or_else(|| rr.record.data.get("description"))
-                                        .cloned()
-                                        .unwrap_or_else(|| truncate_value(&rr.record.data, 200)),
-                                })
-                            })
+                            .map(|rr| json!(boot_table_row(&rr.record, now)))
                             .collect();
                         sections.insert("topic_recall".into(), json!(topic_vals));
                     }
@@ -13683,16 +13682,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                                     .to_lowercase();
                                 if text.contains(&needle) || text.contains(&short) {
                                     seen_ids.insert(record.id.to_string());
-                                    context_hits.push(json!({
-                                        "source": "file_context",
-                                        "file": file_name,
-                                        "table": record.table,
-                                        "id": record.id.to_string(),
-                                        "summary": record.data.get("summary")
-                                            .or_else(|| record.data.get("error"))
-                                            .cloned()
-                                            .unwrap_or_else(|| truncate_value(&record.data, 150)),
-                                    }));
+                                    context_hits.push(json!(boot_table_row(&record, now)));
                                     break;
                                 }
                             }
@@ -13723,18 +13713,8 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                                     if seen_ids.contains(&id_str) {
                                         continue;
                                     }
-                                    seen_ids.insert(id_str.clone());
-                                    context_hits.push(json!({
-                                        "source": "file_context_semantic",
-                                        "file": file_name,
-                                        "table": record.table,
-                                        "id": id_str,
-                                        "summary": record.data.get("summary")
-                                            .or_else(|| record.data.get("error"))
-                                            .cloned()
-                                            .unwrap_or_else(|| truncate_value(&record.data, 150)),
-                                        "similarity": round4(*score),
-                                    }));
+                                    seen_ids.insert(id_str);
+                                    context_hits.push(json!(boot_table_row(record, now)));
                                 }
                             }
                         }
@@ -13751,12 +13731,15 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                         for entity in &entity_names {
                             if let Ok(knowledge) = mem.semantic().about(entity) {
                                 for fact in knowledge.facts.iter().take(3) {
-                                    context_hits.push(json!({
-                                        "source": "entity_context",
-                                        "entity": entity,
-                                        "fact": fact.data.get("fact").cloned().unwrap_or(Value::Null),
-                                        "id": fact.id.to_string(),
-                                    }));
+                                    let text =
+                                        fact.data.get("fact").and_then(Value::as_str).unwrap_or("");
+                                    context_hits.push(json!(axil_core::boot::boot_row(
+                                        &fact.id.to_string(),
+                                        &axil_core::boot::boot_age(fact.created_at, now),
+                                        "fact",
+                                        &format!("{entity}: {text}"),
+                                        axil_core::boot::BOOT_ROW_SUMMARY_CHARS,
+                                    )));
                                 }
                             }
                         }
@@ -13776,12 +13759,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                             .to_lowercase();
                         let matching = error_words.iter().filter(|w| text.contains(**w)).count();
                         if matching >= 2 || (error_words.len() == 1 && matching == 1) {
-                            context_hits.push(json!({
-                                "source": "error_context",
-                                "id": record.id.to_string(),
-                                "error": record.data.get("error").cloned().unwrap_or(Value::Null),
-                                "fix": record.data.get("fix").cloned().unwrap_or(Value::Null),
-                            }));
+                            context_hits.push(json!(boot_error_row(&record, now)));
                         }
                     }
                 }
@@ -13836,30 +13814,20 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
 
             match boot_format {
                 BootFormat::Narrative => {
-                    let mut narrative = boot_to_narrative(&boot_data);
-                    // Right under the header, so a byte budget cuts from the
-                    // other end and never drops it.
-                    let warnings: String = degraded_warnings(&db)
-                        .iter()
-                        .map(|w| format!("WARNING: {w}\n"))
-                        .collect();
-                    if let Some(pos) = narrative.find("\n\n") {
-                        narrative.insert_str(pos + 2, &warnings);
-                    }
-                    let output = match budget {
-                        Some(max_tokens) => cut_narrative_to_budget(narrative, max_tokens),
-                        None => narrative,
-                    };
-                    println!("{output}");
+                    let narrative =
+                        boot_to_narrative(&boot_data, &degraded_warnings(&db), budget_tokens);
+                    // The fill already fits the budget; the byte cut only
+                    // bites when the header and warnings alone exceed it.
+                    println!("{}", cut_narrative_to_budget(narrative, budget_tokens));
                 }
                 BootFormat::Compact => {
                     let compact = compact_boot_json(&boot_data);
-                    let mut output = apply_token_budget(&compact, budget);
+                    let mut output = apply_token_budget(&compact, budget_tokens);
                     insert_degraded(&mut output, &db);
                     out.print(&output);
                 }
                 BootFormat::Json => {
-                    let mut output = apply_token_budget(&boot_data, budget);
+                    let mut output = apply_token_budget(&boot_data, budget_tokens);
                     insert_degraded(&mut output, &db);
                     out.print(&output);
                 }
@@ -19483,31 +19451,15 @@ fn truncate_value(v: &Value, max_len: usize) -> Value {
     }
 }
 
-/// Create a truncated JSON representation of a record.
-fn truncate_record_json(record: &axil_core::Record, max_field_len: usize) -> Value {
-    let mut v = json!({
-        "id": record.id.to_string(),
-        "table": record.table,
-    });
-    if let Some(obj) = record.data.as_object() {
-        for (k, val) in obj {
-            if k.starts_with('_') {
-                continue;
-            }
-            v[k] = truncate_value(val, max_field_len);
-        }
-    }
-    v
-}
-
 /// Sessions older than this are left out of boot.
 const BOOT_SESSION_MAX_AGE_DAYS: i64 = 90;
 /// Sessions older than this are labelled stale in boot.
 const BOOT_SESSION_STALE_DAYS: i64 = 7;
 
-/// Boot's one-line view of a `_sessions` record: when it ended and what it
-/// touched. `None` when it is too old to be worth showing.
-fn boot_session_line(r: &axil_core::Record, now: chrono::DateTime<chrono::Utc>) -> Option<Value> {
+/// Boot's one-line view of a `_sessions` record — `id · age · recent|stale ·
+/// summary`, aged from when it ended — or `None` when it is too old to be
+/// worth showing.
+fn boot_session_line(r: &axil_core::Record, now: chrono::DateTime<chrono::Utc>) -> Option<String> {
     let ended = r
         .data
         .get("ended_at")
@@ -19546,14 +19498,59 @@ fn boot_session_line(r: &axil_core::Record, now: chrono::DateTime<chrono::Utc>) 
             format!("{file_count} files: {}{more}", names.join(", "))
         }
     };
-    Some(json!({
-        "id": r.id.to_string(),
-        "ended_at": ended.to_rfc3339(),
-        "age_days": age_days,
-        "stale": age_days > BOOT_SESSION_STALE_DAYS,
-        "summary": summary,
-        "file_count": file_count,
-    }))
+    let status = if age_days > BOOT_SESSION_STALE_DAYS {
+        "stale"
+    } else {
+        "recent"
+    };
+    Some(axil_core::boot::boot_row(
+        &r.id.to_string(),
+        &axil_core::boot::boot_age(ended, now),
+        status,
+        &summary,
+        axil_core::boot::BOOT_ROW_SUMMARY_CHARS,
+    ))
+}
+
+/// An `errors` record as a boot row whose summary carries the fix too
+/// (`error → fix`): for a lesson or a pushed match, the fix is the point.
+fn boot_error_row(r: &axil_core::Record, now: chrono::DateTime<chrono::Utc>) -> String {
+    let field = |k: &str| {
+        r.data
+            .get(k)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    };
+    let error = field("error").map_or_else(|| axil_core::boot::record_headline(r), String::from);
+    let summary = match field("resolution").or_else(|| field("fix")) {
+        Some(fix) => format!("{error} → {fix}"),
+        None => error,
+    };
+    axil_core::boot::boot_row(
+        &r.id.to_string(),
+        &axil_core::boot::boot_age(r.created_at, now),
+        &axil_core::boot::record_status(r),
+        &summary,
+        axil_core::boot::BOOT_ROW_SUMMARY_CHARS,
+    )
+}
+
+/// A boot row for a list that mixes tables (topic recall, pushed context):
+/// the status slot names the table, since "active" alone would not say
+/// whether the row is a decision, a note or a commit.
+fn boot_table_row(r: &axil_core::Record, now: chrono::DateTime<chrono::Utc>) -> String {
+    let status = match axil_core::boot::record_status(r).as_str() {
+        "active" => r.table.clone(),
+        lifecycle => format!("{} {lifecycle}", r.table),
+    };
+    axil_core::boot::boot_row(
+        &r.id.to_string(),
+        &axil_core::boot::boot_age(r.created_at, now),
+        &status,
+        &axil_core::boot::record_headline(r),
+        axil_core::boot::BOOT_ROW_SUMMARY_CHARS,
+    )
 }
 
 /// One line per Engine this open could not attach, for agent-facing output.
@@ -19574,29 +19571,118 @@ fn insert_degraded(output: &mut Value, db: &Axil) {
     }
 }
 
-/// Apply a token budget to a JSON value by serializing and truncating.
-fn apply_token_budget(v: &Value, budget: Option<usize>) -> Value {
-    if let Some(max_tokens) = budget {
-        let serialized = serde_json::to_string(v).unwrap_or_default();
-        let max_bytes = max_tokens * 4;
-        if serialized.len() > max_bytes {
-            // Try to truncate array elements
-            if let Some(obj) = v.as_object() {
-                let mut result = serde_json::Map::new();
-                let mut used = 2;
-                for (k, val) in obj {
-                    let entry = serde_json::to_string(val).unwrap_or_default();
-                    if used + entry.len() + k.len() + 4 > max_bytes && !result.is_empty() {
-                        break;
+/// Boot sections in fill order, highest priority first: the resume block,
+/// pinned rules, open errors and decisions lead, then everything else. A
+/// section missing from this list fills last.
+const BOOT_FILL_ORDER: &[&str] = &[
+    "extension_blocks",
+    "rules",
+    "errors",
+    "decisions",
+    "topic_recall",
+    "context_push",
+    "recent_changes",
+    "recent_sessions",
+    "lessons",
+    "architecture",
+    "index_freshness",
+    "dep_docs_freshness",
+    "beliefs",
+    "procedures",
+    "key_entities",
+    "preferences",
+    "active_patterns",
+    "project",
+    "modules",
+];
+
+/// Keys of a boot object in [`BOOT_FILL_ORDER`], unlisted keys last.
+fn boot_fill_keys(obj: &serde_json::Map<String, Value>) -> Vec<&String> {
+    let rank = |k: &str| {
+        BOOT_FILL_ORDER
+            .iter()
+            .position(|o| *o == k)
+            .unwrap_or(BOOT_FILL_ORDER.len())
+    };
+    let mut keys: Vec<&String> = obj.keys().collect();
+    keys.sort_by_key(|k| rank(k));
+    keys
+}
+
+/// Fit boot JSON into `budget_tokens`, estimated as `ceil(bytes / 4)` of
+/// the compact serialization, by filling sections in [`BOOT_FILL_ORDER`]
+/// item by item: an array keeps the items that fit (an extension block
+/// that does not fit whole keeps its leading lines), and a section whose
+/// items all missed is omitted. When anything was left out, `omitted_items`
+/// says how many.
+fn apply_token_budget(v: &Value, budget_tokens: usize) -> Value {
+    let Some(obj) = v.as_object() else {
+        return v.clone();
+    };
+    let json_len = |v: &Value| serde_json::to_string(v).map_or(0, |s| s.len());
+    // Room for the `omitted_items` counter itself.
+    let limit = budget_tokens
+        .saturating_mul(4)
+        .saturating_sub(r#","omitted_items":18446744073709551615"#.len());
+    let mut used = 2; // `{}`
+    let mut result = serde_json::Map::new();
+    let mut omitted = 0usize;
+    for key in boot_fill_keys(obj) {
+        // `"key":` plus the comma before it.
+        let key_cost = key.len() + 4;
+        match &obj[key] {
+            Value::Array(items) => {
+                let mut kept = Vec::new();
+                let mut cost = key_cost + 2; // `[]`
+                for item in items {
+                    let c = json_len(item) + 1;
+                    if used + cost + c <= limit {
+                        cost += c;
+                        kept.push(item.clone());
+                        continue;
                     }
-                    used += entry.len() + k.len() + 4;
-                    result.insert(k.clone(), val.clone());
+                    let text = item.get("text").and_then(Value::as_str);
+                    let avail = limit.saturating_sub(used + cost + 1);
+                    let trimmed = text.map(|text| {
+                        axil_core::boot::take_fitting_lines(text, |prefix| {
+                            let mut b = item.clone();
+                            b["text"] = json!(prefix);
+                            json_len(&b) <= avail
+                        })
+                    });
+                    match trimmed {
+                        Some((prefix, cut)) if !prefix.is_empty() => {
+                            let mut b = item.clone();
+                            b["text"] = json!(prefix);
+                            cost += json_len(&b) + 1;
+                            kept.push(b);
+                            omitted += cut;
+                        }
+                        _ => omitted += 1,
+                    }
                 }
-                return Value::Object(result);
+                // An array that was empty to begin with is kept (`[]` says
+                // "looked, found nothing"); one whose items all missed is not.
+                if !kept.is_empty() || (items.is_empty() && used + cost <= limit) {
+                    used += cost;
+                    result.insert(key.clone(), Value::Array(kept));
+                }
+            }
+            other => {
+                let c = key_cost + json_len(other);
+                if used + c <= limit {
+                    used += c;
+                    result.insert(key.clone(), other.clone());
+                } else {
+                    omitted += 1;
+                }
             }
         }
     }
-    v.clone()
+    if omitted > 0 {
+        result.insert("omitted_items".into(), json!(omitted));
+    }
+    Value::Object(result)
 }
 
 // ─── Boot context helpers ──────────────────────────────────────────
@@ -19617,120 +19703,157 @@ fn cut_narrative_to_budget(narrative: String, max_tokens: usize) -> String {
     format!("{}...", &narrative[..cut])
 }
 
-/// Convert boot JSON to a human-readable narrative format.
-fn boot_to_narrative(data: &Value) -> String {
-    let mut out = String::new();
-    out.push_str("=== Axil Boot Context ===\n");
-    out.push_str("INSTRUCTION: This database is your memory. Use `axil recall \"<topic>\"` for project questions. Do NOT read files or grep for status — query the DB first.\n\n");
+/// The fixed opening of a narrative boot; never cut by the budget.
+const BOOT_NARRATIVE_HEADER: &str = "=== Axil Boot Context ===\nINSTRUCTION: This database is your memory. Use `axil recall \"<topic>\"` for project questions. Do NOT read files or grep for status — query the DB first.\nRows read `id · age · status · summary`; `axil get <id>` expands one.\n\n";
 
-    // Extension blocks render before rules/sessions/decisions. Each
-    // block is a self-contained markdown fragment (Extensions own
-    // their own headers); emit in registration order, blank-line separated.
-    if let Some(blocks) = data.get("extension_blocks").and_then(|v| v.as_array()) {
-        for entry in blocks {
-            let text = entry.get("text").and_then(|v| v.as_str()).unwrap_or("");
-            let trimmed = text.trim_end();
-            if !trimmed.is_empty() {
-                out.push_str(trimmed);
-                out.push_str("\n\n");
-            }
-        }
-    }
+/// One narrative section: a heading line and its item lines.
+struct NarrativeSection {
+    header: String,
+    lines: Vec<String>,
+    /// An extension block is prose: keep a prefix of its lines, never a
+    /// selection with holes in it. Row lists skip a row that does not fit
+    /// and try the next.
+    prefix_only: bool,
+}
 
-    // Cross-agent delta from the semantic event log (present only when the
-    // `event-log` feature is enabled and the log is on; absent otherwise, so
-    // this renders nothing by default).
-    if let Some(changes) = data.get("recent_changes").and_then(|v| v.as_array()) {
-        if !changes.is_empty() {
-            out.push_str("## Recent Changes (since last session)\n");
-            for c in changes {
-                let kind = c.get("kind").and_then(|v| v.as_str()).unwrap_or("?");
-                let table = c.get("table").and_then(|v| v.as_str()).unwrap_or("");
-                let rec = c.get("record_id").and_then(|v| v.as_str()).unwrap_or("");
-                match c.get("agent_id").and_then(|v| v.as_str()) {
-                    Some(agent) => {
-                        out.push_str(&format!("- {kind} [{table}] {rec} (by {agent})\n"))
+/// The narrative sections of a boot payload, in [`BOOT_FILL_ORDER`].
+fn narrative_sections(data: &Value) -> Vec<NarrativeSection> {
+    let rows = |key: &str, header: &str| -> Option<NarrativeSection> {
+        let lines: Vec<String> = data
+            .get(key)?
+            .as_array()?
+            .iter()
+            .filter_map(Value::as_str)
+            .map(|row| format!("- {row}"))
+            .collect();
+        (!lines.is_empty()).then(|| NarrativeSection {
+            header: header.to_string(),
+            lines,
+            prefix_only: false,
+        })
+    };
+    let mut out = Vec::new();
+    for key in BOOT_FILL_ORDER {
+        match *key {
+            "extension_blocks" => {
+                // Each block is a self-contained markdown fragment whose
+                // first line is its own heading, in registration order.
+                for entry in data
+                    .get(key)
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                {
+                    let text = entry.get("text").and_then(Value::as_str).unwrap_or("");
+                    let mut lines = text.trim_end().lines().map(String::from);
+                    if let Some(header) = lines.next().filter(|h| !h.trim().is_empty()) {
+                        out.push(NarrativeSection {
+                            header,
+                            lines: lines.collect(),
+                            prefix_only: true,
+                        });
                     }
-                    None => out.push_str(&format!("- {kind} [{table}] {rec}\n")),
                 }
             }
+            "rules" => out.extend(rows(key, "## Rules (pinned — always apply)")),
+            "errors" => out.extend(rows(key, "## Open Errors")),
+            "decisions" => out.extend(rows(key, "## Decisions")),
+            "topic_recall" => out.extend(rows(key, "## Related Context")),
+            "context_push" => out.extend(rows(key, "## Pushed Context")),
+            // Cross-agent delta from the semantic event log (present only
+            // when the `event-log` feature is enabled and the log is on).
+            "recent_changes" => {
+                let lines: Vec<String> = data
+                    .get(key)
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .map(|c| {
+                        let kind = c.get("kind").and_then(|v| v.as_str()).unwrap_or("?");
+                        let table = c.get("table").and_then(|v| v.as_str()).unwrap_or("");
+                        let rec = c.get("record_id").and_then(|v| v.as_str()).unwrap_or("");
+                        match c.get("agent_id").and_then(|v| v.as_str()) {
+                            Some(agent) => format!("- {kind} [{table}] {rec} (by {agent})"),
+                            None => format!("- {kind} [{table}] {rec}"),
+                        }
+                    })
+                    .collect();
+                if !lines.is_empty() {
+                    out.push(NarrativeSection {
+                        header: "## Recent Changes (since last session)".into(),
+                        lines,
+                        prefix_only: false,
+                    });
+                }
+            }
+            "recent_sessions" => out.extend(rows(key, "## Recent Sessions")),
+            "lessons" => out.extend(rows(key, "## Lessons (resolved errors)")),
+            "architecture" => out.extend(rows(key, "## Architecture Notes")),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// The note that ends a narrative boot when the budget left rows out.
+fn boot_omitted_note(omitted: usize, budget_tokens: usize) -> String {
+    format!(
+        "({omitted} more left out to fit the ~{budget_tokens}-token boot budget, estimated as bytes/4; raise --budget to see them.)\n"
+    )
+}
+
+/// Render boot JSON as plain-text narrative within `budget_tokens`
+/// (estimated as `ceil(bytes / 4)`). The header and `warnings` always
+/// appear; sections then fill in [`BOOT_FILL_ORDER`], line by line, and a
+/// closing note counts whatever did not fit.
+fn boot_to_narrative(data: &Value, warnings: &[String], budget_tokens: usize) -> String {
+    let mut out = String::from(BOOT_NARRATIVE_HEADER);
+    for w in warnings {
+        out.push_str(&format!("WARNING: {w}\n"));
+    }
+    if !warnings.is_empty() {
+        out.push('\n');
+    }
+
+    let limit = budget_tokens
+        .saturating_mul(4)
+        .saturating_sub(boot_omitted_note(usize::MAX, budget_tokens).len());
+    let mut omitted = 0usize;
+    for section in narrative_sections(data) {
+        // Heading line plus the blank line that closes the section.
+        let base = section.header.len() + 2;
+        if section.lines.is_empty() {
+            if out.len() + base <= limit {
+                out.push_str(&section.header);
+                out.push_str("\n\n");
+            } else {
+                omitted += 1;
+            }
+            continue;
+        }
+        let mut body = String::new();
+        for (i, line) in section.lines.iter().enumerate() {
+            let line_cost = line.len() + 1; // the line and its newline
+            if out.len() + base + body.len() + line_cost <= limit {
+                body.push_str(line);
+                body.push('\n');
+            } else if section.prefix_only {
+                omitted += section.lines.len() - i;
+                break;
+            } else {
+                omitted += 1;
+            }
+        }
+        if !body.is_empty() {
+            out.push_str(&section.header);
+            out.push('\n');
+            out.push_str(&body);
             out.push('\n');
         }
     }
-
-    if let Some(rules) = data.get("rules").and_then(|v| v.as_array()) {
-        if !rules.is_empty() {
-            out.push_str("## Rules (pinned — always apply)\n");
-            for r in rules {
-                let rule = r.get("rule").and_then(|v| v.as_str()).unwrap_or("?");
-                out.push_str(&format!("- {}\n", rule));
-            }
-            out.push('\n');
-        }
+    if omitted > 0 {
+        out.push_str(&boot_omitted_note(omitted, budget_tokens));
     }
-
-    if let Some(sessions) = data.get("recent_sessions").and_then(|v| v.as_array()) {
-        out.push_str("## Recent Sessions\n");
-        for s in sessions {
-            let summary = s.get("summary").and_then(|v| v.as_str()).unwrap_or("?");
-            let age = match s.get("age_days").and_then(|v| v.as_i64()) {
-                Some(0) => "today".to_string(),
-                Some(1) => "1 day ago".to_string(),
-                Some(d) => format!("{d} days ago"),
-                None => "?".to_string(),
-            };
-            let stale = if s.get("stale").and_then(|v| v.as_bool()) == Some(true) {
-                ", stale"
-            } else {
-                ""
-            };
-            out.push_str(&format!("- {summary} ({age}{stale})\n"));
-        }
-        out.push('\n');
-    }
-
-    if let Some(decisions) = data.get("decisions").and_then(|v| v.as_array()) {
-        out.push_str("## Decisions\n");
-        for d in decisions {
-            let summary = d.get("summary").and_then(|v| v.as_str()).unwrap_or("?");
-            out.push_str(&format!("- {}\n", summary));
-        }
-        out.push('\n');
-    }
-
-    if let Some(errors) = data.get("errors").and_then(|v| v.as_array()) {
-        out.push_str("## Known Issues\n");
-        for e in errors {
-            let error = e.get("error").and_then(|v| v.as_str()).unwrap_or("?");
-            let fix = e.get("fix").and_then(|v| v.as_str()).unwrap_or("");
-            if fix.is_empty() {
-                out.push_str(&format!("- {}\n", error));
-            } else {
-                out.push_str(&format!("- {}: {}\n", error, fix));
-            }
-        }
-        out.push('\n');
-    }
-
-    if let Some(arch) = data.get("architecture").and_then(|v| v.as_array()) {
-        out.push_str("## Architecture Notes\n");
-        for a in arch {
-            let summary = a.get("summary").and_then(|v| v.as_str()).unwrap_or("?");
-            out.push_str(&format!("- {}\n", summary));
-        }
-        out.push('\n');
-    }
-
-    if let Some(topic) = data.get("topic_recall").and_then(|v| v.as_array()) {
-        out.push_str("## Related Context\n");
-        for t in topic {
-            let summary = t.get("summary").and_then(|v| v.as_str()).unwrap_or("?");
-            let score = t.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
-            out.push_str(&format!("- [{:.2}] {}\n", score, summary));
-        }
-        out.push('\n');
-    }
-
     out
 }
 
@@ -20471,6 +20594,135 @@ mod boot_narrative_budget {
             assert!(s.starts_with(body));
             assert!(body.len() <= tokens * 4);
         }
+    }
+}
+
+#[cfg(test)]
+mod boot_budget_fill {
+    use super::{apply_token_budget, boot_error_row, boot_to_narrative};
+    use serde_json::{json, Value};
+
+    fn row(id: usize, status: &str, text: &str) -> Value {
+        json!(format!("ID{id:024} · 2d · {status} · {text}"))
+    }
+
+    /// A payload whose every section is far bigger than a small budget.
+    fn big_boot() -> Value {
+        let long = "words that cost tokens — with non-ASCII → text ".repeat(3);
+        let rows = |status: &str, n: usize| -> Vec<Value> {
+            (0..n)
+                .map(|i| row(i, status, &format!("{status} {i} {long}")))
+                .collect()
+        };
+        let mut resume = String::from("## Resume Here\n");
+        for i in 0..40 {
+            resume.push_str(&format!("- step {i} of the resume block\n"));
+        }
+        json!({
+            "extension_blocks": [{"id": "checkpoint", "text": resume}],
+            "rules": rows("pinned", 2),
+            "errors": rows("open", 5),
+            "decisions": rows("active", 5),
+            "recent_sessions": rows("recent", 3),
+            "lessons": rows("resolved", 3),
+            "architecture": rows("architecture", 2),
+        })
+    }
+
+    #[test]
+    fn narrative_fills_in_priority_order_within_budget() {
+        let data = big_boot();
+        let out = boot_to_narrative(&data, &[], 1000);
+        assert!(out.len() <= 4000, "{} bytes", out.len());
+        let pos = |needle: &str| out.find(needle);
+        let resume = pos("## Resume Here").expect("resume block first");
+        let rules = pos("## Rules").expect("rules kept");
+        assert!(resume < rules);
+        if let Some(errors) = pos("## Open Errors") {
+            assert!(rules < errors);
+            if let Some(decisions) = pos("## Decisions") {
+                assert!(errors < decisions);
+            }
+        }
+        assert!(
+            !out.contains("## Lessons"),
+            "low priority is cut first:\n{out}"
+        );
+        assert!(out.contains("more left out to fit the ~1000-token boot budget"));
+        // Every row keeps its `id · age · status · summary` shape.
+        for line in out.lines().filter(|l| l.starts_with("- ID")) {
+            assert_eq!(line.splitn(4, " · ").count(), 4, "{line}");
+        }
+    }
+
+    #[test]
+    fn narrative_resume_block_is_cut_to_a_prefix() {
+        let data = big_boot();
+        let out = boot_to_narrative(&data, &["vector engine unavailable".into()], 150);
+        assert!(out.len() <= 600, "{} bytes:\n{out}", out.len());
+        assert!(out.contains("WARNING: vector engine unavailable"));
+        assert!(out.contains("## Resume Here\n- step 0 "));
+        assert!(!out.contains("step 39"));
+    }
+
+    #[test]
+    fn narrative_without_a_cut_has_no_omitted_note() {
+        let data = json!({"decisions": [row(1, "active", "small")]});
+        let out = boot_to_narrative(&data, &[], 1000);
+        assert!(out.contains("## Decisions\n- ID"));
+        assert!(!out.contains("left out"));
+    }
+
+    #[test]
+    fn json_budget_trims_array_items_not_whole_keys() {
+        let data = big_boot();
+        let out = apply_token_budget(&data, 600);
+        let text = serde_json::to_string(&out).unwrap();
+        assert!(text.len() <= 2400, "{} bytes", text.len());
+        assert!(out["omitted_items"].as_u64().unwrap() > 0);
+        // The resume block and the rules fill first; later sections keep
+        // whatever rows still fit rather than vanishing as whole keys.
+        assert!(out["extension_blocks"][0]["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("## Resume Here"));
+        assert_eq!(out["rules"].as_array().unwrap().len(), 2);
+        let errors = out["errors"].as_array().map_or(0, Vec::len);
+        assert!(errors > 0 && errors < 5, "errors trimmed to {errors}");
+        assert!(out.get("lessons").is_none());
+    }
+
+    #[test]
+    fn json_budget_cuts_an_oversized_block_to_leading_lines() {
+        let data = big_boot();
+        let out = apply_token_budget(&data, 100);
+        let text = out["extension_blocks"][0]["text"].as_str().unwrap();
+        assert!(text.starts_with("## Resume Here\n- step 0 "), "{text}");
+        assert!(!text.contains("step 39"));
+        assert!(serde_json::to_string(&out).unwrap().len() <= 400);
+    }
+
+    #[test]
+    fn json_within_budget_is_unchanged() {
+        let data = json!({"decisions": [row(1, "active", "small")], "topic_recall": []});
+        assert_eq!(apply_token_budget(&data, 1000), data);
+    }
+
+    #[test]
+    fn error_rows_carry_the_fix() {
+        let now = chrono::Utc::now();
+        let mut record = axil_core::Record::new(
+            "errors",
+            json!({"error": "boot panicked", "fix": "cut on a char boundary", "resolved": true}),
+        );
+        record.created_at = now - chrono::Duration::days(2);
+        assert_eq!(
+            boot_error_row(&record, now),
+            format!(
+                "{} · 2d · resolved · boot panicked → cut on a char boundary",
+                record.id
+            )
+        );
     }
 }
 
