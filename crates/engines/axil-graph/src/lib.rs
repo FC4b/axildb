@@ -1041,6 +1041,13 @@ impl GraphEngine {
     /// one reads the tables, where answering from memory would have every
     /// read-only process decode every edge until some write came along.
     ///
+    /// That makes this the one read that can write, including in the brain
+    /// hook's lookups, which otherwise keep their reads from writing because
+    /// the harness kills a hook at its timeout (see `axil_cmd` in the CLI's
+    /// hook_brain.rs). A killed sync is harmless: each chunk commits
+    /// atomically, the first of several removes the stamp so nothing trusts
+    /// partly updated tables, and the next open finishes the work.
+    ///
     /// The cost depends on what changed since the tables were stamped:
     ///
     /// - nothing: three lookups;
