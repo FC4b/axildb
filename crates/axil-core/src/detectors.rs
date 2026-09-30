@@ -1,4 +1,5 @@
-//! Deferred detectors — embedding drift, stale sessions, slow queries, storage growth.
+//! Deferred detectors — embedding drift, stale sessions, slow queries, storage
+//! growth, and a full check of the `_entities` key index.
 //!
 //! Each detector runs a lightweight check and returns a `DetectorResult`.
 //! Designed to be called from the worker or maintenance thread.
@@ -30,7 +31,48 @@ pub fn run_all_detectors(db: &Axil) -> Vec<DetectorResult> {
     if let Some(r) = detect_embedding_drift(db) {
         results.push(r);
     }
+    if let Some(r) = detect_entity_key_index_drift(db) {
+        results.push(r);
+    }
     results
+}
+
+/// Check the `_entities` key index against every row it covers.
+///
+/// Doctor reads only the index's marker, which shows rows an older binary
+/// added or deleted but not a row whose `canonical_id` or `name` it rewrote
+/// in place; this decodes every `_entities` row to catch that too, and names
+/// the row a failed build stopped on. `None` on a handle that does not use
+/// the index (an encryption cipher).
+pub fn detect_entity_key_index_drift(db: &Axil) -> Option<DetectorResult> {
+    if !db.storage().entity_key_index_enabled() {
+        return None;
+    }
+    let problem = db
+        .entity_key_index_drift()
+        .map(|reason| format!("{reason}; repair it with `axil heal --reindex`"))
+        .or_else(|| {
+            db.entity_key_index_failure().map(|row| {
+                format!(
+                    "the _entities key index could not be built: row {row} does not decode, \
+                     so auto-linking scans every _entities row on each insert"
+                )
+            })
+        });
+    Some(match problem {
+        Some(detail) => DetectorResult {
+            name: "entity_key_index".into(),
+            triggered: true,
+            detail,
+            severity: "warning".into(),
+        },
+        None => DetectorResult {
+            name: "entity_key_index".into(),
+            triggered: false,
+            detail: "in step with the _entities rows, or not built yet".into(),
+            severity: "info".into(),
+        },
+    })
 }
 
 /// Detect sessions that have been active for too long (likely abandoned).
@@ -282,6 +324,34 @@ mod tests {
         let (_dir, db) = temp_db();
         let result = detect_slow_query_patterns(&db);
         assert!(!result.triggered);
+    }
+
+    /// An in-place key rewrite by an older binary leaves the marker looking
+    /// current, so only this full check reports it.
+    #[test]
+    fn entity_key_index_detector_sees_an_in_place_rewrite() {
+        let (_dir, db) = temp_db();
+        let id = db
+            .storage()
+            .insert(&crate::Record::new(
+                "_entities",
+                serde_json::json!({"canonical_id": "kafka"}),
+            ))
+            .unwrap();
+        db.storage().ensure_entity_key_index().unwrap();
+        let clean = detect_entity_key_index_drift(&db).unwrap();
+        assert!(!clean.triggered, "{}", clean.detail);
+
+        db.storage()
+            .older_writer_update(&id, serde_json::json!({"canonical_id": "rabbitmq"}));
+        assert!(db.storage().entity_key_index_ready().unwrap());
+        let drift = detect_entity_key_index_drift(&db).unwrap();
+        assert!(drift.triggered);
+        assert!(
+            drift.detail.contains("axil heal --reindex"),
+            "{}",
+            drift.detail
+        );
     }
 
     #[test]

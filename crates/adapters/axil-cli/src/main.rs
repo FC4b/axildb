@@ -10632,7 +10632,8 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                                 "vector_deletion_ratio"
                                 | "missing_embeddings"
                                 | "missing_fts"
-                                | "vector_load_skips" => reindex,
+                                | "vector_load_skips"
+                                | "entity_key_index_drift" => reindex,
                                 "orphaned_edges" | "orphaned_vectors" => orphans,
                                 _ => compact || orphans,
                             };
@@ -10705,6 +10706,34 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                                     reembedded, refts
                                 ),
                             }));
+                        }
+
+                        // The `_entities` key index: built when absent,
+                        // repaired when stale or when an older binary rewrote
+                        // a row's key in place (which only a check of every
+                        // row sees). An index already in step costs that
+                        // check and no write, so nothing is reported.
+                        match db.repair_entity_key_index() {
+                            Ok(Some(r)) if r.written => actions.push(json!({
+                                "action": "entity_key_index_rebuild",
+                                "result": format!(
+                                    "re-indexed {} of {} _entities rows",
+                                    r.changed, r.rows
+                                ),
+                            })),
+                            Ok(_) => {}
+                            Err(e) => {
+                                let row = match db.storage().entity_key_index_status() {
+                                    Ok(axil_core::EntityKeyIndexStatus::Failed { row }) => {
+                                        format!(" on row {row}, which does not decode")
+                                    }
+                                    _ => String::new(),
+                                };
+                                actions.push(json!({
+                                    "action": "entity_key_index_rebuild",
+                                    "result": format!("rebuild failed{row}: {e}"),
+                                }))
+                            }
                         }
                     }
                 }

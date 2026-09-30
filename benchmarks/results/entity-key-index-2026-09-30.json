@@ -1,0 +1,44 @@
+{
+  "change": "_entities key index: repairs write only the entries that differ, and the list fingerprint is length + CRC-32 instead of SHA-256",
+  "date": "2026-09-30",
+  "method": "scripts/entity-key-index-measure.sh <snapshot> <old> <new> 5",
+  "snapshot": "benchmarks/dogfood-recall/data/snap-prefix (30,516 _entities rows; core file 89,395,200 bytes)",
+  "machine": "Apple silicon Mac (M-series), release builds, APFS; heavily loaded by other jobs, so no wall times are reported",
+  "binaries": {
+    "old": "axil 2.3.1 at dev 65d45ff (predates the index)",
+    "full_rebuild": "the index with every repair deleting and refilling both tables (unmerged 1f30495)",
+    "new": "this change: repairs write only the entries that differ"
+  },
+  "core_file_bytes": {
+    "note": "apparent = file length; allocated = du -k blocks x 1024. Each round is an old-binary store that adds an _entities row behind the index, then a new-binary store that finds the index stale and repairs it.",
+    "old_only": {
+      "snapshot": {"apparent": 89395200, "allocated": 89395200},
+      "after_11_stores": {"apparent": 89395200, "allocated": 89395200}
+    },
+    "new": {
+      "after_a_lookup": {"apparent": 89395200, "allocated": 89395200},
+      "after_first_store_builds": {"apparent": 178376704, "allocated": 92409856},
+      "after_round_1": {"apparent": 178339840, "allocated": 92372992},
+      "after_round_2": {"apparent": 178339840, "allocated": 92372992},
+      "after_round_3": {"apparent": 178339840, "allocated": 92372992},
+      "after_round_4": {"apparent": 178339840, "allocated": 92372992},
+      "after_round_5": {"apparent": 178339840, "allocated": 92372992}
+    },
+    "full_rebuild": {
+      "after_first_store_builds": {"apparent": 178376704, "allocated": 92409856},
+      "after_round_1": {"apparent": 178315264, "allocated": 102129664},
+      "after_round_2": {"apparent": 178286592, "allocated": 102789120},
+      "after_round_3": {"apparent": 178278400, "allocated": 102797312},
+      "after_round_4": {"apparent": 178270208, "allocated": 102789120},
+      "after_round_5": {"apparent": 177647616, "allocated": 102166528}
+    },
+    "why_the_length_doubles": "redb 3.1.3 grows a file under one 4 GiB region to max(2 x usable, usable + 2 x needed) when a transaction needs more pages than are free; the build allocated 3,014,656 bytes of new pages (the allocated growth above), more than the snapshot had free. The added length is sparse on APFS, so only the pages written are allocated.",
+    "duplicate_entities": "most rows sharing one probe entity key: 1 in both the old-only and the new copy"
+  },
+  "fingerprint_instructions_per_lookup": {
+    "note": "instructions retired (/usr/bin/time -l) for 1000 fingerprints of the raw table_index[\"_entities\"] value (885,197 bytes on the old-only copy), minus a 0-iteration run, divided by 1000. Every lookup computes one; a maintained write to _entities computes two.",
+    "crc32_with_length": 213374,
+    "sha256": 26524043,
+    "json_parse_of_the_same_list_for_scale": 24951284
+  }
+}

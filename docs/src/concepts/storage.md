@@ -21,6 +21,45 @@ sessions, entities, etc. Tier-2 Extensions own prefixed tables in the
 core `.axil` file (e.g. `_checkpoint_records`, `_dep_docs`,
 `_idx_code_proxies`).
 
+### The `_entities` key index
+
+Auto-linking resolves each entity it extracts from a new memory against the
+`_entities` table. Rather than decode every entity row on each insert, it
+looks the keys up in an index kept in the core file (the `_entity_key_index`
+and `_entity_key_members` tables, plus a marker in `_storage_markers`). Every
+write that changes an `_entities` row updates the index in the same
+transaction.
+
+- **Built on first use.** Opening a database never builds it. The first
+  insert that auto-links builds it, reading the rows the scan it replaces
+  would have read anyway. Lookups (`recall`, `fts`, the hooks' reads) never
+  write it. `axil doctor` shows its state.
+- **One-time growth of the file's length.** redb grows a file under 4 GiB by
+  doubling it when a transaction needs more pages than are free. On a copy of
+  the dogfood snapshot (`benchmarks/dogfood-recall/data/snap-prefix`, 30,516
+  `_entities` rows) the build took the core file's length from 89.4 MB to
+  178.4 MB, while the space allocated for it on APFS grew by 3.0 MB (to
+  92.4 MB), since the added length is a sparse hole. A filesystem without
+  sparse files, or a backup tool that does not keep them sparse, can store the
+  full length. Five later repairs after an older binary's writes did not grow
+  it further, because a repair writes only the entries that differ
+  (`benchmarks/results/entity-key-index-2026-09-30.json`,
+  `scripts/entity-key-index-measure.sh`).
+- **Older binaries on the same file.** An `axil` built before the index (for
+  example the one on PATH that the hooks run, while an agent runs a newer
+  build) writes `_entities` without updating it. The marker holds a
+  fingerprint of the `_entities` id list, so once an older binary adds or
+  deletes an entity row the index is treated as stale: lookups scan, and the
+  next insert that auto-links repairs it. Each row a lookup returns is also
+  read back, so a row an older binary rewrote is not trusted either. One
+  change stays invisible to lookups: an older binary rewriting some *other*
+  row's `canonical_id` or `name` in place to a key being looked up. Until the
+  index is repaired, that row can be missed and a duplicate entity created.
+  `axil detect` finds it and `axil heal --reindex` repairs it.
+- **Encryption.** A handle opened with an encryption key neither uses nor
+  maintains the index, since it would hold entity names in cleartext, and its
+  first write deletes it (see [Encryption at Rest](../advanced/encryption-at-rest.md)).
+
 ## Companion files
 
 Tier-1 Engines store their data in companion files alongside

@@ -17,6 +17,13 @@ that each record stores. It deliberately does **not** encrypt:
 - **Table names and record IDs.** These remain visible in the core file's key
   space and table index.
 
+A cleartext store also keeps an index of entity names and canonical ids
+(`_entity_key_index`, see [Storage Model](../concepts/storage.md#the-_entities-key-index)).
+An encrypted handle neither uses nor maintains it, and its first write deletes
+it. redb does not zero freed pages, so, as with any bodies written in cleartext
+before encryption was turned on, those bytes can stay in the file until the
+pages are reused.
+
 It **does** encrypt the CDC `_changelog` tape when value-capture is on (the
 `cdc` feature *and* `set_cdc_capture_values(true)`): each change entry — metadata
 plus the captured before/after record bodies — is sealed under its `change_id`,

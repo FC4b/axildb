@@ -23,8 +23,9 @@ axil doctor
 
 Checks: companion-file presence/consistency, vector dimension mismatch, memory
 records missing an embedding (an error once more than 10% of them are), SCIP
-freshness, indexer staleness, orphaned edges/vectors/FTS, recent
-error/healing history. Exit code: 0 all ok, 1 warnings, 2 errors.
+freshness, indexer staleness, orphaned edges/vectors/FTS, the state of the
+`_entities` key index, recent error/healing history. Exit code: 0 all ok,
+1 warnings, 2 errors.
 
 #### A damaged vector store
 
@@ -56,6 +57,30 @@ instead of restoring nothing silently. A store sized for a different model
 than the configured one fails to open; `heal` then stops and names
 `axil reembed --model <model> --field <field>` or the `init` + `heal --reindex`
 route above.
+
+#### The `_entities` key index
+
+Auto-linking resolves the entities it extracts through an index in the core
+file rather than decoding every `_entities` row on each insert (see
+[Storage Model](../concepts/storage.md#the-_entities-key-index)). `doctor`
+reports its state from a marker, without reading the rows:
+
+- **ok, not built yet**: the first insert that auto-links builds it.
+- **warning, stale**: an axil binary that predates the index added or deleted
+  `_entities` rows. Auto-linking scans until the next insert that auto-links
+  repairs the index; `axil heal --reindex` repairs it too.
+- **warning, build failed on row `<id>`**: that row's body does not decode
+  (corrupt, or sealed under an encryption key the process lacks), so
+  auto-linking scans every row, as it did before the index. The build is
+  retried once `_entities` changes.
+
+`axil detect` (its `entity_key_index` detector) decodes every row, which also
+catches an older binary rewriting a row's `canonical_id` or `name` in place,
+something the marker cannot show. `health-report` and `heal --dry-run` list
+the same findings as `entity_key_index_drift` (repairable) and
+`entity_key_index_build_failed` (not). `heal --reindex` and the end-of-session
+heal write only the index entries that differ, and nothing when the index is
+in step.
 
 ### health-report
 
