@@ -2121,6 +2121,10 @@ pub(crate) fn drain(db: &Path) -> Result<i32> {
 /// On a filesystem that refuses OS locks (some network, FUSE or container
 /// mounts) it falls back to the protocol older axils use: the file is
 /// created exclusively, carries a bare pid, and is judged stale by its age.
+/// A file tagged by an OS-lock holder is never judged by age, since a failed
+/// lock call cannot tell whether that holder still runs: if OS locks stop
+/// working after such a holder was killed, the file stays until removed by
+/// hand, and `drain.log` says why each drainer left it.
 ///
 /// On Unix a spawned child gets a copy of every open handle until it execs,
 /// and the OS lock goes only with the last copy. In a process that spawns
@@ -2173,6 +2177,20 @@ impl DrainLock {
                 Ok(()) => {}
                 Err(std::fs::TryLockError::WouldBlock) => return None,
                 Err(std::fs::TryLockError::Error(e)) => {
+                    // Only a drainer that held the OS lock writes the tag, and
+                    // it refreshes the file only between jobs. This call's lock
+                    // attempt failing says nothing about that holder, so the
+                    // age rule could take the queue from it mid-job.
+                    if !created && read_lock_body(&file).starts_with(DRAIN_LOCK_TAG) {
+                        drain_log(
+                            dir,
+                            &format!(
+                                "OS file lock on drain.lock failed ({e}) and the file \
+                                 names an OS-lock holder; leaving the queue to it"
+                            ),
+                        );
+                        return None;
+                    }
                     drop(file);
                     if created {
                         let lock = Self { path, file: None };
@@ -2307,14 +2325,22 @@ fn remove_if_own_pid(path: &Path) {
 /// free. (For an instant it can also be an older axil's before its first
 /// write; both drainers then run, which the per-job rename claim tolerates.)
 fn legacy_holder_live(file: &std::fs::File) -> bool {
-    use std::io::Read as _;
-    let mut body = String::new();
-    let _ = (&*file).read_to_string(&mut body);
-    let body = body.trim();
+    let body = read_lock_body(file);
     if body.is_empty() || body.starts_with(DRAIN_LOCK_TAG) {
         return false;
     }
     lock_age_fresh(file.metadata())
+}
+
+/// The trimmed content of a freshly opened `drain.lock`, or "" when it
+/// cannot be read (on Windows, while another handle holds the OS lock).
+fn read_lock_body(file: &std::fs::File) -> String {
+    use std::io::Read as _;
+    let mut body = String::new();
+    if (&*file).read_to_string(&mut body).is_err() {
+        return String::new();
+    }
+    body.trim().to_string()
 }
 
 /// Without OS locks, the lock is live while the file is fresh by the mtime
@@ -3990,5 +4016,34 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), pid);
         drop(lock);
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn drain_lock_os_lock_holder_is_not_judged_by_age_when_locking_fails() {
+        let _serial = drain_lock_serial();
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let path = dir.join("drain.lock");
+        let held = DrainLock::acquire(dir).expect("free lock");
+        // One job past the age rule, and then a lock call that errors (a
+        // transient ENOLCK, say) instead of reporting the lock held.
+        age_file(&path, DRAIN_LOCK_STALE_SECS * 4);
+        assert!(
+            DrainLock::acquire_with(dir, refuse_os_lock).is_none(),
+            "a live OS-lock holder keeps the queue"
+        );
+        assert!(path.exists(), "and its lock file");
+        // On Windows the holder's mandatory lock keeps the tag unreadable
+        // and its open handle keeps the file from being removed instead.
+        #[cfg(unix)]
+        {
+            let log = std::fs::read_to_string(dir.join("drain.log")).unwrap();
+            assert!(log.contains("names an OS-lock holder"), "{log}");
+        }
+        drop(held);
+        assert!(!path.exists());
+        let lock = DrainLock::acquire_with(dir, refuse_os_lock)
+            .expect("a free lock is still taken without OS locks");
+        drop(lock);
     }
 }
