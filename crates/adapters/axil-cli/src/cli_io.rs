@@ -510,4 +510,524 @@ mod tests {
         assert!(code.contains("fn c<'a>() { eprintln!(); }"), "{code}");
         assert!(!code.contains("print!\""), "{code}");
     }
+
+    /// One-shot vs in-process parity. Each command runs twice against
+    /// identical copies of one fixture database: once in a child process on
+    /// the real fds with no request installed, the way `axil` runs, and once
+    /// in-process under [`capture`]. Both must print the same bytes and exit
+    /// with the same code.
+    ///
+    /// The child is this test binary re-run with only [`one_shot_child`]
+    /// selected, so it carries exactly the code under test. The fixture has
+    /// no vector store, so no command loads an embedding model.
+    mod parity {
+        use super::*;
+        use crate::{run_cli, Cli};
+        use clap::Parser;
+        use std::path::Path;
+        use std::process::{Command, Stdio};
+
+        const CHILD_ARGS_ENV: &str = "AXIL_CLI_IO_PARITY_ARGS";
+        /// Written on both streams before the command runs, so the child's
+        /// output can be told apart from the test harness's.
+        const MARK: &[u8] = b"\x01axil-cli-io-parity\x01\n";
+
+        /// Run `f` on a thread with `main`'s stack size: in debug builds,
+        /// clap's parser for the whole `Command` enum overflows the default
+        /// test-thread stack.
+        fn on_cli_stack<R: Send + 'static>(f: impl FnOnce() -> R + Send + 'static) -> R {
+            std::thread::Builder::new()
+                .stack_size(32 * 1024 * 1024)
+                .spawn(f)
+                .unwrap()
+                .join()
+                .unwrap()
+        }
+
+        fn argv(args: &[&str]) -> Vec<String> {
+            std::iter::once("axil")
+                .chain(args.iter().copied())
+                .map(str::to_string)
+                .collect()
+        }
+
+        /// Not a test on its own: the one-shot side of the parity test. A
+        /// usage error makes clap print and exit inside `parse_from`, exactly
+        /// as it does in `axil`.
+        #[test]
+        fn one_shot_child() {
+            let Some(args) = std::env::var_os(CHILD_ARGS_ENV) else {
+                return;
+            };
+            let args: Vec<String> = serde_json::from_str(args.to_str().unwrap()).unwrap();
+            for mut stream in [
+                Box::new(io::stdout()) as Box<dyn Write>,
+                Box::new(io::stderr()),
+            ] {
+                stream.write_all(MARK).unwrap();
+                stream.flush().unwrap();
+            }
+            let code = on_cli_stack(move || run_cli(Cli::parse_from(args)));
+            std::process::exit(code);
+        }
+
+        fn one_shot(args: &[&str], stdin: Option<&[u8]>) -> (Vec<u8>, Vec<u8>, i32) {
+            let mut child = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "cli_io::tests::parity::one_shot_child",
+                    "--exact",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env(CHILD_ARGS_ENV, serde_json::to_string(&argv(args)).unwrap())
+                .stdin(if stdin.is_some() {
+                    Stdio::piped()
+                } else {
+                    Stdio::null()
+                })
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            if let Some(bytes) = stdin {
+                let mut pipe = child.stdin.take().unwrap();
+                let bytes = bytes.to_vec();
+                std::thread::spawn(move || pipe.write_all(&bytes).unwrap());
+            }
+            let output = child.wait_with_output().unwrap();
+            let after_mark = |stream: &[u8]| {
+                let at = stream
+                    .windows(MARK.len())
+                    .position(|w| w == MARK)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "child never ran: {}",
+                            String::from_utf8_lossy(&output.stderr)
+                        )
+                    });
+                stream[at + MARK.len()..].to_vec()
+            };
+            (
+                after_mark(&output.stdout),
+                after_mark(&output.stderr),
+                output.status.code().unwrap(),
+            )
+        }
+
+        /// The in-process side. `stdin: None` matches the child's null stdin:
+        /// piped, and empty.
+        fn in_process(args: &[&str], stdin: Option<&[u8]>) -> (Vec<u8>, Vec<u8>, i32) {
+            let args = argv(args);
+            let ctx = ReqCtx {
+                stdin: Some(stdin.unwrap_or_default().to_vec()),
+                ..ReqCtx::default()
+            };
+            on_cli_stack(move || {
+                capture(ctx, || match Cli::try_parse_from(&args) {
+                    Ok(cli) => run_cli(cli),
+                    // What `clap::Error::exit` prints, minus the exit.
+                    Err(e) => {
+                        let text = e.render().to_string();
+                        if e.use_stderr() {
+                            errp!("{text}");
+                        } else {
+                            outp!("{text}");
+                        }
+                        e.exit_code()
+                    }
+                })
+            })
+        }
+
+        fn copy_dir(from: &Path, to: &Path) {
+            std::fs::create_dir_all(to).unwrap();
+            for entry in std::fs::read_dir(from).unwrap() {
+                let entry = entry.unwrap();
+                let dest = to.join(entry.file_name());
+                if entry.file_type().unwrap().is_dir() {
+                    copy_dir(&entry.path(), &dest);
+                } else {
+                    std::fs::copy(entry.path(), dest).unwrap();
+                }
+            }
+        }
+
+        /// Replace what differs between two runs of a writing command: ULIDs
+        /// (renumbered in order of appearance, so a repeated id still
+        /// matches) and ISO-8601 timestamps.
+        fn normalize(bytes: &[u8]) -> String {
+            const CROCKFORD: &[u8] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+            let text = String::from_utf8_lossy(bytes);
+            let b = text.as_bytes();
+            let mut ids: Vec<&[u8]> = Vec::new();
+            let mut out = String::new();
+            let mut i = 0;
+            while i < b.len() {
+                let boundary = i == 0 || !b[i - 1].is_ascii_alphanumeric();
+                let ulid = b.get(i..i + 26).filter(|w| {
+                    w[0] == b'0'
+                        && w.iter().all(|c| CROCKFORD.contains(c))
+                        && b.get(i + 26).is_none_or(|c| !c.is_ascii_alphanumeric())
+                });
+                if let (true, Some(id)) = (boundary, ulid) {
+                    let n = ids.iter().position(|seen| *seen == id).unwrap_or_else(|| {
+                        ids.push(id);
+                        ids.len() - 1
+                    });
+                    out.push_str(&format!("<ID{n}>"));
+                    i += 26;
+                    continue;
+                }
+                let digits = |at: usize, n: usize| {
+                    b.get(at..at + n)
+                        .is_some_and(|w| w.iter().all(u8::is_ascii_digit))
+                };
+                let timestamp = digits(i, 4)
+                    && b.get(i + 4) == Some(&b'-')
+                    && digits(i + 5, 2)
+                    && b.get(i + 10) == Some(&b'T')
+                    && digits(i + 11, 2)
+                    && b.get(i + 13) == Some(&b':');
+                if timestamp {
+                    let mut j = i + 19;
+                    while j < b.len() && (b[j].is_ascii_digit() || b"+-:.Z".contains(&b[j])) {
+                        j += 1;
+                    }
+                    out.push_str("<TS>");
+                    i = j;
+                    continue;
+                }
+                let ch = text[i..].chars().next().unwrap();
+                out.push(ch);
+                i += ch.len_utf8();
+            }
+            out
+        }
+
+        struct Case {
+            name: &'static str,
+            args: Vec<String>,
+            stdin: Option<&'static [u8]>,
+            /// Writes a record or stamps the time, so ids and timestamps
+            /// are compared normalized.
+            volatile: bool,
+        }
+
+        fn case(name: &'static str, args: &[&str]) -> Case {
+            Case {
+                name,
+                args: args.iter().map(|a| a.to_string()).collect(),
+                stdin: None,
+                volatile: false,
+            }
+        }
+
+        impl Case {
+            fn stdin(mut self, bytes: &'static [u8]) -> Self {
+                self.stdin = Some(bytes);
+                self
+            }
+            fn volatile(mut self) -> Self {
+                self.volatile = true;
+                self
+            }
+        }
+
+        /// The fixture project and its database, built through the CLI
+        /// itself. Returns the project directory.
+        fn build_fixture(root: &Path) -> std::path::PathBuf {
+            let proj = root.join("proj");
+            std::fs::create_dir_all(proj.join("src")).unwrap();
+            std::fs::create_dir_all(proj.join(".axil")).unwrap();
+            std::fs::write(
+                proj.join("src/auth.rs"),
+                "/// Validate a login token and refresh the session timeout.\n\
+                 pub fn validate_token(token: &str) -> bool {\n    !token.is_empty()\n}\n",
+            )
+            .unwrap();
+            std::fs::write(
+                proj.join("src/cache.rs"),
+                "/// LRU cache eviction for the query planner.\n\
+                 pub struct PlanCache {\n    cap: usize,\n}\n",
+            )
+            .unwrap();
+            std::fs::write(
+                proj.join("README.md"),
+                "# Fixture\n\n## Cache\nThe plan cache evicts half its entries.\n",
+            )
+            .unwrap();
+            // A project marker, so commands that look for the project root
+            // stop here instead of scanning the database's own directory.
+            std::fs::write(
+                proj.join("Cargo.toml"),
+                "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n",
+            )
+            .unwrap();
+
+            let db = proj.join(".axil/memory.axil");
+            let db_s = db.to_str().unwrap();
+            let run = |args: &[&str]| {
+                let (out, err, code) = in_process(args, None);
+                assert_eq!(
+                    code,
+                    0,
+                    "fixture step {args:?} failed: {}{}",
+                    String::from_utf8_lossy(&out),
+                    String::from_utf8_lossy(&err)
+                );
+            };
+            run(&["init", db_s]);
+            // No vector store: no command may need the embedding model.
+            let _ = std::fs::remove_file(proj.join(".axil/memory.axil.vec"));
+            if cfg!(feature = "indexer") {
+                run(&["--db", db_s, "index", proj.to_str().unwrap(), "--quiet"]);
+            }
+            for (table, data) in [
+                (
+                    "decisions",
+                    r#"{"summary":"Cap login tokens at 512 bytes in validate_token","reason":"oversized tokens were a DoS vector"}"#,
+                ),
+                (
+                    "errors",
+                    r#"{"error":"auth timeout fired during long uploads","root_cause":"no heartbeat refresh","fix":"refresh the session on heartbeat"}"#,
+                ),
+                (
+                    "context",
+                    r#"{"type":"architecture","summary":"auth.rs validates tokens; cache.rs owns the plan cache"}"#,
+                ),
+                (
+                    "rules",
+                    r#"{"rule":"Never log raw auth tokens","summary":"Never log raw auth tokens"}"#,
+                ),
+            ] {
+                run(&["--db", db_s, "store", table, data]);
+            }
+            proj
+        }
+
+        #[test]
+        fn captured_output_matches_one_shot() {
+            let tmp = tempfile::tempdir().unwrap();
+            let fixture = build_fixture(&tmp.path().join("fixture"));
+            let work = tmp.path().join("work");
+            let proj = work.join("proj");
+            let db = proj.join(".axil/memory.axil");
+            let db = db.to_str().unwrap();
+            let auth_rs = proj.join("src/auth.rs");
+            let auth_rs = auth_rs.to_str().unwrap();
+            let cp = r#"{"goal":"parity","state":"fixture built","next_steps":["diff"],"references":[{"kind":"file","ref":"src/auth.rs"}]}"#;
+
+            let mut cases = vec![
+                case("boot json", &["--db", db, "boot"]),
+                case(
+                    "boot narrative",
+                    &["--db", db, "boot", "--boot-format", "narrative"],
+                ),
+                case("boot --files", &["--db", db, "boot", "--files", auth_rs]),
+                case(
+                    "boot --schema v1 (Err)",
+                    &["--db", db, "boot", "--schema", "v1"],
+                ),
+                case("boot --schema v2", &["--db", db, "boot", "--schema", "v2"]).volatile(),
+                case("recall-for-file", &["--db", db, "recall-for-file", auth_rs]),
+                case(
+                    "get missing (exit 2)",
+                    &["--db", db, "get", "01ZZZZZZZZZZZZZZZZZZZZZZZZ"],
+                ),
+                case(
+                    "store bad JSON (Err)",
+                    &["--db", db, "store", "decisions", "{nope"],
+                ),
+                case(
+                    "store inline",
+                    &[
+                        "--db",
+                        db,
+                        "store",
+                        "decisions",
+                        r#"{"summary":"inline parity store"}"#,
+                    ],
+                )
+                .volatile(),
+                case("store stdin", &["--db", db, "store", "context", "-"])
+                    .stdin(br#"{"type":"howto","summary":"stdin parity store"}"#)
+                    .volatile(),
+                case(
+                    "store stdin empty (Err)",
+                    &["--db", db, "store", "context", "-"],
+                ),
+                case("clap usage error", &["store"]),
+                case("clap unknown flag", &["boot", "--bogus"]),
+                case("--help", &["--help"]),
+                case("store --help", &["store", "--help"]),
+                case("--version", &["--version"]),
+            ];
+            if cfg!(feature = "embed") {
+                for format in ["context-block", "oneline", "compact", "full"] {
+                    let mut c = case(
+                        "recall",
+                        &[
+                            "--db",
+                            db,
+                            "recall",
+                            "auth timeout",
+                            "--recall-format",
+                            format,
+                        ],
+                    );
+                    c.name = format;
+                    cases.push(c);
+                }
+                cases.push(case(
+                    "recall context-block, no match",
+                    &[
+                        "--db",
+                        db,
+                        "recall",
+                        "zzqx vmwk",
+                        "--recall-format",
+                        "context-block",
+                    ],
+                ));
+                // Equal scores tie-break in no fixed order (in two one-shot
+                // runs as much as here), so every recall query has distinct
+                // scores on this fixture.
+                cases.push(case(
+                    "recall table",
+                    &["--db", db, "--format", "table", "recall", "auth timeout"],
+                ));
+            }
+            if cfg!(feature = "indexer") {
+                cases.push(case(
+                    "code-search",
+                    &["--db", db, "code-search", "validate token"],
+                ));
+                cases.push(case(
+                    "code-search --json",
+                    &["--db", db, "code-search", "validate token", "--json"],
+                ));
+            }
+            if cfg!(feature = "fts") {
+                cases.push(case(
+                    "fts table",
+                    &["--db", db, "--format", "table", "fts", "cache"],
+                ));
+                cases.push(case("fts json", &["--db", db, "fts", "cache"]));
+                cases.push(case(
+                    "fts --jsonl",
+                    &["--db", db, "fts", "cache", "--jsonl"],
+                ));
+            }
+            if cfg!(feature = "timeseries") {
+                cases.push(case("since 1h", &["--db", db, "since", "1h"]));
+            }
+            if cfg!(feature = "checkpoint") {
+                cases.push(case("checkpoint arg", &["--db", db, "checkpoint", cp]).volatile());
+                cases.push(
+                    case("checkpoint -", &["--db", db, "checkpoint", "-"])
+                        .stdin(cp.as_bytes())
+                        .volatile(),
+                );
+                cases.push(
+                    case("checkpoint stdin", &["--db", db, "checkpoint"])
+                        .stdin(cp.as_bytes())
+                        .volatile(),
+                );
+                cases.push(
+                    case(
+                        "checkpoint --final",
+                        &["--db", db, "checkpoint", cp, "--final"],
+                    )
+                    .volatile(),
+                );
+            }
+
+            let mut failures = Vec::new();
+            let mut results = Vec::new();
+            for c in &cases {
+                let args: Vec<&str> = c.args.iter().map(String::as_str).collect();
+                let run_both = || {
+                    let fresh = || {
+                        let _ = std::fs::remove_dir_all(&work);
+                        copy_dir(&fixture, &proj);
+                    };
+                    fresh();
+                    let captured = in_process(&args, c.stdin);
+                    fresh();
+                    (captured, one_shot(&args, c.stdin))
+                };
+                let same = |captured: &(Vec<u8>, Vec<u8>, i32), real: &(Vec<u8>, Vec<u8>, i32)| {
+                    if c.volatile {
+                        captured.2 == real.2
+                            && normalize(&captured.0) == normalize(&real.0)
+                            && normalize(&captured.1) == normalize(&real.1)
+                    } else {
+                        captured == real
+                    }
+                };
+                let (mut captured, mut real) = run_both();
+                // Two one-shot runs of a command can differ on their own, rarely
+                // (equal scores tie-break in no fixed order; ages and scores read
+                // the clock), so a mismatch is rerun once. A capture bug repeats.
+                if !same(&captured, &real) {
+                    eprintln!("parity: {} differed once; rerunning it", c.name);
+                    (captured, real) = run_both();
+                }
+                if !same(&captured, &real) {
+                    failures.push(format!(
+                        "{}: exit {} vs one-shot {}\n--- captured stdout\n{}\n--- one-shot stdout\n{}\n\
+                         --- captured stderr\n{}\n--- one-shot stderr\n{}",
+                        c.name,
+                        captured.2,
+                        real.2,
+                        String::from_utf8_lossy(&captured.0),
+                        String::from_utf8_lossy(&real.0),
+                        String::from_utf8_lossy(&captured.1),
+                        String::from_utf8_lossy(&real.1),
+                    ));
+                }
+                results.push((c.name, real));
+            }
+            assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+
+            // Equal could still mean equally empty: pin what the one-shot
+            // side printed for the cases that show each path ran.
+            let get = |name: &str| {
+                let (_, r) = results.iter().find(|(n, _)| *n == name).unwrap();
+                (
+                    String::from_utf8_lossy(&r.0),
+                    String::from_utf8_lossy(&r.1),
+                    r.2,
+                )
+            };
+            let (out, err, code) = get("store bad JSON (Err)");
+            assert_eq!(code, 1);
+            assert!(
+                out.is_empty() && err.starts_with(r#"{"error":"invalid JSON"#),
+                "{err}"
+            );
+            let (out, err, code) = get("clap usage error");
+            assert_eq!(code, 2);
+            assert!(out.is_empty() && err.starts_with("error:"), "{err}");
+            let (out, _, code) = get("--help");
+            assert_eq!(code, 0);
+            assert!(out.contains("Usage: axil"), "{out}");
+            let (out, _, _) = get("store stdin");
+            assert!(out.contains(r#""table":"context""#), "{out}");
+            let (out, _, _) = get("boot narrative");
+            assert!(out.contains("Cap login tokens at 512 bytes"), "{out}");
+            if cfg!(feature = "embed") {
+                let (out, _, _) = get("context-block");
+                assert!(
+                    out.starts_with("<context") && out.ends_with("</context>\n"),
+                    "the block ends at its closing tag, with no line after it: {out:?}"
+                );
+                assert!(get("recall context-block, no match").0.is_empty());
+            }
+            if cfg!(feature = "checkpoint") {
+                assert!(get("checkpoint -").0.contains(r#""kind":"snapshot""#));
+                assert!(get("checkpoint --final").0.contains(r#""kind":"final""#));
+            }
+        }
+    }
 }

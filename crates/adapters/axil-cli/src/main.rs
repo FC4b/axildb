@@ -256,6 +256,15 @@ struct Output {
 }
 
 impl Output {
+    /// The output settings a parsed command line asks for.
+    fn for_cli(cli: &Cli) -> Self {
+        Self {
+            format: cli.format.clone(),
+            quiet: cli.quiet,
+            jsonl: cli.jsonl,
+        }
+    }
+
     /// Print a single JSON value to stdout.
     fn print(&self, v: &Value) {
         match self.format {
@@ -6966,22 +6975,29 @@ impl CliAdapter {
     /// entry — `main` calls this directly because the `Adapter::run` signature
     /// (`Result<()>`) cannot carry the exit code.
     fn dispatch(self) -> i32 {
-        let cli = Cli::parse();
-        let out = Output {
-            format: cli.format.clone(),
-            quiet: cli.quiet,
-            jsonl: cli.jsonl,
-        };
+        run_cli(Cli::parse())
+    }
+}
 
-        match run(cli, &out) {
-            Ok(code) => code,
-            Err(e) => {
-                let err_json = json!({"error": format!("{e:#}")});
-                errln!("{}", serde_json::to_string(&err_json).unwrap());
-                EXIT_ERROR
-            }
+/// Run a parsed command line and return its exit code, printing a failure
+/// as [`format_cli_error`]'s line on stderr.
+fn run_cli(cli: Cli) -> i32 {
+    let out = Output::for_cli(&cli);
+
+    match process_setup(&cli).and_then(|()| dispatch_command(cli, &out)) {
+        Ok(code) => code,
+        Err(e) => {
+            errln!("{}", format_cli_error(&e));
+            EXIT_ERROR
         }
     }
+}
+
+/// The line the CLI prints on stderr when a command fails:
+/// `{"error":"<e:#>"}`, the whole context chain on one line.
+fn format_cli_error(e: &anyhow::Error) -> String {
+    let err_json = json!({"error": format!("{e:#}")});
+    serde_json::to_string(&err_json).unwrap()
 }
 
 impl axil_core::Adapter for CliAdapter {
@@ -7012,7 +7028,6 @@ impl axil_core::Adapter for CliAdapter {
     }
 }
 
-/// Run the CLI command. Returns the exit code.
 /// Whether a command serves many searches from one process (the MCP and HTTP
 /// servers, the worker), which amortizes building the vector graph.
 #[cfg(feature = "vector")]
@@ -7027,7 +7042,11 @@ fn is_long_lived(command: &Command) -> bool {
     }
 }
 
-fn run(cli: Cli, out: &Output) -> Result<i32> {
+/// Set the process-wide state a command runs under: the vector exact-scan
+/// ceiling and the encryption cipher. Both outlive the command, which is why
+/// this is separate from [`dispatch_command`].
+#[cfg_attr(not(feature = "vector"), allow(unused_variables))]
+fn process_setup(cli: &Cli) -> Result<()> {
     // A command that searches a few times and exits never earns back building
     // the vector graph, so it scans exactly up to a much larger store.
     #[cfg(feature = "vector")]
@@ -7035,14 +7054,20 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
         axil_vector::hnsw::set_process_exact_scan_max(axil_vector::hnsw::ONE_SHOT_EXACT_SCAN_MAX);
     }
 
-    let db_opt = cli.db;
-
     // Install the process-wide encryption cipher before any command opens a
     // database, so every open — including core-internal multi-DB ops and the
     // in-process MCP server — seals/unseals with the same key. No-op when no key
     // is configured or the `encryption` feature is off.
     #[cfg(feature = "encryption")]
     init_default_cipher()?;
+
+    Ok(())
+}
+
+/// Run the parsed command and return its exit code. An error is left for the
+/// caller to print with [`format_cli_error`].
+fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
+    let db_opt = cli.db;
 
     match cli.command {
         // ── Init ────────────────────────────────────────────────────
