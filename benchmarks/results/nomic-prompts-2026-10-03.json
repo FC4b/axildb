@@ -1,0 +1,285 @@
+{
+  "item": "28.10b nomic query/document prompts, re-measured after the relevance-gated chunk window and fixed candidate pool (76d0824)",
+  "date": "2026-10-03/04",
+  "conclusion": "Keep nomic unprompted. On the dogfood eval the prompts trade 5 questions up for 5 down and drop 2 answers from the prompt hook's block; on LongMemEval they lower NDCG@10 0.947->0.914 (1 better, 5 worse) and recall_all 0.917->0.875. The rescoring window was not the reason they lost.",
+  "method": {
+    "builds": "off = dev c4e2d80 (every model unprompted); on = dev c4e2d80 + revert of 90880bd (nomic search_query:/search_document:, text_prefixes store marker, reembed --table guard)",
+    "search": "exact vector scan (one-shot CLI scans exactly below 100k vectors), so runs repeat",
+    "dogfood": "benchmarks/dogfood-recall/run.py, 57 questions; snapshots snap-nomic-off (embedded without prompts, no marker) and snap-nomic-on (embedded with search_document:, marker set); --fetch 10 and 25",
+    "longmemeval": "LongMemEval-S, strategy recall-qtc, top-k 5, --model nomic, --jobs 1; 24 questions = the first 4 of each question type in the deterministic s60 sample (every k-th question of each type in dataset order); each question run off then on as a pair",
+    "control": "the unchanged dev binary and the revert build give identical per-question results on snap-nomic-off (k10): the revert changes nothing for stores without the marker"
+  },
+  "dogfood": {
+    "k10": {
+      "fetch": 10,
+      "off": {
+        "hit@1": 0.7193,
+        "hit@5": 0.9474,
+        "hit@10": 0.9474,
+        "mrr@10": 0.8143,
+        "recall_all@10": 0.9298,
+        "ndcg@10": 0.8378,
+        "hook_hit": 0.9474,
+        "hook_tokens": 310.7368
+      },
+      "on": {
+        "hit@1": 0.7544,
+        "hit@5": 0.9123,
+        "hit@10": 0.9474,
+        "mrr@10": 0.8246,
+        "recall_all@10": 0.9298,
+        "ndcg@10": 0.8435,
+        "hook_hit": 0.9123,
+        "hook_tokens": 306.8509
+      },
+      "on_vs_off_questions": {
+        "better": 5,
+        "worse": 5
+      },
+      "hook_block": {
+        "gained": 0,
+        "lost": 2
+      },
+      "changed": {
+        "q09": [
+          3,
+          4
+        ],
+        "q10": [
+          1,
+          2
+        ],
+        "q13": [
+          2,
+          1
+        ],
+        "q17": [
+          2,
+          1
+        ],
+        "q23": [
+          null,
+          9
+        ],
+        "q25": [
+          4,
+          7
+        ],
+        "q32": [
+          4,
+          1
+        ],
+        "q38": [
+          2,
+          1
+        ],
+        "q43": [
+          1,
+          4
+        ],
+        "q48": [
+          3,
+          null
+        ]
+      }
+    },
+    "k25": {
+      "fetch": 25,
+      "off": {
+        "hit@1": 0.7193,
+        "hit@5": 0.9474,
+        "hit@10": 0.9474,
+        "mrr@10": 0.8143,
+        "recall_all@10": 0.9298,
+        "ndcg@10": 0.8378,
+        "hook_hit": 0.9474,
+        "hook_tokens": 310.7368
+      },
+      "on": {
+        "hit@1": 0.7544,
+        "hit@5": 0.9123,
+        "hit@10": 0.9474,
+        "mrr@10": 0.8246,
+        "recall_all@10": 0.9298,
+        "ndcg@10": 0.8435,
+        "hook_hit": 0.9123,
+        "hook_tokens": 307.6667
+      },
+      "on_vs_off_questions": {
+        "better": 5,
+        "worse": 5
+      },
+      "hook_block": {
+        "gained": 0,
+        "lost": 2
+      },
+      "changed": {
+        "q09": [
+          3,
+          4
+        ],
+        "q10": [
+          1,
+          2
+        ],
+        "q13": [
+          2,
+          1
+        ],
+        "q17": [
+          2,
+          1
+        ],
+        "q23": [
+          null,
+          9
+        ],
+        "q25": [
+          4,
+          7
+        ],
+        "q32": [
+          4,
+          1
+        ],
+        "q38": [
+          2,
+          1
+        ],
+        "q43": [
+          1,
+          4
+        ],
+        "q48": [
+          3,
+          null
+        ]
+      }
+    }
+  },
+  "longmemeval_s24": {
+    "off": {
+      "hit_rate": 0.9583,
+      "recall_all": 0.9167,
+      "ndcg_at_10": 0.9474,
+      "turn_recall_full": 0.9479,
+      "tokens_full": 16485.75
+    },
+    "on": {
+      "hit_rate": 0.9583,
+      "recall_all": 0.875,
+      "ndcg_at_10": 0.9136,
+      "turn_recall_full": 0.9167,
+      "tokens_full": 16601.3958
+    },
+    "ndcg_on_vs_off": {
+      "better": 1,
+      "worse": 5
+    },
+    "recall_all_on_vs_off": {
+      "better": 0,
+      "worse": 1
+    },
+    "by_type": {
+      "knowledge-update": {
+        "n": 4,
+        "off": {
+          "ndcg_at_10": 0.9626,
+          "recall_all": 1.0
+        },
+        "on": {
+          "ndcg_at_10": 0.9579,
+          "recall_all": 0.75
+        }
+      },
+      "multi-session": {
+        "n": 4,
+        "off": {
+          "ndcg_at_10": 0.9084,
+          "recall_all": 0.75
+        },
+        "on": {
+          "ndcg_at_10": 0.9057,
+          "recall_all": 0.75
+        }
+      },
+      "single-session-assistant": {
+        "n": 4,
+        "off": {
+          "ndcg_at_10": 1.0,
+          "recall_all": 1.0
+        },
+        "on": {
+          "ndcg_at_10": 1.0,
+          "recall_all": 1.0
+        }
+      },
+      "single-session-preference": {
+        "n": 4,
+        "off": {
+          "ndcg_at_10": 1.0,
+          "recall_all": 1.0
+        },
+        "on": {
+          "ndcg_at_10": 0.9077,
+          "recall_all": 1.0
+        }
+      },
+      "single-session-user": {
+        "n": 4,
+        "off": {
+          "ndcg_at_10": 0.8333,
+          "recall_all": 0.75
+        },
+        "on": {
+          "ndcg_at_10": 0.7411,
+          "recall_all": 0.75
+        }
+      },
+      "temporal-reasoning": {
+        "n": 4,
+        "off": {
+          "ndcg_at_10": 0.9799,
+          "recall_all": 1.0
+        },
+        "on": {
+          "ndcg_at_10": 0.9693,
+          "recall_all": 1.0
+        }
+      }
+    },
+    "question_ids": [
+      "6a1eabeb",
+      "89941a93",
+      "4d6b87c8",
+      "45dc21b6",
+      "0a995998",
+      "46a3abf7",
+      "gpt4_2ba83207",
+      "gpt4_194be4b3",
+      "7161e7e2",
+      "6ae235be",
+      "0e5e2d1a",
+      "488d3006",
+      "8a2466db",
+      "0edc2aef",
+      "195a1a1b",
+      "54026fce",
+      "e47becba",
+      "6f9b354f",
+      "726462e0",
+      "8ebdbe50",
+      "gpt4_59149c77",
+      "gpt4_1d80365e",
+      "gpt4_61e13b3c",
+      "bcbe585f"
+    ]
+  },
+  "nomic_memory": {
+    "runs": 48,
+    "max_rss_gib": 8.15,
+    "median_wall_s_per_question": 164,
+    "note": "before the bounded batches (7c49e30, 6504694) LongMemEval with --model nomic was OOM-killed at question 1 on this 16 GB M1 Pro"
+  },
+  "previous": "benchmarks/results/step4-28.10b-embed-prefixes-2026-09-28.json (before the window fix: nomic prompts cost fused recall 9 questions for 2)"
+}

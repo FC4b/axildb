@@ -58,14 +58,14 @@ impl EmbeddingModel {
         }
     }
 
-    /// Text put before a search query. Empty for every model for now.
+    /// Text put before a search query. Empty for every model.
     /// nomic-embed-text was trained with `search_query: ` / `search_document: `
-    /// and they lift its vector-only ranking, but fused recall rescores only a
-    /// top-20 window, and the prompts shift which records enter it: on the
-    /// dogfood eval they cost 9 answers and gained 2
-    /// (`benchmarks/results/step4-28.10b-embed-prefixes-2026-09-28.json`).
-    /// A document prompt also needs a store marker, so that stores written
-    /// without it keep being searched without it.
+    /// and they lift its vector-only ranking, but not fused recall: on the
+    /// dogfood eval they move 5 answers up and 5 down and drop 2 from the
+    /// prompt hook's block, and on LongMemEval they lower NDCG@10 from 0.947
+    /// to 0.914 (`benchmarks/results/nomic-prompts-2026-10-03.json`).
+    /// A document prompt would also need a store marker, so that stores
+    /// written without it keep being searched without it.
     pub fn query_prefix(&self) -> &'static str {
         ""
     }
