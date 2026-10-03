@@ -9854,7 +9854,11 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
             };
 
             let recall_ms = recall_start.elapsed().as_secs_f64() * 1000.0;
-            db.record_slow_query(&format!("recall {query}"), recall_ms, values.len());
+            // Logging a slow query is a write. A request can turn it off for
+            // its reads, as `AXIL_SLOW_QUERY_LOG=0` does for a whole process.
+            if cli_io::slow_query_log_enabled() {
+                db.record_slow_query(&format!("recall {query}"), recall_ms, values.len());
+            }
 
             // Apply format and budget
             match recall_format {
@@ -10194,7 +10198,9 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
                 .map(|(r, score)| scored_to_json(r, *score))
                 .collect();
 
-            db.record_slow_query(&format!("search {query}"), ms, values.len());
+            if cli_io::slow_query_log_enabled() {
+                db.record_slow_query(&format!("search {query}"), ms, values.len());
+            }
             out.print_array(&values);
             Ok(EXIT_OK)
         }
@@ -10216,7 +10222,9 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
                 .map(|(r, score)| scored_to_json(r, *score))
                 .collect();
 
-            db.record_slow_query(&format!("fts {query}"), ms, values.len());
+            if cli_io::slow_query_log_enabled() {
+                db.record_slow_query(&format!("fts {query}"), ms, values.len());
+            }
             out.print_array(&values);
             Ok(EXIT_OK)
         }
@@ -10348,11 +10356,13 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
 
             if profile {
                 let (results, prof) = qb.exec_profiled().context("query failed")?;
-                db.record_slow_query(
-                    &format!("query {} --profile", table),
-                    prof.total_ms,
-                    results.len(),
-                );
+                if cli_io::slow_query_log_enabled() {
+                    db.record_slow_query(
+                        &format!("query {} --profile", table),
+                        prof.total_ms,
+                        results.len(),
+                    );
+                }
                 let values: Vec<Value> = results.iter().map(record_to_json).collect();
                 out.print(&json!({
                     "results": values,
@@ -10362,7 +10372,9 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
                 let start = std::time::Instant::now();
                 let results = qb.exec().context("query failed")?;
                 let ms = start.elapsed().as_secs_f64() * 1000.0;
-                db.record_slow_query(&format!("query {table}"), ms, results.len());
+                if cli_io::slow_query_log_enabled() {
+                    db.record_slow_query(&format!("query {table}"), ms, results.len());
+                }
                 let values: Vec<Value> = results.iter().map(record_to_json).collect();
                 out.print_array(&values);
             }
@@ -10408,14 +10420,16 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
                             let effective = ql_apply_flags(line, explain, profile);
                             match axil_ql::run(&db, &effective) {
                                 Ok(result) => {
-                                    db.record_slow_query(
-                                        &format!(
-                                            "ql: {}",
-                                            effective.chars().take(80).collect::<String>()
-                                        ),
-                                        result.elapsed_ms,
-                                        result.count,
-                                    );
+                                    if cli_io::slow_query_log_enabled() {
+                                        db.record_slow_query(
+                                            &format!(
+                                                "ql: {}",
+                                                effective.chars().take(80).collect::<String>()
+                                            ),
+                                            result.elapsed_ms,
+                                            result.count,
+                                        );
+                                    }
                                     errln!("{}", serde_json::to_string_pretty(&result).unwrap());
                                 }
                                 Err(e) => {
@@ -10453,11 +10467,13 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
             let effective = ql_apply_flags(&input, explain, profile);
             match axil_ql::run(&db, &effective) {
                 Ok(result) => {
-                    db.record_slow_query(
-                        &format!("ql: {}", effective.chars().take(80).collect::<String>()),
-                        result.elapsed_ms,
-                        result.count,
-                    );
+                    if cli_io::slow_query_log_enabled() {
+                        db.record_slow_query(
+                            &format!("ql: {}", effective.chars().take(80).collect::<String>()),
+                            result.elapsed_ms,
+                            result.count,
+                        );
+                    }
                     out.print(&serde_json::to_value(&result).unwrap());
                     Ok(EXIT_OK)
                 }

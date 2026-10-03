@@ -33,6 +33,8 @@ pub struct ReqCtx {
     pub err: Vec<u8>,
     /// Piped stdin. `None` stands for a terminal: nothing was piped.
     pub stdin: Option<Vec<u8>>,
+    /// Whether the command records slow queries in the database's log.
+    pub slow_query_log: bool,
     /// An open database the command may use instead of opening its own.
     #[allow(dead_code)] // set by an in-process host; no command reads it yet
     pub warm: Option<Arc<axil_core::Axil>>,
@@ -47,6 +49,7 @@ impl Default for ReqCtx {
             out: Vec::new(),
             err: Vec::new(),
             stdin: None,
+            slow_query_log: true,
             warm: None,
             db_canon: PathBuf::new(),
         }
@@ -243,6 +246,12 @@ pub fn stderr_is_terminal() -> bool {
     !capturing() && io::stderr().is_terminal()
 }
 
+/// Whether the command should record slow queries in the database's log.
+/// True unless the installed request turned it off.
+pub fn slow_query_log_enabled() -> bool {
+    REQ.with(|r| r.borrow().as_ref().is_none_or(|ctx| ctx.slow_query_log))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -336,6 +345,19 @@ mod tests {
         assert!(!tty, "an empty pipe is still a pipe");
         let (_, _, tty) = capture(ReqCtx::default(), stderr_is_terminal);
         assert!(!tty);
+    }
+
+    #[test]
+    fn slow_query_log_is_on_unless_the_request_turns_it_off() {
+        assert!(slow_query_log_enabled());
+        let (_, _, on) = capture(ReqCtx::default(), slow_query_log_enabled);
+        assert!(on);
+        let off = ReqCtx {
+            slow_query_log: false,
+            ..ReqCtx::default()
+        };
+        let (_, _, on) = capture(off, slow_query_log_enabled);
+        assert!(!on);
     }
 
     #[test]
@@ -617,11 +639,15 @@ mod tests {
         /// The in-process side. `stdin: None` matches the child's null stdin:
         /// piped, and empty.
         fn in_process(args: &[&str], stdin: Option<&[u8]>) -> (Vec<u8>, Vec<u8>, i32) {
-            let args = argv(args);
             let ctx = ReqCtx {
                 stdin: Some(stdin.unwrap_or_default().to_vec()),
                 ..ReqCtx::default()
             };
+            in_process_with(ctx, args)
+        }
+
+        fn in_process_with(ctx: ReqCtx, args: &[&str]) -> (Vec<u8>, Vec<u8>, i32) {
+            let args = argv(args);
             on_cli_stack(move || {
                 capture(ctx, || match Cli::try_parse_from(&args) {
                     Ok(cli) => run_cli(cli),
@@ -1027,6 +1053,47 @@ mod tests {
             if cfg!(feature = "checkpoint") {
                 assert!(get("checkpoint -").0.contains(r#""kind":"snapshot""#));
                 assert!(get("checkpoint --final").0.contains(r#""kind":"final""#));
+            }
+        }
+
+        #[test]
+        fn a_request_can_turn_off_the_slow_query_log() {
+            let tmp = tempfile::tempdir().unwrap();
+            let proj = build_fixture(tmp.path());
+            // Every query is slow at a zero threshold.
+            std::fs::write(
+                proj.join(".axil/axil.toml"),
+                "[debug]\nslow_query_threshold_ms = 0\n",
+            )
+            .unwrap();
+            let db = proj.join(".axil/memory.axil");
+            let db = db.to_str().unwrap();
+            let mut reads = vec![vec!["--db", db, "query", "decisions"]];
+            if cfg!(feature = "embed") {
+                reads.push(vec!["--db", db, "recall", "auth timeout"]);
+            }
+            if cfg!(feature = "fts") {
+                reads.push(vec!["--db", db, "fts", "cache"]);
+            }
+            let logged = || {
+                let (out, _, code) = in_process(&["--db", db, "slow-queries"], None);
+                assert_eq!(code, 0);
+                serde_json::from_slice::<Vec<serde_json::Value>>(&out)
+                    .unwrap()
+                    .len()
+            };
+            for (log, expected) in [(false, 0), (true, reads.len())] {
+                in_process(&["--db", db, "slow-queries", "--clear"], None);
+                for read in &reads {
+                    let ctx = ReqCtx {
+                        slow_query_log: log,
+                        stdin: Some(Vec::new()),
+                        ..ReqCtx::default()
+                    };
+                    let (_, err, code) = in_process_with(ctx, read);
+                    assert_eq!(code, 0, "{read:?}: {}", String::from_utf8_lossy(&err));
+                }
+                assert_eq!(logged(), expected, "slow_query_log = {log}");
             }
         }
     }
