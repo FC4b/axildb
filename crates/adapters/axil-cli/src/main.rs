@@ -1,4 +1,4 @@
-use std::io::{self, Read as IoRead, Write as IoWrite};
+use std::io::{self, Write as IoWrite};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -8,6 +8,11 @@ use clap::{Parser, Subcommand, ValueEnum};
 use serde_json::{json, Value};
 
 use axil_core::{Axil, Direction, Op, RecordId, SortDirection};
+
+// Declared first: its print macros are in textual scope only for the code
+// that follows the declaration.
+#[macro_use]
+mod cli_io;
 
 #[cfg(feature = "http")]
 mod http_server;
@@ -97,8 +102,7 @@ impl axil_indexer::IndexProgress for IndicatifIndexProgress {
 /// output stays clean in CI / pipelines.
 #[cfg(feature = "indexer")]
 fn make_index_progress(quiet: bool) -> Box<dyn axil_indexer::IndexProgress> {
-    use std::io::IsTerminal;
-    if quiet || !std::io::stderr().is_terminal() {
+    if quiet || !cli_io::stderr_is_terminal() {
         Box::new(axil_indexer::NoopProgress)
     } else {
         Box::new(IndicatifIndexProgress::new())
@@ -256,9 +260,9 @@ impl Output {
     fn print(&self, v: &Value) {
         match self.format {
             OutputFormat::Json => {
-                println!("{}", serde_json::to_string(v).expect("JSON serialization"))
+                outln!("{}", serde_json::to_string(v).expect("JSON serialization"))
             }
-            OutputFormat::Pretty => println!(
+            OutputFormat::Pretty => outln!(
                 "{}",
                 serde_json::to_string_pretty(v).expect("JSON serialization")
             ),
@@ -270,17 +274,17 @@ impl Output {
     fn print_array(&self, values: &[Value]) {
         if self.jsonl {
             for v in values {
-                println!("{}", serde_json::to_string(v).expect("JSON serialization"));
+                outln!("{}", serde_json::to_string(v).expect("JSON serialization"));
             }
         } else {
             match self.format {
                 OutputFormat::Table => print_table_rows(values),
                 // Serialize the slice directly to avoid cloning into Value::Array.
-                OutputFormat::Json => println!(
+                OutputFormat::Json => outln!(
                     "{}",
                     serde_json::to_string(values).expect("JSON serialization")
                 ),
-                OutputFormat::Pretty => println!(
+                OutputFormat::Pretty => outln!(
                     "{}",
                     serde_json::to_string_pretty(values).expect("JSON serialization")
                 ),
@@ -291,7 +295,7 @@ impl Output {
     /// Print a status message to stderr (suppressed by --quiet).
     fn status(&self, msg: &str) {
         if !self.quiet {
-            eprintln!("{msg}");
+            errln!("{msg}");
         }
     }
 }
@@ -300,17 +304,17 @@ impl Output {
 fn print_table_object(v: &Value) {
     if let Some(obj) = v.as_object() {
         for (k, val) in obj {
-            println!("{:<20} {}", k, format_table_value(val));
+            outln!("{:<20} {}", k, format_table_value(val));
         }
     } else {
-        println!("{}", serde_json::to_string_pretty(v).unwrap());
+        outln!("{}", serde_json::to_string_pretty(v).unwrap());
     }
 }
 
 /// Print an array of JSON objects as an aligned table.
 fn print_table_rows(values: &[Value]) {
     if values.is_empty() {
-        println!("(no results)");
+        outln!("(no results)");
         return;
     }
 
@@ -352,9 +356,9 @@ fn print_table_rows(values: &[Value]) {
         .enumerate()
         .map(|(i, c)| format!("{:<width$}", c, width = widths[i]))
         .collect();
-    println!("{}", header.join("  "));
+    outln!("{}", header.join("  "));
     let separator: Vec<String> = widths.iter().map(|w| "-".repeat(*w)).collect();
-    println!("{}", separator.join("  "));
+    outln!("{}", separator.join("  "));
 
     // Print rows.
     for row in &rows {
@@ -372,7 +376,7 @@ fn print_table_rows(values: &[Value]) {
                 }
             })
             .collect();
-        println!("{}", cells.join("  "));
+        outln!("{}", cells.join("  "));
     }
 }
 
@@ -5391,7 +5395,7 @@ fn uninstall_claude_code_files(cwd: &Path, dry_run: bool) -> Result<Value> {
         if p.exists() {
             if !dry_run {
                 if let Err(e) = std::fs::remove_file(&p) {
-                    eprintln!("[uninstall] warn: failed to remove {}: {e}", p.display());
+                    errln!("[uninstall] warn: failed to remove {}: {e}", p.display());
                 }
             }
             removed.push(p.display().to_string());
@@ -5413,7 +5417,7 @@ fn uninstall_claude_code_files(cwd: &Path, dry_run: bool) -> Result<Value> {
             if skill_dir.is_dir() {
                 if !dry_run {
                     if let Err(e) = std::fs::remove_dir_all(&skill_dir) {
-                        eprintln!(
+                        errln!(
                             "[uninstall] warn: failed to remove {}: {e}",
                             skill_dir.display()
                         );
@@ -5425,7 +5429,7 @@ fn uninstall_claude_code_files(cwd: &Path, dry_run: bool) -> Result<Value> {
             if p.is_file() {
                 if !dry_run {
                     if let Err(e) = std::fs::remove_file(&p) {
-                        eprintln!("[uninstall] warn: failed to remove {}: {e}", p.display());
+                        errln!("[uninstall] warn: failed to remove {}: {e}", p.display());
                     }
                 }
                 removed.push(p.display().to_string());
@@ -5743,7 +5747,7 @@ fn install_agent_integrations(
             if content.contains("Axil Agent Memory") {
                 std::fs::remove_file(&rules_dir)?;
             } else {
-                eprintln!(
+                errln!(
                     "[install] warn: {} is a file (not the directory Cursor expects) and wasn't written by Axil — leaving it; skipping the Cursor rule",
                     rules_dir.display()
                 );
@@ -5784,11 +5788,7 @@ fn install_agent_integrations(
 /// Read JSON from the argument, or from stdin if the value is "-".
 fn read_json_input(data: &str) -> Result<Value> {
     if data == "-" {
-        let mut buf = String::new();
-        io::stdin()
-            .take(MAX_STDIN_BYTES + 1)
-            .read_to_string(&mut buf)
-            .context("failed to read from stdin")?;
+        let buf = cli_io::read_stdin(MAX_STDIN_BYTES + 1).context("failed to read from stdin")?;
         if buf.len() as u64 > MAX_STDIN_BYTES {
             anyhow::bail!(
                 "stdin input exceeds {} MB limit",
@@ -6063,7 +6063,7 @@ fn resolve_embedding_model(db_path: &Path) -> axil_vector::models::EmbeddingMode
             if let Some(model) = axil_vector::models::EmbeddingModel::from_name(name) {
                 return model;
             }
-            eprintln!("warning: unknown embedding model '{name}' in axil.toml, using bge-small");
+            errln!("warning: unknown embedding model '{name}' in axil.toml, using bge-small");
         }
     }
     axil_vector::models::EmbeddingModel::BgeSmall
@@ -6073,7 +6073,7 @@ fn resolve_embedding_model(db_path: &Path) -> axil_vector::models::EmbeddingMode
 /// writer that last had it open died before closing it.
 #[cfg(feature = "vector")]
 fn note_vector_store_repaired(db_path: &Path) {
-    eprintln!(
+    errln!(
         "axil: vector store {} was not closed cleanly; repaired it",
         axil_vector::vector_db_path(db_path).display()
     );
@@ -6250,7 +6250,7 @@ fn attach_detected_engines(mut builder: axil_core::AxilBuilder) -> Result<axil_c
                 }
                 Err(e) => {
                     let degraded = axil_vector::vector_store_unavailable(&path, &e);
-                    eprintln!(
+                    errln!(
                         "axil: warning: {}. Fix: {}",
                         degraded.summary(),
                         degraded.fix
@@ -6323,7 +6323,7 @@ fn compact_graph_file(path: &Path) -> Option<serde_json::Value> {
                 "skipped": "another process has the graph store open; run `axil compact` again once it is done",
             })),
             Err(e) => {
-                eprintln!("axil: warning: graph file not compacted: {e}");
+                errln!("axil: warning: graph file not compacted: {e}");
                 Some(json!({ "compacted": false, "error": e.to_string() }))
             }
         }
@@ -6433,7 +6433,7 @@ fn open_read_command(path: &Path) -> Result<Axil> {
             // committed records read-only without contending for the lock. No
             // companion engines are attached in this mode, so flag the
             // degradation rather than silently returning core-only results.
-            eprintln!(
+            errln!(
                 "axil: another process holds the writer lock — opening read-only \
                  (engine-backed features like vector recall are unavailable until \
                  the writer is idle)."
@@ -6495,7 +6495,7 @@ fn open_for_scip_ingest(path: &Path) -> Result<Axil> {
         builder = builder
             .with_graph_engine()
             .context("failed to create graph store for SCIP ingest")?;
-        eprintln!(
+        errln!(
             "axil ingest-scip: created graph store at {}",
             axil_core::companion_path(path, ".graph").display()
         );
@@ -6537,7 +6537,7 @@ fn open_with_vector_creating(path: &Path, dims: usize) -> Result<Axil> {
             builder = builder
                 .with_vector(dims)
                 .context("failed to create vector store")?;
-            eprintln!(
+            errln!(
                 "axil: created vector store at {}",
                 axil_vector::vector_db_path(path).display()
             );
@@ -6705,7 +6705,7 @@ fn open_with_embedder_creating(path: &Path) -> Result<Axil> {
             builder = builder
                 .with_embedder_model(resolve_embedding_model(path))
                 .context("failed to create vector store")?;
-            eprintln!(
+            errln!(
                 "axil: created vector store at {}",
                 axil_vector::vector_db_path(path).display()
             );
@@ -6761,7 +6761,7 @@ fn open_with_timeseries(path: &Path) -> Result<Axil> {
             .backfill_timeseries()
             .context("failed to backfill timeseries index")?;
         if n > 0 {
-            eprintln!("Indexed {n} existing records into timeseries.");
+            errln!("Indexed {n} existing records into timeseries.");
         }
     }
 
@@ -6797,7 +6797,7 @@ fn init_vector_dims(db_path: &Path, explicit: Option<usize>) -> usize {
         let model = resolve_embedding_model(db_path);
         match explicit {
             Some(dims) if dims != model.dimensions() => {
-                eprintln!(
+                errln!(
                     "warning: --vector-dims {dims} does not match the embedding model {} \
                      ({} dimensions; axil.toml `[database] embedding_model`, bge-small \
                      when unset). Opening this database fails until axil.toml names a \
@@ -6977,7 +6977,7 @@ impl CliAdapter {
             Ok(code) => code,
             Err(e) => {
                 let err_json = json!({"error": format!("{e:#}")});
-                eprintln!("{}", serde_json::to_string(&err_json).unwrap());
+                errln!("{}", serde_json::to_string(&err_json).unwrap());
                 EXIT_ERROR
             }
         }
@@ -7132,7 +7132,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                         "generated_at": chrono::Utc::now().to_rfc3339(),
                     }),
                 );
-                eprintln!("[retro] wrote {}", out_path.display());
+                errln!("[retro] wrote {}", out_path.display());
             }
             Ok(EXIT_OK)
         }
@@ -7998,7 +7998,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                                 }
                             }
                             Err(e) => {
-                                eprintln!("  [warn] model check for {}: {e}", model.name());
+                                errln!("  [warn] model check for {}: {e}", model.name());
                             }
                         }
                     }
@@ -8340,7 +8340,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                 let interval = std::time::Duration::from_secs(interval_secs.max(1));
                 loop {
                     // Clear screen for watch mode.
-                    eprint!("\x1B[2J\x1B[H");
+                    errp!("\x1B[2J\x1B[H");
                     let stats = db.stats(table.as_deref()).context("stats failed")?;
                     out.print(&serde_json::to_value(&stats).unwrap());
                     out.status(&format!(
@@ -8878,12 +8878,10 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                     match resolve_code_ref(&db, spec) {
                         Ok(Some(v)) => refs.push(v),
                         Ok(None) => {
-                            eprintln!(
-                                "warning: --code-ref '{spec}' did not match any proxy or path"
-                            );
+                            errln!("warning: --code-ref '{spec}' did not match any proxy or path");
                         }
                         Err(e) => {
-                            eprintln!("warning: --code-ref '{spec}' resolution error: {e}");
+                            errln!("warning: --code-ref '{spec}' resolution error: {e}");
                         }
                     }
                 }
@@ -8897,7 +8895,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             // that feature there is nothing to resolve against.
             #[cfg(not(feature = "indexer"))]
             if !code_ref.is_empty() {
-                eprintln!("warning: --code-ref requires the `indexer` feature; ignored");
+                errln!("warning: --code-ref requires the `indexer` feature; ignored");
             }
 
             // LLM-enhanced entity extraction.
@@ -8995,11 +8993,8 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
 
             let items: Vec<Value> = if json_data == "-" {
                 // Read from stdin — support both JSON array and JSONL (one object per line).
-                let mut buf = String::new();
-                io::stdin()
-                    .take(MAX_STDIN_BYTES + 1)
-                    .read_to_string(&mut buf)
-                    .context("failed to read from stdin")?;
+                let buf =
+                    cli_io::read_stdin(MAX_STDIN_BYTES + 1).context("failed to read from stdin")?;
                 if buf.len() as u64 > MAX_STDIN_BYTES {
                     anyhow::bail!("stdin input exceeds size limit");
                 }
@@ -9052,7 +9047,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                     Ok(EXIT_OK)
                 }
                 None => {
-                    eprintln!("{{\"error\":\"not found\",\"id\":{}}}", json!(id));
+                    errln!("{{\"error\":\"not found\",\"id\":{}}}", json!(id));
                     Ok(EXIT_NOT_FOUND)
                 }
             }
@@ -9080,7 +9075,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                 out.print(&json!({"deleted": true, "id": id}));
                 Ok(EXIT_OK)
             } else {
-                eprintln!("{{\"error\":\"not found\",\"id\":{}}}", json!(id));
+                errln!("{{\"error\":\"not found\",\"id\":{}}}", json!(id));
                 Ok(EXIT_NOT_FOUND)
             }
         }
@@ -9178,8 +9173,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                 w.flush().ok();
                 stats
             } else {
-                let stdout = io::stdout();
-                let mut w = io::BufWriter::new(stdout.lock());
+                let mut w = io::BufWriter::new(cli_io::stdout());
                 let stats = axil_core::export_to_writer(&db, &opts, &mut w)
                     .context("export failed")?;
                 w.flush().ok();
@@ -9212,8 +9206,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             let opts = axil_core::ImportOptions { dedup, dry_run };
 
             let result = if file == "-" {
-                let stdin = io::stdin();
-                axil_core::import_from_reader(&db, &opts, stdin.lock())
+                axil_core::import_from_reader(&db, &opts, cli_io::stdin_reader())
             } else {
                 let f = std::fs::File::open(&file)
                     .with_context(|| format!("failed to open '{file}'"))?;
@@ -9248,20 +9241,20 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             // An import that replaces or demotes existing records should never
             // pass silently — the report counts it, but say it out loud too.
             if report.overwritten > 0 {
-                eprintln!(
+                errln!(
                     "warning: {} record(s) overwritten in place (same id already existed) — \
                      re-importing a stale export replaces newer local data; use --dedup to skip instead",
                     report.overwritten
                 );
             }
             if report.superseded > 0 {
-                eprintln!(
+                errln!(
                     "warning: {} local record(s) superseded by newer imported near-duplicates",
                     report.superseded
                 );
             }
             if let Some(source) = interrupted {
-                eprintln!(
+                errln!(
                     "error: import interrupted after partial write — the counts above are what \
                      was committed before the failure: {source}"
                 );
@@ -9274,7 +9267,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                 Some(axil_core::EmbeddingVerification::Verified { missing, .. })
                     if *missing > 0 =>
                 {
-                    eprintln!(
+                    errln!(
                         "warning: {missing} imported record(s) have no embedding — \
                          semantic recall won't see them until `axil heal --reindex`"
                     );
@@ -9282,7 +9275,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                 Some(axil_core::EmbeddingVerification::EngineUnavailable { affected })
                     if *affected > 0 =>
                 {
-                    eprintln!(
+                    errln!(
                         "warning: imported {affected} record(s) with no embedder attached — \
                          run `axil heal --reindex` once embeddings are available"
                     );
@@ -9477,7 +9470,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                     Ok(Ok(r)) => r,
                     Ok(Err(e)) => return Err(e.into()),
                     Err(_) => {
-                        eprintln!(
+                        errln!(
                             "[axil recall] timeout_ms={} exceeded inside db.recall; \
                                    returning partial results",
                             timeout_ms.unwrap_or(0)
@@ -9716,7 +9709,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                 }
 
                 if let Some(rung) = cascade_rung {
-                    eprintln!(
+                    errln!(
                         "[recall] cascade rung={} (primary recall returned empty)",
                         rung
                     );
@@ -9746,9 +9739,9 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                     } else {
                         "FTS tilt eligible (no FTS hit to tilt)"
                     };
-                    eprintln!("[recall] query_class={} ({note})", qc.tag());
+                    errln!("[recall] query_class={} ({note})", qc.tag());
                 } else {
-                    eprintln!("[recall] query_class={} (pure RRF, no tilt)", qc.tag());
+                    errln!("[recall] query_class={} (pure RRF, no tilt)", qc.tag());
                 }
             }
 
@@ -9810,27 +9803,25 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                             if let Err(e) =
                                 axil_indexer::rerank::rerank(&query, &mut vals, &rerank_config)
                             {
-                                eprintln!(
-                                    "[rerank] cross-encoder failed: {e} — returning RRF order"
-                                );
+                                errln!("[rerank] cross-encoder failed: {e} — returning RRF order");
                             }
                             vals
                         }
                         #[cfg(not(feature = "rerank"))]
                         {
-                            eprintln!("[rerank] cross-encoder not compiled in (build with --features rerank)");
+                            errln!("[rerank] cross-encoder not compiled in (build with --features rerank)");
                             values
                         }
                     }
                     RerankMode::Llm => {
                         let mut vals = values;
                         if !db.has_llm() {
-                            eprintln!(
+                            errln!(
                                 "[rerank] no LLM configured — returning RRF order. \
                                    Run `axil llm config` to configure."
                             );
                         } else if let Err(e) = rerank_via_llm(&db, &query, &mut vals) {
-                            eprintln!("[rerank] LLM rerank failed: {e} — returning RRF order");
+                            errln!("[rerank] LLM rerank failed: {e} — returning RRF order");
                         }
                         vals
                     }
@@ -9851,16 +9842,16 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                     // expand path is discoverable without an extra footer here.
                     let block = format_context_block(&values, budget, &degraded_warnings(&db));
                     if !block.is_empty() {
-                        print!("{block}");
+                        outp!("{block}");
                     }
                 }
                 RecallFormat::Oneline => {
                     let formatted = format_recall_results(&values, &recall_format, budget);
                     for line in &formatted {
                         if let Some(s) = line.as_str() {
-                            println!("{s}");
+                            outln!("{s}");
                         } else {
-                            println!("{}", serde_json::to_string(line).unwrap_or_default());
+                            outln!("{}", serde_json::to_string(line).unwrap_or_default());
                         }
                     }
                 }
@@ -9870,14 +9861,14 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                     // Compact output omits full record bodies. Surface the
                     // expand path on stderr so stdout stays valid JSON.
                     if matches!(recall_format, RecallFormat::Compact) && !formatted.is_empty() {
-                        eprintln!("[axil] compact view — expand any hit with: axil get <id>");
+                        errln!("[axil] compact view — expand any hit with: axil get <id>");
                     }
                 }
             }
 
             // 12.1: emit deadline-exceeded marker on stderr so hooks can log silently if desired.
             if deadline.is_some() && deadline_exceeded() {
-                eprintln!(
+                errln!(
                     "[axil recall] timeout_ms={} exceeded; returned partial results",
                     timeout_ms.unwrap_or(0)
                 );
@@ -9946,7 +9937,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                 let v = serde_json::to_value(&proxies).unwrap_or(json!([]));
                 out.print(&v);
             } else if proxies.is_empty() {
-                println!(
+                outln!(
                     "(no code proxies matched — run `axil index .` if you have not indexed yet)"
                 );
             } else {
@@ -9959,7 +9950,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                         _ => r.id.clone(),
                     };
                     let why = r.why.as_deref().unwrap_or("matched code proxy");
-                    println!("{pointer} — {why}");
+                    outln!("{pointer} — {why}");
                 }
             }
             Ok(EXIT_OK)
@@ -9985,7 +9976,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                 "json" => out.print(&value),
                 // `compact` (default): lean pointer lines, ~10× smaller than
                 // the JSON bundle — the right shape for locating code.
-                _ => print!("{}", axil_indexer::recall::render_context_compact(&value)),
+                _ => outp!("{}", axil_indexer::recall::render_context_compact(&value)),
             }
             Ok(EXIT_OK)
         }
@@ -10089,7 +10080,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
 
             match bench_format.as_str() {
                 "markdown" | "md" => {
-                    print!(
+                    outp!(
                         "{}",
                         axil_indexer::code_recall_eval::render_markdown_table(&report)
                     );
@@ -10098,7 +10089,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                     out.print(&axil_indexer::code_recall_eval::report_to_json(&report));
                 }
                 _ => {
-                    print!(
+                    outp!(
                         "{}",
                         axil_indexer::code_recall_eval::render_plain_table(&report)
                     );
@@ -10113,9 +10104,9 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                 let regressions =
                     axil_indexer::code_recall_eval::compare_for_gate(&baseline, &report);
                 if !regressions.is_empty() {
-                    eprintln!("regression gate FAILED:");
+                    errln!("regression gate FAILED:");
                     for msg in &regressions {
-                        eprintln!("  - {msg}");
+                        errln!("  - {msg}");
                     }
                     return Ok(EXIT_BENCH_REGRESSION);
                 }
@@ -10154,9 +10145,9 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             }
 
             match savings_format.as_str() {
-                "markdown" | "md" => print!("{}", cs::render_markdown(&report)),
+                "markdown" | "md" => outp!("{}", cs::render_markdown(&report)),
                 "json" => out.print(&cs::report_to_json(&report)),
-                _ => print!("{}", cs::render_plain(&report)),
+                _ => outp!("{}", cs::render_plain(&report)),
             }
             Ok(EXIT_OK)
         }
@@ -10252,7 +10243,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                 out.print(&json!({"deleted": true, "edge_id": edge_id}));
                 Ok(EXIT_OK)
             } else {
-                eprintln!(
+                errln!(
                     "{{\"error\":\"edge not found\",\"edge_id\":{}}}",
                     json!(edge_id)
                 );
@@ -10367,8 +10358,8 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
 
             // Interactive REPL mode
             if interactive || query_str.is_none() {
-                eprintln!("AxilQL interactive mode — type queries, Ctrl+D to exit");
-                eprintln!(
+                errln!("AxilQL interactive mode — type queries, Ctrl+D to exit");
+                errln!(
                     "  RECALL \"text\" TOP k | FIND \"text\" | COUNT | GET <id> | EXPLAIN <query>"
                 );
 
@@ -10400,11 +10391,11 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                                         result.elapsed_ms,
                                         result.count,
                                     );
-                                    eprintln!("{}", serde_json::to_string_pretty(&result).unwrap());
+                                    errln!("{}", serde_json::to_string_pretty(&result).unwrap());
                                 }
                                 Err(e) => {
                                     let err_resp = axil_ql::ErrorResponse::from(&e);
-                                    eprintln!(
+                                    errln!(
                                         "error: {}",
                                         serde_json::to_string_pretty(&err_resp).unwrap()
                                     );
@@ -10414,7 +10405,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                         Err(rustyline::error::ReadlineError::Interrupted) => continue,
                         Err(rustyline::error::ReadlineError::Eof) => break,
                         Err(e) => {
-                            eprintln!("readline error: {e}");
+                            errln!("readline error: {e}");
                             break;
                         }
                     }
@@ -10427,11 +10418,8 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             // Single query mode
             let query_str = query_str.unwrap();
             let input = if query_str == "-" {
-                let mut buf = String::new();
-                io::stdin()
-                    .take(MAX_STDIN_BYTES + 1)
-                    .read_to_string(&mut buf)
-                    .context("failed to read from stdin")?;
+                let buf =
+                    cli_io::read_stdin(MAX_STDIN_BYTES + 1).context("failed to read from stdin")?;
                 buf.trim().to_string()
             } else {
                 query_str
@@ -10871,7 +10859,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             };
 
             if !quiet {
-                eprintln!(
+                errln!(
                     "🧠 Axil session-heal: {} session-problem(s), {} db problem(s), {} fixed{}",
                     problems.len(),
                     detected.len(),
@@ -11198,7 +11186,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                 std::fs::rename(&backup_path, &vec_path).context(
                     "failed to restore the vector store backup left by an interrupted re-embed",
                 )?;
-                eprintln!(
+                errln!(
                     "axil: restored {} from an interrupted re-embed",
                     vec_path.display()
                 );
@@ -11348,13 +11336,13 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                     match db.embed_text(rid, text) {
                         Ok(()) => success += 1,
                         Err(e) => {
-                            eprintln!("  [skip] {rid}: {e}");
+                            errln!("  [skip] {rid}: {e}");
                             errors += 1;
                             first_error.get_or_insert_with(|| e.to_string());
                         }
                     }
                     if (i + 1) % 100 == 0 {
-                        eprintln!("  [{}/{total}] re-embedded...", i + 1);
+                        errln!("  [{}/{total}] re-embedded...", i + 1);
                     }
                 }
 
@@ -12576,7 +12564,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                 // confirm which *.scip got picked when multiple are
                 // present in the tree.
                 for p in &paths {
-                    eprintln!("axil ingest-scip: using {}", p.display());
+                    errln!("axil ingest-scip: using {}", p.display());
                 }
             }
             if watch {
@@ -12593,14 +12581,14 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                 // then poll for fresh mtimes. Cheap enough without depending on notify.
                 let mut last_ingested_mtime: Option<std::time::SystemTime> = None;
                 let stabilize_timeout = std::time::Duration::from_secs(30);
-                eprintln!("axil ingest-scip --watch: waiting for {}…", path.display());
+                errln!("axil ingest-scip --watch: waiting for {}…", path.display());
                 loop {
                     match std::fs::metadata(&path) {
                         Ok(md) => {
                             let mtime = md.modified().ok();
                             if mtime != last_ingested_mtime {
                                 if !axil_scip::wait_for_stable(&path, stabilize_timeout)? {
-                                    eprintln!(
+                                    errln!(
                                         "axil ingest-scip --watch: index still being written after {}s; skipping cycle",
                                         stabilize_timeout.as_secs()
                                     );
@@ -12620,7 +12608,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                             }
                         }
                         Err(e) => {
-                            eprintln!("axil ingest-scip --watch: stat failed: {e}");
+                            errln!("axil ingest-scip --watch: stat failed: {e}");
                         }
                     }
                     std::thread::sleep(std::time::Duration::from_secs(2));
@@ -13214,7 +13202,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                             })
                             .collect();
 
-                        eprintln!(
+                        errln!(
                             "axil scip refresh: running `{bin} {}` (cwd: {})",
                             resolved_args.join(" "),
                             project.dir.display()
@@ -13225,8 +13213,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                         // finishes, after which we finish_and_clear so the JSON
                         // output that follows is the only thing left on screen.
                         let spinner = {
-                            use std::io::IsTerminal;
-                            if !out.quiet && std::io::stderr().is_terminal() {
+                            if !out.quiet && cli_io::stderr_is_terminal() {
                                 let s = indicatif::ProgressBar::new_spinner();
                                 s.set_draw_target(indicatif::ProgressDrawTarget::stderr());
                                 s.set_style(
@@ -13263,7 +13250,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                             Ok(ref out_run) if !out_run.status.success() => {
                                 let child_err = String::from_utf8_lossy(&out_run.stderr);
                                 if !child_err.is_empty() {
-                                    eprint!("{child_err}");
+                                    errp!("{child_err}");
                                 }
                                 let mut msg = format!(
                                     "`{bin}` exited with status {} (cwd: {})",
@@ -13482,10 +13469,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
         // ── Extract Entities ────────────────────────────────
         Command::ExtractEntities { text } => {
             let input = if text == "-" {
-                let mut buf = String::new();
-                io::stdin()
-                    .take(MAX_STDIN_BYTES + 1)
-                    .read_to_string(&mut buf)?;
+                let buf = cli_io::read_stdin(MAX_STDIN_BYTES + 1)?;
                 if buf.len() as u64 > MAX_STDIN_BYTES {
                     return Err(anyhow::anyhow!(
                         "stdin exceeds {} MB cap",
@@ -14078,7 +14062,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                     // bites when the header and warnings alone exceed it.
                     // `print!`: the text ends in its own newline, and one
                     // more would be a byte past the budget.
-                    print!("{}", cut_narrative_to_budget(narrative, budget_tokens));
+                    outp!("{}", cut_narrative_to_budget(narrative, budget_tokens));
                 }
                 BootFormat::Compact => {
                     let compact = compact_boot_json(&boot_data);
@@ -14297,12 +14281,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
             source,
         } => {
             let input = if text == "-" {
-                let mut buf = String::new();
-                io::stdin()
-                    .take(MAX_STDIN_BYTES + 1)
-                    .read_to_string(&mut buf)
-                    .context("failed to read from stdin")?;
-                buf
+                cli_io::read_stdin(MAX_STDIN_BYTES + 1).context("failed to read from stdin")?
             } else {
                 text
             };
@@ -14343,7 +14322,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                             "type": cap.capture_type,
                             "summary": cap.summary,
                         })),
-                        Err(e) => eprintln!("  [skip] failed to store: {e}"),
+                        Err(e) => errln!("  [skip] failed to store: {e}"),
                     }
                 }
                 out.print(&json!({
@@ -14400,7 +14379,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                 ),
             };
 
-            eprintln!("{banner}");
+            errln!("{banner}");
             Ok(EXIT_OK)
         }
 
@@ -14593,7 +14572,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                         }
                         bridged_hops = hops;
                     }
-                    Err(e) => eprintln!("bridge traversal skipped: {e}"),
+                    Err(e) => errln!("bridge traversal skipped: {e}"),
                 }
             }
 
@@ -14850,11 +14829,8 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
 
             // Read text from the appropriate input.
             let obs_text = if stdin {
-                let mut buf = String::new();
-                io::stdin()
-                    .take(MAX_STDIN_BYTES + 1)
-                    .read_to_string(&mut buf)
-                    .context("failed to read from stdin")?;
+                let buf =
+                    cli_io::read_stdin(MAX_STDIN_BYTES + 1).context("failed to read from stdin")?;
                 if buf.len() as u64 > MAX_STDIN_BYTES {
                     return Err(anyhow::anyhow!(
                         "stdin exceeds {} MB cap",
@@ -14912,19 +14888,19 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                     match &outcome.action {
                         axil_core::PipelineAction::Stored => {
                             if let Some(ref r) = outcome.record {
-                                println!("{}", r.id);
+                                outln!("{}", r.id);
                             }
                         }
                         axil_core::PipelineAction::Updated { existing_id } => {
-                            println!("updated:{existing_id}");
+                            outln!("updated:{existing_id}");
                         }
                         axil_core::PipelineAction::Superseded { old_id } => {
                             if let Some(ref r) = outcome.record {
-                                println!("superseded:{old_id}->{}", r.id);
+                                outln!("superseded:{old_id}->{}", r.id);
                             }
                         }
                         axil_core::PipelineAction::Ignored => {
-                            eprintln!("ignored: {}", outcome.reason);
+                            errln!("ignored: {}", outcome.reason);
                         }
                     }
                 }
@@ -15562,9 +15538,10 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                         out.print(&serde_json::to_value(&report).unwrap());
                     } else {
                         let mt = axil_core::MaintenanceThread::start(db_arc, iv);
-                        eprintln!(
+                        errln!(
                             "Maintenance daemon started (interval={}s, duration={}s)",
-                            interval, duration
+                            interval,
+                            duration
                         );
                         std::thread::sleep(std::time::Duration::from_secs(duration));
                         let reports = mt.stop();
@@ -15637,7 +15614,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
                     let report = axil_core::branch_merge(&db_path, &name, merge_strategy)
                         .context("failed to merge branch")?;
                     if report.indexes_need_rebuild {
-                        eprintln!("Note: merged records are not yet indexed. Run `axil heal` to rebuild vector/graph/FTS indexes.");
+                        errln!("Note: merged records are not yet indexed. Run `axil heal` to rebuild vector/graph/FTS indexes.");
                     }
                     out.print(&serde_json::to_value(&report).unwrap());
 
@@ -15685,7 +15662,7 @@ fn run(cli: Cli, out: &Output) -> Result<i32> {
 
             let llm_enhanced = llm && db.has_llm();
             if llm && !db.has_llm() {
-                eprintln!("warning: --llm requested but no LLM configured in axil.toml — using heuristic mode only");
+                errln!("warning: --llm requested but no LLM configured in axil.toml — using heuristic mode only");
             }
             if llm_enhanced && !report.insights.is_empty() {
                 let context = format!(
@@ -16191,19 +16168,14 @@ fn try_deps_extension_dispatch(
             // pre-migration `run_deps` `DepsCommand::Ingest` behavior.
             // Cap at MAX_STDIN_BYTES to prevent OOM on a piped giant.
             let stdin = if file.is_none() && !*from_web {
-                use std::io::Read;
-                let mut buf = String::new();
-                match std::io::stdin()
-                    .take(MAX_STDIN_BYTES + 1)
-                    .read_to_string(&mut buf)
-                {
-                    Ok(_) if buf.len() as u64 > MAX_STDIN_BYTES => {
+                match cli_io::read_stdin(MAX_STDIN_BYTES + 1) {
+                    Ok(buf) if buf.len() as u64 > MAX_STDIN_BYTES => {
                         return Err(anyhow::anyhow!(
                             "stdin exceeds {} MB cap",
                             MAX_STDIN_BYTES / (1024 * 1024)
                         ));
                     }
-                    Ok(_) => Some(buf),
+                    Ok(buf) => Some(buf),
                     Err(_) => None,
                 }
             } else {
@@ -16272,11 +16244,11 @@ fn try_deps_extension_dispatch(
             if !output.stdout.is_empty() {
                 match serde_json::from_str::<Value>(&output.stdout) {
                     Ok(v) => out.print(&v),
-                    Err(_) => println!("{}", output.stdout),
+                    Err(_) => outln!("{}", output.stdout),
                 }
             }
             if !output.stderr.is_empty() {
-                eprint!("{}", output.stderr);
+                errp!("{}", output.stderr);
             }
             Ok(Some(output.exit_code))
         }
@@ -16319,8 +16291,6 @@ fn run_checkpoint_extension(
     db_opt: &Option<PathBuf>,
     out: &Output,
 ) -> Result<i32> {
-    use std::io::Read;
-
     // Build command_path: `checkpoint show` is the read sub; anything
     // else (including no positional) is the write sub.
     let (command_path, positional): (Vec<String>, Option<String>) = match arg.as_deref() {
@@ -16349,22 +16319,13 @@ fn run_checkpoint_extension(
     let stdin = if positional.as_deref() == Some("-")
         || (positional.is_none() && command_path.len() == 1)
     {
-        use std::io::IsTerminal;
-        if std::io::stdin().is_terminal() {
+        if cli_io::stdin_is_terminal() {
             None
         } else {
-            let mut buf = String::new();
             const MAX: u64 = 4 * 1024 * 1024;
-            if std::io::stdin()
-                .take(MAX + 1)
-                .read_to_string(&mut buf)
-                .is_ok()
-                && (buf.len() as u64) <= MAX
-                && !buf.trim().is_empty()
-            {
-                Some(buf)
-            } else {
-                None
+            match cli_io::read_stdin(MAX + 1) {
+                Ok(buf) if (buf.len() as u64) <= MAX && !buf.trim().is_empty() => Some(buf),
+                _ => None,
             }
         }
     } else {
@@ -16384,11 +16345,11 @@ fn run_checkpoint_extension(
             if !output.stdout.is_empty() {
                 match serde_json::from_str::<Value>(&output.stdout) {
                     Ok(v) => out.print(&v),
-                    Err(_) => println!("{}", output.stdout),
+                    Err(_) => outln!("{}", output.stdout),
                 }
             }
             if !output.stderr.is_empty() {
-                eprint!("{}", output.stderr);
+                errp!("{}", output.stderr);
             }
             Ok(output.exit_code)
         }
@@ -16459,11 +16420,11 @@ fn run_cache_extension(cmd: CacheCommand, db_opt: &Option<PathBuf>, out: &Output
             if !output.stdout.is_empty() {
                 match serde_json::from_str::<Value>(&output.stdout) {
                     Ok(v) => out.print(&v),
-                    Err(_) => println!("{}", output.stdout),
+                    Err(_) => outln!("{}", output.stdout),
                 }
             }
             if !output.stderr.is_empty() {
-                eprint!("{}", output.stderr);
+                errp!("{}", output.stderr);
             }
             Ok(output.exit_code)
         }
@@ -16595,11 +16556,7 @@ fn run_deps(cmd: DepsCommand, db_opt: &Option<PathBuf>, out: &Output) -> Result<
                     Some(p) => std::fs::read_to_string(p)
                         .with_context(|| format!("reading {}", p.display()))?,
                     None => {
-                        use std::io::Read;
-                        let mut buf = String::new();
-                        std::io::stdin()
-                            .take(MAX_STDIN_BYTES + 1)
-                            .read_to_string(&mut buf)
+                        let buf = cli_io::read_stdin(MAX_STDIN_BYTES + 1)
                             .context("reading doc text from stdin")?;
                         if buf.len() as u64 > MAX_STDIN_BYTES {
                             return Err(anyhow::anyhow!(
@@ -16927,13 +16884,11 @@ fn build_extension_invocation(
 /// Read piped stdin if present (non-TTY), so Extensions supporting the `-`
 /// convention work over the generic dispatch path. Returns `None` at a TTY.
 fn read_piped_stdin() -> Option<String> {
-    use std::io::{IsTerminal, Read};
-    if std::io::stdin().is_terminal() {
+    if cli_io::stdin_is_terminal() {
         return None;
     }
-    let mut buf = String::new();
-    match std::io::stdin().read_to_string(&mut buf) {
-        Ok(n) if n > 0 => Some(buf),
+    match cli_io::read_stdin(u64::MAX) {
+        Ok(buf) if !buf.is_empty() => Some(buf),
         _ => None,
     }
 }
@@ -17035,15 +16990,15 @@ fn run_extension_dispatch(
     {
         axil_core::Dispatch::Handled(output) => {
             if !output.stdout.is_empty() {
-                print!("{}", output.stdout);
+                outp!("{}", output.stdout);
                 if !output.stdout.ends_with('\n') {
-                    println!();
+                    outln!();
                 }
             }
             if !output.stderr.is_empty() {
-                eprint!("{}", output.stderr);
+                errp!("{}", output.stderr);
                 if !output.stderr.ends_with('\n') {
-                    eprintln!();
+                    errln!();
                 }
             }
             Ok(output.exit_code)
@@ -17788,7 +17743,7 @@ fn run_config(cmd: ConfigCommand, out: &Output) -> Result<i32> {
                     Ok(EXIT_OK)
                 }
                 None => {
-                    eprintln!("{{\"error\":\"key not found\",\"key\":{}}}", json!(key));
+                    errln!("{{\"error\":\"key not found\",\"key\":{}}}", json!(key));
                     Ok(EXIT_NOT_FOUND)
                 }
             }
@@ -18287,7 +18242,7 @@ fn expand_query(db: &axil_core::Axil, query: &str, neighbors: usize) -> String {
         return query.to_string();
     }
     let extras: Vec<String> = extra_terms.into_iter().collect();
-    eprintln!(
+    errln!(
         "[expand] +{} terms: {}",
         extras.len(),
         extras
@@ -18568,7 +18523,7 @@ fn render_brief_markdown(report: &Value, is_retro: bool) -> String {
 fn emit_brief(report: &Value, format: &BriefFormat, out: &Output) {
     match format {
         BriefFormat::Json => out.print(report),
-        BriefFormat::Markdown => print!("{}", render_brief_markdown(report, false)),
+        BriefFormat::Markdown => outp!("{}", render_brief_markdown(report, false)),
     }
 }
 
@@ -20493,7 +20448,7 @@ fn install_aider_files(cwd: &Path, db_path: &Path) -> Result<()> {
         {
             // A read: key we didn't write — don't textually edit unknown
             // YAML; tell the user what to add instead.
-            eprintln!(
+            errln!(
                 "[install] note: add CONVENTIONS.md to the `read:` list in {} so aider loads the Axil memory contract",
                 conf_path.display()
             );
