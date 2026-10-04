@@ -16,6 +16,11 @@ use axil_core::{Axil, Result};
 /// Reserved table for analytics records.
 pub const TABLE_ANALYTICS: &str = "_analytics";
 
+/// Label for the `tokens_served` total in [`get_analytics`]: each logged
+/// count comes from [`crate::token::estimate_json_tokens`] over the results a
+/// query returned, not from a tokenizer.
+pub const TOKENS_SERVED_BASIS: &str = "estimate: ~4 chars/token over the JSON each query returned";
+
 // ── Types ───────────────────────────────────────────────────────────
 
 /// A single analytics record stored in the database.
@@ -62,11 +67,16 @@ pub fn log_query(
 /// The returned JSON includes:
 /// - `period` — the number of days covered
 /// - `total_queries` — count of logged queries in the period
-/// - `tokens_served` — total tokens served
-/// - `tokens_saved_vs_raw` — estimated tokens saved (heuristic: served * 14)
+/// - `tokens_served` — total tokens served, an estimate (see
+///   [`TOKENS_SERVED_BASIS`])
+/// - `tokens_served_basis` — how `tokens_served` was counted
 /// - `most_recalled` — top 5 query terms by frequency
 /// - `query_types` — breakdown by query type
 /// - `stale_hits` — queries that returned zero results
+///
+/// There is deliberately no "tokens saved" figure: a query's raw baseline
+/// (what the agent would have read without Axil) is never measured, so any
+/// multiplier over `tokens_served` would be invented.
 pub fn get_analytics(db: &Axil, period_days: u64) -> Result<Value> {
     let all = db.list(TABLE_ANALYTICS)?;
 
@@ -135,14 +145,11 @@ pub fn get_analytics(db: &Axil, period_days: u64) -> Result<Value> {
         .map(|(term, count)| json!({"term": term, "count": count}))
         .collect();
 
-    // Heuristic: index compression is ~15:1 so tokens saved is served * 14.
-    let tokens_saved_vs_raw = tokens_served * 14;
-
     Ok(json!({
         "period": period_days,
         "total_queries": total_queries,
         "tokens_served": tokens_served,
-        "tokens_saved_vs_raw": tokens_saved_vs_raw,
+        "tokens_served_basis": TOKENS_SERVED_BASIS,
         "most_recalled": most_recalled,
         "query_types": query_types,
         "stale_hits": stale_hits,
@@ -221,13 +228,20 @@ mod tests {
     }
 
     #[test]
-    fn tokens_saved_heuristic() {
+    fn served_tokens_are_labeled_and_no_savings_figure_is_invented() {
         let (db, _dir) = open_temp_db();
 
         log_query(&db, "vector", "query", 5, 100).unwrap();
 
         let analytics = get_analytics(&db, 1).unwrap();
-        // 100 * 14 = 1400
-        assert_eq!(analytics["tokens_saved_vs_raw"], 1400);
+        assert_eq!(analytics["tokens_served"], 100);
+        assert_eq!(analytics["tokens_served_basis"], TOKENS_SERVED_BASIS);
+        assert!(TOKENS_SERVED_BASIS.starts_with("estimate"));
+        // No raw baseline is measured, so no savings figure may appear.
+        let keys: Vec<&String> = analytics.as_object().unwrap().keys().collect();
+        assert!(
+            keys.iter().all(|k| !k.contains("saved")),
+            "unexpected savings field in {keys:?}"
+        );
     }
 }
