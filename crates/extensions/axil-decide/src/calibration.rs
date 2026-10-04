@@ -2,6 +2,7 @@
 
 use serde::Deserialize;
 
+use crate::model::PairModel;
 use crate::{DecideError, Result};
 
 /// The U1 calibration, fitted by `benchmarks/typed-decisions/calibrate_u1.py`.
@@ -18,10 +19,12 @@ const U1_JSON: &str = include_str!("../calibration/u1-nli-deberta-v3-xsmall-qint
 /// by the temperature before the softmax would move mass between the other
 /// labels and reorder pairs.
 ///
-/// A calibration is fitted on the scores of one model file under one
-/// onnxruntime version and graph optimisation level; it records the model
-/// and revision it belongs to, and [`crate::PairClassifier::load`] refuses a
-/// mismatch.
+/// A calibration only fits the scores it was fitted on, and those depend on
+/// more than the model's name: the graph and tokenizer files, the truncation
+/// length, the onnxruntime version, the graph optimisation level and whether
+/// pairs were batched all move them. It records each of these, and
+/// [`crate::PairClassifier::load`] refuses a model or runtime that differs in
+/// any (see [`Calibration::check_fit`]).
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct Calibration {
     /// Model name the calibration was fitted for (see [`crate::PairModel::name`]).
@@ -35,13 +38,26 @@ pub struct Calibration {
     pub temperature: f64,
     /// Calibrated probability at or above which a pair is flagged.
     pub threshold: f64,
+    /// sha256 of the ONNX graph the fitted scores came from.
+    pub onnx_sha256: String,
+    /// sha256 of the tokenizer they came from.
+    pub tokenizer_sha256: String,
+    /// Truncation length they were tokenized with.
+    pub max_len: usize,
+    /// onnxruntime version that produced them, e.g. `1.22.0`.
+    pub onnxruntime: String,
+    /// Graph optimisation level that produced them, e.g. `ORT_ENABLE_ALL`.
+    pub optimization_level: String,
+    /// Whether each pair ran alone (no batching, no padding).
+    pub one_pair_per_call: bool,
 }
 
 impl Calibration {
     /// The U1 judge: P(contradiction | premise = OLD, hypothesis = NEW) from
     /// [`crate::NLI_DEBERTA_V3_XSMALL_QINT8`], cut at a threshold chosen for a
     /// low false-positive rate. A possible-contradiction signal for review,
-    /// not an update detector: it flags few plain updates. Fit and test numbers are in
+    /// not an update detector: it flags few plain updates. Fit and test
+    /// numbers are in
     /// `benchmarks/results/typed-decisions-u1-calibration-2026-10-04.json`.
     pub fn u1() -> Self {
         Self::from_json(U1_JSON).expect("the bundled U1 calibration parses")
@@ -73,6 +89,77 @@ impl Calibration {
             )));
         }
         Ok(())
+    }
+
+    /// Check that this calibration was fitted on scores `model` produces
+    /// under a runtime with onnxruntime API version `ort_api` (1.`ort_api`.x)
+    /// at `optimization_level`; returns the index of its label in the
+    /// model's logits.
+    ///
+    /// Refuses a different model, revision, graph or tokenizer file,
+    /// truncation length, onnxruntime minor version or optimisation level,
+    /// and a calibration fitted on batched scores of a model whose scores
+    /// change in a batch.
+    pub fn check_fit(
+        &self,
+        model: &PairModel,
+        ort_api: u32,
+        optimization_level: &str,
+    ) -> Result<usize> {
+        let differs = |what: &str, fitted: &dyn std::fmt::Display, here: &dyn std::fmt::Display| {
+            Err(DecideError::Calibration(format!(
+                "fitted with {what} {fitted}, but this model or runtime has {here}"
+            )))
+        };
+        if self.model != model.name || self.revision != model.revision {
+            let fitted = format!("{}@{}", self.model, self.revision);
+            return differs(
+                "model",
+                &fitted,
+                &format!("{}@{}", model.name, model.revision),
+            );
+        }
+        if self.onnx_sha256 != model.onnx.sha256 {
+            return differs("graph sha256", &self.onnx_sha256, &model.onnx.sha256);
+        }
+        if self.tokenizer_sha256 != model.tokenizer.sha256 {
+            return differs(
+                "tokenizer sha256",
+                &self.tokenizer_sha256,
+                &model.tokenizer.sha256,
+            );
+        }
+        if self.max_len != model.max_len {
+            return differs("max_len", &self.max_len, &model.max_len);
+        }
+        let fitted_api = self
+            .onnxruntime
+            .split('.')
+            .nth(1)
+            .and_then(|minor| minor.parse::<u32>().ok());
+        if self.onnxruntime.split('.').next() != Some("1") || fitted_api != Some(ort_api) {
+            return differs("onnxruntime", &self.onnxruntime, &format!("1.{ort_api}"));
+        }
+        if self.optimization_level != optimization_level {
+            return differs(
+                "optimization level",
+                &self.optimization_level,
+                &optimization_level,
+            );
+        }
+        if !self.one_pair_per_call && !model.batch_invariant {
+            return differs(
+                "batched scores",
+                &"of a model whose scores change in a batch",
+                &"one pair per call",
+            );
+        }
+        model.label_index(&self.label).ok_or_else(|| {
+            DecideError::Calibration(format!(
+                "label {:?} is not one of {:?}",
+                self.label, model.labels
+            ))
+        })
     }
 
     /// Calibrated probability of the label at `label_index` in `logits`.
@@ -133,6 +220,12 @@ mod tests {
             label: "contradiction".into(),
             temperature,
             threshold,
+            onnx_sha256: "g".into(),
+            tokenizer_sha256: "t".into(),
+            max_len: 512,
+            onnxruntime: "1.22.0".into(),
+            optimization_level: "ORT_ENABLE_ALL".into(),
+            one_pair_per_call: true,
         }
     }
 
@@ -196,8 +289,81 @@ mod tests {
     }
 
     #[test]
+    fn bundled_u1_calibration_fits_the_u1_model_and_runtime() {
+        let index = Calibration::u1()
+            .check_fit(
+                &crate::NLI_DEBERTA_V3_XSMALL_QINT8,
+                ort::sys::ORT_API_VERSION,
+                crate::classifier::OPTIMIZATION_LEVEL,
+            )
+            .unwrap();
+        assert_eq!(index, 0);
+    }
+
+    #[test]
+    fn check_fit_refuses_every_mismatch() {
+        let u1 = crate::NLI_DEBERTA_V3_XSMALL_QINT8;
+        let fits = |c: &Calibration, model: &PairModel, api: u32, level: &str| {
+            c.check_fit(model, api, level)
+        };
+        let ok = Calibration::u1();
+        assert!(fits(&ok, &u1, 22, "ORT_ENABLE_ALL").is_ok());
+
+        // Same name and revision, different files or settings.
+        let other_graph = PairModel {
+            onnx: crate::ModelFile {
+                sha256: "7105da41f625c42eca24e9465ec99150d02a80e644659d7a1daa93a6357155d4",
+                ..u1.onnx
+            },
+            ..u1
+        };
+        let other_tokenizer = PairModel {
+            tokenizer: crate::ModelFile {
+                sha256: "0000000000000000000000000000000000000000000000000000000000000000",
+                ..u1.tokenizer
+            },
+            ..u1
+        };
+        let shorter = PairModel { max_len: 256, ..u1 };
+        for model in [other_graph, other_tokenizer, shorter] {
+            let err = fits(&ok, &model, 22, "ORT_ENABLE_ALL").unwrap_err();
+            assert!(matches!(err, DecideError::Calibration(_)), "{err}");
+        }
+        assert!(
+            fits(&ok, &u1, 23, "ORT_ENABLE_ALL").is_err(),
+            "other onnxruntime"
+        );
+        assert!(
+            fits(&ok, &u1, 22, "ORT_ENABLE_BASIC").is_err(),
+            "other level"
+        );
+
+        let batched = Calibration {
+            one_pair_per_call: false,
+            ..Calibration::u1()
+        };
+        assert!(
+            fits(&batched, &u1, 22, "ORT_ENABLE_ALL").is_err(),
+            "batched fit"
+        );
+        let invariant = PairModel {
+            batch_invariant: true,
+            ..u1
+        };
+        assert!(fits(&batched, &invariant, 22, "ORT_ENABLE_ALL").is_ok());
+
+        let unknown_label = Calibration {
+            label: "relevant".into(),
+            ..Calibration::u1()
+        };
+        assert!(fits(&unknown_label, &u1, 22, "ORT_ENABLE_ALL").is_err());
+    }
+
+    #[test]
     fn rejects_bad_values() {
-        let base = r#""model":"m","revision":"r","label":"contradiction""#;
+        let base = r#""model":"m","revision":"r","label":"contradiction","onnx_sha256":"g",
+            "tokenizer_sha256":"t","max_len":512,"onnxruntime":"1.22.0",
+            "optimization_level":"ORT_ENABLE_ALL","one_pair_per_call":true"#;
         for bad in [
             format!(r#"{{{base},"temperature":0,"threshold":0.5}}"#),
             format!(r#"{{{base},"temperature":-1,"threshold":0.5}}"#),

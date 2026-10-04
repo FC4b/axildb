@@ -15,6 +15,10 @@ use crate::{DecideError, Result};
 /// Largest number of pairs a batch-invariant model runs in one call.
 const MAX_BATCH: usize = 8;
 
+/// The session's graph optimisation level (`Level3`), named as onnxruntime
+/// and the calibration files name it.
+pub(crate) const OPTIMIZATION_LEVEL: &str = "ORT_ENABLE_ALL";
+
 /// Session settings for [`PairClassifier::load_with`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LoadOptions {
@@ -73,12 +77,13 @@ impl PairClassifier {
         Self::load_with(model, dir, calibration, LoadOptions::default())
     }
 
-    /// Load `model` from `dir`, which must hold its pinned files (see
-    /// [`PairModel::download`]).
+    /// Load `model` from `dir`, which must hold its pinned files.
+    /// [`PairModel::download`] puts them there, and repairs any that fail
+    /// their hash, so calling it first is the usual recipe.
     ///
-    /// Fails if `calibration` has unusable values, was fitted for a
-    /// different model or revision, or names a label the model lacks, and
-    /// if any file in `dir` does not match its pinned sha256. Hashing the
+    /// Fails if `calibration` has unusable values or does not fit this model
+    /// and runtime ([`Calibration::check_fit`]), and if any file in `dir` is
+    /// missing or does not match its pinned size and sha256. Hashing the
     /// files is part of every load.
     pub fn load_with(
         model: &PairModel,
@@ -87,26 +92,13 @@ impl PairClassifier {
         options: LoadOptions,
     ) -> Result<Self> {
         calibration.validate()?;
-        if calibration.model != model.name || calibration.revision != model.revision {
-            return Err(DecideError::Calibration(format!(
-                "fitted for {}@{}, not {}@{}",
-                calibration.model, calibration.revision, model.name, model.revision
-            )));
-        }
-        let label_index = model.label_index(&calibration.label).ok_or_else(|| {
-            DecideError::Calibration(format!(
-                "label {:?} is not one of {:?}",
-                calibration.label, model.labels
+        let label_index =
+            calibration.check_fit(model, ort::sys::ORT_API_VERSION, OPTIMIZATION_LEVEL)?;
+        model.verify(dir).map_err(|e| {
+            DecideError::Model(format!(
+                "{e} (PairModel::download fetches missing files and repairs bad ones)"
             ))
         })?;
-        if !model.is_available(dir) {
-            return Err(DecideError::Model(format!(
-                "{} is not in {} (download it first)",
-                model.name,
-                dir.display()
-            )));
-        }
-        model.verify(dir)?;
 
         let session = Session::builder()
             .and_then(|b| b.with_optimization_level(GraphOptimizationLevel::Level3))
@@ -371,6 +363,20 @@ mod tests {
         let err = PairClassifier::load(&model, dir.path(), unknown)
             .err()
             .expect("unknown label");
+        assert!(matches!(err, DecideError::Calibration(_)), "{err}");
+
+        // Same name and revision, a different pinned graph: the calibration
+        // was not fitted on its scores.
+        let regraphed = PairModel {
+            onnx: crate::ModelFile {
+                sha256: "7105da41f625c42eca24e9465ec99150d02a80e644659d7a1daa93a6357155d4",
+                ..model.onnx
+            },
+            ..model
+        };
+        let err = PairClassifier::load(&regraphed, dir.path(), Calibration::u1())
+            .err()
+            .expect("graph mismatch");
         assert!(matches!(err, DecideError::Calibration(_)), "{err}");
     }
 

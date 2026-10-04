@@ -46,9 +46,8 @@ fn ready(model: &PairModel, env: &str) -> PathBuf {
         .map(PathBuf::from)
         .or_else(|| model.default_dir())
         .expect("a model directory");
-    if !model.is_available(&dir) {
-        model.download(&dir).expect("model download");
-    }
+    // Verifies the cached files, fetching or repairing any that fail.
+    model.download(&dir).expect("model download");
     dir
 }
 
@@ -144,6 +143,7 @@ const FP32: PairModel = PairModel {
 fn padded_batches_match_single_pairs() {
     let calibration = Calibration {
         model: FP32.name.into(),
+        onnx_sha256: FP32.onnx.sha256.into(),
         temperature: 1.0,
         ..Calibration::u1()
     };
