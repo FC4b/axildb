@@ -83,7 +83,21 @@ TYPESAFE_API_KEY=... python run_jev.py --confirm-external     # hosted Jev; send
 # Production-heuristic arm
 cat sets/u1_lme.jsonl sets/u1_repo.jsonl > out/u1_all.jsonl
 cargo run --release --manifest-path heuristic/Cargo.toml -- out/u1_all.jsonl > out/heuristic-u1.jsonl
+
+# U1 calibration for the Rust runtime (crates/extensions/axil-decide).
+# Use onnxruntime 1.22.0, the version ort 2.0.0-rc.10 bundles: the int8
+# model's logits move by up to 1.3 between onnxruntime versions.
+pip install onnxruntime==1.22.0 tokenizers==0.21.4 huggingface_hub numpy
+python calibrate_u1.py
 ```
+
+`calibrate_u1.py` fits one temperature on the one-vs-rest contradiction logit
+and a threshold whose validation FPR has a 95% upper bound of 5%, both on the
+`train` split, and reports on `test`. It writes
+`benchmarks/results/typed-decisions-u1-calibration-<date>.json`, the runtime
+file `crates/extensions/axil-decide/calibration/u1-nli-deberta-v3-xsmall-qint8.json`
+and the Rust parity fixture `crates/extensions/axil-decide/tests/fixtures/u1_parity.json`.
+The model and tokenizer are pinned by revision and sha256.
 
 Raw outputs go to `out/`, which is gitignored. The committed summary is `benchmarks/results/typed-decisions-bakeoff-<date>.json`.
 

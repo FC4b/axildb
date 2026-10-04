@@ -1,0 +1,221 @@
+{
+  "benchmark": "typed-decisions-u1-calibration",
+  "date": "2026-10-04",
+  "machine": "arm64 macOS-26.6-arm64-arm-64bit",
+  "onnxruntime": "1.22.0",
+  "threads": 4,
+  "model": {
+    "name": "nli-deberta-v3-xsmall-qint8",
+    "repo": "cross-encoder/nli-deberta-v3-xsmall",
+    "revision": "a150876415327c80daeff35ca6f68f5ed8cf5c24",
+    "onnx": "onnx/model_qint8_arm64.onnx",
+    "onnx_sha256": "ef41fe8474f6070373f97fbe8362461d55108f387723280fcdb64f8015133db2",
+    "tokenizer_sha256": "5124ef2ead1a10a717703bc436de7f353da76d6340e4587719b42b1693707964",
+    "labels": [
+      "contradiction",
+      "entailment",
+      "neutral"
+    ],
+    "max_len": 512
+  },
+  "score": "sigmoid((z_contradiction - logsumexp(z_entailment, z_neutral)) / T), premise=old, hypothesis=new, batch 1, no padding, ORT_ENABLE_ALL",
+  "sets": "u1_lme.jsonl + u1_repo.jsonl; split field: train = validation (fit), test = report",
+  "n_validation": {
+    "pairs": 102,
+    "positives": 36,
+    "negatives": 66
+  },
+  "n_test": {
+    "pairs": 147,
+    "positives": 53,
+    "negatives": 94
+  },
+  "temperature": 5.283353,
+  "comparisons": {
+    "platt": {
+      "a": 0.19671678189111272,
+      "b": 0.04603309646997971,
+      "note": "sigmoid(a * logit(p_raw) + b); not shipped"
+    },
+    "softmax_temperature": {
+      "temperature": 6.0766239527082515,
+      "note": "softmax(logits / T)[contradiction]; not shipped: it reorders pairs"
+    }
+  },
+  "test": {
+    "auroc_raw": 0.746688077077479,
+    "auroc_calibrated": 0.746688077077479,
+    "auroc_softmax_temperature": 0.7376555600160578,
+    "ece_raw": 0.1992736704507691,
+    "ece_temperature": 0.08640283812583772,
+    "ece_platt": 0.08404616224434472,
+    "ece_softmax_temperature": 0.10661987191533888,
+    "ece_bootstrap95": {
+      "raw": [
+        0.1458,
+        0.2705
+      ],
+      "temperature": [
+        0.0598,
+        0.163
+      ],
+      "platt": [
+        0.0677,
+        0.1681
+      ],
+      "softmax_temperature": [
+        0.0699,
+        0.1824
+      ]
+    },
+    "nll": {
+      "raw": 1.0068188793013784,
+      "temperature": 0.5483701173145121,
+      "platt": 0.5476370758400494,
+      "softmax_temperature": 0.5625455668193685
+    },
+    "brier": {
+      "raw": 0.20762755924539128,
+      "temperature": 0.18100136026207392,
+      "platt": 0.1806363762503268,
+      "softmax_temperature": 0.1882463693767023
+    },
+    "ece_note": "10 equal-width bins (same as the bake-off); 147 pairs, so ECE is noisy: see the bootstrap interval"
+  },
+  "validation": {
+    "ece_raw": 0.30652741882578344,
+    "ece_temperature": 0.07461242884196562,
+    "nll_raw": 1.284946007110752,
+    "nll_temperature": 0.6074665109875654
+  },
+  "threshold": {
+    "shipped": 0.695294,
+    "rule": "val_fpr_cp95_upper_le_0.05",
+    "at_shipped_threshold_test": {
+      "tp": 10,
+      "fp": 2,
+      "positives": 53,
+      "negatives": 94,
+      "tpr": 0.18867924528301888,
+      "tpr_wilson95": [
+        0.10585325059108783,
+        0.3135845919717667
+      ],
+      "fpr": 0.02127659574468085,
+      "fpr_wilson95": [
+        0.005854336186497451,
+        0.07429020551345286
+      ],
+      "precision": 0.8333333333333334
+    },
+    "rules": {
+      "val_fpr_cp95_upper_le_0.05": {
+        "threshold": 0.6952939009109012,
+        "validation": {
+          "tp": 4,
+          "fp": 0,
+          "positives": 36,
+          "negatives": 66,
+          "tpr": 0.1111111111111111,
+          "tpr_wilson95": [
+            0.04406640269669905,
+            0.253148087279096
+          ],
+          "fpr": 0.0,
+          "fpr_wilson95": [
+            0.0,
+            0.05500255783352154
+          ],
+          "precision": 1.0
+        },
+        "test": {
+          "tp": 10,
+          "fp": 2,
+          "positives": 53,
+          "negatives": 94,
+          "tpr": 0.18867924528301888,
+          "tpr_wilson95": [
+            0.10585325059108783,
+            0.3135845919717667
+          ],
+          "fpr": 0.02127659574468085,
+          "fpr_wilson95": [
+            0.005854336186497451,
+            0.07429020551345286
+          ],
+          "precision": 0.8333333333333334
+        }
+      },
+      "val_fpr_le_0.05": {
+        "threshold": 0.6205076939107961,
+        "validation": {
+          "tp": 7,
+          "fp": 3,
+          "positives": 36,
+          "negatives": 66,
+          "tpr": 0.19444444444444445,
+          "tpr_wilson95": [
+            0.0975309536595807,
+            0.3502804313214011
+          ],
+          "fpr": 0.045454545454545456,
+          "fpr_wilson95": [
+            0.015578274213192515,
+            0.12533314199909978
+          ],
+          "precision": 0.7
+        },
+        "test": {
+          "tp": 20,
+          "fp": 7,
+          "positives": 53,
+          "negatives": 94,
+          "tpr": 0.37735849056603776,
+          "tpr_wilson95": [
+            0.2593626539178842,
+            0.5119310416371796
+          ],
+          "fpr": 0.07446808510638298,
+          "fpr_wilson95": [
+            0.03653858066702447,
+            0.14581212306626468
+          ],
+          "precision": 0.7407407407407407
+        }
+      }
+    },
+    "note": "Thresholds are on the temperature-calibrated probability and chosen on validation only. val_fpr_le_0.05 is the bake-off's rule, shown for comparison."
+  },
+  "accuracy_by_kind_test": {
+    "both_hold": "42/42",
+    "contradiction": "3/4",
+    "negation_other_subject": "2/3",
+    "refinement": "4/4",
+    "restatement": "2/2",
+    "reversal": "2/3",
+    "same_topic": "42/43",
+    "update": "5/46"
+  },
+  "auroc_test_by_source": {
+    "axil-dogfood": 0.7904761904761904,
+    "longmemeval_oracle": 0.7164473684210526
+  },
+  "python_latency": {
+    "load_ms": 962.7,
+    "p50_ms": 42.12,
+    "p95_ms": 122.72,
+    "note": "tokenize + run, batch 1, one run on this machine"
+  },
+  "onnxruntime_drift": {
+    "against": "u1-scores-ort1.30.0.jsonl",
+    "pairs": 249,
+    "max_abs_logit_diff": 1.2883470952510834,
+    "max_abs_calibrated_p_diff": 0.10574636823658223,
+    "threshold_flips": 4
+  },
+  "notes": [
+    "Test ECE after temperature scaling misses the 0.05 bar of the bake-off's go rules. It is not applied to this model: it only proposes a 'possible contradiction' review edge, never retires a record (Axil decision 01M42C1K7XJK3NNG0JM9CYGDW0).",
+    "Latency is one run on a machine shared with other jobs; compare it only with numbers from the same day."
+  ],
+  "runtime_file": "crates/extensions/axil-decide/calibration/u1-nli-deberta-v3-xsmall-qint8.json"
+}

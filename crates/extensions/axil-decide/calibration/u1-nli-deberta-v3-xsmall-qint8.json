@@ -1,0 +1,16 @@
+{
+  "decision": "U1",
+  "question": "Does NEW update, replace or contradict OLD?",
+  "model": "nli-deberta-v3-xsmall-qint8",
+  "repo": "cross-encoder/nli-deberta-v3-xsmall",
+  "revision": "a150876415327c80daeff35ca6f68f5ed8cf5c24",
+  "premise": "old",
+  "hypothesis": "new",
+  "label": "contradiction",
+  "calibration": "sigmoid((z_label - logsumexp(z_other)) / temperature)",
+  "temperature": 5.283353,
+  "threshold": 0.695294,
+  "threshold_rule": "lowest threshold whose validation FPR has a one-sided 95% Clopper-Pearson upper bound <= 0.05",
+  "fitted_on": "U1 train split (102 pairs), onnxruntime 1.22.0, batch 1",
+  "source": "benchmarks/results/typed-decisions-u1-calibration-2026-10-04.json"
+}
