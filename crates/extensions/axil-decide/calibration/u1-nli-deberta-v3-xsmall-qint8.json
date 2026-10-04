@@ -1,6 +1,6 @@
 {
   "decision": "U1",
-  "question": "Does NEW update, replace or contradict OLD?",
+  "signal": "possible contradiction for review: P(contradiction | premise=OLD, hypothesis=NEW); not an update detector, it flags few plain updates",
   "model": "nli-deberta-v3-xsmall-qint8",
   "repo": "cross-encoder/nli-deberta-v3-xsmall",
   "revision": "a150876415327c80daeff35ca6f68f5ed8cf5c24",

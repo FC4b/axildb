@@ -21,9 +21,9 @@ and every reported number is on `test`:
 The model and tokenizer are pinned by revision and sha256. Score with the same
 onnxruntime version and graph optimisation level as the Rust runtime (ort
 2.0.0-rc.10 bundles 1.22.0; Level3 = ORT_ENABLE_ALL): this model's logits move
-by up to 1.3 between onnxruntime 1.22 and 1.30, and by 0.7 between
-ORT_ENABLE_BASIC and ORT_ENABLE_ALL, so a calibration is only valid for the
-scores the runtime will produce. The thread count does not change them.
+between onnxruntime versions (`onnxruntime_drift` in the report, with
+--compare) and between optimisation levels (`session_settings_check`), so a
+calibration is only valid for the scores the runtime will produce.
 
 Usage:
   python calibrate_u1.py --scores-only            # dump out/u1-scores-ort<ver>.jsonl
@@ -95,7 +95,7 @@ def pinned(path_in_repo, expected):
     return path
 
 
-def score_all(rows):
+def score_all(rows, threads=THREADS, level=ort.GraphOptimizationLevel.ORT_ENABLE_ALL):
     """Raw logits per pair, batch 1, no padding.
 
     Batching changes this model's output: dynamic int8 quantization takes one
@@ -105,8 +105,9 @@ def score_all(rows):
     tok.enable_truncation(max_length=MODEL["max_len"])
     tok.no_padding()
     opts = ort.SessionOptions()
-    opts.intra_op_num_threads = THREADS
+    opts.intra_op_num_threads = threads
     opts.inter_op_num_threads = 1
+    opts.graph_optimization_level = level
     model_path = pinned(MODEL["onnx"], MODEL["onnx_sha256"])
     t0 = time.perf_counter()
     sess = ort.InferenceSession(model_path, opts, providers=["CPUExecutionProvider"])
@@ -124,6 +125,33 @@ def score_all(rows):
         lat.append((time.perf_counter() - t0) * 1000)
         out.append({"id": r["id"], "tokens": len(enc.ids), "logits": [float(x) for x in logits]})
     return out, load_ms, lat
+
+
+def score_batched(rows, batch=8):
+    """Raw logits per pair from padded batches of `batch`, shortest pairs
+    first (how a runtime would batch a batch-invariant model)."""
+    tok = Tokenizer.from_file(pinned("tokenizer.json", MODEL["tokenizer_sha256"]))
+    tok.enable_truncation(max_length=MODEL["max_len"])
+    tok.no_padding()
+    opts = ort.SessionOptions()
+    opts.intra_op_num_threads = THREADS
+    opts.inter_op_num_threads = 1
+    sess = ort.InferenceSession(pinned(MODEL["onnx"], MODEL["onnx_sha256"]), opts,
+                                providers=["CPUExecutionProvider"])
+    encs = [tok.encode(r["old"], r["new"]) for r in rows]
+    order = sorted(range(len(rows)), key=lambda i: len(encs[i].ids))
+    out = {}
+    for start in range(0, len(order), batch):
+        group = order[start:start + batch]
+        width = max(len(encs[i].ids) for i in group)
+        ids = np.zeros((len(group), width), dtype=np.int64)
+        mask = np.zeros_like(ids)
+        for row, i in enumerate(group):
+            ids[row, :len(encs[i].ids)] = encs[i].ids
+            mask[row, :len(encs[i].ids)] = 1
+        for i, logits in zip(group, sess.run(None, {"input_ids": ids, "attention_mask": mask})[0]):
+            out[rows[i]["id"]] = [float(x) for x in logits]
+    return out
 
 
 def ovr_logit(logits):
@@ -371,10 +399,41 @@ def main():
         drift = {"against": Path(args.compare).name, "pairs": len(scored),
                  "max_abs_logit_diff": dl, "max_abs_calibrated_p_diff": dp, "threshold_flips": flips}
 
+    # How much the session settings move the scores, against the run above
+    # (ORT_ENABLE_ALL, THREADS threads): why the runtime pins Level3 and why
+    # its thread count is free.
+    level = ort.GraphOptimizationLevel
+    variants = {f"optimization {lv.name}": dict(level=lv)
+                for lv in (level.ORT_DISABLE_ALL, level.ORT_ENABLE_BASIC, level.ORT_ENABLE_EXTENDED)}
+    variants.update({f"threads {n}": dict(threads=n) for n in (1, 2, 8)})
+    session_check = {"against": f"ORT_ENABLE_ALL, {THREADS} threads", "pairs": len(scored)}
+    for name, kwargs in variants.items():
+        other = {o["id"]: o for o in score_all(rows, **kwargs)[0]}
+        session_check[name] = {
+            "max_abs_logit_diff": max(abs(a - b) for s_ in scored
+                                      for a, b in zip(s_["logits"], other[s_["id"]]["logits"])),
+            "threshold_flips": sum((prob(s_["logits"], t) >= threshold)
+                                   != (prob(other[s_["id"]]["logits"], t) >= threshold) for s_ in scored),
+        }
+
+    # Dynamic int8 quantization takes one activation scale per input tensor,
+    # so batching changes every pair's score: why the runtime scores this
+    # model one pair per call.
+    batched = score_batched(rows)
+    batch_check = {
+        "what": "padded batches of 8, shortest pairs first, against one pair per run",
+        "pairs": len(scored),
+        "max_abs_logit_diff": max(abs(a - b) for s_ in scored for a, b in zip(s_["logits"], batched[s_["id"]])),
+        "max_abs_calibrated_p_diff": max(abs(prob(s_["logits"], t) - prob(batched[s_["id"]], t)) for s_ in scored),
+        "threshold_flips": sum((prob(s_["logits"], t) >= threshold) != (prob(batched[s_["id"]], t) >= threshold)
+                               for s_ in scored),
+    }
+
     date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     runtime = {
         "decision": "U1",
-        "question": "Does NEW update, replace or contradict OLD?",
+        "signal": "possible contradiction for review: P(contradiction | premise=OLD, hypothesis=NEW); "
+                  "not an update detector, it flags few plain updates",
         "model": MODEL["name"],
         "repo": MODEL["repo"],
         "revision": MODEL["revision"],
@@ -447,6 +506,8 @@ def main():
                            "p95_ms": round(sorted(lat)[int(0.95 * (len(lat) - 1))], 2),
                            "note": "tokenize + run, batch 1, one run on this machine"},
         "onnxruntime_drift": drift,
+        "session_settings_check": session_check,
+        "batch_check": batch_check,
         "notes": [
             "Test ECE after temperature scaling misses the 0.05 bar of the bake-off's go rules. It is not "
             "applied to this model: it only proposes a 'possible contradiction' review edge, never retires a "
@@ -492,6 +553,11 @@ def main():
         print(f"{name:<30} thr {op['threshold']:.4f}  val FPR {v['fpr']:.3f} TPR {v['tpr']:.3f}"
               f"  | test FPR {te['fpr']:.3f} ({te['fp']}/{te['negatives']}) TPR {te['tpr']:.3f}"
               f" ({te['tp']}/{te['positives']})")
+    print(f"batched vs single: max |logit diff| {batch_check['max_abs_logit_diff']:.3g}, "
+          f"max |p diff| {batch_check['max_abs_calibrated_p_diff']:.3g}, flips {batch_check['threshold_flips']}")
+    for name, v in session_check.items():
+        if isinstance(v, dict):
+            print(f"{name:<36} max |logit diff| {v['max_abs_logit_diff']:.3g}  flips {v['threshold_flips']}")
     if drift:
         print(f"drift vs {drift['against']}: logits {drift['max_abs_logit_diff']:.2e}, "
               f"p {drift['max_abs_calibrated_p_diff']:.2e}, flips {drift['threshold_flips']}")

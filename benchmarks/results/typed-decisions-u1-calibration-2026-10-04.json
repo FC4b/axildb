@@ -201,9 +201,9 @@
     "longmemeval_oracle": 0.7164473684210526
   },
   "python_latency": {
-    "load_ms": 1210.4,
-    "p50_ms": 82.79,
-    "p95_ms": 244.69,
+    "load_ms": 618.2,
+    "p50_ms": 33.47,
+    "p95_ms": 48.74,
     "note": "tokenize + run, batch 1, one run on this machine"
   },
   "onnxruntime_drift": {
@@ -211,6 +211,41 @@
     "pairs": 249,
     "max_abs_logit_diff": 1.2883470952510834,
     "max_abs_calibrated_p_diff": 0.10574636823658223,
+    "threshold_flips": 4
+  },
+  "session_settings_check": {
+    "against": "ORT_ENABLE_ALL, 4 threads",
+    "pairs": 249,
+    "optimization ORT_DISABLE_ALL": {
+      "max_abs_logit_diff": 0.9532110691070557,
+      "threshold_flips": 4
+    },
+    "optimization ORT_ENABLE_BASIC": {
+      "max_abs_logit_diff": 0.9532110691070557,
+      "threshold_flips": 4
+    },
+    "optimization ORT_ENABLE_EXTENDED": {
+      "max_abs_logit_diff": 0.0,
+      "threshold_flips": 0
+    },
+    "threads 1": {
+      "max_abs_logit_diff": 0.0,
+      "threshold_flips": 0
+    },
+    "threads 2": {
+      "max_abs_logit_diff": 0.0,
+      "threshold_flips": 0
+    },
+    "threads 8": {
+      "max_abs_logit_diff": 0.0,
+      "threshold_flips": 0
+    }
+  },
+  "batch_check": {
+    "what": "padded batches of 8, shortest pairs first, against one pair per run",
+    "pairs": 249,
+    "max_abs_logit_diff": 1.3889007568359375,
+    "max_abs_calibrated_p_diff": 0.09536376815241399,
     "threshold_flips": 4
   },
   "notes": [
