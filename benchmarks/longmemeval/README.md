@@ -46,11 +46,14 @@ split (about 480 sessions per question, 2.6 GB) is the retrieval setting the
 paper used; a question takes roughly ten times as long as on `s`. The gate
 skips loudly when the requested split's file is missing.
 
-Each configuration (split, strategy, top-k, question count, rerank) has its own
-baseline: `baseline.jsonl` for the default 500-question `recall-qtc` run, and
-`baselines/<variant>-<strategy>-k<top_k>-n<questions>.json` for the rest. A
-comparison against a baseline recorded under another configuration fails
-instead of passing on a meaningless delta.
+Each configuration (split, strategy, top-k, question count, rerank, embedding
+model) has its own baseline: `baseline.jsonl` for the default 500-question
+`recall-qtc` run, and `baselines/<variant>-<strategy>-k<top_k>-n<questions>.json`
+for the rest, with `-rerank-<mode>` and `-model-<model>` appended when those
+differ from the defaults (off, bge-small). A comparison against a baseline
+recorded under another configuration fails instead of passing on a
+meaningless delta; the model is kept apart by file name, since the report
+does not record it.
 
 The gate exit codes:
 

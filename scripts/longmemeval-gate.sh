@@ -95,6 +95,9 @@ N_LABEL="${QUESTIONS}"
 [[ "${QUESTIONS}" == "0" ]] && N_LABEL="all"
 CONFIG="${VARIANT}-${STRATEGY}-k${TOP_K}-n${N_LABEL}"
 [[ "${RERANK}" != "off" ]] && CONFIG="${CONFIG}-rerank-${RERANK}"
+# The report does not record the embedding model, so a non-default model
+# gets its own baseline file; bge-small keeps the existing paths.
+[[ "${MODEL}" != "bge-small" ]] && CONFIG="${CONFIG}-model-${MODEL}"
 if [[ "${CONFIG}" == "s-recall-qtc-k5-n500" ]]; then
   BASELINE="${HARNESS}/baseline.jsonl"
 else

@@ -52,11 +52,10 @@ claimed here.
 │          (vector + recency + graph + keyword + temporal +   │
 │           feedback + preference + activation + importance)  │
 ├─────────────────────────────────────────────────────────────┤
-│ Step 4b — Library reranker              (optional, off)     │
-│           (QueryBuilder::with_reranker; the CLI's --rerank  │
-│            runs after recall returns, see Step 4b)          │
+│ Step 4b — Library reranker   (QueryBuilder only, optional)  │
+│           (the CLI's --rerank runs after recall returns)    │
 ├─────────────────────────────────────────────────────────────┤
-│ Step 4c — Query-Time Chunk rerank       (optional)          │
+│ Step 4c — Query-Time Chunk rerank   (Axil::recall only)     │
 ├─────────────────────────────────────────────────────────────┤
 │ Step 5 — Graph traversal                (optional)          │
 ├─────────────────────────────────────────────────────────────┤
@@ -220,10 +219,12 @@ expected model is `cross-encoder/ms-marco-MiniLM-L-6-v2`.
 `--rerank llm` reorders the same list through the configured
 `LlmProvider` instead.
 
-**The library reranker** is the stage in the diagram. Embedded library
-users can bring their own: implement the `Rerank` trait in `axil-core` and
-attach it with `QueryBuilder::with_reranker(...)`; it runs on the
-QueryBuilder path before query-time chunks. The top `rerank_top_k_in` candidates
+**The library reranker** belongs to the `QueryBuilder` path only. Embedded
+library users can bring their own: implement the `Rerank` trait in
+`axil-core` and attach it with `QueryBuilder::with_reranker(...)`. It does
+not run inside `Axil::recall` (`db.recall()`), and `QueryBuilder` has no
+query-time chunk stage: the diagram shows both paths' stages, and Steps 4b
+and 4c each apply to one of them. The top `rerank_top_k_in` candidates
 (default 50) are re-scored and up to `rerank_top_k_out` (default 10) are
 kept.
 
