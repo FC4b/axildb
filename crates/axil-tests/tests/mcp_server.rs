@@ -456,13 +456,37 @@ fn mcp_tool_profiles() {
     init_db_with_all_engines(&db_path);
 
     let (core, refused) = listed_tools_and_list_call(spawn_mcp(&db_path, &[], None));
-    for name in ["boot", "recall", "search", "get", "code_search", "store", "checkpoint"] {
-        assert!(core.iter().any(|n| n == name), "core omits `{name}`: {core:?}");
+    for name in [
+        "boot",
+        "recall",
+        "search",
+        "get",
+        "code_search",
+        "store",
+        "checkpoint",
+    ] {
+        assert!(
+            core.iter().any(|n| n == name),
+            "core omits `{name}`: {core:?}"
+        );
     }
-    for name in ["list", "link", "delete", "query", "code_context", "cache_get"] {
-        assert!(!core.iter().any(|n| n == name), "core lists `{name}`: {core:?}");
+    for name in [
+        "list",
+        "link",
+        "delete",
+        "query",
+        "code_context",
+        "cache_get",
+    ] {
+        assert!(
+            !core.iter().any(|n| n == name),
+            "core lists `{name}`: {core:?}"
+        );
     }
-    assert_eq!(refused["isError"], true, "core must refuse `list`: {refused}");
+    assert_eq!(
+        refused["isError"], true,
+        "core must refuse `list`: {refused}"
+    );
     let text = refused["content"][0]["text"].as_str().unwrap();
     assert!(text.contains("--tools full"), "{text}");
 
@@ -472,7 +496,10 @@ fn mcp_tool_profiles() {
         for name in ["list", "link", "delete", "code_context"] {
             assert!(full.iter().any(|n| n == name), "full omits `{name}`");
         }
-        assert!(listed.get("isError").is_none(), "full must run `list`: {listed}");
+        assert!(
+            listed.get("isError").is_none(),
+            "full must run `list`: {listed}"
+        );
     }
 }
 
@@ -512,5 +539,9 @@ fn mcp_install_pins_the_tool_profile() {
         "{pinned:?}"
     );
     let default = args_for(&[]);
-    assert_eq!(default.last().map(String::as_str), Some("mcp"), "{default:?}");
+    assert_eq!(
+        default.last().map(String::as_str),
+        Some("mcp"),
+        "{default:?}"
+    );
 }
