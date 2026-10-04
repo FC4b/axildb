@@ -1,0 +1,60 @@
+{
+  "benchmark": "typed-decisions-u1-rust-runtime",
+  "date": "2026-10-04",
+  "machine": "M1 Pro (aarch64 macOS), 10 cores, shared with other build jobs",
+  "runtime": "axil-decide PairClassifier, ort 2.0.0-rc.10 (onnxruntime 1.22.0), CPU, Level3",
+  "model": "nli-deberta-v3-xsmall-qint8@a150876415327c80daeff35ca6f68f5ed8cf5c24",
+  "calibration": "crates/extensions/axil-decide/calibration/u1-nli-deberta-v3-xsmall-qint8.json",
+  "reproduce": "cargo run --release -p axil-decide --example u1_bench -- --threads N --out FILE.json; cargo test --release -p axil-decide --test u1_parity -- --ignored",
+  "parity": {
+    "against": "Python onnxruntime 1.22.0",
+    "flagged": 12,
+    "max_abs_logit_diff": 4.440892098500626e-16,
+    "max_abs_probability_diff": 5.551115123125783e-17,
+    "pairs": 147,
+    "verdicts_agree": 147,
+    "tokens_equal": "every pair (asserted by tests/u1_parity.rs)",
+    "argmax_equal": "every pair (asserted by tests/u1_parity.rs)",
+    "note": "Rust and Python onnxruntime 1.22.0 produce the same float32 logits; the residual is float64 rounding in the calibration."
+  },
+  "batched_fp32_check": {
+    "model": "onnx/model.onnx (fp32) of the same revision, batch-invariant",
+    "pairs": 40,
+    "max_abs_probability_diff_batched_vs_single": 1.95e-06,
+    "note": "Padded batches of 8 against one pair per call, temperature 1 and the U1 threshold; asserted by tests/u1_parity.rs. The runtime batches only a batch-invariant model whose calibration was fitted on batched scores, so the U1 calibration (fitted one pair per call) never batches. The int8 model is not batch-invariant (one activation scale per batch tensor), so the runtime scores it one pair per call: padded batches of 8 move its logits by up to 1.4 and flip 4 of 249 verdicts (batch_check in benchmarks/results/typed-decisions-u1-calibration-2026-10-04.json).",
+    "verdict_flips_batched_vs_single": 0
+  },
+  "latency": {
+    "what": "one pair per call (tokenize + run + calibrate), 249 U1 pairs; Rust after 5 warm-up pairs, Python without; one run each, Rust first",
+    "load_what": "Rust load = sha256 check of the pinned files + session + tokenizer, first in process (the hash check, timed alone just before with the files in the page cache, is of_which_verify_ms); Python load = session creation only",
+    "rust_threads_1": {
+      "load_ms": 811.3,
+      "of_which_verify_ms": 302.5,
+      "mean_ms": 36.86,
+      "p50_ms": 38.05,
+      "p95_ms": 57.94
+    },
+    "rust_threads_4": {
+      "load_ms": 738.8,
+      "of_which_verify_ms": 287.2,
+      "mean_ms": 18.63,
+      "p50_ms": 18.92,
+      "p95_ms": 28.42
+    },
+    "python_onnxruntime_1.22.0_threads_1": {
+      "load_ms": 586.86,
+      "p50_ms": 85.84,
+      "p95_ms": 130.92,
+      "mean_ms": 82.32
+    },
+    "python_onnxruntime_1.22.0_threads_4": {
+      "load_ms": 589.25,
+      "p50_ms": 34.22,
+      "p95_ms": 54.21,
+      "mean_ms": 35.5
+    },
+    "load_average_during_runs": "7 to 14 (1-minute) on 10 cores",
+    "caveat": "One run each, on a machine still shared with other jobs (it was idle-ish, not idle). The bake-off measured Python p50 19.3 ms (onnxruntime 1.30, 4 threads) on 2026-09-27 (typed-decisions-bakeoff-2026-09-27.json). Re-measure on an idle machine and on x86 Linux before choosing where the model runs."
+  },
+  "session_settings": "Level3 is pinned: the basic level moves the int8 logits by up to 0.95 and flips 4 of 249 verdicts, while 1 to 8 threads give identical logits (session_settings_check in benchmarks/results/typed-decisions-u1-calibration-2026-10-04.json)."
+}

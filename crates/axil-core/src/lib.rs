@@ -40,6 +40,7 @@ pub mod consolidation;
 #[cfg(feature = "encryption")]
 pub mod crypto;
 pub mod db;
+pub mod decide;
 pub mod detectors;
 pub mod diagnostics;
 pub mod entity;
@@ -92,6 +93,7 @@ pub use db::{
     is_valid_space_name, AutoLinkReport, Axil, AxilBuilder, CanonicalPublisher, DatabaseInfo,
     HealReport, VectorSpaceFactory, VectorSpaceInfo, WarmUpReport, SCIP_ALIAS_TABLE,
 };
+pub use decide::{PairJudge, PairVerdict};
 pub use diagnostics::{
     human_bytes, BenchReport, BenchResult, CheckResult, CompactReport, DataQualitySection,
     DatabaseMeta, DatabaseStats, DegradedEngine, DoctorReport, DropEngineReport, HealAction,

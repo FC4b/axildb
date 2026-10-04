@@ -145,3 +145,54 @@ jobs:
             printf 'broken: %s\n' "${failed[@]}"
             exit 1
           fi
+
+  decide-parity:
+    name: axil-decide model parity (Linux x86, blocking)
+    runs-on: ubuntu-latest
+    env:
+      AXIL_DECIDE_MODEL_DIR: ${{ github.workspace }}/.decide-models/qint8
+      AXIL_DECIDE_FP32_DIR: ${{ github.workspace }}/.decide-models/fp32
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # The pinned revision and file hashes live in the crate's source; key
+      # the model cache on them, so a new pin starts a new cache.
+      - name: model pins (cache key)
+        id: pins
+        run: |
+          pins=$(grep -ohE '"[0-9a-f]{40}"|"[0-9a-f]{64}"' \
+            crates/extensions/axil-decide/src/model.rs \
+            crates/extensions/axil-decide/tests/u1_parity.rs \
+            | sort -u | sha256sum | cut -c1-16)
+          echo "key=axil-decide-models-$pins" >> "$GITHUB_OUTPUT"
+      - name: restore models
+        id: restore
+        uses: actions/cache/restore@v4
+        with:
+          path: .decide-models
+          key: ${{ steps.pins.outputs.key }}
+          restore-keys: ${{ steps.pins.outputs.key }}-
+      # Each test first calls PairModel::download, which verifies the cached
+      # files against their pinned sha256 and fetches from the pinned revision
+      # any that are missing or corrupt (87 MB int8, 284 MB fp32). U1 is then
+      # compared with the committed Python onnxruntime 1.22 scores, which were
+      # produced on macOS arm64: token counts, argmax and verdicts must match
+      # exactly, probabilities within 1e-4. A failure here on Linux x86 means
+      # the calibration does not carry across platforms as is.
+      - name: U1 parity with the committed Python onnxruntime scores
+        run: cargo test --release -p axil-decide --test u1_parity -- --ignored --nocapture --test-threads 1
+      # Save what the tests verified, under a key naming the files, so a cache
+      # left incomplete by a failed download is replaced rather than kept.
+      - name: models key
+        id: saved
+        if: always()
+        run: >-
+          echo "key=${{ steps.pins.outputs.key }}-${{ hashFiles('.decide-models/*/model.onnx',
+          '.decide-models/*/tokenizer.json') }}" >> "$GITHUB_OUTPUT"
+      - name: save models
+        if: always() && hashFiles('.decide-models/*/model.onnx') != '' && steps.restore.outputs.cache-matched-key != steps.saved.outputs.key
+        uses: actions/cache/save@v4
+        with:
+          path: .decide-models
+          key: ${{ steps.saved.outputs.key }}

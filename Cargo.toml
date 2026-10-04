@@ -28,6 +28,7 @@ members = [
     "crates/extensions/axil-cache",
     "crates/extensions/axil-workspace",
     "crates/extensions/axil-sync",
+    "crates/extensions/axil-decide",
     # Shared wire protocol (public contract for the closed Atlas server)
     "crates/proto/axil-atlas-proto",
     # Tier 3 — Adapters (interface to the outside world)
