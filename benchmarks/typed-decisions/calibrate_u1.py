@@ -11,12 +11,20 @@ the same way. Dividing all three logits by T before the softmax does not: it
 moves mass between entailment and neutral and reorders pairs, so it is
 reported as a comparison only, like Platt scaling.
 
-Both are fitted on the sets' `train` split, used here as the validation split,
-and every reported number is on `test`:
+Both are fitted on the sets' `train` split, used here as the validation split:
   * T minimises the binary log-loss on validation;
   * the threshold is the lowest (highest-recall) one whose validation FPR has
     a one-sided 95% Clopper-Pearson upper bound <= 5%. The bake-off's rule
     (validation FPR <= 5%) is reported next to it.
+
+The report labels each group of numbers with its split (`splits` in the JSON):
+  * test only: the quality numbers (AUROC, ECE, NLL, Brier, TPR/FPR at each
+    threshold, accuracy by kind, AUROC by source);
+  * validation only: what the fit saw (`validation`, and each threshold rule's
+    `validation` rates);
+  * all 249 pairs (validation + test): checks that compare two ways of
+    scoring the same pairs, not quality (onnxruntime drift, session settings,
+    batching), and the Python latency.
 
 The model and tokenizer are pinned by revision and sha256. Score with the same
 onnxruntime version and graph optimisation level as the Rust runtime (ort
@@ -396,7 +404,7 @@ def main():
         dp = max(abs(prob(s["logits"], t) - prob(other[s["id"]]["logits"], t)) for s in scored)
         flips = sum((prob(s["logits"], t) >= threshold) != (prob(other[s["id"]]["logits"], t) >= threshold)
                     for s in scored)
-        drift = {"against": Path(args.compare).name, "pairs": len(scored),
+        drift = {"against": Path(args.compare).name, "split": "all", "pairs": len(scored),
                  "max_abs_logit_diff": dl, "max_abs_calibrated_p_diff": dp, "threshold_flips": flips}
 
     # How much the session settings move the scores, against the run above
@@ -406,7 +414,7 @@ def main():
     variants = {f"optimization {lv.name}": dict(level=lv)
                 for lv in (level.ORT_DISABLE_ALL, level.ORT_ENABLE_BASIC, level.ORT_ENABLE_EXTENDED)}
     variants.update({f"threads {n}": dict(threads=n) for n in (1, 2, 8)})
-    session_check = {"against": f"ORT_ENABLE_ALL, {THREADS} threads", "pairs": len(scored)}
+    session_check = {"against": f"ORT_ENABLE_ALL, {THREADS} threads", "split": "all", "pairs": len(scored)}
     for name, kwargs in variants.items():
         other = {o["id"]: o for o in score_all(rows, **kwargs)[0]}
         session_check[name] = {
@@ -422,6 +430,7 @@ def main():
     batched = score_batched(rows)
     batch_check = {
         "what": "padded batches of 8, shortest pairs first, against one pair per run",
+        "split": "all",
         "pairs": len(scored),
         "max_abs_logit_diff": max(abs(a - b) for s_ in scored for a, b in zip(s_["logits"], batched[s_["id"]])),
         "max_abs_calibrated_p_diff": max(abs(prob(s_["logits"], t) - prob(batched[s_["id"]], t)) for s_ in scored),
@@ -445,7 +454,15 @@ def main():
         "threshold": round(threshold, 6),
         "threshold_rule": f"lowest threshold whose validation FPR has a one-sided {CONFIDENCE:.0%} "
                           f"Clopper-Pearson upper bound <= {TARGET_FPR}",
-        "fitted_on": f"U1 train split ({len(val)} pairs), onnxruntime {ort.__version__}, batch 1",
+        "fitted_on": f"U1 train split ({len(val)} pairs)",
+        # What the scores were produced with. The runtime refuses this
+        # calibration for a model or session that differs in any of them.
+        "onnx_sha256": MODEL["onnx_sha256"],
+        "tokenizer_sha256": MODEL["tokenizer_sha256"],
+        "max_len": MODEL["max_len"],
+        "onnxruntime": ort.__version__,
+        "optimization_level": "ORT_ENABLE_ALL",
+        "one_pair_per_call": True,
         "source": f"benchmarks/results/typed-decisions-u1-calibration-{date}.json",
     }
     # The runtime compares against the rounded values; re-derive the test
@@ -457,6 +474,13 @@ def main():
     report = {
         "benchmark": "typed-decisions-u1-calibration",
         "date": date,
+        "splits": {
+            "test": "test, threshold.at_shipped_threshold_test, threshold.rules.*.test, "
+                    "accuracy_by_kind_test, auroc_test_by_source",
+            "validation": "validation, threshold.rules.*.validation (the fit's own data)",
+            "all_249_pairs": "onnxruntime_drift, session_settings_check, batch_check, python_latency "
+                             "(agreement between two ways of scoring the same pairs, not quality)",
+        },
         "machine": f"{platform.machine()} {platform.platform()}",
         "onnxruntime": ort.__version__,
         "threads": THREADS,
@@ -504,6 +528,7 @@ def main():
         "auroc_test_by_source": {s: auroc([p for p, _ in v], [y for _, y in v]) for s, v in sorted(by_source.items())},
         "python_latency": {"load_ms": round(load_ms, 1), "p50_ms": round(statistics.median(lat), 2),
                            "p95_ms": round(sorted(lat)[int(0.95 * (len(lat) - 1))], 2),
+                           "split": "all",
                            "note": "tokenize + run, batch 1, one run on this machine"},
         "onnxruntime_drift": drift,
         "session_settings_check": session_check,

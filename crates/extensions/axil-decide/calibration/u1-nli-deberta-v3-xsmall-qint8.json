@@ -11,6 +11,12 @@
   "temperature": 5.283353,
   "threshold": 0.695294,
   "threshold_rule": "lowest threshold whose validation FPR has a one-sided 95% Clopper-Pearson upper bound <= 0.05",
-  "fitted_on": "U1 train split (102 pairs), onnxruntime 1.22.0, batch 1",
+  "fitted_on": "U1 train split (102 pairs)",
+  "onnx_sha256": "ef41fe8474f6070373f97fbe8362461d55108f387723280fcdb64f8015133db2",
+  "tokenizer_sha256": "5124ef2ead1a10a717703bc436de7f353da76d6340e4587719b42b1693707964",
+  "max_len": 512,
+  "onnxruntime": "1.22.0",
+  "optimization_level": "ORT_ENABLE_ALL",
+  "one_pair_per_call": true,
   "source": "benchmarks/results/typed-decisions-u1-calibration-2026-10-04.json"
 }

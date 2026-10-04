@@ -1,6 +1,11 @@
 {
   "benchmark": "typed-decisions-u1-calibration",
   "date": "2026-10-04",
+  "splits": {
+    "test": "test, threshold.at_shipped_threshold_test, threshold.rules.*.test, accuracy_by_kind_test, auroc_test_by_source",
+    "validation": "validation, threshold.rules.*.validation (the fit's own data)",
+    "all_249_pairs": "onnxruntime_drift, session_settings_check, batch_check, python_latency (agreement between two ways of scoring the same pairs, not quality)"
+  },
   "machine": "arm64 macOS-26.6-arm64-arm-64bit",
   "onnxruntime": "1.22.0",
   "threads": 4,
@@ -201,13 +206,15 @@
     "longmemeval_oracle": 0.7164473684210526
   },
   "python_latency": {
-    "load_ms": 618.2,
-    "p50_ms": 33.47,
-    "p95_ms": 48.74,
+    "load_ms": 687.8,
+    "p50_ms": 33.95,
+    "p95_ms": 84.14,
+    "split": "all",
     "note": "tokenize + run, batch 1, one run on this machine"
   },
   "onnxruntime_drift": {
     "against": "u1-scores-ort1.30.0.jsonl",
+    "split": "all",
     "pairs": 249,
     "max_abs_logit_diff": 1.2883470952510834,
     "max_abs_calibrated_p_diff": 0.10574636823658223,
@@ -215,6 +222,7 @@
   },
   "session_settings_check": {
     "against": "ORT_ENABLE_ALL, 4 threads",
+    "split": "all",
     "pairs": 249,
     "optimization ORT_DISABLE_ALL": {
       "max_abs_logit_diff": 0.9532110691070557,
@@ -243,6 +251,7 @@
   },
   "batch_check": {
     "what": "padded batches of 8, shortest pairs first, against one pair per run",
+    "split": "all",
     "pairs": 249,
     "max_abs_logit_diff": 1.3889007568359375,
     "max_abs_calibrated_p_diff": 0.09536376815241399,
