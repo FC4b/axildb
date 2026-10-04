@@ -451,27 +451,75 @@ fn a_delete_while_the_vector_store_is_detached_leaves_no_orphan() {
 }
 
 #[test]
-fn a_record_reinserted_under_its_id_while_detached_keeps_its_vector() {
+fn a_record_reinserted_with_other_text_while_detached_is_embedded_afresh() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("test.axil");
-    let record = open_with_vectors(&path)
-        .insert("sessions", json!({"summary": "auth timeout in the pool"}))
-        .unwrap();
+    let (memory, proxy, bare) = {
+        let db = open_with_vectors(&path);
+        let memory = db
+            .insert("sessions", json!({"summary": "auth timeout in the pool"}))
+            .unwrap();
+        // Internal rows are embedded by their writers, not by insert.
+        let proxy = db
+            .insert(
+                "_idx_code_proxies",
+                json!({"proxy_id": "p", "proxy_text": "fn auth_timeout"}),
+            )
+            .unwrap();
+        db.embed_text(&proxy.id, "fn auth_timeout").unwrap();
+        let bare = db
+            .insert(
+                "_idx_code_proxies",
+                json!({"proxy_id": "q", "proxy_text": "fn auth_pool"}),
+            )
+            .unwrap();
+        assert_eq!(
+            db.get_vector(&memory.id).unwrap(),
+            Some(vec![1.0, 1.0, 1.0, 1.0])
+        );
+        (memory, proxy, bare)
+    };
 
+    // Deleted and re-inserted under the same ids, with other text, while
+    // nothing could reach the vector store.
     {
         let db = open_detached(&path);
-        assert!(db.delete(&record.id).unwrap());
-        db.insert_preserving(record.clone()).unwrap();
+        for (record, field, text) in [
+            (&memory, "summary", "connection sizing notes"),
+            (&proxy, "proxy_text", "fn pool_size"),
+            (&bare, "proxy_text", "fn pool_size"),
+        ] {
+            assert!(db.delete(&record.id).unwrap());
+            let mut again = record.clone();
+            again.data[field] = json!(text);
+            db.insert_preserving(again).unwrap();
+        }
     }
 
-    // The note is cleared without taking a vector a live record owns.
+    // The deleted text's vectors are gone; each live record that should have
+    // one is embedded from its new text, and a row that had none stays
+    // without (code-index vectors are never added implicitly).
     let db = open_with_vectors(&path);
-    assert!(db.get_vector(&record.id).unwrap().is_some());
+    assert_eq!(
+        db.get_vector(&memory.id).unwrap(),
+        Some(vec![0.0, 0.0, 0.0, 1.0])
+    );
+    assert_eq!(
+        db.get_vector(&proxy.id).unwrap(),
+        Some(vec![0.0, 0.0, 1.0, 1.0])
+    );
+    assert_eq!(db.get_vector(&bare.id).unwrap(), None);
     drop(db);
-    assert!(open_with_vectors(&path)
-        .get_vector(&record.id)
-        .unwrap()
-        .is_some());
+    // The notes are cleared: a later open changes nothing.
+    let db = open_with_vectors(&path);
+    assert_eq!(
+        db.get_vector(&memory.id).unwrap(),
+        Some(vec![0.0, 0.0, 0.0, 1.0])
+    );
+    assert_eq!(
+        db.get_vector(&proxy.id).unwrap(),
+        Some(vec![0.0, 0.0, 1.0, 1.0])
+    );
 }
 
 /// A vector index that, when asked to remove vectors, first lets a re-insert

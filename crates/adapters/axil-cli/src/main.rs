@@ -6360,6 +6360,15 @@ fn open_with_all_detected(path: &Path) -> Result<Axil> {
     builder.build().context("failed to open database")
 }
 
+/// Open a database with all detected plugins for a command that only
+/// inspects it (diagnostics, dry runs). Deletes noted while the vector store
+/// was detached are left for a later open rather than applied by this one,
+/// so the command changes nothing.
+fn open_for_inspection(path: &Path) -> Result<Axil> {
+    let builder = attach_detected_engines(Axil::open(path).defer_vector_delete_notes(true))?;
+    builder.build().context("failed to open database")
+}
+
 /// Number of times a hot read command retries the writable open when the
 /// single-writer lock is contended before falling back to a read-only open.
 const BUSY_RETRY_ATTEMPTS: u32 = 3;
@@ -7921,7 +7930,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
         // ── Info ────────────────────────────────────────────────────
         Command::Info => {
             let db_path = require_db(&db_opt)?;
-            let db = open_with_all_detected(&db_path)?;
+            let db = open_for_inspection(&db_path)?;
             let info = db.info().context("failed to get database info")?;
 
             let mut features = Vec::new();
@@ -7974,7 +7983,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
         // ── Detect ──────────────────────────────────────────────────
         Command::Detect => {
             let db_path = require_db(&db_opt)?;
-            let db = open_with_all_detected(&db_path)?;
+            let db = open_for_inspection(&db_path)?;
             let results = axil_core::run_all_detectors(&db);
             let triggered: Vec<_> = results.iter().filter(|r| r.triggered).collect();
             out.print(&json!({
@@ -7987,7 +7996,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
         // ── Doctor ───────────────────────────────────────────────────
         Command::Doctor => {
             let db_path = require_db(&db_opt)?;
-            let db = open_with_all_detected(&db_path)?;
+            let db = open_for_inspection(&db_path)?;
             let mut report = db.doctor().context("doctor failed")?;
 
             // Check if downloaded models have checksum sidecar files.
@@ -8360,7 +8369,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
             activation,
         } => {
             let db_path = require_db(&db_opt)?;
-            let db = open_with_all_detected(&db_path)?;
+            let db = open_for_inspection(&db_path)?;
 
             if activation {
                 let config = axil_core::ActivationConfig::default();
@@ -8557,7 +8566,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
             compare,
         } => {
             let db_path = require_db(&db_opt)?;
-            let db = open_with_all_detected(&db_path)?;
+            let db = open_for_inspection(&db_path)?;
             let report = db.report().context("report generation failed")?;
             let report_json = serde_json::to_value(&report).unwrap();
 
@@ -10662,8 +10671,13 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
             let missing_vector_store = heal_vector_store_check(&db_path, &config)?;
             #[cfg(not(feature = "embed"))]
             let missing_vector_store: Option<String> = None;
-            let db = open_with_all_detected(&db_path)?;
+            let db = if dry_run {
+                open_for_inspection(&db_path)?
+            } else {
+                open_with_all_detected(&db_path)?
+            };
 
+            let mut exit = EXIT_OK;
             // If specific flags are given, run only those actions
             if compact || reindex || orphans || embed_internal {
                 let mut actions = Vec::new();
@@ -10884,7 +10898,11 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
         } => {
             let db_path = require_db(&db_opt)?;
             let config = load_config(&db_path)?;
-            let db = open_with_all_detected(&db_path)?;
+            let db = if dry_run {
+                open_for_inspection(&db_path)?
+            } else {
+                open_with_all_detected(&db_path)?
+            };
 
             let problems = problems_file
                 .as_ref()

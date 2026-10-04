@@ -56,6 +56,15 @@ space), then run `axil init <db>` and `axil heal --reindex`. `init` sizes the
 new store for the embedding model set in `axil.toml`
 (`[database] embedding_model`, bge-small when unset).
 
+A record deleted while the store can't be opened, or while `[engines]
+disabled` lists `vec`, keeps its vector until the store is back: the delete
+leaves a note in the core file, and the next command that opens the database
+with the store attached removes those vectors. A memory record re-inserted
+under the same id in the meantime is embedded afresh from its new text.
+Inspection commands (`doctor`, `detect`, `health-report`, `stats`, `info`,
+`heal --dry-run` and `session-heal --dry-run`) leave the notes alone; `doctor`
+lists them under `orphaned_vectors`.
+
 `heal` never creates or resizes a vector store. With no store, `heal --reindex`
 reports `vector_store: {"status": "missing"}` and the `init` command to run
 instead of restoring nothing silently. A store sized for a different model

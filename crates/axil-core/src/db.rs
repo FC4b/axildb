@@ -175,6 +175,10 @@ pub struct AxilBuilder {
     read_only: bool,
     /// Engines the adapter found on disk but could not attach.
     degraded_engines: Vec<crate::diagnostics::DegradedEngine>,
+    /// Leave notes of deletes made while the vector store was detached for a
+    /// later open instead of applying them at build; see
+    /// [`AxilBuilder::defer_vector_delete_notes`].
+    defer_vector_delete_notes: bool,
     /// Optional encryption-at-rest cipher for core record bodies, applied to the
     /// `Storage` handle at [`AxilBuilder::build`] time. `None` means cleartext
     /// bodies — the default. Available only under the off-by-default
@@ -460,6 +464,15 @@ impl AxilBuilder {
         self
     }
 
+    /// Leave notes of deletes made while the vector store was detached (see
+    /// [`Axil::delete`]) for a later open, instead of applying them when this
+    /// handle is built. Applying them writes to the vector store, so opens
+    /// that must not change the database (diagnostics, dry runs) set this.
+    pub fn defer_vector_delete_notes(mut self, defer: bool) -> Self {
+        self.defer_vector_delete_notes = defer;
+        self
+    }
+
     /// Record that an Engine's companion file exists but could not be attached.
     ///
     /// Adapters call this instead of silently skipping the Engine, so the
@@ -501,6 +514,7 @@ impl AxilBuilder {
     /// Open the database and return the handle.
     pub fn build(self) -> Result<Axil> {
         let needs_fts_reindex = self.needs_fts_reindex;
+        let defer_vector_delete_notes = self.defer_vector_delete_notes;
         let storage = if self.read_only {
             Storage::open_read_only(&self.path)?
         } else {
@@ -617,8 +631,9 @@ impl AxilBuilder {
 
         // Vectors of records deleted while the store was detached. Reading the
         // (normally absent) note table is the whole cost of an open with
-        // nothing pending. A read-only handle leaves them to the writer.
-        if db.vector_index.is_some() && !db.storage.is_read_only() {
+        // nothing pending. A read-only handle leaves them to the writer, and
+        // an inspection open to a later one.
+        if db.vector_index.is_some() && !db.storage.is_read_only() && !defer_vector_delete_notes {
             if let Err(e) = db.apply_pending_vector_deletes() {
                 eprintln!(
                     "axil: warning: removing the vectors of records deleted while the \
@@ -876,6 +891,7 @@ impl Axil {
             needs_fts_reindex: false,
             read_only: false,
             degraded_engines: Vec::new(),
+            defer_vector_delete_notes: false,
             #[cfg(feature = "encryption")]
             cipher: None,
         }
@@ -3384,9 +3400,13 @@ impl Axil {
     /// was detached (see [`Axil::delete`]) and clear their notes. Returns how
     /// many vectors were removed.
     ///
-    /// Only an id whose record is still gone loses its vector. One whose
-    /// record exists again, re-inserted under the same id before the store
-    /// came back, keeps it: this never takes a vector a live record may own.
+    /// Every noted id loses its vector: it was embedded from the deleted
+    /// record. An id whose record exists again, re-inserted while the store
+    /// was detached and possibly with other text, is then embedded afresh
+    /// from that record: a memory record always (the insert gate embeds it),
+    /// an internal-table row only when it held a vector, so this replaces
+    /// vectors and never adds a code-index one. A failed embed leaves the
+    /// record without a vector, which `doctor` reports and heal repairs.
     fn apply_pending_vector_deletes(&self) -> Result<usize> {
         let Some(ref vi) = self.vector_index else {
             return Ok(0);
@@ -3395,12 +3415,29 @@ impl Axil {
         if pending.is_empty() {
             return Ok(0);
         }
-        let gone: Vec<RecordId> = pending
+        let back: Vec<(Record, bool)> = pending
             .iter()
-            .filter(|id| matches!(self.storage.get(id), Ok(None)))
-            .cloned()
+            .filter_map(|id| match self.storage.get(id) {
+                Ok(Some(record)) => {
+                    let had_vector = matches!(vi.get_vector(id), Ok(Some(_)));
+                    Some((record, had_vector))
+                }
+                _ => None,
+            })
             .collect();
-        let removed = vi.remove_batch(&gone)?;
+        let removed = vi.remove_batch(&pending)?;
+        for (record, had_vector) in &back {
+            let text = if Self::is_embeddable(record) {
+                Some(crate::util::searchable_text(&record.data))
+            } else if *had_vector {
+                Self::embedded_internal_text(record).map(|(_, text)| text.to_string())
+            } else {
+                None
+            };
+            if let Some(text) = text {
+                let _ = self.embed_text(&record.id, &text);
+            }
+        }
         // Cleared only once the vectors are gone, so a failure above leaves
         // the notes for the next open.
         self.storage.clear_pending_vector_deletes(&pending)?;
@@ -4801,12 +4838,17 @@ impl Axil {
                 });
             }
 
-            // The forward direction: vectors whose record is gone.
+            // The forward direction: vectors whose record is gone, and notes
+            // of deletes this handle was opened not to apply.
             let orphaned = index_scan
                 .as_ref()
                 .map(|recs| self.count_orphaned_vectors(recs))
                 .unwrap_or(0);
-            if orphaned == 0 {
+            let noted = self
+                .storage
+                .pending_vector_deletes()
+                .map_or(0, |ids| ids.len());
+            if orphaned == 0 && noted == 0 {
                 checks.push(CheckResult {
                     name: "orphaned_vectors".to_string(),
                     status: Severity::Ok,
@@ -4814,14 +4856,21 @@ impl Axil {
                     fix: None,
                 });
             } else {
+                let mut detail = format!(
+                    "{orphaned} of {vec_count} vectors belong to records that no longer \
+                     exist; recall fetches them and then drops them, so each one takes a \
+                     live record's candidate slot"
+                );
+                if noted > 0 {
+                    detail.push_str(&format!(
+                        "; {noted} delete(s) made while the vector store was detached are \
+                         not applied yet (the next writable open applies them)"
+                    ));
+                }
                 checks.push(CheckResult {
                     name: "orphaned_vectors".to_string(),
                     status: Self::orphaned_vectors_severity(orphaned, vec_count),
-                    detail: format!(
-                        "{orphaned} of {vec_count} vectors belong to records that no longer \
-                         exist; recall fetches them and then drops them, so each one takes a \
-                         live record's candidate slot"
-                    ),
+                    detail,
                     fix: Some("axil heal --orphans".to_string()),
                 });
             }

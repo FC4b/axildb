@@ -331,6 +331,10 @@ fn a_cli_delete_with_the_vector_engine_disabled_leaves_no_orphan() {
     assert_eq!(code, 0, "{stderr}");
     std::fs::remove_file(&config).unwrap();
 
+    // The next ordinary command with the engine back applies the note
+    // (doctor only inspects, so it leaves notes for such a command).
+    let (_, stderr, code) = axil(&path, &["list", "decisions"]);
+    assert_eq!(code, 0, "{stderr}");
     let (stdout, _, _) = axil(&path, &["doctor"]);
     let report: Value = serde_json::from_str(&stdout).expect(&stdout);
     let check = doctor_check(&report, "orphaned_vectors");
@@ -382,4 +386,59 @@ fn only_heal_embed_internal_embeds_code_proxies_left_without_a_vector() {
 
     let db = Axil::open(&path).with_vector(384).unwrap().build().unwrap();
     assert!(db.get_vector(&proxy).unwrap().is_some());
+}
+
+/// Uses the default embedding model (bge-small, 384 dims), so like the other
+/// model-backed tests in this crate it runs locally and nightly, not per-PR.
+#[test]
+fn inspection_commands_leave_delete_notes_and_vectors_alone() {
+    use axil_vector::AxilBuilderVectorExt;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("memory.axil");
+    let id = Axil::open(&path)
+        .build()
+        .unwrap()
+        .insert(
+            "decisions",
+            json!({"summary": "the connection pool size is 32"}),
+        )
+        .unwrap()
+        .id;
+    let engine = axil_vector::VectorEngine::open(&path, 384).unwrap();
+    let mut v = vec![0.0f32; 384];
+    v[0] = 1.0;
+    engine.add(id.clone(), &v).unwrap();
+    drop(engine);
+    // Deleted while the store was detached: a note waits for the next open.
+    assert!(Axil::open(&path).build().unwrap().delete(&id).unwrap());
+
+    for args in [
+        &["doctor"][..],
+        &["heal", "--orphans", "--dry-run"],
+        &["heal", "--reindex", "--dry-run"],
+        &["stats"],
+    ] {
+        let (stdout, stderr, _) = axil(&path, args);
+        assert!(!stdout.is_empty(), "{args:?}: {stderr}");
+    }
+    let (stdout, _, _) = axil(&path, &["doctor"]);
+    let report: Value = serde_json::from_str(&stdout).expect(&stdout);
+    let check = doctor_check(&report, "orphaned_vectors");
+    assert!(
+        check["detail"]
+            .as_str()
+            .unwrap()
+            .contains("1 delete(s) made while the vector store was detached are not applied"),
+        "{check}"
+    );
+    // The vector is still on disk: nothing above applied the note.
+    let store = axil_vector::VectorEngine::open(&path, 384).unwrap();
+    assert!(store.get_vector(&id).unwrap().is_some());
+    drop(store);
+
+    // A real heal applies it.
+    let (_, stderr, code) = axil(&path, &["heal", "--orphans"]);
+    assert_eq!(code, 0, "{stderr}");
+    let db = Axil::open(&path).with_vector(384).unwrap().build().unwrap();
+    assert_eq!(db.get_vector(&id).unwrap(), None);
 }
