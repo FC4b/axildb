@@ -878,6 +878,9 @@ mod tests {
             /// Writes a record or stamps the time, so ids and timestamps
             /// are compared normalized.
             volatile: bool,
+            /// Opens the database itself rather than through [`hot_db`], so
+            /// it can't run while a warm handle holds the file.
+            cold_only: bool,
         }
 
         fn case(name: &'static str, args: &[&str]) -> Case {
@@ -886,6 +889,7 @@ mod tests {
                 args: args.iter().map(|a| a.to_string()).collect(),
                 stdin: None,
                 volatile: false,
+                cold_only: false,
             }
         }
 
@@ -896,6 +900,10 @@ mod tests {
             }
             fn volatile(mut self) -> Self {
                 self.volatile = true;
+                self
+            }
+            fn cold_only(mut self) -> Self {
+                self.cold_only = true;
                 self
             }
         }
@@ -972,16 +980,10 @@ mod tests {
             proj
         }
 
-        #[test]
-        fn captured_output_matches_one_shot() {
-            let tmp = tempfile::tempdir().unwrap();
-            let fixture = build_fixture(&tmp.path().join("fixture"));
-            let work = tmp.path().join("work");
-            let proj = work.join("proj");
-            let db = proj.join(".axil/memory.axil");
-            let db = db.to_str().unwrap();
-            let auth_rs = proj.join("src/auth.rs");
-            let auth_rs = auth_rs.to_str().unwrap();
+        /// The hot commands in each output format, with the errors, usage
+        /// errors and help text around them. `db` is the work copy's
+        /// database and `auth_rs` a file in its project.
+        fn matrix(db: &str, auth_rs: &str) -> Vec<Case> {
             let cp = r#"{"goal":"parity","state":"fixture built","next_steps":["diff"],"references":[{"kind":"file","ref":"src/auth.rs"}]}"#;
 
             let mut cases = vec![
@@ -1000,7 +1002,8 @@ mod tests {
                 case(
                     "get missing (exit 2)",
                     &["--db", db, "get", "01ZZZZZZZZZZZZZZZZZZZZZZZZ"],
-                ),
+                )
+                .cold_only(),
                 case(
                     "store bad JSON (Err)",
                     &["--db", db, "store", "decisions", "{nope"],
@@ -1108,22 +1111,36 @@ mod tests {
                     .volatile(),
                 );
             }
+            cases
+        }
 
+        type Run = (Vec<u8>, Vec<u8>, i32);
+
+        /// Run each case through `captured` and as a one-shot child, each
+        /// on a fresh copy of `fixture` at `proj`, and fail on any
+        /// difference. Returns the one-shot results by case name.
+        fn check_parity(
+            fixture: &Path,
+            proj: &Path,
+            cases: &[Case],
+            run_captured: impl Fn(&Case, &[&str]) -> Run,
+        ) -> Vec<(&'static str, Run)> {
+            let work = proj.parent().unwrap();
             let mut failures = Vec::new();
             let mut results = Vec::new();
-            for c in &cases {
+            for c in cases {
                 let args: Vec<&str> = c.args.iter().map(String::as_str).collect();
                 let run_both = || {
                     let fresh = || {
-                        let _ = std::fs::remove_dir_all(&work);
-                        copy_dir(&fixture, &proj);
+                        let _ = std::fs::remove_dir_all(work);
+                        copy_dir(fixture, proj);
                     };
                     fresh();
-                    let captured = in_process(&args, c.stdin);
+                    let captured = run_captured(c, &args);
                     fresh();
                     (captured, one_shot(&args, c.stdin))
                 };
-                let same = |captured: &(Vec<u8>, Vec<u8>, i32), real: &(Vec<u8>, Vec<u8>, i32)| {
+                let same = |captured: &Run, real: &Run| {
                     if c.volatile {
                         captured.2 == real.2
                             && normalize(&captured.0) == normalize(&real.0)
@@ -1156,6 +1173,22 @@ mod tests {
                 results.push((c.name, real));
             }
             assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+            results
+        }
+
+        #[test]
+        fn captured_output_matches_one_shot() {
+            let tmp = tempfile::tempdir().unwrap();
+            let fixture = build_fixture(&tmp.path().join("fixture"));
+            let proj = tmp.path().join("work/proj");
+            let db = proj.join(".axil/memory.axil");
+            let db = db.to_str().unwrap();
+            let auth_rs = proj.join("src/auth.rs");
+            let auth_rs = auth_rs.to_str().unwrap();
+
+            let results = check_parity(&fixture, &proj, &matrix(db, auth_rs), |c, args| {
+                in_process(args, c.stdin)
+            });
 
             // Equal could still mean equally empty: pin what the one-shot
             // side printed for the cases that show each path ran.
@@ -1194,6 +1227,171 @@ mod tests {
             if cfg!(feature = "checkpoint") {
                 assert!(get("checkpoint -").0.contains(r#""kind":"snapshot""#));
                 assert!(get("checkpoint --final").0.contains(r#""kind":"final""#));
+            }
+        }
+
+        /// Open `db` the way a long-lived host keeps it open.
+        fn open_warm(db: &Path) -> Arc<Axil> {
+            Arc::new(crate::open_with_all_detected(db).unwrap())
+        }
+
+        /// A request that hands `warm`, opened from `db`, to its command.
+        fn warm_request(warm: &Arc<Axil>, db: &Path, stdin: Option<&[u8]>) -> ReqCtx {
+            ReqCtx {
+                stdin: Some(stdin.unwrap_or_default().to_vec()),
+                warm: Some(Arc::clone(warm)),
+                db_canon: std::fs::canonicalize(db).unwrap(),
+                ..ReqCtx::default()
+            }
+        }
+
+        /// The hot commands on a handle the request carries: the one-shot
+        /// binary's bytes, without opening the database themselves, and the
+        /// handle still open and theirs no longer when they return.
+        #[test]
+        fn warm_handle_output_matches_one_shot() {
+            let tmp = tempfile::tempdir().unwrap();
+            let fixture = build_fixture(&tmp.path().join("fixture"));
+            let proj = tmp.path().join("work/proj");
+            let db_path = proj.join(".axil/memory.axil");
+            let db = db_path.to_str().unwrap();
+            let auth_rs = proj.join("src/auth.rs");
+            let auth_rs = auth_rs.to_str().unwrap();
+
+            // A command that opened the database while this process holds
+            // it would say so on stderr, so the parity below can't pass that
+            // way.
+            copy_dir(&fixture, &proj);
+            let held = open_warm(&db_path);
+            let (_, err, _) = in_process(&["--db", db, "boot"], None);
+            let err = String::from_utf8_lossy(&err);
+            assert!(err.contains("holds the writer lock"), "{err}");
+            drop(held);
+
+            let mut cases = matrix(db, auth_rs);
+            cases.retain(|c| !c.cold_only);
+            check_parity(&fixture, &proj, &cases, |c, args| {
+                let warm = open_warm(&db_path);
+                let run = in_process_with(warm_request(&warm, &db_path, c.stdin), args);
+                assert_eq!(
+                    Arc::strong_count(&warm),
+                    1,
+                    "{}: the command kept a reference to the warm handle",
+                    c.name
+                );
+                if c.name.starts_with("store") && c.volatile && run.2 == 0 {
+                    let stored: serde_json::Value = serde_json::from_slice(&run.0).unwrap();
+                    let id = stored["id"].as_str().unwrap();
+                    let id = axil_core::RecordId::from_string(id).unwrap();
+                    assert!(
+                        warm.get(&id).unwrap().is_some(),
+                        "{}: the record went somewhere other than the warm handle",
+                        c.name
+                    );
+                }
+                run
+            });
+        }
+
+        /// `recall --timeout-ms` on a long-lived handle. With every slot
+        /// taken it answers at once with the partial results; and however
+        /// many requests time out, no more workers than slots stay behind,
+        /// each giving its slot and handle back when its search ends.
+        #[cfg(feature = "embed")]
+        #[test]
+        fn recall_timeout_workers_stay_within_the_slots() {
+            use std::sync::atomic::AtomicBool;
+            use std::time::{Duration, Instant};
+
+            let tmp = tempfile::tempdir().unwrap();
+            let proj = build_fixture(tmp.path());
+            let db_path = proj.join(".axil/memory.axil");
+            let db = db_path.to_str().unwrap();
+            let warm = open_warm(&db_path);
+            let recall = |timeout_ms: &str| {
+                let ctx = ReqCtx {
+                    slow_query_log: false,
+                    ..warm_request(&warm, &db_path, None)
+                };
+                let args = [
+                    "--db",
+                    db,
+                    "recall",
+                    "auth timeout",
+                    "--timeout-ms",
+                    timeout_ms,
+                ];
+                let (out, err, code) = in_process_with(ctx, &args);
+                assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
+                let hits = serde_json::from_slice::<Vec<serde_json::Value>>(&out).unwrap();
+                (hits.len(), String::from_utf8(err).unwrap())
+            };
+            let partial = |ms: u64| {
+                format!(
+                    "[axil recall] timeout_ms={ms} exceeded inside db.recall; returning partial results\n"
+                )
+            };
+
+            // Only this test runs recalls with a deadline, so every slot is
+            // free to take.
+            let held: Vec<RecallSlot> = std::iter::from_fn(|| RECALL_SLOTS.try_take()).collect();
+            assert_eq!(held.len(), RECALL_SLOTS.cap);
+            let start = Instant::now();
+            let (hits, err) = recall("60000");
+            assert!(
+                start.elapsed() < Duration::from_secs(30),
+                "it waited for the deadline"
+            );
+            assert_eq!(hits, 0, "no slot means no search, and no cascade after it");
+            assert!(err.starts_with(&partial(60000)), "{err}");
+            assert!(
+                err.contains("timeout_ms=60000 exceeded; returned partial results"),
+                "{err}"
+            );
+            drop(held);
+            let (hits, err) = recall("60000");
+            assert!(hits > 0 && !err.contains("partial"), "{err}");
+
+            // 100 requests from 10 clients at once, each with a deadline
+            // most searches miss.
+            let done = AtomicBool::new(false);
+            let peak = AtomicUsize::new(0);
+            let (clients, live_after) = std::thread::scope(|s| {
+                s.spawn(|| {
+                    while !done.load(Ordering::Acquire) {
+                        peak.fetch_max(RECALL_SLOTS.live(), Ordering::AcqRel);
+                        std::thread::sleep(Duration::from_micros(50));
+                    }
+                });
+                let clients: Vec<_> = (0..10)
+                    .map(|_| {
+                        s.spawn(|| {
+                            (0..10)
+                                .filter(|_| recall("1").1.contains(&partial(1)))
+                                .count()
+                        })
+                    })
+                    .collect();
+                let clients: Vec<_> = clients.into_iter().map(|c| c.join()).collect();
+                let live_after = RECALL_SLOTS.live();
+                done.store(true, Ordering::Release);
+                (clients, live_after)
+            });
+            let partials: usize = clients.into_iter().map(Result::unwrap).sum();
+            let peak = peak.load(Ordering::Acquire);
+            eprintln!(
+                "recall slots: {partials} of 100 recalls cut short; peak {peak} live workers"
+            );
+            assert!(peak <= RECALL_SLOTS.cap, "{peak} workers ran at once");
+            assert!(live_after <= RECALL_SLOTS.cap, "{live_after} workers left");
+
+            let deadline = Instant::now() + Duration::from_secs(60);
+            while RECALL_SLOTS.live() > 0 || Arc::strong_count(&warm) > 1 {
+                assert!(
+                    Instant::now() < deadline,
+                    "a worker never gave its slot back"
+                );
+                std::thread::sleep(Duration::from_millis(10));
             }
         }
 
