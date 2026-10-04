@@ -62,5 +62,7 @@ All commands output JSON by default, making them easy to parse programmatically.
 A reader that stops early, as in `axil recall "auth" | head -1`, ends `axil`
 cleanly: the rest of the output is discarded, the command finishes and closes
 the database normally, and the exit code is the command's own (0 when it
-succeeded), the same convention `rg` and `fd` follow. The `--watch` modes stop
-once their reader has gone away.
+succeeded), the same convention `rg` and `fd` follow. `stats --watch` and
+`ingest-scip --watch` stop at their next report once their reader has gone
+away. `ingest --watch` reports on stderr only, so a closed stdout does not stop
+it.

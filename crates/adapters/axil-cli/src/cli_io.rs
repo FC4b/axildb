@@ -22,9 +22,9 @@
 //! reader that stopped because it had what it wanted. 141 (what a process
 //! killed by SIGPIPE reports) would fail every `set -o pipefail` script that
 //! pipes `axil` into `head`. Running on also means a closed pipe never cuts a
-//! write command off halfway. Commands that print in an endless loop (the
-//! `--watch` modes) check [`stdout_closed`] and stop. Any other write error
-//! panics with `println!`'s message.
+//! write command off halfway. The loops that print to stdout without end
+//! (`stats --watch`, `ingest-scip --watch`) check [`stdout_closed`] and stop.
+//! Any other write error panics with `println!`'s message.
 //!
 //! [`capture`] installs a [`ReqCtx`] on the current thread for the duration
 //! of a closure. Output then appends to the context's buffers and stdin is
