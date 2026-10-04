@@ -352,3 +352,81 @@ fn drain_never_retries_an_interrupted_job() {
     let log = std::fs::read_to_string(queue.join("drain.log")).unwrap();
     assert!(log.contains("not retried"), "{log}");
 }
+
+/// A paired search injects a record once per session: a later search that
+/// finds it again leaves it out, a search with nothing new injects nothing,
+/// and a session start (a compaction, `/clear`) makes it injectable again.
+#[test]
+fn paired_search_injects_each_record_once_per_session() {
+    let p = Project::new(true);
+    // Rebuild the database with its search engines, so `fts` has an index.
+    std::fs::remove_dir_all(p.db.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(p.db.parent().unwrap()).unwrap();
+    let axil = |args: &[&str]| -> Value {
+        let out = Command::new(axil_bin())
+            .arg("--db")
+            .arg(&p.db)
+            .args(args)
+            .env_remove("AXIL_DB")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        serde_json::from_slice(&out.stdout).unwrap_or(Value::Null)
+    };
+    axil(&["init"]);
+    let pool = axil(&[
+        "store",
+        "decisions",
+        r#"{"summary":"kafka broker pool size is 32"}"#,
+    ]);
+    let retry = axil(&[
+        "store",
+        "decisions",
+        r#"{"summary":"the kafka broker retries on timeout"}"#,
+    ]);
+    let (pool, retry) = (pool["id"].as_str().unwrap(), retry["id"].as_str().unwrap());
+
+    let sid = "s-dedup";
+    p.booted(sid);
+    let search = |pattern: &str| -> String {
+        let out = p.hook(json!({
+            "hook_event_name": "PreToolUse",
+            "session_id": sid,
+            "tool_name": "Bash",
+            "tool_input": {"command": format!("grep -rn '{pattern}' .")},
+        }));
+        if out.trim().is_empty() {
+            return String::new();
+        }
+        let v: Value = serde_json::from_str(out.trim()).expect(&out);
+        v["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
+    };
+
+    let first = search("pool size");
+    assert!(
+        first.contains(pool),
+        "the first search injects the pool record: {first}"
+    );
+    let second = search("kafka broker");
+    assert!(second.contains(retry), "a new record is injected: {second}");
+    assert!(
+        !second.contains(pool),
+        "an injected record is left out: {second}"
+    );
+    assert_eq!(search("broker"), "", "nothing new, nothing injected");
+
+    p.hook(json!({
+        "hook_event_name": "SessionStart",
+        "session_id": sid,
+        "source": "compact",
+    }));
+    let after = search("broker timeout");
+    assert!(after.contains(retry), "a session start forgets: {after}");
+}

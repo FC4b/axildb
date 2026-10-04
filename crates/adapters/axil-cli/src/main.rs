@@ -9980,15 +9980,14 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
                 );
             } else {
                 for r in &proxies {
-                    let pointer = match (r.path.as_deref(), r.line_start, r.symbol.as_deref()) {
-                        (Some(p), Some(l), Some(s)) => format!("{p}:{l} {s}"),
-                        (Some(p), Some(l), None) => format!("{p}:{l}"),
-                        (Some(p), None, Some(s)) => format!("{p} {s}"),
-                        (Some(p), None, None) => p.to_string(),
-                        _ => r.id.clone(),
-                    };
-                    let why = r.why.as_deref().unwrap_or("matched code proxy");
-                    outln!("{pointer} — {why}");
+                    let line = code_hit_line(
+                        r.path.as_deref(),
+                        r.line_start.map(|l| l as u64),
+                        r.symbol.as_deref(),
+                        &r.id,
+                        r.why.as_deref(),
+                    );
+                    outln!("{line}");
                 }
             }
             Ok(EXIT_OK)
@@ -19695,6 +19694,26 @@ fn format_code_proxy_line(v: &Value) -> String {
         bc,
         xml_escape_for_context(id),
     )
+}
+
+/// One code-search hit as `axil code-search` prints it:
+/// `path:line symbol — why`, falling back to the record id when the hit has
+/// no path. The pre-tool hook renders the same lines from `--json` output.
+fn code_hit_line(
+    path: Option<&str>,
+    line: Option<u64>,
+    symbol: Option<&str>,
+    id: &str,
+    why: Option<&str>,
+) -> String {
+    let pointer = match (path, line, symbol) {
+        (Some(p), Some(l), Some(s)) => format!("{p}:{l} {s}"),
+        (Some(p), Some(l), None) => format!("{p}:{l}"),
+        (Some(p), None, Some(s)) => format!("{p} {s}"),
+        (Some(p), None, None) => p.to_string(),
+        _ => id.to_string(),
+    };
+    format!("{pointer} — {}", why.unwrap_or("matched code proxy"))
 }
 
 /// Escape XML-special characters so untrusted recalled text cannot
