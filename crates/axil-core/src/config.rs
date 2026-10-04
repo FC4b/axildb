@@ -906,10 +906,23 @@ pub fn default_config_toml() -> String {
     .to_string()
 }
 
+/// Where a walk up for `axil.toml` starts: `start_dir` made absolute, so a
+/// relative directory (the parent of `--db .axil/memory.axil`, say) walks the
+/// same directories as its absolute form instead of stopping at the working
+/// directory.
+fn walk_start(start_dir: &Path) -> PathBuf {
+    let dir = if start_dir.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        start_dir
+    };
+    std::path::absolute(dir).unwrap_or_else(|_| dir.to_path_buf())
+}
+
 /// Find the nearest `axil.toml` by walking up from `start_dir`.
 /// Returns `None` if no config file is found (defaults should be used).
 pub fn find_config_file(start_dir: &Path) -> Option<PathBuf> {
-    let mut dir = start_dir.to_path_buf();
+    let mut dir = walk_start(start_dir);
     loop {
         let candidate = dir.join("axil.toml");
         if candidate.exists() {
@@ -933,7 +946,7 @@ pub fn find_config_file(start_dir: &Path) -> Option<PathBuf> {
 /// Falls back to `~/.config/axil/config.toml` then defaults.
 pub fn load_config_from(start_dir: &Path) -> Result<AxilConfig, String> {
     // Walk up from start_dir looking for axil.toml
-    let mut dir = start_dir.to_path_buf();
+    let mut dir = walk_start(start_dir);
     loop {
         let candidate = dir.join("axil.toml");
         if candidate.exists() {
@@ -1570,6 +1583,18 @@ full_retention_days = 7
         let found = find_config_file(&sub);
         assert!(found.is_some());
         assert_eq!(found.unwrap(), dir.path().join("axil.toml"));
+    }
+
+    /// A relative start walks the directories its absolute form walks, past
+    /// the working directory: the workspace's own `axil.toml` sits above this
+    /// crate's directory, where tests run.
+    #[test]
+    fn a_relative_start_walks_like_its_absolute_form() {
+        let cwd = std::env::current_dir().unwrap();
+        let from_abs = find_config_file(&cwd.join("src"));
+        assert!(from_abs.as_ref().is_some_and(|p| !p.starts_with(&cwd)));
+        assert_eq!(find_config_file(Path::new("src")), from_abs);
+        assert_eq!(find_config_file(Path::new("")), find_config_file(&cwd));
     }
 
     #[test]
