@@ -222,6 +222,7 @@ impl<'a> ProjectIndexer<'a> {
         self.progress.phase("project overview");
         self.index_project_overview(
             root,
+            &skipped_large,
             &project_name,
             project_type,
             files.len(),
@@ -529,6 +530,7 @@ impl<'a> ProjectIndexer<'a> {
 
         self.index_project_overview(
             root,
+            &skipped_large,
             &project_name,
             project_type,
             all_file_records.len(),
@@ -1161,9 +1163,11 @@ impl<'a> ProjectIndexer<'a> {
         Ok(count)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn index_project_overview(
         &self,
         root: &Path,
+        skipped_large: &[SkippedFile],
         name: &str,
         project_type: ProjectType,
         file_count: usize,
@@ -1242,6 +1246,9 @@ impl<'a> ProjectIndexer<'a> {
             "name": name,
             "type": project_type.as_str(),
             "root": root.to_string_lossy(),
+            // Kept so a run nobody watched (an automatic re-index) still
+            // leaves a trace: `axil index-stats` lists them.
+            "skipped_large": skipped_large,
             "summary": format!(
                 "{name} — {type} project with {files} files, {modules} modules",
                 name = name,
@@ -1708,6 +1715,36 @@ mod tests {
         assert_eq!(s, "abcdefghi...");
         let s = combine_summaries(&["One — two", "One — two", "Three"], 1000);
         assert_eq!(s, "One — two. Three", "duplicates are dropped");
+    }
+
+    #[test]
+    fn the_project_record_keeps_the_root_and_the_files_left_out() {
+        let db_dir = tempfile::tempdir().unwrap();
+        let db = Axil::open(db_dir.path().join("t.axil")).build().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("small.rs"), "fn a() {}\n").unwrap();
+        std::fs::write(root.path().join("big.rs"), "// pad\n".repeat(300)).unwrap();
+        let mut config = IndexConfig::default();
+        config.max_file_size_kb = 1;
+
+        let result = ProjectIndexer::new(&db, config)
+            .index_full(root.path())
+            .unwrap();
+        assert_eq!(result.skipped_large.len(), 1);
+
+        let project = &db.list(TABLE_PROJECT).unwrap()[0].data;
+        let canonical = std::fs::canonicalize(root.path()).unwrap();
+        assert_eq!(project["root"], canonical.to_string_lossy().as_ref());
+        assert_eq!(
+            project["skipped_large"],
+            json!([{"path": "big.rs", "size_bytes": 2100}])
+        );
+        assert_eq!(
+            crate::freshness::indexed_root(&db).as_deref(),
+            Some(canonical.as_path())
+        );
+        let stats = crate::recall::stats(&db, None, None).unwrap();
+        assert_eq!(stats["index"]["skipped_large"][0]["path"], "big.rs");
     }
 
     #[test]

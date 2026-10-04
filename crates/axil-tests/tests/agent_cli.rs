@@ -122,7 +122,13 @@ fn test_reads_never_scan_the_database_directory() {
     ]);
     assert_eq!(code, 0, "{stderr}");
 
-    let (stdout, stderr, code) = run_axil(&["--db", db, "index", proj.to_str().unwrap()]);
+    let proj_s = proj.to_str().unwrap();
+    let (stdout, stderr, code) = run_axil(&["--db", db, "index", proj_s, "--dry-run"]);
+    assert_eq!(code, 0, "{stderr}");
+    let dry = parse_json(&stdout);
+    assert_eq!(dry["skipped_large"][0]["path"], "big.rs", "{stdout}");
+
+    let (stdout, stderr, code) = run_axil(&["--db", db, "index", proj_s]);
     assert_eq!(code, 0, "{stderr}");
     assert!(
         stderr.contains("[axil-index] skipped 1 file(s) over max_file_size_kb = 1 KB: big.rs"),
@@ -130,6 +136,13 @@ fn test_reads_never_scan_the_database_directory() {
     );
     // small.rs and axil.toml.
     assert_eq!(parse_json(&stdout)["indexed_files"], 2, "{stdout}");
+    let (stdout, stderr, code) = run_axil(&["--db", db, "index-stats"]);
+    assert_eq!(code, 0, "{stderr}");
+    let stats = parse_json(&stdout);
+    assert_eq!(
+        stats["index"]["skipped_large"][0]["path"], "big.rs",
+        "{stdout}"
+    );
 
     for args in [
         vec!["--db", db, "recall", "connection pool"],

@@ -11587,13 +11587,13 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
                 // No database is needed for a dry run, but when there is one
                 // its files are left out exactly as the real run leaves them.
                 let db_path = require_db(&db_opt).ok();
-                let files =
-                    axil_indexer::scanner::scan_files(&root, &config, db_path.as_deref()).files;
+                let scan = axil_indexer::scanner::scan_files(&root, &config, db_path.as_deref());
                 out.print(&json!({
                     "dry_run": true,
                     "project_type": project_type.as_str(),
-                    "files_to_index": files.len(),
-                    "files": files.iter().map(|f| &f.rel_path).collect::<Vec<_>>(),
+                    "files_to_index": scan.files.len(),
+                    "files": scan.files.iter().map(|f| &f.rel_path).collect::<Vec<_>>(),
+                    "skipped_large": scan.skipped_large,
                 }));
                 return Ok(EXIT_OK);
             }
@@ -16067,8 +16067,10 @@ fn freshness_root(db: &Axil, db_path: &Path) -> Option<PathBuf> {
 
 /// Warn, on stderr, about the source files an index run left out for size:
 /// their symbols are missing from code-search and fts, and nothing else says
-/// why. Only commands that index call this; a read path that checks
-/// freshness stays quiet.
+/// why. Commands run to index call this. The re-index that `recall` and
+/// `code-context` start on their own stays quiet: its stderr reaches agent
+/// hooks on every stale read, and the index records the files for
+/// `axil index-stats` instead.
 #[cfg(feature = "indexer")]
 fn warn_skipped_large(result: &axil_indexer::IndexResult, max_file_size_kb: u64) {
     if let Some(warning) =

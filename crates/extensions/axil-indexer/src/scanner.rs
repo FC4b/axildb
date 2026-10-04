@@ -260,9 +260,11 @@ pub fn detect_project_name(root: &Path, project_type: ProjectType) -> String {
 }
 
 /// A source file [`scan_files`] left out for exceeding `max_file_size_kb`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Serializes as `{"path", "size_bytes"}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SkippedFile {
     /// Path relative to the scan root, with `/` separators.
+    #[serde(rename = "path")]
     pub rel_path: String,
     /// File size in bytes.
     pub size_bytes: u64,
