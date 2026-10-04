@@ -57,14 +57,16 @@ pub trait Engine: Send + Sync {
     fn on_record_delete(&self, id: &RecordId) -> Result<()>;
 
     /// Durably persist any buffered state so the engine's on-disk files reflect
-    /// every write accepted so far.
+    /// every write accepted so far, and finish any background work that would
+    /// still change those files.
     ///
     /// Default is a no-op, which is correct for engines that commit each write
     /// to their backing store synchronously (e.g. the redb-backed vector and
     /// graph engines). Engines that buffer writes before committing — notably
-    /// the Tantivy FTS engine — override this to flush the buffer. Used when a
-    /// caller needs the companion files to be self-consistent for an external
-    /// copy (e.g. `Axil::branch_create`).
+    /// the Tantivy FTS engine — override this to flush the buffer (and, for
+    /// Tantivy, to wait for segment merges). Used when a caller needs the
+    /// companion files to be self-consistent for an external copy (e.g.
+    /// `Axil::branch_create`).
     fn flush(&self) -> Result<()> {
         Ok(())
     }

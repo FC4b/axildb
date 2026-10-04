@@ -4179,7 +4179,10 @@ impl Axil {
     /// 1. While this handle is open it holds redb's **exclusive** OS write lock,
     ///    so no other process can mutate the database.
     /// 2. [`flush_engines`](Self::flush_engines) commits any buffered engine
-    ///    state (notably the FTS index) so every companion file is current.
+    ///    state (notably the FTS index) so every companion file is current,
+    ///    and waits for the FTS index's background segment merges, which
+    ///    would otherwise go on rewriting and deleting its files after the
+    ///    handle is dropped.
     /// 3. The handle is then **dropped**, releasing the OS lock, and only then
     ///    are the files copied. On Windows, redb holds a byte-range lock on the
     ///    core file for the lifetime of the [`Database`], so an open file cannot

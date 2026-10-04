@@ -230,7 +230,7 @@ pub(crate) fn copy_branch_files(db_path: &Path, name: &str) -> Result<PathBuf> {
     let fts_src = crate::companion_path(db_path, ".fts");
     if fts_src.is_dir() {
         let fts_dest = crate::companion_path(&dest, ".fts");
-        copy_dir_recursive(&fts_src, &fts_dest)
+        copy_dir_stable(&fts_src, &fts_dest)
             .map_err(|e| AxilError::plugin(format!("failed to copy FTS directory: {e}")))?;
     }
 
@@ -684,6 +684,67 @@ fn merge_via_changelog(
 }
 
 /// Recursively copy a directory.
+/// Copy a directory that something may still be changing, retrying until one
+/// copy starts and ends with the same files in place.
+///
+/// The FTS index's merge threads write new segment files, rewrite
+/// `meta.json`, and delete the segments they replaced.
+/// [`Axil::branch_create`](crate::Axil::branch_create) waits for them before
+/// closing the handle, so the first attempt normally stands. The retry covers
+/// a copy taken some other way: a file listed and then deleted fails the copy
+/// outright, and a copy taken while the files changed can hold a `meta.json`
+/// that names segments the copy lacks, so neither attempt is kept.
+fn copy_dir_stable(src: &Path, dest: &Path) -> std::io::Result<()> {
+    const ATTEMPTS: u64 = 5;
+    let mut last_err = None;
+    for attempt in 0..ATTEMPTS {
+        if attempt > 0 {
+            let _ = fs::remove_dir_all(dest);
+            std::thread::sleep(std::time::Duration::from_millis(50 * attempt));
+        }
+        let before = dir_state(src)?;
+        match copy_dir_recursive(src, dest) {
+            Ok(()) if dir_state(src)? == before => return Ok(()),
+            Ok(()) => {
+                last_err = Some(std::io::Error::other(
+                    "its files changed while it was being copied",
+                ))
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => last_err = Some(e),
+            Err(e) => return Err(e),
+        }
+    }
+    Err(last_err.expect("at least one attempt ran"))
+}
+
+/// Every file under `dir` with its length and modification time, sorted. A
+/// file deleted while it is listed is left out.
+fn dir_state(dir: &Path) -> std::io::Result<Vec<(PathBuf, u64, Option<std::time::SystemTime>)>> {
+    fn walk(
+        dir: &Path,
+        out: &mut Vec<(PathBuf, u64, Option<std::time::SystemTime>)>,
+    ) -> std::io::Result<()> {
+        for entry in fs::read_dir(dir)? {
+            let entry = entry?;
+            let meta = match entry.metadata() {
+                Ok(meta) => meta,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(e),
+            };
+            if meta.is_dir() {
+                walk(&entry.path(), out)?;
+            } else {
+                out.push((entry.path(), meta.len(), meta.modified().ok()));
+            }
+        }
+        Ok(())
+    }
+    let mut out = Vec::new();
+    walk(dir, &mut out)?;
+    out.sort();
+    Ok(out)
+}
+
 fn copy_dir_recursive(src: &Path, dest: &Path) -> std::io::Result<()> {
     fs::create_dir_all(dest)?;
     for entry in fs::read_dir(src)? {
@@ -723,6 +784,31 @@ mod tests {
 
         let branches = branch_list(&db_path).unwrap();
         assert_eq!(branches, vec!["experiment"]);
+    }
+
+    #[test]
+    fn branch_copies_the_fts_directory_tree() {
+        let (_dir, db_path) = temp_db();
+        let fts = crate::companion_path(&db_path, ".fts");
+        fs::create_dir_all(fts.join("nested")).unwrap();
+        fs::write(fts.join("meta.json"), "{}").unwrap();
+        fs::write(fts.join("nested").join("seg.idx"), "segment bytes").unwrap();
+
+        let bp = branch_create(&db_path, "fts-copy").unwrap();
+        let copied = crate::companion_path(&bp, ".fts");
+        assert_eq!(fs::read_to_string(copied.join("meta.json")).unwrap(), "{}");
+        assert_eq!(
+            fs::read_to_string(copied.join("nested").join("seg.idx")).unwrap(),
+            "segment bytes"
+        );
+        let names = |dir: &Path| -> Vec<(PathBuf, u64)> {
+            dir_state(dir)
+                .unwrap()
+                .into_iter()
+                .map(|(p, len, _)| (p.strip_prefix(dir).unwrap().to_path_buf(), len))
+                .collect()
+        };
+        assert_eq!(names(&copied), names(&fts));
     }
 
     #[test]
