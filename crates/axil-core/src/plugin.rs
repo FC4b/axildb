@@ -113,6 +113,21 @@ pub trait VectorIndex: Engine {
         Ok(())
     }
 
+    /// Remove the vectors of many records in one call. Returns how many
+    /// vectors were removed.
+    ///
+    /// The default loops over [`Engine::on_record_delete`] and, having no way
+    /// to tell which ids held a vector, counts every id. Backends with an
+    /// independent durable store should override it to commit the whole batch
+    /// under one write transaction, as [`add_batch`](Self::add_batch) does for
+    /// inserts, and count only the ids they actually held.
+    fn remove_batch(&self, ids: &[RecordId]) -> Result<usize> {
+        for id in ids {
+            self.on_record_delete(id)?;
+        }
+        Ok(ids.len())
+    }
+
     /// Search for the top-k most similar vectors.
     fn search(&self, query: &[f32], top_k: usize) -> Result<Vec<(RecordId, f32)>>;
 

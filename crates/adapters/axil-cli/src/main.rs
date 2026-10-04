@@ -1640,10 +1640,12 @@ enum Command {
         /// Just compact (purge expired/superseded).
         #[arg(long)]
         compact: bool,
-        /// Rebuild all indexes from records.
+        /// Rebuild all indexes from records: drop vectors whose record is
+        /// gone, compact the vector index, and re-embed / re-index records
+        /// missing from it.
         #[arg(long)]
         reindex: bool,
-        /// Clean orphaned edges/vectors/FTS.
+        /// Clean orphaned edges and vectors.
         #[arg(long)]
         orphans: bool,
         /// Show what would be fixed without doing it.
@@ -10671,7 +10673,8 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
                                 | "missing_fts"
                                 | "vector_load_skips"
                                 | "entity_key_index_drift" => reindex,
-                                "orphaned_edges" | "orphaned_vectors" => orphans,
+                                "orphaned_vectors" => orphans || reindex,
+                                "orphaned_edges" => orphans,
                                 _ => compact || orphans,
                             };
                             if dominated {
@@ -10709,6 +10712,23 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
                                 "action": "clean_orphans",
                                 "result": format!(
                                     "removed {} orphaned edges, {} orphaned vectors", oe, ov
+                                ),
+                            }));
+                        }
+                    }
+
+                    if reindex {
+                        // Rebuilding from the records means dropping vectors
+                        // no record backs: recall would fetch them and throw
+                        // them away. First, so the rebuild below compacts the
+                        // tombstones this leaves. Finds nothing after
+                        // --compact or --orphans.
+                        let ov = db.clean_orphaned_vectors();
+                        if ov > 0 {
+                            actions.push(json!({
+                                "action": "clean_orphaned_vectors",
+                                "result": format!(
+                                    "removed {ov} vectors whose record no longer exists"
                                 ),
                             }));
                         }

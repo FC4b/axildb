@@ -146,6 +146,62 @@ fn orphaned_vector_is_detected_and_healed() {
     assert!(detect_problems_is_clean(&db));
 }
 
+/// The `orphaned_vectors` check from `doctor`.
+fn orphaned_vectors_check(db: &Axil) -> axil_core::CheckResult {
+    db.doctor()
+        .unwrap()
+        .checks
+        .into_iter()
+        .find(|c| c.name == "orphaned_vectors")
+        .expect("doctor must report orphaned_vectors when a vector index is attached")
+}
+
+#[test]
+fn doctor_reports_orphaned_vectors_by_share_of_the_index() {
+    let (db, _dir) = full_db();
+    let ids: Vec<RecordId> = (0..20)
+        .map(|i| {
+            db.insert(
+                "sessions",
+                json!({"summary": format!("auth timeout pool record {i}")}),
+            )
+            .unwrap()
+            .id
+        })
+        .collect();
+    let clean = orphaned_vectors_check(&db);
+    assert_eq!(clean.status, Severity::Ok, "{}", clean.detail);
+
+    // One orphan in twenty vectors: a warning, with the targeted fix.
+    torn_delete(&db, &ids[0]);
+    let check = orphaned_vectors_check(&db);
+    assert_eq!(check.status, Severity::Warning, "{}", check.detail);
+    assert!(
+        check.detail.starts_with("1 of 20 vectors"),
+        "{}",
+        check.detail
+    );
+    assert_eq!(check.fix.as_deref(), Some("axil heal --orphans"));
+
+    // Four in twenty is past a tenth of the index: an error, in doctor and in
+    // detect_problems alike.
+    for id in &ids[1..4] {
+        torn_delete(&db, id);
+    }
+    assert_eq!(orphaned_vectors_check(&db).status, Severity::Error);
+    let problem = db
+        .detect_problems()
+        .into_iter()
+        .find(|p| p.detector == "orphaned_vectors")
+        .expect("detect_problems must report the orphans too");
+    assert_eq!(problem.severity, Severity::Error, "{}", problem.message);
+
+    assert_eq!(db.clean_orphaned_vectors(), 4);
+    let healed = orphaned_vectors_check(&db);
+    assert_eq!(healed.status, Severity::Ok, "{}", healed.detail);
+    assert_eq!(healed.detail, "16 vectors, no orphans");
+}
+
 #[test]
 fn orphaned_fts_is_detected_and_healed() {
     // FTS is the weakest link — `index_text` writes to a separate tantivy

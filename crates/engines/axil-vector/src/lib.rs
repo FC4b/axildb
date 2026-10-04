@@ -429,6 +429,17 @@ impl VectorIndex for VectorEngine {
         Ok(())
     }
 
+    fn remove_batch(&self, ids: &[RecordId]) -> axil_core::Result<usize> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        // One commit for the whole batch, before the live index changes, so a
+        // failed commit leaves the two in step.
+        delete_vectors_batch(&self.vector_db, ids)?;
+        let mut idx = self.index.write();
+        Ok(ids.iter().filter(|id| idx.remove(id)).count())
+    }
+
     fn search(&self, query: &[f32], top_k: usize) -> axil_core::Result<Vec<(RecordId, f32)>> {
         // The graph is searchable immediately after an incremental `add` and
         // despite accumulated tombstones, and its one-time lazy build is
@@ -696,6 +707,20 @@ fn persist_vectors_batch(
             table
                 .insert(id.as_str(), bytes.as_slice())
                 .map_err(plugin_err)?;
+        }
+    }
+    txn.commit().map_err(plugin_err)?;
+    Ok(())
+}
+
+/// Delete many vectors from the vector database under a single write
+/// transaction. Ids the store does not hold are skipped.
+fn delete_vectors_batch(db: &Database, ids: &[RecordId]) -> axil_core::Result<()> {
+    let txn = db.begin_write().map_err(plugin_err)?;
+    {
+        let mut table = txn.open_table(VECTORS_TABLE).map_err(plugin_err)?;
+        for id in ids {
+            table.remove(id.as_str()).map_err(plugin_err)?;
         }
     }
     txn.commit().map_err(plugin_err)?;

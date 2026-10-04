@@ -241,3 +241,64 @@ fn boot_topic_recalls_with_a_vector_store_attached() {
     let boot: Value = serde_json::from_str(&stdout).expect(&stdout);
     assert!(boot["topic_recall"].is_array(), "{stdout}");
 }
+
+/// The `name` check from a `doctor` JSON report.
+fn doctor_check(report: &Value, name: &str) -> Value {
+    report["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == name)
+        .unwrap_or_else(|| panic!("doctor reports no {name} check: {report}"))
+        .clone()
+}
+
+/// Uses the default embedding model (bge-small, 384 dims), so like the other
+/// model-backed tests in this crate it runs locally and nightly, not per-PR.
+#[test]
+fn doctor_reports_orphaned_vectors_and_heal_reindex_removes_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("memory.axil");
+    Axil::open(&path).build().unwrap();
+    // A vector with no record behind it, as a delete that never reached the
+    // vector store leaves one.
+    let engine = axil_vector::VectorEngine::open(&path, 384).unwrap();
+    let mut v = vec![0.0f32; 384];
+    v[0] = 1.0;
+    engine.add(axil_core::RecordId::new(), &v).unwrap();
+    drop(engine);
+
+    let (stdout, stderr, code) = axil(&path, &["doctor"]);
+    assert_eq!(
+        code, 2,
+        "one orphan in one vector is an error: {stdout}{stderr}"
+    );
+    let report: Value = serde_json::from_str(&stdout).expect(&stdout);
+    let check = doctor_check(&report, "orphaned_vectors");
+    assert_eq!(check["status"], "error", "{check}");
+    assert!(
+        check["detail"]
+            .as_str()
+            .unwrap()
+            .starts_with("1 of 1 vectors"),
+        "{check}"
+    );
+    assert_eq!(check["fix"], "axil heal --orphans", "{check}");
+
+    let (stdout, stderr, code) = axil(&path, &["heal", "--reindex"]);
+    assert_eq!(code, 0, "{stderr}");
+    let heal: Value = serde_json::from_str(&stdout).expect(&stdout);
+    assert!(
+        heal["actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a["action"] == "clean_orphaned_vectors"),
+        "{stdout}"
+    );
+
+    let (stdout, _, _) = axil(&path, &["doctor"]);
+    let report: Value = serde_json::from_str(&stdout).expect(&stdout);
+    let check = doctor_check(&report, "orphaned_vectors");
+    assert_eq!(check["status"], "ok", "{check}");
+}

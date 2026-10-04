@@ -23,9 +23,11 @@ axil doctor
 
 Checks: companion-file presence/consistency, vector dimension mismatch, memory
 records missing an embedding (an error once more than 10% of them are), SCIP
-freshness, indexer staleness, orphaned edges/vectors/FTS, the state of the
-`_entities` key index, recent error/healing history. Exit code: 0 all ok,
-1 warnings, 2 errors.
+freshness, indexer staleness, orphaned edges, orphaned vectors (vectors whose
+record is gone; an error once they are more than 10% of the index, since
+recall fetches them and then drops them), the state of the `_entities` key
+index, recent error/healing history. Exit code: 0 all ok, 1 warnings,
+2 errors.
 
 #### A damaged vector store
 
@@ -158,8 +160,9 @@ Rebuild drifted indexes or roll up old data. Run deliberately — check
 
 ```bash
 axil heal --compact     # `axil compact`'s purge, without the graph file
-axil heal --reindex     # rebuild all indexes from the canonical records (slow)
-axil heal --orphans     # clean orphaned companion entries only
+axil heal --reindex     # rebuild all indexes from the canonical records (slow);
+                        # also drops vectors whose record is gone
+axil heal --orphans     # clean orphaned edges and vectors only
 axil heal --dry-run     # print what would be fixed, change nothing
 axil heal               # also DOWNSAMPLES (see warning below)
 ```

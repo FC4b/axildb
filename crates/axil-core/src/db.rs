@@ -677,6 +677,10 @@ fn prefix_overlaps(a: &str, b: &str) -> bool {
 /// `detect_problems` report an error rather than a warning.
 const EMBEDDING_GAP_ERROR_RATIO: f64 = 0.10;
 
+/// Share of the default vector index belonging to no record above which
+/// `doctor` and `detect_problems` report an error rather than a warning.
+const ORPHANED_VECTOR_ERROR_RATIO: f64 = 0.10;
+
 /// Maximum audit log entries before auto-rotation.
 const MAX_AUDIT_ENTRIES: usize = 10_000;
 
@@ -1009,6 +1013,19 @@ impl Axil {
     /// to find a real share of what the agent stored, which is an error.
     fn embedding_gap_severity(missing: usize, embeddable: usize) -> Severity {
         if missing as f64 > embeddable as f64 * EMBEDDING_GAP_ERROR_RATIO {
+            Severity::Error
+        } else {
+            Severity::Warning
+        }
+    }
+
+    /// How bad a share of orphaned vectors is. Recall fetches a fixed pool of
+    /// nearest vectors and drops the orphans only after the fetch, so every
+    /// orphan in the pool costs a live record its slot; past
+    /// [`ORPHANED_VECTOR_ERROR_RATIO`] of the index that is a real share of
+    /// the pool, which is an error.
+    fn orphaned_vectors_severity(orphaned: usize, vectors: usize) -> Severity {
+        if orphaned as f64 > vectors as f64 * ORPHANED_VECTOR_ERROR_RATIO {
             Severity::Error
         } else {
             Severity::Warning
@@ -3153,20 +3170,35 @@ impl Axil {
         cleaned
     }
 
-    /// Remove orphaned vectors. Returns count removed.
+    /// Remove vectors in the default index whose record no longer exists.
+    /// Returns how many were removed.
+    ///
+    /// A vector whose record cannot be read (an I/O error, a body sealed
+    /// under another key) is kept: only a record that is certainly gone loses
+    /// its vector.
     pub fn clean_orphaned_vectors(&self) -> usize {
-        let mut cleaned = 0;
-        if let Some(ref vi) = self.vector_index {
-            if let Ok(vec_ids) = vi.all_ids() {
-                for vid in &vec_ids {
-                    if self.storage.get(vid).ok().flatten().is_none() {
-                        let _ = vi.on_record_delete(vid);
-                        cleaned += 1;
-                    }
-                }
+        let Some(ref vi) = self.vector_index else {
+            return 0;
+        };
+        let Ok(vec_ids) = vi.all_ids() else {
+            return 0;
+        };
+        let orphans: Vec<RecordId> = vec_ids
+            .into_iter()
+            .filter(|vid| matches!(self.storage.get(vid), Ok(None)))
+            .collect();
+        // One commit for the lot: a store holding hundreds of orphans would
+        // otherwise pay a durable write per vector.
+        match vi.remove_batch(&orphans) {
+            Ok(removed) => removed,
+            Err(e) => {
+                eprintln!(
+                    "warning: removing {} orphaned vector(s) failed: {e}",
+                    orphans.len()
+                );
+                0
             }
         }
-        cleaned
     }
 
     /// Remove orphaned FTS entries (indexed docs whose records no longer exist).
@@ -3565,9 +3597,10 @@ impl Axil {
                 // proxies, dep docs) are.
                 let orphaned_vectors = self.count_orphaned_vectors(&records);
                 if orphaned_vectors > 0 {
+                    let vectors = self.vector_index.as_ref().map_or(0, |vi| vi.count());
                     problems.push(crate::diagnostics::ProblemDetection {
                         detector: "orphaned_vectors".to_string(),
-                        severity: Severity::Warning,
+                        severity: Self::orphaned_vectors_severity(orphaned_vectors, vectors),
                         message: format!(
                             "{orphaned_vectors} vector(s) belong to records that no longer exist"
                         ),
@@ -4531,6 +4564,31 @@ impl Axil {
                         vi.dimensions()
                     ),
                     fix: Some("axil heal --reindex".to_string()),
+                });
+            }
+
+            // The forward direction: vectors whose record is gone.
+            let orphaned = index_scan
+                .as_ref()
+                .map(|recs| self.count_orphaned_vectors(recs))
+                .unwrap_or(0);
+            if orphaned == 0 {
+                checks.push(CheckResult {
+                    name: "orphaned_vectors".to_string(),
+                    status: Severity::Ok,
+                    detail: format!("{vec_count} vectors, no orphans"),
+                    fix: None,
+                });
+            } else {
+                checks.push(CheckResult {
+                    name: "orphaned_vectors".to_string(),
+                    status: Self::orphaned_vectors_severity(orphaned, vec_count),
+                    detail: format!(
+                        "{orphaned} of {vec_count} vectors belong to records that no longer \
+                         exist; recall fetches them and then drops them, so each one takes a \
+                         live record's candidate slot"
+                    ),
+                    fix: Some("axil heal --orphans".to_string()),
                 });
             }
         }
