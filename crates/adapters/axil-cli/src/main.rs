@@ -183,9 +183,10 @@ fn reindex_scip(db_path: &Path, root: &Path, full: bool, wait: bool, quiet: bool
 }
 
 /// SCIP feature compiled out — `reindex` still rebuilds the proxy index and
-/// reports the skip so the combined JSON shape stays stable.
+/// reports the skip so the combined JSON shape stays stable. Same signature as
+/// the real one so the call site needs no gate of its own.
 #[cfg(all(feature = "indexer", not(feature = "scip")))]
-fn reindex_scip(_db_path: &Path, _full: bool, _wait: bool, _quiet: bool) -> Value {
+fn reindex_scip(_db_path: &Path, _root: &Path, _full: bool, _wait: bool, _quiet: bool) -> Value {
     json!({ "status": "skipped", "reason": "scip_feature_disabled" })
 }
 
@@ -7999,51 +8000,60 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
             let db = open_for_inspection(&db_path)?;
             let mut report = db.doctor().context("doctor failed")?;
 
-            // Check if downloaded models have checksum sidecar files.
-            // Full SHA256 verification is expensive (17-500MB per model), so doctor
-            // only checks that checksums exist. Use `verify_model()` for full verification.
+            // Check each installed embedding model's files against their
+            // pinned sizes. Re-hashing would read hundreds of MB per model on
+            // every doctor run, so this is the cheap check; `axil
+            // model-download <model>` re-hashes against the pins and repairs.
             #[cfg(feature = "vector")]
             if db.has_vector_index() {
                 use axil_core::diagnostics::{CheckResult, Severity};
+                use axil_vector::models::EmbeddingModel;
                 let models_to_check = [
-                    axil_vector::models::EmbeddingModel::BgeSmall,
-                    axil_vector::models::EmbeddingModel::BgeSmallInt8,
-                    axil_vector::models::EmbeddingModel::BgeBase,
-                    axil_vector::models::EmbeddingModel::Nomic,
+                    EmbeddingModel::BgeSmall,
+                    EmbeddingModel::BgeSmallInt8,
+                    EmbeddingModel::BgeBase,
+                    EmbeddingModel::Nomic,
+                    EmbeddingModel::BgeM3,
+                    EmbeddingModel::GteModernbertBase,
                 ];
                 for model in &models_to_check {
-                    if axil_vector::download::is_model_available(model) {
-                        let check_name = format!("model_integrity_{}", model.name());
-                        match axil_vector::download::has_checksums(model) {
-                            Ok(results) => {
-                                let missing: Vec<_> = results
-                                    .iter()
-                                    .filter(|(_, ok)| !*ok)
-                                    .map(|(f, _)| f.as_str())
-                                    .collect();
-                                if missing.is_empty() {
-                                    report.add_check(CheckResult {
-                                        name: check_name,
-                                        status: Severity::Ok,
-                                        detail: format!("{}: checksums present", model.name()),
-                                        fix: None,
-                                    });
-                                } else {
-                                    report.add_check(CheckResult {
-                                        name: check_name,
-                                        status: Severity::Warning,
-                                        detail: format!(
-                                            "{}: missing checksums for: {}",
-                                            model.name(),
-                                            missing.join(", "),
-                                        ),
-                                        fix: Some(format!("axil model-download {}", model.name())),
-                                    });
-                                }
+                    // A model with no directory was never installed.
+                    if !model.model_dir().is_some_and(|d| d.exists()) {
+                        continue;
+                    }
+                    let check_name = format!("model_integrity_{}", model.name());
+                    match axil_vector::download::check_sizes(model) {
+                        Ok(results) => {
+                            let bad: Vec<_> = results
+                                .iter()
+                                .filter(|(_, ok)| !*ok)
+                                .map(|(f, _)| f.as_str())
+                                .collect();
+                            if bad.is_empty() {
+                                report.add_check(CheckResult {
+                                    name: check_name,
+                                    status: Severity::Ok,
+                                    detail: format!(
+                                        "{}: files at their pinned sizes",
+                                        model.name()
+                                    ),
+                                    fix: None,
+                                });
+                            } else {
+                                report.add_check(CheckResult {
+                                    name: check_name,
+                                    status: Severity::Warning,
+                                    detail: format!(
+                                        "{}: missing or not the pinned size: {}",
+                                        model.name(),
+                                        bad.join(", "),
+                                    ),
+                                    fix: Some(format!("axil model-download {}", model.name())),
+                                });
                             }
-                            Err(e) => {
-                                errln!("  [warn] model check for {}: {e}", model.name());
-                            }
+                        }
+                        Err(e) => {
+                            errln!("  [warn] model check for {}: {e}", model.name());
                         }
                     }
                 }
@@ -19574,21 +19584,30 @@ fn format_context_block(values: &[Value], budget: Option<usize>, warnings: &[Str
             xml_escape_for_context(id),
         ));
     }
-    // Build the combined `lines` list: code first, then memories — so the
-    // first thing the agent sees is the actionable pointer.
-    let mut lines: Vec<String> = Vec::with_capacity(code_lines.len() + other_lines.len() + 2);
-    if !code_lines.is_empty() {
-        lines.push("  # Relevant code".to_string());
+    // Build the combined list: code first, then memories — so the first
+    // thing the agent sees is the actionable pointer. Each entry is one unit
+    // for the budget below, and a section heading shares a unit with the
+    // section's first hit: packing them separately could keep a heading and
+    // drop every hit under it.
+    let mut lines: Vec<String> = Vec::with_capacity(code_lines.len() + other_lines.len());
+    let mut code_lines = code_lines.into_iter();
+    if let Some(first) = code_lines.next() {
+        lines.push(format!("  # Relevant code\n{first}"));
         lines.extend(code_lines);
     }
-    if !other_lines.is_empty() {
-        if !lines.is_empty() {
-            lines.push("  # Related memories".to_string());
+    let mut other_lines = other_lines.into_iter();
+    if let Some(first) = other_lines.next() {
+        if lines.is_empty() {
+            lines.push(first);
+        } else {
+            lines.push(format!("  # Related memories\n{first}"));
         }
         lines.extend(other_lines);
     }
 
     // Apply token budget (bytes/4 ≈ tokens) packing highest-ranked first.
+    // The first unit is always kept, so a block never comes out empty when
+    // there was a hit to show.
     if let Some(max_tokens) = budget {
         let max_bytes = max_tokens.saturating_mul(4);
         let opener = "<context source=\"axil\">\n";
@@ -21851,6 +21870,43 @@ mod recall_summary_tests {
         );
         assert!(
             block.contains("  [decisions] one hook binary — the &lt;bash&gt; copy drifted (id=D)"),
+            "{block}"
+        );
+    }
+
+    #[cfg(feature = "indexer")]
+    #[test]
+    fn a_budget_never_keeps_a_section_heading_without_its_first_hit() {
+        let hits = vec![
+            json!({"id": "C", "table": axil_indexer::TABLE_CODE_PROXIES, "data": {
+                "path": "src/auth.rs", "line_start": 42, "symbol": "login"}}),
+            json!({"id": "D", "table": "decisions", "data": {"summary": "use redb"}}),
+        ];
+
+        // A budget too small for anything still shows the first hit, with its
+        // heading.
+        let block = format_context_block(&hits, Some(0), &[]);
+        assert!(
+            block.contains("  # Relevant code\n  [code] src/auth.rs:42 login"),
+            "{block}"
+        );
+        assert!(!block.contains("Related memories"), "{block}");
+
+        // Room for the memories heading but not for its hit: neither prints.
+        let code_only = format_context_block(&hits[..1], None, &[]);
+        let tools = code_only
+            .lines()
+            .find(|l| l.starts_with("  # Tools"))
+            .map_or(0, |l| l.len() + 1);
+        let budget = (code_only.len() - tools + "  # Related memories\n".len()).div_ceil(4);
+        let block = format_context_block(&hits, Some(budget), &[]);
+        assert!(block.contains("(id=C)"), "{block}");
+        assert!(!block.contains("Related memories"), "{block}");
+
+        // With room for both, both sections print.
+        let block = format_context_block(&hits, Some(2000), &[]);
+        assert!(
+            block.contains("  # Related memories\n  [decisions] use redb (id=D)"),
             "{block}"
         );
     }
