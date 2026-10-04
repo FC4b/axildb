@@ -4,7 +4,7 @@
 //! staleness without doing a full re-index. Returns a compact freshness
 //! report that agents can use to decide whether to re-index.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -160,6 +160,15 @@ pub fn check_freshness(
         indexed_proxies,
         stale_proxies,
     }
+}
+
+/// The directory the code index was last built from, if it still exists.
+/// `None` without an index, and for an index built before the root was
+/// recorded.
+pub fn indexed_root(db: &Axil) -> Option<PathBuf> {
+    let projects = db.list(TABLE_PROJECT).ok()?;
+    let root = PathBuf::from(projects.first()?.data.get("root")?.as_str()?);
+    root.is_dir().then_some(root)
 }
 
 /// Return the set of relative file paths that are stale (changed or deleted since indexing).

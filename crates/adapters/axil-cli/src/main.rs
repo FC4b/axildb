@@ -9368,7 +9368,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
             // Resolve project root and config once for freshness + auto-refresh.
             #[cfg(feature = "indexer")]
             let (resolved_root, resolved_config) = {
-                let root = detect_project_root(&db_path);
+                let root = freshness_root(&db, &db_path);
                 let cfg = root
                     .as_ref()
                     .and_then(|r| axil_core::load_config_from(r).ok());
@@ -11693,7 +11693,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
             let db_path = require_db(&db_opt)?;
             let db = open_with_best_effort(&db_path)?;
 
-            let project_root = detect_project_root(&db_path);
+            let project_root = freshness_root(&db, &db_path);
             let index_config = project_root
                 .as_ref()
                 .and_then(|root| axil_core::load_config_from(root).ok())
@@ -11739,7 +11739,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
         Command::IndexStats => {
             let db_path = require_db(&db_opt)?;
             let db = open_with_all_detected(&db_path)?;
-            let project_root = detect_project_root(&db_path);
+            let project_root = freshness_root(&db, &db_path);
             let index_config = project_root
                 .as_ref()
                 .and_then(|root| axil_core::load_config_from(root).ok())
@@ -13873,7 +13873,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
             #[cfg(feature = "indexer")]
             {
                 // Freshness check
-                let project_root = detect_project_root(&db_path);
+                let project_root = freshness_root(&db, &db_path);
                 if let Some(ref root) = project_root {
                     let idx_config = load_config(&db_path).map(|c| c.index).unwrap_or_default();
                     let freshness =
@@ -16005,13 +16005,19 @@ fn run_worker_and_report(db: &axil_core::Axil, out: &Output) {
 /// Walk up from the database path to find the project root.
 /// Looks for Cargo.toml, package.json, pyproject.toml, go.mod, etc.
 ///
-/// With no marker anywhere above, the root is the directory holding the
-/// database or, for the usual `.axil/memory.axil`, the directory holding
-/// `.axil/`, since `.axil/` holds only Axil's own files.
+/// `None` when no directory above holds a marker, and when the nearest one
+/// that does is the home directory or the filesystem root (a dotfiles repo
+/// puts `.git` in `$HOME`). Callers walk the root they get, and walking a
+/// home directory on every read is never what a marker meant.
 ///
 /// Not feature-gated: pure `std::path` walking with no indexer dependency,
 /// called from ungated handlers (`memory-pressure`, `decay`).
 fn detect_project_root(db_path: &Path) -> Option<PathBuf> {
+    detect_project_root_under(db_path, axil_core::home_dir().as_deref())
+}
+
+/// [`detect_project_root`] with the home directory passed in.
+fn detect_project_root_under(db_path: &Path, home: Option<&Path>) -> Option<PathBuf> {
     let mut dir = db_path.parent()?.to_path_buf();
     let markers = [
         "Cargo.toml",
@@ -16023,25 +16029,40 @@ fn detect_project_root(db_path: &Path) -> Option<PathBuf> {
         ".git",
     ];
     loop {
-        for marker in &markers {
-            if dir.join(marker).exists() {
-                return Some(dir);
+        if markers.iter().any(|marker| dir.join(marker).exists()) {
+            if dir.as_os_str().is_empty() {
+                dir = PathBuf::from(".");
             }
+            return (!is_home_or_filesystem_root(&dir, home)).then_some(dir);
         }
         if !dir.pop() {
-            break;
+            return None;
         }
     }
-    let db_dir = db_path.parent()?;
-    let root = match db_dir.file_name() {
-        Some(name) if name == ".axil" => db_dir.parent()?,
-        _ => db_dir,
+}
+
+/// Whether `dir` is the home directory or the filesystem root.
+fn is_home_or_filesystem_root(dir: &Path, home: Option<&Path>) -> bool {
+    let Ok(dir) = std::fs::canonicalize(dir) else {
+        return false;
     };
-    Some(if root.as_os_str().is_empty() {
-        PathBuf::from(".")
-    } else {
-        root.to_path_buf()
-    })
+    dir.parent().is_none()
+        || home
+            .and_then(|home| std::fs::canonicalize(home).ok())
+            .is_some_and(|home| home == dir)
+}
+
+/// The directory a read may walk to check the code index's freshness, or
+/// `None` when no walk is safe.
+///
+/// That is the project root a marker shows ([`detect_project_root`]), or else
+/// the directory the index was last built from: someone ran `axil index` on
+/// it. With neither, the read skips the check. An unmarked directory can be a
+/// whole home directory, and recall and boot would walk and hash all of it
+/// on every call.
+#[cfg(feature = "indexer")]
+fn freshness_root(db: &Axil, db_path: &Path) -> Option<PathBuf> {
+    detect_project_root(db_path).or_else(|| axil_indexer::freshness::indexed_root(db))
 }
 
 /// Warn, on stderr, about the source files an index run left out for size:
@@ -22319,22 +22340,24 @@ mod project_root_tests {
     use super::*;
 
     #[test]
-    fn without_a_marker_the_root_is_the_directory_holding_axil() {
+    fn only_a_marker_makes_a_project_root_and_never_home() {
         let dir = tempfile::tempdir().unwrap();
-        let proj = dir.path().join("proj");
+        let home = dir.path().join("home");
+        let proj = home.join("proj");
         let db = proj.join(".axil").join("memory.axil");
-        assert_eq!(detect_project_root(&db), Some(proj.clone()));
+        std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+        let root = |db: &Path| detect_project_root_under(db, Some(&home));
 
-        // A database kept outside `.axil/`: the directory it is in.
-        let data = dir.path().join("data");
-        assert_eq!(
-            detect_project_root(&data.join("memory.axil")),
-            Some(data.clone())
-        );
+        // No marker anywhere above: no root, not the directory holding `.axil/`.
+        assert_eq!(root(&db), None);
 
-        // A marker above the database still wins.
-        std::fs::create_dir_all(&proj).unwrap();
+        // A marker in home (a dotfiles repo) does not make home the root.
+        std::fs::create_dir_all(home.join(".git")).unwrap();
+        assert_eq!(root(&db), None);
+        assert_eq!(root(&home.join(".axil").join("memory.axil")), None);
+
+        // A marker in the project does.
         std::fs::write(proj.join("Cargo.toml"), "").unwrap();
-        assert_eq!(detect_project_root(&db), Some(proj));
+        assert_eq!(root(&db), Some(proj));
     }
 }

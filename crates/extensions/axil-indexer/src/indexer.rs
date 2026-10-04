@@ -221,6 +221,7 @@ impl<'a> ProjectIndexer<'a> {
         // Generate and store project overview
         self.progress.phase("project overview");
         self.index_project_overview(
+            root,
             &project_name,
             project_type,
             files.len(),
@@ -527,6 +528,7 @@ impl<'a> ProjectIndexer<'a> {
             .sum();
 
         self.index_project_overview(
+            root,
             &project_name,
             project_type,
             all_file_records.len(),
@@ -1161,6 +1163,7 @@ impl<'a> ProjectIndexer<'a> {
 
     fn index_project_overview(
         &self,
+        root: &Path,
         name: &str,
         project_type: ProjectType,
         file_count: usize,
@@ -1232,9 +1235,13 @@ impl<'a> ProjectIndexer<'a> {
             conventions.insert("testing".to_string(), json!("inline tests detected"));
         }
 
+        // The root lets a later read check this index's freshness without
+        // guessing a directory to walk.
+        let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
         let project_data = json!({
             "name": name,
             "type": project_type.as_str(),
+            "root": root.to_string_lossy(),
             "summary": format!(
                 "{name} — {type} project with {files} files, {modules} modules",
                 name = name,

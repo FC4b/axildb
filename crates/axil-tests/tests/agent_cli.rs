@@ -90,8 +90,8 @@ fn parse_json(stdout: &str) -> Value {
 // ─── Index freshness on read paths ─────────────────────────────────────────
 
 /// Recall and boot check the code index's freshness by scanning the project.
-/// With no project marker above the database, that scan must cover the
-/// directory holding `.axil/`, never `.axil/` itself, whose 1 MB
+/// With no project marker above the database, the scan covers the directory
+/// `axil index` was run on, never `.axil/` itself, whose 1 MB
 /// `memory.axil.ts` read as an oversized TypeScript file and drew a warning
 /// on every read. A read also says nothing about source files left out of
 /// the index for size: `axil index` does.
@@ -139,6 +139,57 @@ fn test_reads_never_scan_the_database_directory() {
         assert_eq!(code, 0, "{args:?}: {stderr}");
         assert!(!stderr.contains("[axil-index]"), "{args:?}: {stderr}");
     }
+}
+
+/// With no project marker, recall must not walk the directory around the
+/// database: for a database in `~/.axil` that is the whole home directory,
+/// walked and hashed on every call. A directory someone ran `axil index` on
+/// is checked.
+#[test]
+fn test_recall_walks_no_unmarked_directory_until_it_is_indexed() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(home.join(".axil")).unwrap();
+    let db = home.join(".axil/memory.axil");
+    let db = db.to_str().unwrap();
+    let axil = |args: &[&str]| {
+        let out = Command::new(axil_bin())
+            .env("HOME", &home)
+            .env_remove("AXIL_DB")
+            .arg("--db")
+            .arg(db)
+            .args(args)
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert!(out.status.success(), "{args:?}: {stderr}");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    axil(&["init"]);
+    // No vector store, so nothing loads the embedding model.
+    std::fs::remove_file(home.join(".axil/memory.axil.vec")).unwrap();
+    axil(&[
+        "store",
+        "decisions",
+        r#"{"summary":"the connection pool size is 32"}"#,
+    ]);
+    let notes = home.join("notes.py");
+    std::fs::write(&notes, "def pool():\n    return 32\n").unwrap();
+    let recall = || axil(&["recall", "connection pool", "--recall-format", "full"]);
+
+    // A scan would have found notes.py missing from the index and marked
+    // every hit with its freshness.
+    let out = recall();
+    assert!(out.contains("connection pool size"), "{out}");
+    assert!(!out.contains(r#""fresh":"#), "recall walked home: {out}");
+
+    axil(&["index", home.to_str().unwrap()]);
+    std::fs::write(&notes, "def pool():\n    return 64\n").unwrap();
+    let out = recall();
+    assert!(
+        out.contains(r#""fresh":false"#),
+        "indexed root not checked: {out}"
+    );
 }
 
 // ─── Init ──────────────────────────────────────────────────────────────────
