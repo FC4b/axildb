@@ -7,7 +7,8 @@
 # in overall avg_recall or ndcg_at_10 vs the baseline recorded for the same
 # configuration (benchmarks/longmemeval/baseline.jsonl for the default
 # 500-question recall-qtc run, benchmarks/longmemeval/baselines/<config>.json
-# for the rest).
+# for the rest). ndcg_at_10 counts only when the baseline carries it, and
+# baseline.jsonl predates the metric, so the full run gates avg_recall alone.
 #
 # The bench binary writes a JSON BenchmarkReport to stdout — this script
 # captures it, optionally promotes it to the baseline (--save), and
@@ -66,7 +67,7 @@ while [[ $# -gt 0 ]]; do
       EXTRA_FEATURES="--features rerank"
       shift ;;
     -h|--help)
-      sed -n '2,28p' "${BASH_SOURCE[0]}" ; exit 0 ;;
+      sed -n '2,32p' "${BASH_SOURCE[0]}" ; exit 0 ;;
     *) echo "unknown flag: $1" ; exit 1 ;;
   esac
 done

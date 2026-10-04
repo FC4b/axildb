@@ -140,10 +140,15 @@ Every report also carries:
 | `tokens_compact`, `tokens_full` | Tokens (bytes / 4) of the top-k hits in each form |
 | `evidence_per_1k_tokens_*` | Answer turns found per 1,000 tokens shown |
 
-`ndcg_at_10` is gated with `avg_recall`; the rest is printed. The gap between
-`turn_recall_compact` and `turn_recall_full` is the cost of showing a hit's
-opening lines instead of the part that matched: on the first 20 `s` questions
-(`recall-qtc`, top-5;
+`avg_recall` is always gated. `ndcg_at_10` is gated only when both the
+baseline and the run carry it: the per-configuration baselines in `baselines/`
+do (including the PR smoke's `s-recall-k5-n20.json`), but `baseline.jsonl`, the
+500-question run, predates the metric, so the nightly full gate checks
+`avg_recall` alone until that baseline is re-seeded. The rest is printed.
+
+The gap between `turn_recall_compact` and `turn_recall_full` is the cost of
+showing a hit's opening lines instead of the part that matched: on the first
+20 `s` questions (`recall-qtc`, top-5;
 [`baselines/s-recall-qtc-k5-n20.json`](baselines/s-recall-qtc-k5-n20.json))
 the right session was found for 90% of them, yet the compact output contained
 the answer turn for none, while the full text cost about 15,500 tokens per
