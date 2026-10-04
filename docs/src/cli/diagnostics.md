@@ -22,12 +22,15 @@ axil doctor
 ```
 
 Checks: companion-file presence/consistency, vector dimension mismatch, memory
-records missing an embedding (an error once more than 10% of them are), SCIP
-freshness, indexer staleness, orphaned edges, orphaned vectors (vectors whose
-record is gone; an error once they are more than 10% of the index, since
-recall fetches them and then drops them), the state of the `_entities` key
-index, recent error/healing history. Exit code: 0 all ok, 1 warnings,
-2 errors.
+records missing an embedding (an error once more than 10% of them are), rows
+missing an embedding in the internal tables whose writers embed them (code
+proxies, file / module / project summaries, dependency docs, recall chunks,
+checkpoints; counted per table, a warning, fixed only by
+`heal --embed-internal`), SCIP freshness, indexer staleness, orphaned edges,
+orphaned vectors (vectors whose record is gone; an error once they are more
+than 10% of the index, since recall fetches them and then drops them), the
+state of the `_entities` key index, recent error/healing history. Exit code:
+0 all ok, 1 warnings, 2 errors.
 
 #### A damaged vector store
 
@@ -163,9 +166,19 @@ axil heal --compact     # `axil compact`'s purge, without the graph file
 axil heal --reindex     # rebuild all indexes from the canonical records (slow);
                         # also drops vectors whose record is gone
 axil heal --orphans     # clean orphaned edges and vectors only
+axil heal --embed-internal  # embed code-index / dep-doc / chunk rows left
+                        # without a vector (opt-in, see below)
 axil heal --dry-run     # print what would be fixed, change nothing
 axil heal               # also DOWNSAMPLES (see warning below)
 ```
+
+Rows of the internal tables written while the vector store was unavailable
+(a code index built then, for example) have no vector; `doctor` counts them per
+table. Nothing embeds them automatically, not `heal --reindex`, a bare `heal`
+or the end-of-session heal: once embedded, those rows compete with memories in
+recall's vector channel, which moves memory recall rankings. Embed them with
+`axil heal --embed-internal` when you want them searchable by meaning.
+`axil index --full` rebuilds the code index with vectors too.
 
 > ⚠️ A bare `axil heal` **downsamples**: it deletes records older than
 > `full_retention_days` (default 90d), replacing each day's rows with a single

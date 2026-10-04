@@ -1648,6 +1648,12 @@ enum Command {
         /// Clean orphaned edges and vectors.
         #[arg(long)]
         orphans: bool,
+        /// Embed rows of internal tables (code index, dep docs, recall
+        /// chunks, checkpoints) that have no vector, as rows written while
+        /// the vector store was unavailable. Opt-in: once embedded they
+        /// compete with memories in recall, which moves its rankings.
+        #[arg(long)]
+        embed_internal: bool,
         /// Show what would be fixed without doing it.
         #[arg(long)]
         dry_run: bool,
@@ -10645,6 +10651,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
             compact,
             reindex,
             orphans,
+            embed_internal,
             dry_run,
         } => {
             let db_path = require_db(&db_opt)?;
@@ -10656,13 +10663,19 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
             let db = open_with_all_detected(&db_path)?;
 
             // If specific flags are given, run only those actions
-            if compact || reindex || orphans {
+            if compact || reindex || orphans || embed_internal {
                 let mut actions = Vec::new();
 
                 if dry_run {
                     // Dry-run: report what would happen without modifying anything
                     let problems = db.detect_problems();
                     for p in &problems {
+                        if embed_internal && p.detector == "missing_internal_embeddings" {
+                            actions.push(json!({
+                                "action": p.detector,
+                                "result": format!("[dry-run] would fix: {}", p.message),
+                            }));
+                        }
                         if p.auto_fixable {
                             let dominated = match p.detector.as_str() {
                                 "expired_records" | "superseded_records" | "storage_bloat" => {
@@ -10793,6 +10806,20 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
                             }
                         }
                     }
+
+                    if embed_internal {
+                        let embedded = db
+                            .reembed_missing_internal()
+                            .context("embedding internal rows failed")?;
+                        if embedded > 0 {
+                            actions.push(json!({
+                                "action": "reembed_missing_internal",
+                                "result": format!(
+                                    "embedded {embedded} internal-table rows that had no vector"
+                                ),
+                            }));
+                        }
+                    }
                 }
 
                 let mut output = json!({
@@ -10829,6 +10856,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
                 && !compact
                 && !reindex
                 && !orphans
+                && !embed_internal
                 && db.has_timeseries_index()
                 && config.timeseries.auto_downsample
             {

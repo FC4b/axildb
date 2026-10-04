@@ -337,3 +337,49 @@ fn a_cli_delete_with_the_vector_engine_disabled_leaves_no_orphan() {
     assert_eq!(check["status"], "ok", "{check}");
     assert_eq!(check["detail"], "0 vectors, no orphans", "{check}");
 }
+
+/// Uses the default embedding model (bge-small, 384 dims), so like the other
+/// model-backed tests in this crate it runs locally and nightly, not per-PR.
+#[test]
+fn only_heal_embed_internal_embeds_code_proxies_left_without_a_vector() {
+    use axil_vector::AxilBuilderVectorExt;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("memory.axil");
+    // A store exists, but the proxy is written past it, as the indexer did
+    // while the store could not be opened.
+    drop(axil_vector::VectorEngine::open(&path, 384).unwrap());
+    let proxy = Axil::open(&path)
+        .build()
+        .unwrap()
+        .insert(
+            "_idx_code_proxies",
+            json!({"proxy_id": "p1", "path": "src/pool.rs", "proxy_text": "fn pool_size"}),
+        )
+        .unwrap()
+        .id;
+
+    let (stdout, _, code) = axil(&path, &["doctor"]);
+    assert_eq!(code, 1, "a warning, not an error: {stdout}");
+    let report: Value = serde_json::from_str(&stdout).expect(&stdout);
+    let check = doctor_check(&report, "vector_index");
+    assert_eq!(check["status"], "warning", "{check}");
+    assert_eq!(check["fix"], "axil heal --embed-internal", "{check}");
+
+    let (_, stderr, code) = axil(&path, &["heal", "--reindex"]);
+    assert_eq!(code, 0, "{stderr}");
+    let (stdout, _, _) = axil(&path, &["doctor"]);
+    assert!(
+        stdout.contains("1 of 1 _idx_code_proxies row(s) missing an embedding"),
+        "heal --reindex must leave internal rows alone: {stdout}"
+    );
+    let (stdout, stderr, code) = axil(&path, &["heal", "--embed-internal"]);
+    assert_eq!(code, 0, "{stderr}");
+    let heal: Value = serde_json::from_str(&stdout).expect(&stdout);
+    assert_eq!(
+        heal["actions"][0]["action"], "reembed_missing_internal",
+        "{stdout}"
+    );
+
+    let db = Axil::open(&path).with_vector(384).unwrap().build().unwrap();
+    assert!(db.get_vector(&proxy).unwrap().is_some());
+}

@@ -596,11 +596,13 @@ impl<'a> ProjectIndexer<'a> {
     /// Consults a `ProxyDedupCache` when present. If an existing proxy
     /// with the same `proxy_id` already has the same `proxy_text`, the
     /// existing `RecordId` is returned and both insert and embed are
-    /// skipped — the dominant cost on incremental re-index. The cache's
-    /// `touched` set records the id either way so the caller can prune
-    /// removed symbols afterwards. Failures inside embed/index calls are
-    /// silently ignored (matches existing `embed_field` style elsewhere
-    /// in this file).
+    /// skipped — the dominant cost on incremental re-index — unless the
+    /// proxy has no stored vector (written while the vector store was
+    /// unavailable), which is embedded then. The cache's `touched` set
+    /// records the id either way so the caller can prune removed symbols
+    /// afterwards. Failures inside embed/index calls are silently ignored
+    /// (matches existing `embed_field` style elsewhere in this file);
+    /// `axil doctor` reports a proxy left without a vector.
     fn store_proxy_with_dedupe(
         &self,
         proxy: &CodeProxy,
@@ -616,6 +618,9 @@ impl<'a> ProjectIndexer<'a> {
                     && existing.source_record.as_deref() == proxy.source_record.as_deref();
 
                 if text_matches && nav_matches {
+                    if self.lacks_vector(&id) {
+                        let _ = self.db.embed_text(&id, &proxy.proxy_text);
+                    }
                     return Ok(id);
                 }
 
@@ -629,6 +634,8 @@ impl<'a> ProjectIndexer<'a> {
                 if !text_matches {
                     let _ = self.db.embed_text(&id, &proxy.proxy_text);
                     self.fts_index_proxy(&id, proxy);
+                } else if self.lacks_vector(&id) {
+                    let _ = self.db.embed_text(&id, &proxy.proxy_text);
                 }
                 cache.existing.insert(
                     proxy.proxy_id.clone(),
@@ -648,6 +655,15 @@ impl<'a> ProjectIndexer<'a> {
         let _ = self.db.embed_text(&record.id, &proxy.proxy_text);
         self.fts_index_proxy(&record.id, proxy);
         Ok(record.id)
+    }
+
+    /// Whether `id` should have a vector and has none: a vector index and an
+    /// embedder are attached (without them nothing could embed it) and the
+    /// index holds nothing for it.
+    fn lacks_vector(&self, id: &RecordId) -> bool {
+        self.db.has_vector_index()
+            && self.db.has_embedder()
+            && matches!(self.db.get_vector(id), Ok(None))
     }
 
     fn fts_index_proxy(&self, id: &RecordId, proxy: &CodeProxy) {

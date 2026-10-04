@@ -879,3 +879,149 @@ fn no_embedder_means_no_missing_embedding_flag() {
     let (embeddings, _fts) = db.reembed_missing().unwrap();
     assert_eq!(embeddings, 0);
 }
+
+// ── internal tables whose writers embed their rows ─────────────────────
+
+/// A code proxy as the indexer writes it, minus the embed the indexer runs
+/// afterwards: the state a proxy written while the vector store was
+/// unavailable is left in.
+fn unembedded_proxy(db: &Axil, text: &str) -> axil_core::RecordId {
+    db.insert(
+        "_idx_code_proxies",
+        json!({"proxy_id": text, "kind": "symbol", "path": "src/lib.rs", "proxy_text": text}),
+    )
+    .unwrap()
+    .id
+}
+
+#[test]
+fn doctor_flags_code_proxies_without_a_vector_and_only_an_opt_in_restores_them() {
+    let (db, _dir) = temp_db_with_mock_vector();
+    for i in 0..20 {
+        db.insert(
+            "sessions",
+            json!({"summary": format!("session number {i}")}),
+        )
+        .unwrap();
+    }
+    let proxy = unembedded_proxy(&db, "fn retry_auth after a timeout");
+    // Tables no writer embeds, and rows with nothing to embed, are not gaps.
+    db.insert(
+        "_idx_symbols",
+        json!({"name": "retry_auth", "summary": "x"}),
+    )
+    .unwrap();
+    db.insert(
+        "_idx_code_proxies",
+        json!({"proxy_id": "empty", "proxy_text": ""}),
+    )
+    .unwrap();
+
+    let check = db
+        .doctor()
+        .unwrap()
+        .checks
+        .into_iter()
+        .find(|c| c.name == "vector_index")
+        .expect("vector_index check present");
+    // Every memory record has its vector. The proxy that should have one
+    // does not: a warning, since restoring it is a ranking call.
+    assert_eq!(check.status, Severity::Warning, "{}", check.detail);
+    assert!(
+        check
+            .detail
+            .contains("1 of 1 _idx_code_proxies row(s) missing an embedding"),
+        "{}",
+        check.detail
+    );
+    assert!(!check.detail.contains("record(s)"), "{}", check.detail);
+    assert_eq!(check.fix.as_deref(), Some("axil heal --embed-internal"));
+    let problems = db.detect_problems();
+    assert!(problems.iter().all(|p| p.detector != "missing_embeddings"));
+    let problem = problems
+        .iter()
+        .find(|p| p.detector == "missing_internal_embeddings")
+        .expect("missing_internal_embeddings problem should be detected");
+    assert_eq!(
+        problem.message,
+        "1 of 1 _idx_code_proxies row(s) have no vector embedding"
+    );
+    assert_eq!(problem.severity, Severity::Warning);
+    assert!(!problem.auto_fixable, "automatic heals must leave it alone");
+
+    // The automatic repairs leave the proxy as it is.
+    assert_eq!(db.reembed_missing().unwrap().0, 0);
+    db.heal_all(&default_healing_config(), false).unwrap();
+    assert_eq!(db.get_vector(&proxy).unwrap(), None);
+
+    // The opt-in embeds it from its proxy_text, as the indexer does.
+    assert_eq!(db.reembed_missing_internal().unwrap(), 1);
+    assert_eq!(
+        db.get_vector(&proxy).unwrap(),
+        Some(vec![1.0, 1.0, 0.0, 1.0])
+    );
+    assert!(db
+        .detect_problems()
+        .iter()
+        .all(|p| p.detector != "missing_internal_embeddings"));
+    assert_eq!(db.reembed_missing_internal().unwrap(), 0);
+}
+
+#[test]
+fn incremental_index_embeds_an_unchanged_proxy_that_has_no_vector() {
+    use axil_indexer::{IndexConfig, ProjectIndexer, TABLE_CODE_PROXIES};
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("test.axil");
+    let project = dir.path().join("project");
+    std::fs::create_dir_all(project.join("src")).unwrap();
+    std::fs::write(
+        project.join("Cargo.toml"),
+        "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    let lib = "/// Retry an auth call after a timeout.\npub fn retry_auth() {}\n";
+    std::fs::write(project.join("src/lib.rs"), lib).unwrap();
+
+    // Indexed with no vector store: every proxy is stored without a vector.
+    ProjectIndexer::new(&Axil::open(&path).build().unwrap(), IndexConfig::default())
+        .index_full(&project)
+        .unwrap();
+
+    let vector = axil_vector::VectorEngine::open(&path, 4).unwrap();
+    let db = Axil::open(&path)
+        .with_vector_index(Box::new(vector))
+        .with_embedder(Box::new(FrontWindowEmbedder))
+        .build()
+        .unwrap();
+    let symbol_proxy = |db: &Axil| {
+        db.list(TABLE_CODE_PROXIES)
+            .unwrap()
+            .into_iter()
+            .find(|r| r.data.get("symbol").and_then(|v| v.as_str()) == Some("retry_auth"))
+            .expect("a proxy for retry_auth")
+    };
+    let before = symbol_proxy(&db);
+    assert_eq!(db.get_vector(&before.id).unwrap(), None);
+
+    // A change below the symbol leaves its proxy text and lines as they were.
+    std::fs::write(
+        project.join("src/lib.rs"),
+        format!("{lib}\n/// Size the pool.\npub fn pool_size() -> usize {{ 32 }}\n"),
+    )
+    .unwrap();
+    ProjectIndexer::new(&db, IndexConfig::default())
+        .index_incremental(&project)
+        .unwrap();
+
+    let after = symbol_proxy(&db);
+    assert_eq!(after.id, before.id, "the dedup path kept the proxy row");
+    assert_eq!(
+        after.data["proxy_text"], before.data["proxy_text"],
+        "the proxy text did not change"
+    );
+    assert!(
+        db.get_vector(&after.id).unwrap().is_some(),
+        "an unchanged proxy without a vector must be embedded on re-index"
+    );
+}

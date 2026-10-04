@@ -692,6 +692,85 @@ fn prefix_overlaps(a: &str, b: &str) -> bool {
 /// `detect_problems` report an error rather than a warning.
 const EMBEDDING_GAP_ERROR_RATIO: f64 = 0.10;
 
+/// Internal tables whose writers embed one text field of every row into the
+/// default vector index, with that field.
+///
+/// `_` tables skip the insert-time auto-embed, so their writers embed rows
+/// themselves and ignore a failure. A row written while the vector store was
+/// unavailable therefore never gets a vector, unless reconciliation knows
+/// which text its writer embeds. Each entry must match its writer: the
+/// indexer (proxies, file / module / project summaries), dep-docs ingest,
+/// recall chunking in this file, and checkpoints.
+const EMBEDDED_INTERNAL_FIELDS: &[(&str, &str)] = &[
+    ("_idx_code_proxies", "proxy_text"),
+    ("_idx_files", "summary"),
+    ("_idx_modules", "summary"),
+    ("_idx_project", "summary"),
+    ("_dep_docs", "content"),
+    (RECALL_CHUNKS_TABLE, "content"),
+    ("_checkpoint_records", "summary"),
+];
+
+/// Rows of [`EMBEDDED_INTERNAL_FIELDS`] tables that
+/// [`Axil::reembed_missing_internal`] embeds and commits together.
+const REEMBED_BATCH: usize = 32;
+
+/// Rows missing from the default vector index, from one scan
+/// ([`Axil::embedding_gap`]). Memory records and the embedded internal tables
+/// are counted apart: they fail for different reasons and a share of one says
+/// nothing about the other.
+#[derive(Debug, Default)]
+struct EmbeddingGap {
+    /// Memory records (the insert gate, [`Axil::is_embeddable`]) without a
+    /// vector.
+    missing: usize,
+    /// Memory records the insert gate embeds.
+    embeddable: usize,
+    /// `(table, missing, rows)` for each [`EMBEDDED_INTERNAL_FIELDS`] table
+    /// with at least one row without a vector.
+    internal: Vec<(&'static str, usize, usize)>,
+}
+
+impl EmbeddingGap {
+    fn is_empty(&self) -> bool {
+        self.missing == 0 && self.internal.is_empty()
+    }
+
+    /// How bad the gap is. Memory records follow
+    /// [`Axil::embedding_gap_severity`]. Internal rows alone are a warning:
+    /// they stay findable by keyword, and restoring them moves recall
+    /// rankings (see [`Axil::reembed_missing_internal`]), so it is a call to
+    /// make, not an error to clear.
+    fn severity(&self) -> Severity {
+        if self.missing > 0 {
+            Axil::embedding_gap_severity(self.missing, self.embeddable)
+        } else {
+            Severity::Warning
+        }
+    }
+
+    /// The `heal` that closes this gap.
+    fn fix(&self) -> &'static str {
+        match (self.missing > 0, !self.internal.is_empty()) {
+            (true, true) => "axil heal --reindex --embed-internal",
+            (false, true) => "axil heal --embed-internal",
+            _ => "axil heal --reindex",
+        }
+    }
+
+    /// `"3 of 40 _idx_code_proxies row(s), 1 of 9 _dep_docs row(s)"`, or
+    /// `None` when every internal row has its vector.
+    fn internal_summary(&self) -> Option<String> {
+        (!self.internal.is_empty()).then(|| {
+            self.internal
+                .iter()
+                .map(|(table, missing, rows)| format!("{missing} of {rows} {table} row(s)"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+    }
+}
+
 /// Share of the default vector index belonging to no record above which
 /// `doctor` and `detect_problems` report an error rather than a warning.
 const ORPHANED_VECTOR_ERROR_RATIO: f64 = 0.10;
@@ -1000,32 +1079,51 @@ impl Axil {
         !record.table.starts_with('_')
     }
 
-    /// Records that should have a vector embedding but don't, as
-    /// `(missing, embeddable)`.
+    /// The [`EMBEDDED_INTERNAL_FIELDS`] entry for a row of an internal table
+    /// whose writer embeds it, as `(table, text)`: `None` for any other table,
+    /// or when the field is absent or empty (the writer embedded nothing).
+    fn embedded_internal_text(record: &Record) -> Option<(&'static str, &str)> {
+        let (table, field) = EMBEDDED_INTERNAL_FIELDS
+            .iter()
+            .find(|(table, _)| *table == record.table)?;
+        let text = record.data.get(*field)?.as_str()?;
+        (!text.is_empty()).then_some((*table, text))
+    }
+
+    /// Rows that should have a vector embedding but don't.
     ///
     /// Takes an already-scanned record slice so the caller can share one full
-    /// scan across reconciliation checks. Returns `(0, 0)` unless both a vector
-    /// index and an embedder are configured — a user who only ever calls
-    /// `add_vector` manually (no embedder) must not be flagged as missing
-    /// embeddings.
-    fn embedding_gap(&self, records: &[Record]) -> (usize, usize) {
+    /// scan across reconciliation checks. Empty unless both a vector index and
+    /// an embedder are configured — a user who only ever calls `add_vector`
+    /// manually (no embedder) must not be flagged as missing embeddings.
+    fn embedding_gap(&self, records: &[Record]) -> EmbeddingGap {
+        let mut gap = EmbeddingGap::default();
         if !self.has_vector_index() || self.embedder.is_none() {
-            return (0, 0);
+            return gap;
         }
         let Some(ref vi) = self.vector_index else {
-            return (0, 0);
+            return gap;
         };
         let indexed: std::collections::HashSet<RecordId> =
             vi.all_ids().unwrap_or_default().into_iter().collect();
-        records.iter().filter(|r| Self::is_embeddable(r)).fold(
-            (0, 0),
-            |(missing, embeddable), r| {
-                (
-                    missing + usize::from(!indexed.contains(&r.id)),
-                    embeddable + 1,
-                )
-            },
-        )
+        let mut internal: BTreeMap<&'static str, (usize, usize)> = BTreeMap::new();
+        for record in records {
+            let missing = usize::from(!indexed.contains(&record.id));
+            if Self::is_embeddable(record) {
+                gap.missing += missing;
+                gap.embeddable += 1;
+            } else if let Some((table, _)) = Self::embedded_internal_text(record) {
+                let (table_missing, rows) = internal.entry(table).or_default();
+                *table_missing += missing;
+                *rows += 1;
+            }
+        }
+        gap.internal = internal
+            .into_iter()
+            .filter(|(_, (missing, _))| *missing > 0)
+            .map(|(table, (missing, rows))| (table, missing, rows))
+            .collect();
+        gap
     }
 
     /// How bad an embedding gap is. A torn insert here and there is a warning;
@@ -1090,7 +1188,8 @@ impl Axil {
     /// embed/index failures. A torn insert can therefore leave a stored memory
     /// permanently invisible to recall. `reembed_missing` reconciles the live
     /// records against the vector and FTS indexes and regenerates the missing
-    /// entries.
+    /// entries. Internal tables are left alone; see
+    /// [`Axil::reembed_missing_internal`].
     ///
     /// Returns `(embeddings_restored, fts_docs_restored)`. Best-effort per
     /// record — a single failure does not abort the sweep. A no-op (returns
@@ -1142,6 +1241,51 @@ impl Axil {
         }
 
         Ok((embeddings_restored, fts_restored))
+    }
+
+    /// Embed the rows of internal tables whose writers embed them (code
+    /// proxies, file / module / project summaries, dep docs, recall chunks,
+    /// checkpoints; see [`EMBEDDED_INTERNAL_FIELDS`]) that have no vector,
+    /// with the text their writer embeds. Returns how many were embedded.
+    ///
+    /// Those writers ignore a failed embed, so rows written while the vector
+    /// store was unavailable have none. Restoring them is not automatic:
+    /// [`Axil::reembed_missing`], `heal_all` and the end-of-session heal leave
+    /// them alone, because once embedded these rows compete with memories in
+    /// recall's vector channel, which moves memory recall rankings. Callers
+    /// opt in (`axil heal --embed-internal`).
+    ///
+    /// Rows are embedded in micro-batches with one `.vec` commit each, as
+    /// their writers' bulk paths do; a failed batch costs only its own rows.
+    /// A no-op without a vector index and an embedder.
+    pub fn reembed_missing_internal(&self) -> Result<usize> {
+        if !self.has_vector_index() || self.embedder.is_none() {
+            return Ok(0);
+        }
+        let Some(ref vi) = self.vector_index else {
+            return Ok(0);
+        };
+        let records = self.storage.scan_all_records()?;
+        let indexed: std::collections::HashSet<RecordId> =
+            vi.all_ids().unwrap_or_default().into_iter().collect();
+        let missing: Vec<(&RecordId, &str)> = records
+            .iter()
+            .filter(|r| !indexed.contains(&r.id))
+            .filter_map(|r| Self::embedded_internal_text(r).map(|(_, text)| (&r.id, text)))
+            .collect();
+        let mut embedded = 0usize;
+        for batch in missing.chunks(REEMBED_BATCH) {
+            if self.embed_fields_batch(batch).is_ok() {
+                embedded += batch.len();
+            }
+        }
+        if embedded > 0 {
+            self.audit_heal_action(
+                "reembed_missing_internal",
+                &format!("embedded {embedded} internal-table rows that had no vector"),
+            );
+        }
+        Ok(embedded)
     }
 
     /// Insert a new record into the given table.
@@ -3627,20 +3771,33 @@ impl Axil {
         // One scan feeds both the embedding and FTS reconciliation.
         if self.vector_index.is_some() || self.fts_index.is_some() {
             if let Ok(records) = self.storage.scan_all_records() {
-                let (missing_embeddings, embeddable) = self.embedding_gap(&records);
-                if missing_embeddings > 0 {
+                let gap = self.embedding_gap(&records);
+                if gap.missing > 0 {
                     // Only auto-fixable when an embedder can regenerate them; a
                     // manual `add_vector` user with no embedder is already gated
                     // out by `embedding_gap`, but guard the flag too.
                     problems.push(crate::diagnostics::ProblemDetection {
                         detector: "missing_embeddings".to_string(),
-                        severity: Self::embedding_gap_severity(missing_embeddings, embeddable),
+                        severity: Self::embedding_gap_severity(gap.missing, gap.embeddable),
                         message: format!(
-                            "{missing_embeddings} of {embeddable} record(s) committed without \
-                             a vector embedding"
+                            "{} of {} record(s) committed without a vector embedding",
+                            gap.missing, gap.embeddable
                         ),
                         recommendation: "Re-embed missing records: axil heal --reindex".to_string(),
                         auto_fixable: self.embedder.is_some(),
+                    });
+                }
+                // Not auto-fixable on purpose: embedding these rows moves
+                // memory recall rankings, so automatic heals must not do it.
+                if let Some(internal) = gap.internal_summary() {
+                    problems.push(crate::diagnostics::ProblemDetection {
+                        detector: "missing_internal_embeddings".to_string(),
+                        severity: Severity::Warning,
+                        message: format!("{internal} have no vector embedding"),
+                        recommendation: "Embed them, after which they compete with memories \
+                                         in recall: axil heal --embed-internal"
+                            .to_string(),
+                        auto_fixable: false,
                     });
                 }
 
@@ -4593,11 +4750,11 @@ impl Axil {
         // 3. Vector index sync
         if let Some(ref vi) = self.vector_index {
             let vec_count = vi.count();
-            let (missing, embeddable) = index_scan
+            let gap = index_scan
                 .as_ref()
                 .map(|recs| self.embedding_gap(recs))
-                .unwrap_or((0, 0));
-            if missing == 0 {
+                .unwrap_or_default();
+            if gap.is_empty() {
                 checks.push(CheckResult {
                     name: "vector_index".to_string(),
                     status: Severity::Ok,
@@ -4608,15 +4765,29 @@ impl Axil {
                     fix: None,
                 });
             } else {
+                let mut detail = format!(
+                    "{vec_count} vectors indexed, dimensions={}",
+                    vi.dimensions()
+                );
+                if gap.missing > 0 {
+                    detail.push_str(&format!(
+                        "; {} of {} record(s) missing an embedding, so recall can find them \
+                         only by keyword",
+                        gap.missing, gap.embeddable
+                    ));
+                }
+                if let Some(internal) = gap.internal_summary() {
+                    detail.push_str(&format!(
+                        "; {internal} missing an embedding, so code search, dep docs and \
+                         recall match them only by keyword (embedded, they compete with \
+                         memories in recall)"
+                    ));
+                }
                 checks.push(CheckResult {
                     name: "vector_index".to_string(),
-                    status: Self::embedding_gap_severity(missing, embeddable),
-                    detail: format!(
-                        "{vec_count} vectors indexed, dimensions={}; {missing} of {embeddable} \
-                         record(s) missing an embedding, so recall can find them only by keyword",
-                        vi.dimensions()
-                    ),
-                    fix: Some("axil heal --reindex".to_string()),
+                    status: gap.severity(),
+                    detail,
+                    fix: Some(gap.fix().to_string()),
                 });
             }
 
