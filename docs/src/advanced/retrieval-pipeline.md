@@ -183,13 +183,23 @@ axil recall "auth timeout" --explain
 
 ## Step 4b — Cross-encoder rerank (optional, off by default)
 
-`axil recall --rerank cross-encoder` re-scores the results recall has
-already chosen with an ONNX cross-encoder and reorders them by its score
-(the fused order is replaced, not blended). Recall cuts its list to
-`--top-k` (default 5) before the rerank runs, and the cross-encoder scores
-at most the first 20 of those. So the rerank changes the order of the
-returned hits, never which hits are returned: a candidate fused below
-`--top-k` cannot be promoted. The implementation is
+`axil recall --rerank cross-encoder` re-scores the list recall is about
+to print with an ONNX cross-encoder and reorders it by its score (the
+fused order is replaced, not blended); the cross-encoder scores at most
+the first 20 entries. It changes the order of that list, never which
+records are in it. How long the list is decides what it can promote:
+
+- **No filter:** the list is `--top-k` long (default 5), or up to
+  ⌈1.5 × `--top-k`⌉ when completeness widening fires (on by default;
+  `--no-widen` turns it off). Only in the widened case can a hit fused
+  below position `--top-k` move into the first `--top-k` positions, and
+  only from the widened tail.
+- **Any post-filter** (`--table`, `--type`, `--after`, `--before`,
+  `--agent`, `--min-importance`, `--fresh-only`): recall over-fetches,
+  filters, then cuts the list back to `--top-k` before the rerank, so
+  nothing fused below `--top-k` can be promoted.
+
+The implementation is
 [`crates/extensions/axil-indexer/src/rerank.rs`](../../../crates/extensions/axil-indexer/src/rerank.rs),
 compiled in by the `rerank` Cargo feature (part of the CLI's `full`
 build, not `default`). It loads `models/cross-encoder.onnx`; the
