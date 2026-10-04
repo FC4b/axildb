@@ -174,11 +174,16 @@ axil heal               # also DOWNSAMPLES (see warning below)
 
 Rows of the internal tables written while the vector store was unavailable
 (a code index built then, for example) have no vector; `doctor` counts them per
-table. Nothing embeds them automatically, not `heal --reindex`, a bare `heal`
-or the end-of-session heal: once embedded, those rows compete with memories in
-recall's vector channel, which moves memory recall rankings. Embed them with
-`axil heal --embed-internal` when you want them searchable by meaning.
-`axil index --full` rebuilds the code index with vectors too.
+table. Nothing embeds them implicitly: not `heal --reindex`, a bare `heal`, the
+end-of-session heal, or an incremental `axil index`. Embedded, those rows
+compete with memories in recall's vector channel, and that currently lowers
+memory recall. On the dogfood eval (snap-prefix, 2026-10-04), restoring 2,962
+code-index vectors took hit@1 from 0.70 to 0.51, MRR@10 from 0.80 to 0.66 and
+the prompt hook's hit rate from 0.89 to 0.82
+(`benchmarks/results/dogfood-recall-2026-10-04-snap-prefix-orphans-removed.json`
+against `…-internal-embedded.json`). `axil heal --embed-internal` embeds them
+anyway, for when code search by meaning matters more. So does
+`axil index --full`, which rebuilds the code index with vectors.
 
 > ⚠️ A bare `axil heal` **downsamples**: it deletes records older than
 > `full_retention_days` (default 90d), replacing each day's rows with a single

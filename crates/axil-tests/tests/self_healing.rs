@@ -935,6 +935,11 @@ fn doctor_flags_code_proxies_without_a_vector_and_only_an_opt_in_restores_them()
         check.detail
     );
     assert!(!check.detail.contains("record(s)"), "{}", check.detail);
+    assert!(
+        check.detail.contains("currently lowers memory recall"),
+        "the cost of backfilling must be stated: {}",
+        check.detail
+    );
     assert_eq!(check.fix.as_deref(), Some("axil heal --embed-internal"));
     let problems = db.detect_problems();
     assert!(problems.iter().all(|p| p.detector != "missing_embeddings"));
@@ -948,6 +953,11 @@ fn doctor_flags_code_proxies_without_a_vector_and_only_an_opt_in_restores_them()
     );
     assert_eq!(problem.severity, Severity::Warning);
     assert!(!problem.auto_fixable, "automatic heals must leave it alone");
+    assert!(
+        problem.recommendation.contains("lowers memory recall"),
+        "{}",
+        problem.recommendation
+    );
 
     // The automatic repairs leave the proxy as it is.
     assert_eq!(db.reembed_missing().unwrap().0, 0);
@@ -968,7 +978,7 @@ fn doctor_flags_code_proxies_without_a_vector_and_only_an_opt_in_restores_them()
 }
 
 #[test]
-fn incremental_index_embeds_an_unchanged_proxy_that_has_no_vector() {
+fn an_incremental_index_leaves_an_unchanged_proxy_without_a_vector() {
     use axil_indexer::{IndexConfig, ProjectIndexer, TABLE_CODE_PROXIES};
 
     let dir = tempfile::tempdir().unwrap();
@@ -1020,8 +1030,9 @@ fn incremental_index_embeds_an_unchanged_proxy_that_has_no_vector() {
         after.data["proxy_text"], before.data["proxy_text"],
         "the proxy text did not change"
     );
-    assert!(
-        db.get_vector(&after.id).unwrap().is_some(),
-        "an unchanged proxy without a vector must be embedded on re-index"
-    );
+    // Embedded code-index rows lower memory recall, so a routine re-index
+    // must not add them; only the explicit opt-in does.
+    assert_eq!(db.get_vector(&after.id).unwrap(), None);
+    assert!(db.reembed_missing_internal().unwrap() > 0);
+    assert!(db.get_vector(&after.id).unwrap().is_some());
 }

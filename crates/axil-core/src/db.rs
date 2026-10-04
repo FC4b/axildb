@@ -711,6 +711,15 @@ const EMBEDDED_INTERNAL_FIELDS: &[(&str, &str)] = &[
     ("_checkpoint_records", "summary"),
 ];
 
+/// Why rows of [`EMBEDDED_INTERNAL_FIELDS`] tables without a vector are
+/// left alone, said wherever `doctor` and `detect_problems` report them so
+/// nobody backfills them blindly. The figures are the dogfood eval in
+/// `benchmarks/results/dogfood-recall-2026-10-04-snap-prefix-orphans-removed.json`
+/// and `…-internal-embedded.json`.
+const INTERNAL_EMBED_COST: &str = "embedding them currently lowers memory recall: on the \
+     dogfood eval (snap-prefix, 2026-10-04) restoring 2,962 code-index vectors took hit@1 \
+     from 0.70 to 0.51";
+
 /// Rows of [`EMBEDDED_INTERNAL_FIELDS`] tables that
 /// [`Axil::reembed_missing_internal`] embeds and commits together.
 const REEMBED_BATCH: usize = 32;
@@ -1250,10 +1259,10 @@ impl Axil {
     ///
     /// Those writers ignore a failed embed, so rows written while the vector
     /// store was unavailable have none. Restoring them is not automatic:
-    /// [`Axil::reembed_missing`], `heal_all` and the end-of-session heal leave
-    /// them alone, because once embedded these rows compete with memories in
-    /// recall's vector channel, which moves memory recall rankings. Callers
-    /// opt in (`axil heal --embed-internal`).
+    /// [`Axil::reembed_missing`], `heal_all`, the end-of-session heal and the
+    /// indexer all leave them alone, because once embedded these rows compete
+    /// with memories in recall's vector channel and lower memory recall (see
+    /// [`INTERNAL_EMBED_COST`]). Callers opt in (`axil heal --embed-internal`).
     ///
     /// Rows are embedded in micro-batches with one `.vec` commit each, as
     /// their writers' bulk paths do; a failed batch costs only its own rows.
@@ -3794,9 +3803,10 @@ impl Axil {
                         detector: "missing_internal_embeddings".to_string(),
                         severity: Severity::Warning,
                         message: format!("{internal} have no vector embedding"),
-                        recommendation: "Embed them, after which they compete with memories \
-                                         in recall: axil heal --embed-internal"
-                            .to_string(),
+                        recommendation: format!(
+                            "Leave them unless the cost is acceptable; {INTERNAL_EMBED_COST}. \
+                             To embed them anyway: axil heal --embed-internal"
+                        ),
                         auto_fixable: false,
                     });
                 }
@@ -4779,8 +4789,8 @@ impl Axil {
                 if let Some(internal) = gap.internal_summary() {
                     detail.push_str(&format!(
                         "; {internal} missing an embedding, so code search, dep docs and \
-                         recall match them only by keyword (embedded, they compete with \
-                         memories in recall)"
+                         recall match them only by keyword. Do not backfill them blindly: \
+                         {INTERNAL_EMBED_COST}"
                     ));
                 }
                 checks.push(CheckResult {
