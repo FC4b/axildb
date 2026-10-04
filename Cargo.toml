@@ -8,7 +8,7 @@ edition = "2021"
 publish = false
 
 [workspace]
-# Phase 17 layout — crates are grouped by extensibility tier.
+# Crates are grouped by extensibility tier.
 # See docs/src/extending/overview.md for the three-tier taxonomy.
 members = [
     "crates/axil-core",

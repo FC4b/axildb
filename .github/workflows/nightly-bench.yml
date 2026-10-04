@@ -1,6 +1,6 @@
 name: nightly-bench
 
-# Criterion latency regression watch (Phase 25 P0.5). Runs the 4 in-tree
+# Criterion latency regression watch. Runs the 4 in-tree
 # hot-path suites (core/vector/graph/fts) via scripts/bench-check.sh and
 # surfaces >5% regressions vs the previous night's baseline as WARNINGS —
 # informational, never blocking. Criterion variance on shared CI runners is

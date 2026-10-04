@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 #
-# scripts/longmemeval-gate.sh — Phase 15 P0.1 CI gate.
+# scripts/longmemeval-gate.sh — end-to-end recall-quality gate.
 #
-# Runs the LongMemEval recall harness on the `s` split (small,
-# single-session-user questions) and fails on >2% relative regression
+# Runs the LongMemEval recall harness on the `s` split (the small-haystack
+# setting; `m` is the paper's larger one) and fails on >2% relative regression
 # in overall avg_recall or ndcg_at_10 vs the baseline recorded for the same
 # configuration (benchmarks/longmemeval/baseline.jsonl for the default
 # 500-question recall-qtc run, benchmarks/longmemeval/baselines/<config>.json
