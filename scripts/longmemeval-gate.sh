@@ -72,6 +72,15 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# Every value below ends up in a baseline file name: accept only known
+# names and plain numbers, so a typo or a "../" can't seed or overwrite the
+# wrong file.
+case "${MODEL}" in bge-small|bge-base|nomic) ;; *) echo "unknown --model: ${MODEL} (bge-small, bge-base or nomic)" ; exit 1 ;; esac
+case "${VARIANT}" in s|m|oracle) ;; *) echo "unknown --variant: ${VARIANT} (s, m or oracle)" ; exit 1 ;; esac
+[[ "${STRATEGY}" =~ ^[a-z][a-z-]*$ ]] || { echo "invalid --strategy: ${STRATEGY}" ; exit 1 ; }
+[[ "${TOP_K}" =~ ^[0-9]+$ ]] || { echo "invalid --top-k: ${TOP_K}" ; exit 1 ; }
+[[ "${QUESTIONS}" =~ ^[0-9]+$ ]] || { echo "invalid --questions: ${QUESTIONS}" ; exit 1 ; }
+
 # The requested split's own file: an `m` run must not proceed because the `s`
 # or oracle file happens to be present.
 if [[ "${VARIANT}" == "oracle" ]]; then
@@ -153,6 +162,9 @@ cand = load(cand_path)
 # A baseline recorded under another configuration can't judge this run.
 config_keys = ("variant", "strategy", "weights", "rerank", "top_k", "total_questions")
 mismatch = [k for k in config_keys if base.get(k) != cand.get(k)]
+# Reports from before the model was recorded were all bge-small runs.
+if base.get("model", "bge-small") != cand.get("model", "bge-small"):
+    mismatch.append("model")
 if mismatch:
     for k in mismatch:
         print(f"[gate] config mismatch: {k} baseline={base.get(k)!r} candidate={cand.get(k)!r}", file=sys.stderr)

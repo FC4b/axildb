@@ -255,6 +255,8 @@ struct BenchmarkReport {
     benchmark: String,
     variant: String,
     strategy: String,
+    /// The embedding model the run used, so a comparison can tell runs apart.
+    model: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     weights: Option<String>,
     rerank: String,
@@ -438,10 +440,16 @@ fn main() {
     // Preload the embedder once — this is the heaviest per-question cost
     // when each question opens a fresh Axil DB.
     eprintln!("[2/3] Loading embedder ({})...", args.model);
+    // An unknown name used to run bge-small under the wrong label, so a
+    // typo could seed or pass a baseline recorded as another model.
     let embedding_model = match args.model.as_str() {
+        "bge-small" => EmbeddingModel::BgeSmall,
         "bge-base" => EmbeddingModel::BgeBase,
         "nomic" => EmbeddingModel::Nomic,
-        _ => EmbeddingModel::BgeSmall,
+        other => {
+            eprintln!("unknown --model {other:?}: expected bge-small, bge-base or nomic");
+            std::process::exit(2);
+        }
     };
     let embedder = match Embedder::new(embedding_model.clone()) {
         Ok(e) => Arc::new(e),
@@ -544,6 +552,7 @@ fn main() {
         benchmark: "LongMemEval".to_string(),
         variant: args.variant.clone(),
         strategy: args.strategy.clone(),
+        model: args.model.clone(),
         weights: args.weights.clone(),
         rerank: format!("{:?}", args.rerank).to_lowercase(),
         top_k: args.top_k,
