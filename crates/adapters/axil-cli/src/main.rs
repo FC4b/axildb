@@ -2663,6 +2663,11 @@ enum Command {
         /// Example: http://localhost:4317
         #[arg(long)]
         otel_endpoint: Option<String>,
+        /// Tool profile: `core` serves the tools a session needs (boot,
+        /// recall, search, get, code_search, store, remember_*, resolve_error,
+        /// checkpoint); `full` serves every tool.
+        #[arg(long, env = "AXIL_MCP_TOOLS", default_value = "core", value_parser = ["core", "full"])]
+        tools: String,
     },
 
     // ── HTTP API server ────────────────────────────────────
@@ -3407,6 +3412,10 @@ enum McpCommand {
         /// Print the config path and entry without writing.
         #[arg(long)]
         dry_run: bool,
+        /// Pin the server's tool profile in the entry (`--tools <profile>`).
+        /// Omit it to leave the server on its default, `core`.
+        #[arg(long, value_parser = ["core", "full"])]
+        tools: Option<String>,
     },
 }
 
@@ -4504,7 +4513,7 @@ fn install_droid_hooks(cwd: &Path) -> Result<bool> {
 fn mcp_register_soft(cwd: &Path, target: &str) -> Value {
     #[cfg(feature = "mcp")]
     {
-        mcp_register(cwd, target, false).unwrap_or_else(|e| json!({"error": e.to_string()}))
+        mcp_register(cwd, target, false, None).unwrap_or_else(|e| json!({"error": e.to_string()}))
     }
     #[cfg(not(feature = "mcp"))]
     {
@@ -15489,13 +15498,25 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
         // ── MCP server ─────────────────────────────────────────────
         #[cfg(feature = "mcp")]
         Command::Mcp {
-            command: Some(McpCommand::Install { target, dry_run }),
+            command:
+                Some(McpCommand::Install {
+                    target,
+                    dry_run,
+                    tools,
+                }),
             ..
-        } => mcp_install(&std::env::current_dir()?, &target, dry_run, out),
+        } => mcp_install(
+            &std::env::current_dir()?,
+            &target,
+            dry_run,
+            tools.as_deref(),
+            out,
+        ),
         #[cfg(feature = "mcp")]
         Command::Mcp {
             command: None,
             otel_endpoint,
+            tools,
         } => {
             // Fail loudly if --otel-endpoint is used without the otel feature.
             #[cfg(not(feature = "otel"))]
@@ -15517,6 +15538,8 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
                 None
             };
 
+            let profile: axil_mcp::ToolProfile =
+                tools.parse().map_err(|e: String| anyhow::anyhow!(e))?;
             let db_path = require_db(&db_opt)?;
             // Use embedder so recall/similar_to works over MCP.
             #[cfg(feature = "embed")]
@@ -15532,7 +15555,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
             // shared Axil, then run the blocking serve loop (it owns the tokio
             // runtime internally).
             use axil_core::Adapter as _;
-            let mut adapter = axil_mcp::McpAdapter::new();
+            let mut adapter = axil_mcp::McpAdapter::new().with_tool_profile(profile);
             adapter
                 .bind(db)
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -20524,16 +20547,25 @@ struct McpTarget {
 
 /// CLI wrapper around [`mcp_register`].
 #[cfg(feature = "mcp")]
-fn mcp_install(cwd: &Path, target: &str, dry_run: bool, out: &Output) -> Result<i32> {
-    let result = mcp_register(cwd, target, dry_run)?;
+fn mcp_install(
+    cwd: &Path,
+    target: &str,
+    dry_run: bool,
+    tools: Option<&str>,
+    out: &Output,
+) -> Result<i32> {
+    let result = mcp_register(cwd, target, dry_run, tools)?;
     out.print(&result);
     Ok(EXIT_OK)
 }
 
 /// Register the Axil MCP server in an agent's config. Only the `axil`
 /// entry is written; everything else in the file is preserved.
+///
+/// `tools` pins the server's tool profile in the entry's arguments; `None`
+/// leaves the server on its default profile.
 #[cfg(feature = "mcp")]
-fn mcp_register(cwd: &Path, target: &str, dry_run: bool) -> Result<Value> {
+fn mcp_register(cwd: &Path, target: &str, dry_run: bool, tools: Option<&str>) -> Result<Value> {
     let db_rel = "./.axil/memory.axil";
     let db_abs = cwd.join(".axil").join("memory.axil");
     if !db_abs.is_file() {
@@ -20611,11 +20643,14 @@ fn mcp_register(cwd: &Path, target: &str, dry_run: bool) -> Result<Value> {
     // the server's launch cwd, so one global entry serves every project.
     // Project-scoped configs live in the project, so a relative path is safe.
     let db_arg = db_rel.to_string();
-    let args = if t.global {
+    let mut args = if t.global {
         vec!["mcp".to_string()]
     } else {
         vec!["--db".to_string(), db_arg.clone(), "mcp".to_string()]
     };
+    if let Some(profile) = tools {
+        args.extend(["--tools".to_string(), profile.to_string()]);
+    }
 
     // Per-target entry shape.
     let entry_desc: Value;

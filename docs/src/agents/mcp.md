@@ -22,6 +22,33 @@ axil mcp
 The process reads newline-delimited JSON-RPC requests from stdin and writes
 responses to stdout.
 
+## Tool profiles
+
+Every tool definition in `tools/list` goes to the model, and a client that does
+not cache tool definitions pays for all of them on every request. So the server
+starts with the **core** profile, the tools an agent uses in a normal session:
+resume, recall, find code, and write knowledge back. The **full** profile serves
+every tool.
+
+**Core profile (default):** `boot`, `recall`, `search`, `get`, `code_search`, `store`, `remember_decision`, `remember_error`, `resolve_error`, `checkpoint`.
+
+Serve the full set with the flag or the environment variable:
+
+```bash
+axil --db ./.axil/memory.axil mcp --tools full
+AXIL_MCP_TOOLS=full axil mcp
+```
+
+Under the core profile, a call to any other built-in tool returns a tool error
+that names the flag. Tools that an installed WASM plugin adds are served under
+both profiles. The `initialize` instructions name only the tools the profile
+serves.
+
+`axil mcp install <target> --tools full` writes the flag into the agent's
+config entry. `axil install` and `axil sync` rewrite the entry without it; to
+keep the full set across them, export `AXIL_MCP_TOOLS=full` in the environment
+the agent starts from.
+
 ## Configuration
 
 For Claude Code, the one-liner registers the server in a single step (note the
@@ -33,7 +60,8 @@ claude mcp add axil -- axil --db ./.axil/memory.axil mcp
 ```
 
 For any other MCP client, add the equivalent block to its configuration. Keep
-the `--db` value and the literal `mcp` subcommand as the last argument:
+the global `--db` flag before the `mcp` subcommand; `mcp`'s own flags, such as
+`--tools full`, go after it:
 
 ```json
 {
@@ -45,6 +73,9 @@ the `--db` value and the literal `mcp` subcommand as the last argument:
   }
 }
 ```
+
+To serve every tool, append `"--tools", "full"` to `args`, or give the entry
+`"env": {"AXIL_MCP_TOOLS": "full"}`.
 
 ## Smoke test (no client required)
 
@@ -68,9 +99,10 @@ You get three response lines. The first confirms the handshake — look for
 {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"axil-mcp","version":"…"},"instructions":"…"}}
 ```
 
-The second lists every registered tool (`recall`, `store`, `boot`, …). The
-third is the `recall` result, wrapped as MCP tool-call content — its `text`
-field is a JSON array of hits (`[]` against a fresh, empty database):
+The second lists the tools the server's profile serves (`recall`, `store`,
+`boot`, …). The third is the `recall` result, wrapped as MCP tool-call
+content — its `text` field is a JSON array of hits (`[]` against a fresh, empty
+database):
 
 ```json
 {"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"[]"}]}}
@@ -84,8 +116,9 @@ server is reading real memory. If the handshake frame is missing or
 
 The assembled surface is the built-in tools plus the tools of every enabled
 **Extension** (`deps`, `checkpoint`, and `cache` ship by default). The groups below describe
-the full default surface; a trimmed build that disables an Extension drops that
-Extension's tools.
+the full surface (`--tools full`); the core profile serves the subset named under
+[Tool profiles](#tool-profiles). A trimmed build that disables an Extension drops
+that Extension's tools.
 
 A Rust drift test (`crates/adapters/axil-mcp/src/lib.rs`) asserts this document
 stays in sync with the assembled runtime set — adding or removing a tool without
