@@ -48,14 +48,16 @@ pub struct PairModel {
     pub labels: &'static [&'static str],
     /// Maximum sequence length; longer pairs are truncated longest-first.
     pub max_len: usize,
-    /// Whether a pair's logits are the same alone and in a padded batch.
+    /// Whether a pair's logits are the same, up to float rounding, alone and
+    /// in a padded batch. Batching also needs a calibration fitted on batched
+    /// scores ([`crate::Calibration::one_pair_per_call`]).
     ///
     /// False for dynamically quantized graphs: they quantize activations with
     /// one scale for the whole input tensor, so other pairs and padding in a
     /// batch change every pair's result. On the U1 model, padded batches of 8
     /// move logits by up to 1.4 and flip 4 of 249 verdicts (`batch_check` in
     /// `benchmarks/results/typed-decisions-u1-calibration-2026-10-04.json`).
-    /// Such models score one pair per run.
+    /// Such models always score one pair per run.
     pub batch_invariant: bool,
 }
 

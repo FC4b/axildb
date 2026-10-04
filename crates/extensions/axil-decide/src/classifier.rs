@@ -66,7 +66,9 @@ pub struct PairClassifier {
     accepts_token_type_ids: bool,
     labels: usize,
     label_index: usize,
-    batch_invariant: bool,
+    /// Pairs per inference call: 1 unless both the model and the
+    /// calibration allow batching (see [`batch_limit`]).
+    max_batch: usize,
     calibration: Calibration,
     name: String,
 }
@@ -82,18 +84,29 @@ impl PairClassifier {
     /// their hash, so calling it first is the usual recipe.
     ///
     /// Fails if `calibration` has unusable values or does not fit this model
-    /// and runtime ([`Calibration::check_fit`]), and if any file in `dir` is
-    /// missing or does not match its pinned size and sha256. Hashing the
-    /// files is part of every load.
+    /// and the onnxruntime actually loaded ([`Calibration::check_fit`]), and
+    /// if any file in `dir` is missing or does not match its pinned size and
+    /// sha256. Hashing the files is part of every load.
     pub fn load_with(
         model: &PairModel,
         dir: &Path,
         calibration: Calibration,
         options: LoadOptions,
     ) -> Result<Self> {
+        let runtime = loaded_runtime_version()?;
+        Self::load_on_runtime(model, dir, calibration, options, &runtime)
+    }
+
+    /// [`PairClassifier::load_with`] given the loaded onnxruntime's version.
+    fn load_on_runtime(
+        model: &PairModel,
+        dir: &Path,
+        calibration: Calibration,
+        options: LoadOptions,
+        runtime: &str,
+    ) -> Result<Self> {
         calibration.validate()?;
-        let label_index =
-            calibration.check_fit(model, ort::sys::ORT_API_VERSION, OPTIMIZATION_LEVEL)?;
+        let label_index = calibration.check_fit(model, runtime, OPTIMIZATION_LEVEL)?;
         model.verify(dir).map_err(|e| {
             DecideError::Model(format!(
                 "{e} (PairModel::download fetches missing files and repairs bad ones)"
@@ -124,7 +137,7 @@ impl PairClassifier {
             accepts_token_type_ids,
             labels: model.labels.len(),
             label_index,
-            batch_invariant: model.batch_invariant,
+            max_batch: batch_limit(model.batch_invariant, &calibration),
             calibration,
             name: format!("{}@{}", model.name, model.revision),
         })
@@ -137,9 +150,10 @@ impl PairClassifier {
 
     /// Score `(premise, hypothesis)` pairs; one result per pair, in input order.
     ///
-    /// A batch-invariant model runs up to 8 pairs per call, grouped by length
-    /// so little is padding. Any other model runs each pair alone, which is
-    /// how its calibration was fitted.
+    /// Each pair runs alone, as calibration scores are normally produced.
+    /// Only a batch-invariant model with a calibration fitted on batched
+    /// scores runs up to 8 pairs per call, grouped by length so little is
+    /// padding.
     pub fn score_pairs(&self, pairs: &[(&str, &str)]) -> Result<Vec<PairScore>> {
         let encodings = pairs
             .iter()
@@ -151,9 +165,8 @@ impl PairClassifier {
             .collect::<Result<Vec<_>>>()?;
 
         let lengths: Vec<usize> = encodings.iter().map(|e| e.get_ids().len()).collect();
-        let max_batch = if self.batch_invariant { MAX_BATCH } else { 1 };
         let mut logits: Vec<Vec<f32>> = vec![Vec::new(); pairs.len()];
-        for group in plan_batches(&lengths, max_batch) {
+        for group in plan_batches(&lengths, self.max_batch) {
             let rows: Vec<&tokenizers::Encoding> = group.iter().map(|&i| &encodings[i]).collect();
             for (&i, row) in group.iter().zip(self.run(&rows)?) {
                 logits[i] = row;
@@ -244,6 +257,45 @@ impl axil_core::PairJudge for PairClassifier {
     }
 }
 
+/// Pairs per inference call. Batching changes scores, slightly even for a
+/// batch-invariant model, so pairs are batched only when the model is
+/// batch-invariant and the calibration was fitted on batched scores; a
+/// calibration fitted one pair per call gets one pair per call.
+fn batch_limit(batch_invariant: bool, calibration: &Calibration) -> usize {
+    if batch_invariant && !calibration.one_pair_per_call {
+        MAX_BATCH
+    } else {
+        1
+    }
+}
+
+/// The loaded onnxruntime's version, from its build info (official builds
+/// name their release branch, `git-branch=rel-1.22.0`). Read through the
+/// loaded library, so a shared runtime other than the one this build was
+/// compiled against reports its own version.
+pub(crate) fn loaded_runtime_version() -> Result<String> {
+    let info = std::panic::catch_unwind(ort::info)
+        .map_err(|_| DecideError::Model("onnxruntime failed to initialise".into()))?;
+    version_from_build_info(info)
+        .map(str::to_string)
+        .ok_or_else(|| {
+            DecideError::Calibration(format!(
+                "cannot tell the onnxruntime version from its build info ({info}), so no \
+             calibration can be checked against it"
+            ))
+        })
+}
+
+/// The release version in an onnxruntime build-info string, if it names one.
+fn version_from_build_info(info: &str) -> Option<&str> {
+    let start = info.find("git-branch=rel-")? + "git-branch=rel-".len();
+    let rest = &info[start..];
+    let end = rest
+        .find(|c: char| c == ',' || c.is_whitespace())
+        .unwrap_or(rest.len());
+    Some(&rest[..end]).filter(|v| !v.is_empty())
+}
+
 /// Split pairs, given their token lengths, into calls of at most `max_batch`.
 /// Pairs are taken shortest first so each call pads little; every index
 /// appears in exactly one call. With `max_batch` 1 each pair runs alone, in
@@ -300,6 +352,61 @@ mod tests {
             Vec::new(),
             Default::default(),
         )
+    }
+
+    #[test]
+    fn the_u1_calibration_scores_one_pair_per_call() {
+        let u1 = Calibration::u1();
+        assert!(u1.one_pair_per_call);
+        // Even on a model whose scores do not change in a batch.
+        assert_eq!(batch_limit(true, &u1), 1);
+        assert_eq!(batch_limit(false, &u1), 1);
+        let batched = Calibration {
+            one_pair_per_call: false,
+            ..Calibration::u1()
+        };
+        assert_eq!(batch_limit(true, &batched), MAX_BATCH);
+        assert_eq!(batch_limit(false, &batched), 1);
+    }
+
+    #[test]
+    fn runtime_version_comes_from_the_build_info() {
+        let real = "ORT Build Info: git-branch=rel-1.22.0, git-commit-id=f217402, \
+                    build type=Release, cmake cxx flags: -DCPUINFO_SUPPORTED";
+        assert_eq!(version_from_build_info(real), Some("1.22.0"));
+        assert_eq!(
+            version_from_build_info("git-branch=rel-1.30.1 build type=Release"),
+            Some("1.30.1")
+        );
+        assert_eq!(
+            version_from_build_info("ORT Build Info: git-branch=main, x"),
+            None
+        );
+        assert_eq!(version_from_build_info("git-branch=rel-, x"), None);
+        assert_eq!(version_from_build_info(""), None);
+        // The runtime this crate links reports the version U1 was fitted on.
+        assert!(loaded_runtime_version().unwrap().starts_with("1.22."));
+    }
+
+    #[test]
+    fn load_refuses_a_runtime_the_calibration_was_not_measured_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let model = crate::NLI_DEBERTA_V3_XSMALL_QINT8;
+        for runtime in ["1.23.0", "1.30.0", "1.21.0"] {
+            let err = PairClassifier::load_on_runtime(
+                &model,
+                dir.path(),
+                Calibration::u1(),
+                LoadOptions::default(),
+                runtime,
+            )
+            .err()
+            .expect("other onnxruntime");
+            assert!(
+                matches!(err, DecideError::Calibration(_)) && err.to_string().contains(runtime),
+                "{runtime}: {err}"
+            );
+        }
     }
 
     #[test]

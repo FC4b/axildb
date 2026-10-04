@@ -141,14 +141,20 @@ const FP32: PairModel = PairModel {
 #[test]
 #[ignore = "downloads a 284 MB model; run with --ignored"]
 fn padded_batches_match_single_pairs() {
-    let calibration = Calibration {
+    let dir = ready(&FP32, "AXIL_DECIDE_FP32_DIR");
+    let single_pair = Calibration {
         model: FP32.name.into(),
         onnx_sha256: FP32.onnx.sha256.into(),
         temperature: 1.0,
         ..Calibration::u1()
     };
-    let judge =
-        PairClassifier::load(&FP32, &ready(&FP32, "AXIL_DECIDE_FP32_DIR"), calibration).unwrap();
+    // Only a calibration fitted on batched scores lets the runtime batch.
+    let batch_fitted = Calibration {
+        one_pair_per_call: false,
+        ..single_pair.clone()
+    };
+    let single = PairClassifier::load(&FP32, &dir, single_pair).unwrap();
+    let batching = PairClassifier::load(&FP32, &dir, batch_fitted).unwrap();
     let texts = u1_texts();
     let mut ids: Vec<&String> = texts.keys().collect();
     ids.sort();
@@ -158,16 +164,25 @@ fn padded_batches_match_single_pairs() {
         .map(|id| (texts[*id].0.as_str(), texts[*id].1.as_str()))
         .collect();
 
-    let batched = judge.score_pairs(&inputs).unwrap();
-    let mut max_p = 0f64;
-    for (pair, b) in inputs.iter().zip(&batched) {
-        let single = judge.score_pairs(&[*pair]).unwrap().remove(0);
-        assert_eq!(single.tokens, b.tokens);
-        max_p = max_p.max((single.probability - b.probability).abs());
+    // A single-pair calibration runs one pair per call even on this
+    // batch-invariant model: the whole slice equals pair-by-pair calls.
+    let one_by_one: Vec<_> = inputs
+        .iter()
+        .map(|&pair| single.score_pairs(&[pair]).unwrap().remove(0))
+        .collect();
+    assert_eq!(single.score_pairs(&inputs).unwrap(), one_by_one);
+
+    let batched = batching.score_pairs(&inputs).unwrap();
+    let (mut max_p, mut flips) = (0f64, 0usize);
+    for (s, b) in one_by_one.iter().zip(&batched) {
+        assert_eq!(s.tokens, b.tokens);
+        max_p = max_p.max((s.probability - b.probability).abs());
+        flips += usize::from(s.flagged != b.flagged);
     }
     println!(
-        "{} pairs: max |p diff| batched vs single {max_p:.2e}",
+        "{} pairs: batched vs single max |p diff| {max_p:.2e}, {flips} verdict flips",
         inputs.len()
     );
     assert!(max_p <= TOLERANCE, "max |p diff| {max_p:e} > {TOLERANCE:e}");
+    assert_eq!(flips, 0, "batched verdicts differ from single-pair ones");
 }

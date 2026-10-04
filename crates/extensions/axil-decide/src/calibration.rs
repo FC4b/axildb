@@ -48,7 +48,10 @@ pub struct Calibration {
     pub onnxruntime: String,
     /// Graph optimisation level that produced them, e.g. `ORT_ENABLE_ALL`.
     pub optimization_level: String,
-    /// Whether each pair ran alone (no batching, no padding).
+    /// Whether each pair ran alone (no batching, no padding). When true the
+    /// runtime scores one pair per call, even for a model marked
+    /// batch-invariant: batched scores still differ slightly (up to 1.95e-6
+    /// in probability on the fp32 U1 export).
     pub one_pair_per_call: bool,
 }
 
@@ -92,18 +95,20 @@ impl Calibration {
     }
 
     /// Check that this calibration was fitted on scores `model` produces
-    /// under a runtime with onnxruntime API version `ort_api` (1.`ort_api`.x)
-    /// at `optimization_level`; returns the index of its label in the
-    /// model's logits.
+    /// under the loaded onnxruntime, version `runtime` (e.g. `1.22.0`), at
+    /// `optimization_level`; returns the index of its label in the model's
+    /// logits.
     ///
     /// Refuses a different model, revision, graph or tokenizer file,
-    /// truncation length, onnxruntime minor version or optimisation level,
-    /// and a calibration fitted on batched scores of a model whose scores
-    /// change in a batch.
+    /// truncation length or optimisation level; an onnxruntime whose
+    /// major.minor differs from the one the scores were measured on (the
+    /// int8 U1 model's verdicts change between 1.22 and 1.30); and a
+    /// calibration fitted on batched scores of a model whose scores change
+    /// in a batch.
     pub fn check_fit(
         &self,
         model: &PairModel,
-        ort_api: u32,
+        runtime: &str,
         optimization_level: &str,
     ) -> Result<usize> {
         let differs = |what: &str, fitted: &dyn std::fmt::Display, here: &dyn std::fmt::Display| {
@@ -132,13 +137,9 @@ impl Calibration {
         if self.max_len != model.max_len {
             return differs("max_len", &self.max_len, &model.max_len);
         }
-        let fitted_api = self
-            .onnxruntime
-            .split('.')
-            .nth(1)
-            .and_then(|minor| minor.parse::<u32>().ok());
-        if self.onnxruntime.split('.').next() != Some("1") || fitted_api != Some(ort_api) {
-            return differs("onnxruntime", &self.onnxruntime, &format!("1.{ort_api}"));
+        match (major_minor(&self.onnxruntime), major_minor(runtime)) {
+            (Some(fitted), Some(loaded)) if fitted == loaded => {}
+            _ => return differs("onnxruntime", &self.onnxruntime, &runtime),
         }
         if self.optimization_level != optimization_level {
             return differs(
@@ -171,6 +172,15 @@ impl Calibration {
     pub fn flags(&self, probability: f64) -> bool {
         probability >= self.threshold
     }
+}
+
+/// `(major, minor)` of a version such as `1.22.0`; `None` if it has no
+/// numeric major and minor.
+fn major_minor(version: &str) -> Option<(u32, u32)> {
+    let mut parts = version.trim().split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    Some((major, minor))
 }
 
 /// `z[label] - logsumexp(z[others])`: the log-odds of the label under a
@@ -289,11 +299,12 @@ mod tests {
     }
 
     #[test]
-    fn bundled_u1_calibration_fits_the_u1_model_and_runtime() {
+    fn bundled_u1_calibration_fits_the_u1_model_and_the_loaded_runtime() {
+        let runtime = crate::classifier::loaded_runtime_version().unwrap();
         let index = Calibration::u1()
             .check_fit(
                 &crate::NLI_DEBERTA_V3_XSMALL_QINT8,
-                ort::sys::ORT_API_VERSION,
+                &runtime,
                 crate::classifier::OPTIMIZATION_LEVEL,
             )
             .unwrap();
@@ -301,13 +312,22 @@ mod tests {
     }
 
     #[test]
+    fn major_minor_parses_versions() {
+        assert_eq!(major_minor("1.22.0"), Some((1, 22)));
+        assert_eq!(major_minor("1.22"), Some((1, 22)));
+        assert_eq!(major_minor(" 1.30.1 "), Some((1, 30)));
+        assert_eq!(major_minor("1"), None);
+        assert_eq!(major_minor("main"), None);
+        assert_eq!(major_minor(""), None);
+    }
+
+    #[test]
     fn check_fit_refuses_every_mismatch() {
         let u1 = crate::NLI_DEBERTA_V3_XSMALL_QINT8;
-        let fits = |c: &Calibration, model: &PairModel, api: u32, level: &str| {
-            c.check_fit(model, api, level)
-        };
+        let all = "ORT_ENABLE_ALL";
         let ok = Calibration::u1();
-        assert!(fits(&ok, &u1, 22, "ORT_ENABLE_ALL").is_ok());
+        assert!(ok.check_fit(&u1, "1.22.0", all).is_ok());
+        assert!(ok.check_fit(&u1, "1.22.1", all).is_ok(), "patch release");
 
         // Same name and revision, different files or settings.
         let other_graph = PairModel {
@@ -326,37 +346,35 @@ mod tests {
         };
         let shorter = PairModel { max_len: 256, ..u1 };
         for model in [other_graph, other_tokenizer, shorter] {
-            let err = fits(&ok, &model, 22, "ORT_ENABLE_ALL").unwrap_err();
+            let err = ok.check_fit(&model, "1.22.0", all).unwrap_err();
             assert!(matches!(err, DecideError::Calibration(_)), "{err}");
         }
-        assert!(
-            fits(&ok, &u1, 23, "ORT_ENABLE_ALL").is_err(),
-            "other onnxruntime"
-        );
-        assert!(
-            fits(&ok, &u1, 22, "ORT_ENABLE_BASIC").is_err(),
-            "other level"
-        );
+        // A newer runtime that still serves API 22 is not the one measured.
+        for runtime in ["1.23.0", "1.30.0", "1.21.4", "2.22.0", "unknown", ""] {
+            let err = ok.check_fit(&u1, runtime, all).unwrap_err();
+            assert!(err.to_string().contains("onnxruntime"), "{runtime}: {err}");
+        }
+        assert!(ok.check_fit(&u1, "1.22.0", "ORT_ENABLE_BASIC").is_err());
 
         let batched = Calibration {
             one_pair_per_call: false,
             ..Calibration::u1()
         };
         assert!(
-            fits(&batched, &u1, 22, "ORT_ENABLE_ALL").is_err(),
+            batched.check_fit(&u1, "1.22.0", all).is_err(),
             "batched fit"
         );
         let invariant = PairModel {
             batch_invariant: true,
             ..u1
         };
-        assert!(fits(&batched, &invariant, 22, "ORT_ENABLE_ALL").is_ok());
+        assert!(batched.check_fit(&invariant, "1.22.0", all).is_ok());
 
         let unknown_label = Calibration {
             label: "relevant".into(),
             ..Calibration::u1()
         };
-        assert!(fits(&unknown_label, &u1, 22, "ORT_ENABLE_ALL").is_err());
+        assert!(unknown_label.check_fit(&u1, "1.22.0", all).is_err());
     }
 
     #[test]
