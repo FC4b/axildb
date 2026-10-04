@@ -1,0 +1,55 @@
+{
+  "benchmark": "typed-decisions-u1-rust-runtime",
+  "date": "2026-10-04",
+  "machine": "M1 Pro (aarch64 macOS), 10 cores, shared with other build jobs",
+  "runtime": "axil-decide PairClassifier, ort 2.0.0-rc.10 (onnxruntime 1.22.0), CPU, Level3",
+  "model": "nli-deberta-v3-xsmall-qint8@a150876415327c80daeff35ca6f68f5ed8cf5c24",
+  "calibration": "crates/extensions/axil-decide/calibration/u1-nli-deberta-v3-xsmall-qint8.json",
+  "reproduce": "cargo run --release -p axil-decide --example u1_bench -- --threads N --out FILE.json; cargo test --release -p axil-decide --test u1_parity -- --ignored",
+  "parity": {
+    "against": "Python onnxruntime 1.22.0",
+    "flagged": 12,
+    "max_abs_logit_diff": 4.440892098500626e-16,
+    "max_abs_probability_diff": 5.551115123125783e-17,
+    "pairs": 147,
+    "verdicts_agree": 147,
+    "tokens_equal": "every pair (asserted by tests/u1_parity.rs)",
+    "argmax_equal": "every pair (asserted by tests/u1_parity.rs)",
+    "note": "Rust and Python onnxruntime 1.22.0 produce the same float32 logits; the residual is float64 rounding in the calibration."
+  },
+  "batched_fp32_check": {
+    "model": "onnx/model.onnx (fp32) of the same revision, batch-invariant",
+    "pairs": 40,
+    "max_abs_probability_diff_batched_vs_single": 1.95e-06,
+    "note": "The int8 model is not batch-invariant (one activation scale per batch tensor), so the runtime scores it one pair per call; batching it moved probabilities by up to 0.27 in Python."
+  },
+  "latency": {
+    "what": "one pair per call (tokenize + run + calibrate), 249 U1 pairs; Rust after 5 warm-up pairs, Python without; load = session creation (+ tokenizer for Rust), first in process; one run each, Rust then Python per thread count",
+    "rust_threads_1": {
+      "load_ms": 1038.0,
+      "mean_ms": 49.69,
+      "p50_ms": 48.01,
+      "p95_ms": 85.43
+    },
+    "rust_threads_4": {
+      "load_ms": 763.0,
+      "mean_ms": 75.67,
+      "p50_ms": 53.14,
+      "p95_ms": 197.0
+    },
+    "python_onnxruntime_1.22.0_threads_1": {
+      "load_ms": 842.08,
+      "p50_ms": 113.55,
+      "p95_ms": 236.42,
+      "mean_ms": 119.46
+    },
+    "python_onnxruntime_1.22.0_threads_4": {
+      "load_ms": 1210.61,
+      "p50_ms": 98.65,
+      "p95_ms": 262.31,
+      "mean_ms": 117.44
+    },
+    "load_average_during_runs": "72 to 88 (1-minute) on 10 cores",
+    "caveat": "Measured while other jobs saturated the machine, so these are upper bounds and the Rust/Python gap is mostly the load changing between runs. The bake-off measured Python p50 19.3 ms (4 threads) on a quieter machine (typed-decisions-bakeoff-2026-09-27.json). Re-measure on an idle machine and on x86 Linux before choosing where the model runs."
+  }
+}

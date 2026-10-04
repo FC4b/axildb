@@ -287,5 +287,5 @@ jobs:
       - name: cargo-semver-checks (all publishable crates vs crates.io)
         run: |
           cargo semver-checks check-release --workspace \
-            --exclude axildb-umbrella --exclude axil-tests \
+            --exclude axildb-umbrella --exclude axil-tests --exclude axil-decide \
             --default-features
