@@ -201,7 +201,9 @@ fn scan_file_drift(db: &Axil, project_root: &Path, config: &axil_core::IndexConf
         }
     }
 
-    let current_files = scanner::scan_files(project_root, config);
+    // Freshness is checked on every read, so the files left out for size go
+    // unreported here: reporting them is an index run's job.
+    let current_files = scanner::scan_files(project_root, config, Some(db.path())).files;
     let mut changed = std::collections::HashSet::new();
     let mut new_files = std::collections::HashSet::new();
     let mut seen = std::collections::HashSet::new();

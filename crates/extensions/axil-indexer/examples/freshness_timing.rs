@@ -67,7 +67,7 @@ fn main() {
         std::hint::black_box(stored);
 
         let t = Instant::now();
-        let files = scan_files(&root, &config);
+        let files = scan_files(&root, &config, Some(db.path())).files;
         walk_ms.push(ms(t));
 
         let t = Instant::now();

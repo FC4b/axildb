@@ -87,6 +87,60 @@ fn parse_json(stdout: &str) -> Value {
         .unwrap_or_else(|e| panic!("failed to parse JSON: {e}\nstdout: {stdout}"))
 }
 
+// ─── Index freshness on read paths ─────────────────────────────────────────
+
+/// Recall and boot check the code index's freshness by scanning the project.
+/// With no project marker above the database, that scan must cover the
+/// directory holding `.axil/`, never `.axil/` itself, whose 1 MB
+/// `memory.axil.ts` read as an oversized TypeScript file and drew a warning
+/// on every read. A read also says nothing about source files left out of
+/// the index for size: `axil index` does.
+#[test]
+fn test_reads_never_scan_the_database_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    let proj = dir.path().join("proj");
+    std::fs::create_dir_all(proj.join(".axil")).unwrap();
+    let db = proj.join(".axil/memory.axil");
+    let db = db.to_str().unwrap();
+    let (_, stderr, code) = run_axil(&["--db", db, "init"]);
+    assert_eq!(code, 0, "{stderr}");
+    // No vector store, so nothing loads the embedding model.
+    std::fs::remove_file(proj.join(".axil/memory.axil.vec")).unwrap();
+    std::fs::write(proj.join("axil.toml"), "[index]\nmax_file_size_kb = 1\n").unwrap();
+    std::fs::write(proj.join("small.rs"), "pub fn small() {}\n").unwrap();
+    std::fs::write(
+        proj.join("big.rs"),
+        format!("pub fn big() {{}}\n{}", "// padding\n".repeat(200)),
+    )
+    .unwrap();
+    let (_, stderr, code) = run_axil(&[
+        "--db",
+        db,
+        "store",
+        "decisions",
+        r#"{"summary":"the connection pool size is 32"}"#,
+    ]);
+    assert_eq!(code, 0, "{stderr}");
+
+    let (stdout, stderr, code) = run_axil(&["--db", db, "index", proj.to_str().unwrap()]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        stderr.contains("[axil-index] skipped 1 file(s) over max_file_size_kb = 1 KB: big.rs"),
+        "{stderr}"
+    );
+    // small.rs and axil.toml.
+    assert_eq!(parse_json(&stdout)["indexed_files"], 2, "{stdout}");
+
+    for args in [
+        vec!["--db", db, "recall", "connection pool"],
+        vec!["--db", db, "boot"],
+    ] {
+        let (_, stderr, code) = run_axil(&args);
+        assert_eq!(code, 0, "{args:?}: {stderr}");
+        assert!(!stderr.contains("[axil-index]"), "{args:?}: {stderr}");
+    }
+}
+
 // ─── Init ──────────────────────────────────────────────────────────────────
 
 #[test]

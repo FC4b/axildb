@@ -7628,11 +7628,13 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
                         .unwrap_or_default();
                     let index_result = (|| -> anyhow::Result<Value> {
                         let db = open_with_all_detected(&db_path)?;
+                        let max_file_size_kb = index_config.max_file_size_kb;
                         let indexer = axil_indexer::ProjectIndexer::new(&db, index_config)
                             .with_progress(make_index_progress(out.quiet));
                         let report = indexer
                             .index_full(&cwd)
                             .map_err(|e| anyhow::anyhow!("{e}"))?;
+                        warn_skipped_large(&report, max_file_size_kb);
                         Ok(serde_json::to_value(&report)?)
                     })();
                     match index_result {
@@ -11582,7 +11584,11 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
 
             if dry_run {
                 let project_type = axil_indexer::scanner::detect_project_type(&root);
-                let files = axil_indexer::scanner::scan_files(&root, &config);
+                // No database is needed for a dry run, but when there is one
+                // its files are left out exactly as the real run leaves them.
+                let db_path = require_db(&db_opt).ok();
+                let files =
+                    axil_indexer::scanner::scan_files(&root, &config, db_path.as_deref()).files;
                 out.print(&json!({
                     "dry_run": true,
                     "project_type": project_type.as_str(),
@@ -11594,6 +11600,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
 
             let db_path = require_db(&db_opt)?;
             let db = open_with_all_detected(&db_path)?;
+            let max_file_size_kb = config.max_file_size_kb;
             let indexer = axil_indexer::ProjectIndexer::new(&db, config)
                 .with_progress(make_index_progress(out.quiet));
 
@@ -11607,6 +11614,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
                     .map_err(|e| anyhow::anyhow!("{e}"))?
             };
 
+            warn_skipped_large(&result, max_file_size_kb);
             out.print(&serde_json::to_value(&result)?);
             Ok(EXIT_OK)
         }
@@ -11628,6 +11636,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
             let db_path = require_db(&db_opt)?;
             let proxies = {
                 let db = open_with_all_detected(&db_path)?;
+                let max_file_size_kb = config.max_file_size_kb;
                 let indexer = axil_indexer::ProjectIndexer::new(&db, config)
                     .with_progress(make_index_progress(out.quiet));
                 let result = if full || !indexer.has_index() {
@@ -11639,6 +11648,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
                         .index_incremental(&root)
                         .map_err(|e| anyhow::anyhow!("{e}"))?
                 };
+                warn_skipped_large(&result, max_file_size_kb);
                 // Drop the DB handle (end of scope) before spawning the SCIP
                 // child so the worker can take the redb write lock cleanly.
                 serde_json::to_value(&result)?
@@ -15995,6 +16005,10 @@ fn run_worker_and_report(db: &axil_core::Axil, out: &Output) {
 /// Walk up from the database path to find the project root.
 /// Looks for Cargo.toml, package.json, pyproject.toml, go.mod, etc.
 ///
+/// With no marker anywhere above, the root is the directory holding the
+/// database or, for the usual `.axil/memory.axil`, the directory holding
+/// `.axil/`, since `.axil/` holds only Axil's own files.
+///
 /// Not feature-gated: pure `std::path` walking with no indexer dependency,
 /// called from ungated handlers (`memory-pressure`, `decay`).
 fn detect_project_root(db_path: &Path) -> Option<PathBuf> {
@@ -16018,8 +16032,29 @@ fn detect_project_root(db_path: &Path) -> Option<PathBuf> {
             break;
         }
     }
-    // Fallback: db parent directory
-    db_path.parent().map(|p| p.to_path_buf())
+    let db_dir = db_path.parent()?;
+    let root = match db_dir.file_name() {
+        Some(name) if name == ".axil" => db_dir.parent()?,
+        _ => db_dir,
+    };
+    Some(if root.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        root.to_path_buf()
+    })
+}
+
+/// Warn, on stderr, about the source files an index run left out for size:
+/// their symbols are missing from code-search and fts, and nothing else says
+/// why. Only commands that index call this; a read path that checks
+/// freshness stays quiet.
+#[cfg(feature = "indexer")]
+fn warn_skipped_large(result: &axil_indexer::IndexResult, max_file_size_kb: u64) {
+    if let Some(warning) =
+        axil_indexer::scanner::skipped_large_warning(&result.skipped_large, max_file_size_kb)
+    {
+        errln!("{warning}");
+    }
 }
 
 // ─── dependency documentation memory ──────────────────────────────
@@ -22276,5 +22311,30 @@ mod open_helper_tests {
             #[cfg(feature = "indexer")]
             check("open_with_best_effort", open_with_best_effort(&path));
         }
+    }
+}
+
+#[cfg(test)]
+mod project_root_tests {
+    use super::*;
+
+    #[test]
+    fn without_a_marker_the_root_is_the_directory_holding_axil() {
+        let dir = tempfile::tempdir().unwrap();
+        let proj = dir.path().join("proj");
+        let db = proj.join(".axil").join("memory.axil");
+        assert_eq!(detect_project_root(&db), Some(proj.clone()));
+
+        // A database kept outside `.axil/`: the directory it is in.
+        let data = dir.path().join("data");
+        assert_eq!(
+            detect_project_root(&data.join("memory.axil")),
+            Some(data.clone())
+        );
+
+        // A marker above the database still wins.
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::write(proj.join("Cargo.toml"), "").unwrap();
+        assert_eq!(detect_project_root(&db), Some(proj));
     }
 }

@@ -23,7 +23,7 @@ use crate::progress::{IndexProgress, NoopProgress};
 use crate::proxy::{
     build_proxy, proxy_to_record, CodeProxy, ProxyInput, ProxyKind, TABLE_CODE_PROXIES,
 };
-use crate::scanner::{self, Language, ProjectType, ScannedFile};
+use crate::scanner::{self, Language, ProjectType, ScannedFile, SkippedFile};
 use crate::token;
 use axil_core::IndexConfig;
 
@@ -47,6 +47,11 @@ pub struct IndexResult {
     /// For incremental: how many files were changed vs unchanged.
     pub changed: Option<usize>,
     pub unchanged: Option<usize>,
+    /// Source files left out for exceeding `max_file_size_kb`, largest
+    /// first. Not serialized: a caller reports them, e.g. with
+    /// [`scanner::skipped_large_warning`].
+    #[serde(skip)]
+    pub skipped_large: Vec<SkippedFile>,
 }
 
 /// SCIP definition match for a `(path, symbol)` pair. Carries the
@@ -120,7 +125,10 @@ impl<'a> ProjectIndexer<'a> {
         let project_name = scanner::detect_project_name(root, project_type);
 
         // Scan files
-        let files = scanner::scan_files(root, &self.config);
+        let scanner::Scan {
+            files,
+            skipped_large,
+        } = scanner::scan_files(root, &self.config, Some(self.db.path()));
         self.progress.start(files.len());
 
         // Clear existing index tables
@@ -257,6 +265,7 @@ impl<'a> ProjectIndexer<'a> {
             tokens_saved_estimate: format!("~{ratio}:1 compression ({index_tokens} index tokens vs {total_source_tokens} source tokens)"),
             changed: None,
             unchanged: None,
+            skipped_large,
         })
     }
 
@@ -270,7 +279,10 @@ impl<'a> ProjectIndexer<'a> {
         let project_name = scanner::detect_project_name(root, project_type);
 
         // Scan current files on disk
-        let current_files = scanner::scan_files(root, &self.config);
+        let scanner::Scan {
+            files: current_files,
+            skipped_large,
+        } = scanner::scan_files(root, &self.config, Some(self.db.path()));
         self.progress.start(current_files.len());
 
         // Build a map of stored file records: path → (record_id, content_hash)
@@ -331,6 +343,7 @@ impl<'a> ProjectIndexer<'a> {
                 tokens_saved_estimate: "no changes".to_string(),
                 changed: Some(0),
                 unchanged: Some(unchanged_count),
+                skipped_large,
             });
         }
 
@@ -556,6 +569,7 @@ impl<'a> ProjectIndexer<'a> {
             ),
             changed: Some(changed_count),
             unchanged: Some(unchanged_count),
+            skipped_large,
         })
     }
 
