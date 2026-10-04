@@ -16021,6 +16021,10 @@ fn run_worker_and_report(db: &axil_core::Axil, out: &Output) {
 /// Not feature-gated: pure `std::path` walking with no indexer dependency,
 /// called from ungated handlers (`memory-pressure`, `decay`).
 fn detect_project_root(db_path: &Path) -> Option<PathBuf> {
+    // Walk the absolute path. A relative one (`--db .axil/memory.axil`) runs
+    // out at an empty path, which as a root names no files: every indexed
+    // file would read as deleted.
+    let db_path = std::path::absolute(db_path).unwrap_or_else(|_| db_path.to_path_buf());
     let mut dir = db_path.parent()?.to_path_buf();
     let markers = [
         "Cargo.toml",
