@@ -52,7 +52,9 @@ claimed here.
 │          (vector + recency + graph + keyword + temporal +   │
 │           feedback + preference + activation + importance)  │
 ├─────────────────────────────────────────────────────────────┤
-│ Step 4b — Cross-encoder rerank          (optional, off)     │
+│ Step 4b — Library reranker              (optional, off)     │
+│           (QueryBuilder::with_reranker; the CLI's --rerank  │
+│            runs after recall returns, see Step 4b)          │
 ├─────────────────────────────────────────────────────────────┤
 │ Step 4c — Query-Time Chunk rerank       (optional)          │
 ├─────────────────────────────────────────────────────────────┤
@@ -186,12 +188,16 @@ axil recall "auth timeout" --explain
 
 ## Step 4b — Cross-encoder rerank (optional, off by default)
 
-`axil recall --rerank cross-encoder` re-scores a candidate list with an
-ONNX cross-encoder and reorders it by the cross-encoder's score (the fused
+Two rerankers share this name and run at different points.
+
+**The CLI's `--rerank`** is not a stage inside `db.recall()`: it runs after
+recall has returned, so after query-time chunk rescoring (Step 4c) and the
+post-filter. `axil recall --rerank cross-encoder` re-scores those returned
+hits with an ONNX cross-encoder and reorders them by its score (recall's
 order is replaced, not blended; at most the first 20 entries are scored).
 
-- **What the rerank receives.** With no post-filter: the first `--top-k`
-  fused hits (default 5), or up to ⌈1.5 × `--top-k`⌉ when completeness
+- **What the rerank receives.** Recall's final, QTC-scored hits. With no
+  post-filter: the first `--top-k` hits (default 5), or up to ⌈1.5 × `--top-k`⌉ when completeness
   widening fires (on by default; `--no-widen` turns it off). With a
   post-filter (`--table`, `--type`, `--after`, `--before`, `--agent`,
   `--min-importance`, `--fresh-only`): recall over-fetches 5 × `--top-k`
@@ -214,9 +220,10 @@ expected model is `cross-encoder/ms-marco-MiniLM-L-6-v2`.
 `--rerank llm` reorders the same list through the configured
 `LlmProvider` instead.
 
-Embedded library users can bring their own reranker: implement the
-`Rerank` trait in `axil-core` and attach it with
-`QueryBuilder::with_reranker(...)`. The top `rerank_top_k_in` candidates
+**The library reranker** is the stage in the diagram. Embedded library
+users can bring their own: implement the `Rerank` trait in `axil-core` and
+attach it with `QueryBuilder::with_reranker(...)`; it runs on the
+QueryBuilder path before query-time chunks. The top `rerank_top_k_in` candidates
 (default 50) are re-scored and up to `rerank_top_k_out` (default 10) are
 kept.
 

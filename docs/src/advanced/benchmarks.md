@@ -21,11 +21,15 @@ retrieved in top-k; recall = fraction of answer sessions retrieved.
 > (`qtc-500.json`, `fusion-500.json`, `baseline-500.json`); the investigation
 > notes further down are from earlier runs.
 
-| Strategy | Variant | Questions | top-k | Hit Rate | Recall |
-|----------|---------|-----------|-------|----------|--------|
-| **Recall-QTC (query-time chunk)** | S (500 Qs) | 500 | 5 | **96.4%** | **93.5%** |
-| **Recall (full pipeline)** | S (500 Qs) | 500 | 5 | **96.2%** | **91.5%** |
-| **Vector (BGE-small)** | S (500 Qs) | 500 | 5 | **96.4%** | **93.6%** |
+| Strategy | Variant | Questions | top-k | Hit Rate | Recall | Build | Source |
+|----------|---------|-----------|-------|----------|--------|-------|--------|
+| **Recall-QTC (query-time chunk)** | S (500 Qs) | 500 | 5 | **96.4%** | **93.5%** | 2026-06-27 rerun | `qtc-500.json` |
+| **Recall (full pipeline)** | S (500 Qs) | 500 | 5 | **96.2%** | **91.5%** | 2026-06-27 rerun | `fusion-500.json` |
+| **Vector (BGE-small)** *(historical)* | S (500 Qs) | 500 | 5 | **96.4%** | **93.6%** | initial release | `baseline-500.json` |
+
+The vector row is from an earlier build than the other two (vector search
+and fusion have changed since), so the table is not a head-to-head; no
+same-build vector run is committed.
 
 Recall strategy = `db.recall()` with RRF-style fusion of vector + FTS +
 recency + keyword overlap. Solid baseline for production agent use.
