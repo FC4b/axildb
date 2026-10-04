@@ -303,19 +303,19 @@ pub fn skipped_large_warning(skipped: &[SkippedFile], max_file_size_kb: u64) -> 
     ))
 }
 
-/// A database's own files: its core file and every companion named after it
-/// (`memory.axil.vec`, `memory.axil.ts`, `memory.axil.fts/`, named vector
-/// spaces). `memory.axil.ts` would otherwise read as TypeScript.
+/// A database's own files: its core file and every companion Axil derives
+/// from its path ([`axil_core::is_database_file_name`]). `memory.axil.ts`
+/// would otherwise read as TypeScript.
 struct DatabaseFiles {
     /// The directory holding the database, canonicalized.
     dir: PathBuf,
     /// The core file's name.
-    name: std::ffi::OsString,
+    name: String,
 }
 
 impl DatabaseFiles {
     fn new(db_path: &Path) -> Option<Self> {
-        let name = db_path.file_name()?.to_os_string();
+        let name = db_path.file_name()?.to_string_lossy().into_owned();
         let parent = db_path
             .parent()
             .filter(|p| !p.as_os_str().is_empty())
@@ -328,12 +328,8 @@ impl DatabaseFiles {
         let Some(name) = path.file_name() else {
             return false;
         };
-        let named_after = name
-            .as_encoded_bytes()
-            .strip_prefix(self.name.as_encoded_bytes())
-            .is_some_and(|rest| rest.is_empty() || rest[0] == b'.');
         // Only an entry named like the database pays for a canonicalize.
-        named_after
+        axil_core::is_database_file_name(&self.name, &name.to_string_lossy())
             && path
                 .parent()
                 .and_then(|p| std::fs::canonicalize(p).ok())
@@ -588,8 +584,9 @@ mod tests {
         std::fs::write(data.join("memory.axil.ts"), "export const x = 1;\n").unwrap();
         std::fs::write(data.join("memory.axil.vec.code"), "").unwrap();
         std::fs::write(data.join("memory.axil.fts/notes.py"), "x = 1\n").unwrap();
-        // Named like the database but not its file: still source.
+        // Named like the database but not one of its files: still source.
         std::fs::write(data.join("memory.axilx.ts"), "export const y = 2;\n").unwrap();
+        std::fs::write(data.join("memory.axil.helpers.ts"), "export const z = 3;\n").unwrap();
         std::fs::write(dir.path().join("lib.rs"), "pub fn f() {}\n").unwrap();
         let config = IndexConfig::default();
 
@@ -600,10 +597,15 @@ mod tests {
                 .map(|f| f.rel_path)
                 .collect()
         };
-        assert_eq!(rels(Some(&db)), ["data/memory.axilx.ts", "lib.rs"]);
+        let sources = [
+            "data/memory.axil.helpers.ts",
+            "data/memory.axilx.ts",
+            "lib.rs",
+        ];
+        assert_eq!(rels(Some(&db)), sources);
         // Found by its canonical location, however the path was spelled.
         let spelled = dir.path().join("data/../data/memory.axil");
-        assert_eq!(rels(Some(&spelled)), ["data/memory.axilx.ts", "lib.rs"]);
+        assert_eq!(rels(Some(&spelled)), sources);
         assert!(rels(None).contains(&"data/memory.axil.ts".to_string()));
     }
 }
