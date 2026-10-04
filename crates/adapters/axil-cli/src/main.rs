@@ -7981,51 +7981,60 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
             let db = open_with_all_detected(&db_path)?;
             let mut report = db.doctor().context("doctor failed")?;
 
-            // Check if downloaded models have checksum sidecar files.
-            // Full SHA256 verification is expensive (17-500MB per model), so doctor
-            // only checks that checksums exist. Use `verify_model()` for full verification.
+            // Check each installed embedding model's files against their
+            // pinned sizes. Re-hashing would read hundreds of MB per model on
+            // every doctor run, so this is the cheap check; `axil
+            // model-download <model>` re-hashes against the pins and repairs.
             #[cfg(feature = "vector")]
             if db.has_vector_index() {
                 use axil_core::diagnostics::{CheckResult, Severity};
+                use axil_vector::models::EmbeddingModel;
                 let models_to_check = [
-                    axil_vector::models::EmbeddingModel::BgeSmall,
-                    axil_vector::models::EmbeddingModel::BgeSmallInt8,
-                    axil_vector::models::EmbeddingModel::BgeBase,
-                    axil_vector::models::EmbeddingModel::Nomic,
+                    EmbeddingModel::BgeSmall,
+                    EmbeddingModel::BgeSmallInt8,
+                    EmbeddingModel::BgeBase,
+                    EmbeddingModel::Nomic,
+                    EmbeddingModel::BgeM3,
+                    EmbeddingModel::GteModernbertBase,
                 ];
                 for model in &models_to_check {
-                    if axil_vector::download::is_model_available(model) {
-                        let check_name = format!("model_integrity_{}", model.name());
-                        match axil_vector::download::has_checksums(model) {
-                            Ok(results) => {
-                                let missing: Vec<_> = results
-                                    .iter()
-                                    .filter(|(_, ok)| !*ok)
-                                    .map(|(f, _)| f.as_str())
-                                    .collect();
-                                if missing.is_empty() {
-                                    report.add_check(CheckResult {
-                                        name: check_name,
-                                        status: Severity::Ok,
-                                        detail: format!("{}: checksums present", model.name()),
-                                        fix: None,
-                                    });
-                                } else {
-                                    report.add_check(CheckResult {
-                                        name: check_name,
-                                        status: Severity::Warning,
-                                        detail: format!(
-                                            "{}: missing checksums for: {}",
-                                            model.name(),
-                                            missing.join(", "),
-                                        ),
-                                        fix: Some(format!("axil model-download {}", model.name())),
-                                    });
-                                }
+                    // A model with no directory was never installed.
+                    if !model.model_dir().is_some_and(|d| d.exists()) {
+                        continue;
+                    }
+                    let check_name = format!("model_integrity_{}", model.name());
+                    match axil_vector::download::check_sizes(model) {
+                        Ok(results) => {
+                            let bad: Vec<_> = results
+                                .iter()
+                                .filter(|(_, ok)| !*ok)
+                                .map(|(f, _)| f.as_str())
+                                .collect();
+                            if bad.is_empty() {
+                                report.add_check(CheckResult {
+                                    name: check_name,
+                                    status: Severity::Ok,
+                                    detail: format!(
+                                        "{}: files at their pinned sizes",
+                                        model.name()
+                                    ),
+                                    fix: None,
+                                });
+                            } else {
+                                report.add_check(CheckResult {
+                                    name: check_name,
+                                    status: Severity::Warning,
+                                    detail: format!(
+                                        "{}: missing or not the pinned size: {}",
+                                        model.name(),
+                                        bad.join(", "),
+                                    ),
+                                    fix: Some(format!("axil model-download {}", model.name())),
+                                });
                             }
-                            Err(e) => {
-                                errln!("  [warn] model check for {}: {e}", model.name());
-                            }
+                        }
+                        Err(e) => {
+                            errln!("  [warn] model check for {}: {e}", model.name());
                         }
                     }
                 }

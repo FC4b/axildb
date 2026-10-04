@@ -282,14 +282,15 @@ impl VectorEngine {
 
     /// Attach an embedder by model type.
     ///
-    /// If the model files are not available locally, they are downloaded
-    /// automatically from HuggingFace on first use.
+    /// If the model files are not available locally (missing, or not at
+    /// their pinned sizes), the pinned files are downloaded from HuggingFace
+    /// on first use.
     pub fn with_model(self, model: EmbeddingModel) -> Result<Self, String> {
         if !matches!(model, EmbeddingModel::Custom { .. })
             && !crate::download::is_model_available(&model)
         {
             eprintln!(
-                "Model {} not found locally — downloading ({})...",
+                "Model {} is not installed or does not match its pinned files — downloading ({})...",
                 model.name(),
                 model.approx_size(),
             );
