@@ -410,8 +410,14 @@ fn main() {
     // Unknown names used to fall through to the oracle split or to vector
     // search while the report recorded the name given, so a typo could seed
     // a mislabeled baseline.
-    if !matches!(args.strategy.as_str(), "vector" | "fts" | "ask" | "recall" | "recall-qtc") {
-        eprintln!("unknown --strategy {:?}: expected vector, fts, ask, recall or recall-qtc", args.strategy);
+    if !matches!(
+        args.strategy.as_str(),
+        "vector" | "fts" | "ask" | "recall" | "recall-qtc" | "oracle-answer"
+    ) {
+        eprintln!(
+            "unknown --strategy {:?}: expected vector, fts, ask, recall, recall-qtc or oracle-answer",
+            args.strategy
+        );
         std::process::exit(2);
     }
     let data_file = args.data_dir.join(match args.variant.as_str() {

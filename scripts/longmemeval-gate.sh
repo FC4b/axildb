@@ -77,7 +77,7 @@ done
 # wrong file.
 case "${MODEL}" in bge-small|bge-base|nomic) ;; *) echo "unknown --model: ${MODEL} (bge-small, bge-base or nomic)" ; exit 1 ;; esac
 case "${VARIANT}" in s|m|oracle) ;; *) echo "unknown --variant: ${VARIANT} (s, m or oracle)" ; exit 1 ;; esac
-case "${STRATEGY}" in vector|fts|ask|recall|recall-qtc) ;; *) echo "unknown --strategy: ${STRATEGY} (vector, fts, ask, recall or recall-qtc)" ; exit 1 ;; esac
+case "${STRATEGY}" in vector|fts|ask|recall|recall-qtc|oracle-answer) ;; *) echo "unknown --strategy: ${STRATEGY} (vector, fts, ask, recall, recall-qtc or oracle-answer)" ; exit 1 ;; esac
 [[ "${TOP_K}" =~ ^[0-9]+$ ]] || { echo "invalid --top-k: ${TOP_K}" ; exit 1 ; }
 [[ "${QUESTIONS}" =~ ^[0-9]+$ ]] || { echo "invalid --questions: ${QUESTIONS}" ; exit 1 ; }
 

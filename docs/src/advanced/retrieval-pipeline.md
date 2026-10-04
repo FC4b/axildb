@@ -195,7 +195,8 @@ post-filter. `axil recall --rerank cross-encoder` re-scores those returned
 hits with an ONNX cross-encoder and reorders them by its score (recall's
 order is replaced, not blended; at most the first 20 entries are scored).
 
-- **What the rerank receives.** Recall's final, QTC-scored hits. With no
+- **What the rerank receives.** Recall's final, QTC-scored hits; when
+  recall returns nothing, the CLI's direct FTS fallback hits instead. With no
   post-filter: the first `--top-k` hits (default 5), or up to ⌈1.5 × `--top-k`⌉ when completeness
   widening fires (on by default; `--no-widen` turns it off). With a
   post-filter (`--table`, `--type`, `--after`, `--before`, `--agent`,
