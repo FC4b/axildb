@@ -207,9 +207,11 @@ kept.
 On a 30-question LongMemEval-S subset, the MS-MARCO cross-encoder cut
 recall from 0.933 (recall-qtc, no rerank) to 0.667, and a BGE reranker
 to 0.733 ([investigation](../../../benchmarks/results/lme-rerank-investigation.md)).
-Those runs predate a fix to the text the CLI hands the cross-encoder, and
-have not been repeated since. The infrastructure ships so users can
-attach domain-specific rerankers, but no model is enabled out of the box.
+Those runs used the LongMemEval harness, which reranks the top 20 of 40
+fused candidates before keeping 5, a wider window than the CLI's. The
+CLI path itself has not been measured since a fix to the text it hands
+the cross-encoder. The infrastructure ships so users can attach
+domain-specific rerankers, but no model is enabled out of the box.
 
 ## Step 4c — Query-Time Chunking (QTC)
 
