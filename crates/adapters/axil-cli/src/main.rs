@@ -8856,27 +8856,47 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
                 ensure_default_space_dims(&db_path, v.len())?;
             }
 
-            // Open path: `--embed` needs the embedder; otherwise the raw-vector
-            // policy is shared across feature ladders by `open_for_store` (a
-            // default-space vector creates the store at the vector's dimension;
-            // a named space or no vector opens all detected engines).
+            // What an already-open handle must have, since this command's own
+            // open would attach or create it: checked before anything is written.
+            let mut needs = Vec::new();
             #[cfg(feature = "embed")]
-            let db = open_waiting_for_writer(|| {
-                if embed.is_some() {
-                    open_with_embedder_creating(&db_path)
-                } else {
+            if embed.is_some() {
+                needs.extend([cli_io::Need::Vectors, cli_io::Need::Embedder]);
+            }
+            #[cfg(feature = "vector")]
+            if raw_vector.is_some() && space.is_none() {
+                needs.push(cli_io::Need::Vectors);
+            }
+            if llm {
+                needs.push(cli_io::Need::Llm);
+            }
+            let db = cli_io::hot_db(&db_path, &needs, || {
+                // Open path: `--embed` needs the embedder; otherwise the raw-vector
+                // policy is shared across feature ladders by `open_for_store` (a
+                // default-space vector creates the store at the vector's dimension;
+                // a named space or no vector opens all detected engines).
+                #[cfg(feature = "embed")]
+                let db = open_waiting_for_writer(|| {
+                    if embed.is_some() {
+                        open_with_embedder_creating(&db_path)
+                    } else {
+                        open_for_store(&db_path, raw_vector.as_deref(), space.is_some())
+                    }
+                })?;
+                #[cfg(all(feature = "vector", not(feature = "embed")))]
+                let db = open_waiting_for_writer(|| {
                     open_for_store(&db_path, raw_vector.as_deref(), space.is_some())
+                })?;
+                #[cfg(not(feature = "vector"))]
+                let db = open_waiting_for_writer(|| open_with_all_detected(&db_path))?;
+
+                // Wire up LLM if --llm flag is set and config exists.
+                if llm {
+                    wire_llm(db, &db_path)
+                } else {
+                    Ok(db)
                 }
             })?;
-            #[cfg(all(feature = "vector", not(feature = "embed")))]
-            let db = open_waiting_for_writer(|| {
-                open_for_store(&db_path, raw_vector.as_deref(), space.is_some())
-            })?;
-            #[cfg(not(feature = "vector"))]
-            let db = open_waiting_for_writer(|| open_with_all_detected(&db_path))?;
-
-            // Wire up LLM if --llm flag is set and config exists.
-            let db = if llm { wire_llm(db, &db_path)? } else { db };
 
             let mut data = read_json_input(&json_data)?;
 
@@ -9350,8 +9370,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
                     .unwrap_or(false)
             };
 
-            #[allow(unused_mut)]
-            let mut db = open_read_command(&db_path)?;
+            let db = cli_io::hot_db(&db_path, &[], || open_read_command(&db_path))?;
 
             // Expand BEFORE the similarity fetch so every downstream stage sees the same query.
             let query = if expand {
@@ -9474,24 +9493,29 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
             // Deadline-bounded recall: when --timeout-ms is set we run db.recall in a worker
             // thread and wait up to the remaining budget on a channel. If it doesn't finish
             // in time we return empty partial results and abandon the thread — the CLI process
-            // exits shortly afterward and tears down any lingering work.
-            // The handle lives in an Arc from here on: the timeout path shares it
-            // with a worker thread, and every later use in this command is by
-            // reference, so the shared form costs nothing.
-            let (db, mut recall_results) = if deadline_exceeded() {
-                (Arc::new(db), Vec::new())
+            // exits shortly afterward and tears down any lingering work. A long-lived process
+            // doesn't, so a worker needs one of the process's few recall slots, and waits for
+            // one until the deadline.
+            let mut recall_results = if deadline_exceeded() {
+                Vec::new()
             } else if let Some(d) = deadline {
-                let db_arc: Arc<axil_core::Axil> = Arc::new(db);
-                let db_handle = db_arc.clone();
-                let q = query.clone();
-                let cfg_clone = cfg.clone();
-                let tk = fetch_k;
                 let (tx, rx) = std::sync::mpsc::channel();
-                std::thread::spawn(move || {
-                    let _ = tx.send(db_handle.recall(&q, tk, Some(cfg_clone)));
-                });
+                if let Some(slot) = cli_io::RECALL_SLOTS.take_by(d) {
+                    let db_handle = Arc::clone(&db);
+                    let q = query.clone();
+                    let cfg_clone = cfg.clone();
+                    let tk = fetch_k;
+                    std::thread::spawn(move || {
+                        let _ = tx.send(db_handle.recall(&q, tk, Some(cfg_clone)));
+                        drop(slot);
+                    });
+                } else {
+                    // The deadline passed waiting for a slot. With no sender
+                    // left, the wait below ends at once.
+                    drop(tx);
+                }
                 let remaining = d.saturating_duration_since(std::time::Instant::now());
-                let result = match rx.recv_timeout(remaining) {
+                match rx.recv_timeout(remaining) {
                     Ok(Ok(r)) => r,
                     Ok(Err(e)) => return Err(e.into()),
                     Err(_) => {
@@ -9502,17 +9526,9 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
                         );
                         Vec::new()
                     }
-                };
-                // Keep the Arc rather than trying to reclaim the inner value: on
-                // timeout the worker still owns a clone, and that clone holds the
-                // single-writer file lock, so re-opening the database here could
-                // never succeed. One extra live handle for the remainder of this
-                // command is bounded and harmless.
-                (db_arc, result)
+                }
             } else {
-                let db = Arc::new(db);
-                let r = db.recall(&query, fetch_k, Some(cfg))?;
-                (db, r)
+                db.recall(&query, fetch_k, Some(cfg))?
             };
 
             // Normalize the --type facet filter once (case-insensitive,
@@ -9937,7 +9953,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
             trace_graph,
         } => {
             let db_path = require_db(&db_opt)?;
-            let db = open_read_command(&db_path)?;
+            let db = cli_io::hot_db(&db_path, &[], || open_read_command(&db_path))?;
             // Fetch a larger pool so non-proxy hits (project/file index)
             // don't crowd proxies out before we filter.
             let pool = top_k.saturating_mul(5).max(15);
@@ -10209,7 +10225,9 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
         #[cfg(feature = "fts")]
         Command::Fts { query, limit } => {
             let db_path = require_db(&db_opt)?;
-            let db = open_read_command_fts(&db_path)?;
+            let db = cli_io::hot_db(&db_path, &[cli_io::Need::FullText], || {
+                open_read_command_fts(&db_path)
+            })?;
 
             let start = std::time::Instant::now();
             let results = db
@@ -10542,7 +10560,9 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
             let secs = parse_duration(&duration)?;
             // The Stop hook counts recent records with this: ride out a short
             // writer instead of failing on the first contended open.
-            let db = retry_busy_open(|| open_with_timeseries(&db_path))?;
+            let db = cli_io::hot_db(&db_path, &[cli_io::Need::TimeSeries], || {
+                retry_busy_open(|| open_with_timeseries(&db_path))
+            })?;
 
             let mut records = db.since(table.as_deref(), secs)?;
             // `since` yields oldest-first; a limit should keep the *newest* N,
@@ -13547,10 +13567,18 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
             schema,
         } => {
             let db_path = require_db(&db_opt)?;
-            let db = std::sync::Arc::new(open_read_command(&db_path)?);
-            // Register installed WASM plugins so their boot_block contributions
-            // render in `axil boot`, like a native Extension's.
-            register_installed_plugins(&db, &db_path);
+            let db = match cli_io::warm_db(&db_path) {
+                // Opening it registered the installed plugins (`WarmDb::open`).
+                Some(db) => db,
+                None => {
+                    let db = std::sync::Arc::new(open_read_command(&db_path)?);
+                    // Register installed WASM plugins so their boot_block
+                    // contributions render in `axil boot`, like a native
+                    // Extension's.
+                    register_installed_plugins(&db, &db_path);
+                    db
+                }
+            };
 
             // Opt-in structured schema; the flat JSON below stays the default.
             if schema.as_deref() == Some("v1") {
@@ -14643,7 +14671,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
             let db_path = require_db(&db_opt)?;
             // A hook runs this before every edit: ride out a short writer, and
             // fall back to a read-only open rather than fail.
-            let db = open_read_command(&db_path)?;
+            let db = cli_io::hot_db(&db_path, &[], || open_read_command(&db_path))?;
 
             let file_lower = file.to_lowercase();
             let short_name = std::path::Path::new(&file)
@@ -16380,7 +16408,9 @@ fn run_checkpoint_extension(
     };
 
     let db_path = require_db(db_opt)?;
-    let db = open_waiting_for_writer(|| open_with_all_detected(&db_path))?;
+    let db = cli_io::hot_db(&db_path, &[], || {
+        open_waiting_for_writer(|| open_with_all_detected(&db_path))
+    })?;
     match axil_core::dispatch_cli(&db, &db.extensions(), &invocation)? {
         axil_core::Dispatch::Handled(output) => {
             if !output.stdout.is_empty() {

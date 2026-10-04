@@ -164,9 +164,10 @@ pub fn load_one(
 
     // Deny-by-default capabilities from `[plugins.<key>] capabilities`. Writable
     // prefixes are the plugin's own `table-prefixes()` declaration, set inside
-    // `WasmExtension::load`.
-    let state = PluginState::new(
-        Arc::clone(db),
+    // `WasmExtension::load`. `db` will own the plugin once it is registered, so
+    // the plugin holds `db` weakly.
+    let state = PluginState::for_registration(
+        db,
         Capabilities::from_names(&granted),
         Vec::new(),
         config.clone(),

@@ -14,12 +14,23 @@
 //! [`capture`] installs a [`ReqCtx`] on the current thread for the duration
 //! of a closure. Output then appends to the context's buffers and stdin is
 //! served from its bytes.
+//!
+//! The context can also carry a database the host already has open, a
+//! [`WarmDb`]. The hot commands get their handle through [`hot_db`], which
+//! returns that handle instead of opening the file again, or refuses with
+//! [`WarmLacks`] when the handle is missing something the command's own open
+//! would have provided. [`RECALL_SLOTS`] bounds the recall workers a deadline
+//! leaves running, which a one-shot run never outlives but a long-lived host
+//! would accumulate.
 
 use std::cell::RefCell;
 use std::fmt;
 use std::io::{self, IsTerminal, Read, Write};
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
+use std::time::{Duration, Instant};
+
+use axil_core::Axil;
 
 thread_local! {
     static REQ: RefCell<Option<ReqCtx>> = const { RefCell::new(None) };
@@ -35,12 +46,9 @@ pub struct ReqCtx {
     pub stdin: Option<Vec<u8>>,
     /// Whether the command records slow queries in the database's log.
     pub slow_query_log: bool,
-    /// An open database the command may use instead of opening its own.
-    #[allow(dead_code)] // set by an in-process host; no command reads it yet
-    pub warm: Option<Arc<axil_core::Axil>>,
-    /// Canonical path of the database `warm` was opened from.
-    #[allow(dead_code)] // pairs with `warm`
-    pub db_canon: PathBuf,
+    /// An open database the command uses instead of opening its own, when
+    /// it is the command's database. See [`hot_db`].
+    pub warm: Option<WarmDb>,
 }
 
 impl Default for ReqCtx {
@@ -51,7 +59,6 @@ impl Default for ReqCtx {
             stdin: None,
             slow_query_log: true,
             warm: None,
-            db_canon: PathBuf::new(),
         }
     }
 }
@@ -252,6 +259,258 @@ pub fn slow_query_log_enabled() -> bool {
     REQ.with(|r| r.borrow().as_ref().is_none_or(|ctx| ctx.slow_query_log))
 }
 
+/// The identity of the database at `path`: its directory, canonicalized,
+/// joined with its file name as given.
+///
+/// The companion files (`.vec`, `.fts`, `.ts`, ...) are named after the path as
+/// given, so two paths are one database only when they agree on this, not
+/// merely when they resolve to the same core file: a symlink to the core file
+/// under another name has companions of its own.
+pub fn db_key(path: &Path) -> io::Result<PathBuf> {
+    let name = path.file_name().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{} names no database file", path.display()),
+        )
+    })?;
+    let dir = match path.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir,
+        _ => Path::new("."),
+    };
+    Ok(std::fs::canonicalize(dir)?.join(name))
+}
+
+/// A database a long-lived host keeps open for the commands it runs
+/// in-process, installed through [`ReqCtx::warm`].
+///
+/// The only way to make one is [`WarmDb::open`], which opens it exactly as a
+/// hot command's own open finds the database: every engine whose store
+/// exists, no LLM provider, and the installed plugins registered as a
+/// one-shot `boot` registers them. A store that appears after the open is
+/// not attached: commands that need it get [`WarmLacks`].
+#[derive(Clone)]
+pub struct WarmDb {
+    db: Arc<Axil>,
+    key: PathBuf,
+}
+
+impl WarmDb {
+    /// Open the database at `path` for in-process commands.
+    #[cfg_attr(not(test), allow(dead_code))] // the in-process host is its first non-test caller
+    pub fn open(path: &Path) -> anyhow::Result<Self> {
+        let key = db_key(path)?;
+        let db = Arc::new(crate::open_with_all_detected(path)?);
+        crate::register_installed_plugins(&db, path);
+        Ok(Self { db, key })
+    }
+
+    /// The open handle.
+    #[cfg_attr(not(test), allow(dead_code))] // read by tests until a host uses it
+    pub fn db(&self) -> &Arc<Axil> {
+        &self.db
+    }
+
+    /// Close the database, so another process can open it, and return the
+    /// path to reopen it from with [`WarmDb::open`].
+    ///
+    /// The database closes when the last reference to the handle goes, so
+    /// this waits, up to `timeout`, for every other one: clones of this
+    /// `WarmDb` in requests still running, the handles their commands took
+    /// from [`hot_db`], and recall workers still searching past their
+    /// deadline. The host must have stopped installing it in new requests.
+    /// After `timeout` the handle comes back unchanged.
+    #[cfg_attr(not(test), allow(dead_code))] // the in-process host is its first non-test caller
+    pub fn release(self, timeout: Duration) -> Result<PathBuf, WarmDb> {
+        let deadline = Instant::now() + timeout;
+        let mut db = self.db;
+        loop {
+            match Arc::try_unwrap(db) {
+                Ok(db) => {
+                    drop(db);
+                    return Ok(self.key);
+                }
+                Err(shared) if Instant::now() >= deadline => {
+                    return Err(WarmDb {
+                        db: shared,
+                        key: self.key,
+                    })
+                }
+                Err(shared) => {
+                    db = shared;
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            }
+        }
+    }
+}
+
+/// The installed request's open database, when `path` names that database
+/// (see [`db_key`]). `None` when no request is installed, it carries no
+/// handle, or `path` is another database (or can't be resolved).
+pub fn warm_db(path: &Path) -> Option<Arc<Axil>> {
+    let warm = REQ.with(|r| r.borrow().as_ref()?.warm.clone())?;
+    (db_key(path).ok()? == warm.key).then_some(warm.db)
+}
+
+/// Something a command needs from its database handle beyond the core store.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code)] // which variants a build constructs depends on its features
+pub enum Need {
+    /// The default vector store.
+    Vectors,
+    /// A text embedder.
+    Embedder,
+    /// The full-text index.
+    FullText,
+    /// The time-series index.
+    TimeSeries,
+    /// An LLM provider.
+    Llm,
+}
+
+impl Need {
+    fn met_by(self, db: &Axil) -> bool {
+        match self {
+            Need::Vectors => db.has_vector_index(),
+            Need::Embedder => db.has_embedder(),
+            Need::FullText => db.has_fts_index(),
+            Need::TimeSeries => db.has_timeseries_index(),
+            Need::Llm => db.has_llm(),
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Need::Vectors => "vector store",
+            Need::Embedder => "embedder",
+            Need::FullText => "full-text index",
+            Need::TimeSeries => "time-series index",
+            Need::Llm => "LLM provider",
+        }
+    }
+}
+
+/// The request's open database can't serve a command: it lacks something
+/// the command's own open would have attached or created. Nothing has been
+/// written when a command returns this, so a host can run the command again
+/// in a process of its own, which opens the database the one-shot way. That
+/// process can't open the database while the host holds it: the host first
+/// calls [`WarmDb::release`], then runs the command, then reopens with
+/// [`WarmDb::open`], which attaches what the command created.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WarmLacks(pub Need);
+
+impl fmt::Display for WarmLacks {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "the open database handle has no {}; run the command in its own process",
+            self.0.name()
+        )
+    }
+}
+
+impl std::error::Error for WarmLacks {}
+
+/// The handle a command runs against: the request's open database when it is
+/// the one at `path` (see [`warm_db`]), otherwise a new handle from `open`.
+///
+/// A warm handle must meet every one of `needs`, or this returns
+/// [`WarmLacks`] before the command has done anything. `open` is the
+/// command's one-shot open, which attaches or creates what it needs itself.
+///
+/// Without such a request this is exactly `open`, so a one-shot run opens and
+/// closes the database as it always has. A warm handle is shared: the command
+/// neither opens nor closes it, and only drops its own reference.
+pub fn hot_db(
+    path: &Path,
+    needs: &[Need],
+    open: impl FnOnce() -> anyhow::Result<Axil>,
+) -> anyhow::Result<Arc<Axil>> {
+    let Some(db) = warm_db(path) else {
+        return open().map(Arc::new);
+    };
+    match needs.iter().find(|need| !need.met_by(&db)) {
+        Some(&need) => Err(WarmLacks(need).into()),
+        None => Ok(db),
+    }
+}
+
+/// A process-wide cap on threads that run a recall past its caller's
+/// deadline.
+///
+/// `recall --timeout-ms` runs the search on a worker and stops waiting at the
+/// deadline; the worker carries on until the search finishes. A one-shot
+/// process exits right after and takes the worker with it. A long-lived
+/// process keeps it, so without a cap each timed-out request would leave
+/// another thread behind.
+#[cfg_attr(not(feature = "embed"), allow(dead_code))] // recall, the one taker, needs `embed`
+pub struct RecallSlots {
+    live: Mutex<usize>,
+    freed: Condvar,
+    cap: usize,
+}
+
+/// The recall worker cap shared by every command in this process.
+#[cfg_attr(not(feature = "embed"), allow(dead_code))]
+pub static RECALL_SLOTS: RecallSlots = RecallSlots::new(4);
+
+/// A taken [`RecallSlots`] slot. The worker holds it while it runs, and
+/// dropping it frees the slot.
+#[cfg_attr(not(feature = "embed"), allow(dead_code))]
+pub struct RecallSlot(&'static RecallSlots);
+
+#[cfg_attr(not(feature = "embed"), allow(dead_code))]
+impl RecallSlots {
+    /// A cap of `cap` concurrent workers.
+    pub const fn new(cap: usize) -> Self {
+        Self {
+            live: Mutex::new(0),
+            freed: Condvar::new(),
+            cap,
+        }
+    }
+
+    /// Take a slot, waiting for one to be freed until `deadline`. `None` once
+    /// `deadline` has passed, even with a slot free by then: the caller has
+    /// stopped waiting for the search the slot would run.
+    pub fn take_by(&'static self, deadline: Instant) -> Option<RecallSlot> {
+        let mut live = self.live.lock().unwrap_or_else(PoisonError::into_inner);
+        loop {
+            let now = Instant::now();
+            if now > deadline {
+                if *live < self.cap {
+                    // The wakeup may have been meant for this waiter: pass it on.
+                    self.freed.notify_one();
+                }
+                return None;
+            }
+            if *live < self.cap {
+                *live += 1;
+                return Some(RecallSlot(self));
+            }
+            live = self
+                .freed
+                .wait_timeout(live, deadline - now)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        }
+    }
+
+    /// How many slots are taken right now.
+    #[cfg_attr(not(test), allow(dead_code))] // read by tests until a host reports it
+    pub fn live(&self) -> usize {
+        *self.live.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+impl Drop for RecallSlot {
+    fn drop(&mut self) {
+        *self.0.live.lock().unwrap_or_else(PoisonError::into_inner) -= 1;
+        self.0.freed.notify_one();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -370,6 +629,129 @@ mod tests {
                 .collect::<Vec<_>>()
         });
         assert_eq!(lines, ["a", "b"]);
+    }
+
+    #[test]
+    fn hot_db_serves_the_warm_handle_only_for_its_own_database() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("db");
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("a.axil");
+        let warm = WarmDb::open(&path).unwrap();
+        let ctx = || ReqCtx {
+            warm: Some(warm.clone()),
+            ..ReqCtx::default()
+        };
+        let warm_hit = |p: &Path, needs: &[Need]| {
+            capture(ctx(), || {
+                hot_db(p, needs, || panic!("opened a database the request holds"))
+            })
+            .2
+        };
+        let opens = |p: &Path| {
+            let (_, _, got) = capture(ctx(), || hot_db(p, &[], || anyhow::bail!("cold open")));
+            got.is_err_and(|e| e.to_string() == "cold open")
+        };
+
+        // The same database under another spelling: no open.
+        let got = warm_hit(&dir.join(".").join("a.axil"), &[]).unwrap();
+        assert!(Arc::ptr_eq(&got, warm.db()));
+        drop(got);
+
+        // Another database: the command opens its own.
+        assert!(opens(&dir.join("b.axil")));
+
+        // A symlinked directory holds the same companion files, so it is the
+        // same database. A symlink to the core file under another name has
+        // companions of its own, so it is another database.
+        #[cfg(unix)]
+        {
+            let dir_link = tmp.path().join("db-link");
+            std::os::unix::fs::symlink(&dir, &dir_link).unwrap();
+            let got = warm_hit(&dir_link.join("a.axil"), &[]).unwrap();
+            assert!(Arc::ptr_eq(&got, warm.db()));
+            drop(got);
+            let file_link = dir.join("link.axil");
+            std::os::unix::fs::symlink(&path, &file_link).unwrap();
+            assert!(opens(&file_link));
+        }
+
+        // The handle lacks what the command needs: refused, unopened.
+        let Err(err) = warm_hit(&path, &[Need::FullText]) else {
+            panic!("served a command the handle lacks a store for");
+        };
+        assert_eq!(
+            err.downcast_ref::<WarmLacks>(),
+            Some(&WarmLacks(Need::FullText))
+        );
+
+        // No request: always the command's own open.
+        let mut opened = false;
+        let got = hot_db(&path, &[Need::FullText], || {
+            opened = true;
+            Err(anyhow::anyhow!("cold open"))
+        });
+        assert!(opened && got.is_err());
+        assert!(warm_db(&path).is_none());
+        assert_eq!(
+            Arc::strong_count(warm.db()),
+            1,
+            "a request's clone outlived it"
+        );
+    }
+
+    #[test]
+    fn recall_slots_cap_holders_and_hand_a_freed_slot_to_a_waiter() {
+        static SLOTS: RecallSlots = RecallSlots::new(2);
+        let soon = || Instant::now() + Duration::from_secs(1);
+        let a = SLOTS.take_by(soon()).unwrap();
+        // Slots are per process, not per thread.
+        let b = std::thread::spawn(move || SLOTS.take_by(soon()));
+        let b = b.join().unwrap().unwrap();
+        assert_eq!(SLOTS.live(), 2);
+
+        // All taken: wait for the deadline, then give up.
+        let start = Instant::now();
+        assert!(SLOTS.take_by(start + Duration::from_millis(50)).is_none());
+        assert!(start.elapsed() >= Duration::from_millis(50));
+
+        // A slot freed during the wait goes to the waiter, long before its
+        // deadline.
+        let start = Instant::now();
+        let freer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            drop(a);
+        });
+        let c = SLOTS.take_by(start + Duration::from_secs(60));
+        assert!(c.is_some() && start.elapsed() < Duration::from_secs(30));
+        freer.join().unwrap();
+        drop((b, c));
+        assert_eq!(SLOTS.live(), 0);
+    }
+
+    #[test]
+    fn a_slot_freed_after_the_deadline_is_not_taken() {
+        static SLOTS: RecallSlots = RecallSlots::new(1);
+        let soon = Instant::now() + Duration::from_secs(1);
+        let held = SLOTS.take_by(soon).unwrap();
+        let start = Instant::now();
+        let deadline = start + Duration::from_millis(50);
+        let waiter = std::thread::spawn(move || SLOTS.take_by(deadline).is_some());
+
+        // Hold the lock across the waiter's deadline and free the slot under
+        // it: the waiter's timed-out wait can only return once the slot is
+        // free, and must still give up.
+        std::thread::sleep(Duration::from_millis(20));
+        let mut live = SLOTS.live.lock().unwrap();
+        while Instant::now() <= deadline + Duration::from_millis(30) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        *live -= 1;
+        std::mem::forget(held);
+        SLOTS.freed.notify_one();
+        drop(live);
+        assert!(!waiter.join().unwrap(), "took a slot after its deadline");
+        assert_eq!(SLOTS.live(), 0);
     }
 
     /// `src` with comments and the contents of string and char literals
@@ -737,6 +1119,9 @@ mod tests {
             /// Writes a record or stamps the time, so ids and timestamps
             /// are compared normalized.
             volatile: bool,
+            /// Opens the database itself rather than through [`hot_db`], so
+            /// it can't run while a warm handle holds the file.
+            cold_only: bool,
         }
 
         fn case(name: &'static str, args: &[&str]) -> Case {
@@ -745,6 +1130,7 @@ mod tests {
                 args: args.iter().map(|a| a.to_string()).collect(),
                 stdin: None,
                 volatile: false,
+                cold_only: false,
             }
         }
 
@@ -755,6 +1141,10 @@ mod tests {
             }
             fn volatile(mut self) -> Self {
                 self.volatile = true;
+                self
+            }
+            fn cold_only(mut self) -> Self {
+                self.cold_only = true;
                 self
             }
         }
@@ -831,16 +1221,10 @@ mod tests {
             proj
         }
 
-        #[test]
-        fn captured_output_matches_one_shot() {
-            let tmp = tempfile::tempdir().unwrap();
-            let fixture = build_fixture(&tmp.path().join("fixture"));
-            let work = tmp.path().join("work");
-            let proj = work.join("proj");
-            let db = proj.join(".axil/memory.axil");
-            let db = db.to_str().unwrap();
-            let auth_rs = proj.join("src/auth.rs");
-            let auth_rs = auth_rs.to_str().unwrap();
+        /// The hot commands in each output format, with the errors, usage
+        /// errors and help text around them. `db` is the work copy's
+        /// database and `auth_rs` a file in its project.
+        fn matrix(db: &str, auth_rs: &str) -> Vec<Case> {
             let cp = r#"{"goal":"parity","state":"fixture built","next_steps":["diff"],"references":[{"kind":"file","ref":"src/auth.rs"}]}"#;
 
             let mut cases = vec![
@@ -859,7 +1243,8 @@ mod tests {
                 case(
                     "get missing (exit 2)",
                     &["--db", db, "get", "01ZZZZZZZZZZZZZZZZZZZZZZZZ"],
-                ),
+                )
+                .cold_only(),
                 case(
                     "store bad JSON (Err)",
                     &["--db", db, "store", "decisions", "{nope"],
@@ -967,22 +1352,36 @@ mod tests {
                     .volatile(),
                 );
             }
+            cases
+        }
 
+        type Run = (Vec<u8>, Vec<u8>, i32);
+
+        /// Run each case through `captured` and as a one-shot child, each
+        /// on a fresh copy of `fixture` at `proj`, and fail on any
+        /// difference. Returns the one-shot results by case name.
+        fn check_parity(
+            fixture: &Path,
+            proj: &Path,
+            cases: &[Case],
+            run_captured: impl Fn(&Case, &[&str]) -> Run,
+        ) -> Vec<(&'static str, Run)> {
+            let work = proj.parent().unwrap();
             let mut failures = Vec::new();
             let mut results = Vec::new();
-            for c in &cases {
+            for c in cases {
                 let args: Vec<&str> = c.args.iter().map(String::as_str).collect();
                 let run_both = || {
                     let fresh = || {
-                        let _ = std::fs::remove_dir_all(&work);
-                        copy_dir(&fixture, &proj);
+                        let _ = std::fs::remove_dir_all(work);
+                        copy_dir(fixture, proj);
                     };
                     fresh();
-                    let captured = in_process(&args, c.stdin);
+                    let captured = run_captured(c, &args);
                     fresh();
                     (captured, one_shot(&args, c.stdin))
                 };
-                let same = |captured: &(Vec<u8>, Vec<u8>, i32), real: &(Vec<u8>, Vec<u8>, i32)| {
+                let same = |captured: &Run, real: &Run| {
                     if c.volatile {
                         captured.2 == real.2
                             && normalize(&captured.0) == normalize(&real.0)
@@ -1015,6 +1414,22 @@ mod tests {
                 results.push((c.name, real));
             }
             assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+            results
+        }
+
+        #[test]
+        fn captured_output_matches_one_shot() {
+            let tmp = tempfile::tempdir().unwrap();
+            let fixture = build_fixture(&tmp.path().join("fixture"));
+            let proj = tmp.path().join("work/proj");
+            let db = proj.join(".axil/memory.axil");
+            let db = db.to_str().unwrap();
+            let auth_rs = proj.join("src/auth.rs");
+            let auth_rs = auth_rs.to_str().unwrap();
+
+            let results = check_parity(&fixture, &proj, &matrix(db, auth_rs), |c, args| {
+                in_process(args, c.stdin)
+            });
 
             // Equal could still mean equally empty: pin what the one-shot
             // side printed for the cases that show each path ran.
@@ -1053,6 +1468,390 @@ mod tests {
             if cfg!(feature = "checkpoint") {
                 assert!(get("checkpoint -").0.contains(r#""kind":"snapshot""#));
                 assert!(get("checkpoint --final").0.contains(r#""kind":"final""#));
+            }
+        }
+
+        /// A request that hands `warm` to its command.
+        fn warm_request(warm: &WarmDb, stdin: Option<&[u8]>) -> ReqCtx {
+            ReqCtx {
+                stdin: Some(stdin.unwrap_or_default().to_vec()),
+                warm: Some(warm.clone()),
+                ..ReqCtx::default()
+            }
+        }
+
+        /// The hot commands on a handle the request carries: the one-shot
+        /// binary's bytes, without opening the database themselves, and the
+        /// handle still open and theirs no longer when they return.
+        #[test]
+        fn warm_handle_output_matches_one_shot() {
+            let tmp = tempfile::tempdir().unwrap();
+            let fixture = build_fixture(&tmp.path().join("fixture"));
+            let proj = tmp.path().join("work/proj");
+            let db_path = proj.join(".axil/memory.axil");
+            let db = db_path.to_str().unwrap();
+            let auth_rs = proj.join("src/auth.rs");
+            let auth_rs = auth_rs.to_str().unwrap();
+
+            // A command that opened the database while this process holds
+            // it would say so on stderr, so the parity below can't pass that
+            // way.
+            copy_dir(&fixture, &proj);
+            let held = WarmDb::open(&db_path).unwrap();
+            let (_, err, _) = in_process(&["--db", db, "boot"], None);
+            let err = String::from_utf8_lossy(&err);
+            assert!(err.contains("holds the writer lock"), "{err}");
+            drop(held);
+
+            let mut cases = matrix(db, auth_rs);
+            cases.retain(|c| !c.cold_only);
+            check_parity(&fixture, &proj, &cases, |c, args| {
+                let warm = WarmDb::open(&db_path).unwrap();
+                let run = in_process_with(warm_request(&warm, c.stdin), args);
+                assert_eq!(
+                    Arc::strong_count(warm.db()),
+                    1,
+                    "{}: the command kept a reference to the warm handle",
+                    c.name
+                );
+                if c.name.starts_with("store") && c.volatile && run.2 == 0 {
+                    let stored: serde_json::Value = serde_json::from_slice(&run.0).unwrap();
+                    let id = stored["id"].as_str().unwrap();
+                    let id = axil_core::RecordId::from_string(id).unwrap();
+                    assert!(
+                        warm.db().get(&id).unwrap().is_some(),
+                        "{}: the record went somewhere other than the warm handle",
+                        c.name
+                    );
+                }
+                run
+            });
+        }
+
+        /// Run a command in-process on `warm` and return what
+        /// `dispatch_command` returned, which an in-process host sees before
+        /// any error is printed.
+        fn dispatch_warm(warm: &WarmDb, args: &[&str]) -> anyhow::Result<i32> {
+            let ctx = warm_request(warm, None);
+            let args = argv(args);
+            on_cli_stack(move || {
+                capture(ctx, || {
+                    let cli = Cli::try_parse_from(&args).unwrap();
+                    let out = crate::Output::for_cli(&cli);
+                    crate::dispatch_command(cli, &out)
+                })
+                .2
+            })
+        }
+
+        /// A warm handle opened before a store existed can't serve a command
+        /// whose own open would create that store, and one without an LLM
+        /// can't serve `store --llm`. The command refuses with [`WarmLacks`]
+        /// before it writes anything, and the one-shot binary, which a host
+        /// falls back to, serves it.
+        #[test]
+        fn a_warm_handle_refuses_what_it_lacks() {
+            let tmp = tempfile::tempdir().unwrap();
+            let proj = build_fixture(tmp.path());
+            let db_path = proj.join(".axil/memory.axil");
+            let db = db_path.to_str().unwrap();
+            let companion = |suffix: &str| axil_core::companion_path(&db_path, suffix);
+            for suffix in [".fts", ".ts"] {
+                let _ = std::fs::remove_dir_all(companion(suffix));
+                let _ = std::fs::remove_file(companion(suffix));
+            }
+            let stored = r#"{"summary":"stored through a handle that lacks a store"}"#;
+
+            // (one-shot serves it too, args, what the handle lacks)
+            let mut cases: Vec<(bool, Vec<String>, Need)> = vec![(
+                true,
+                argv(&["store", "decisions", stored, "--llm"]),
+                Need::Llm,
+            )];
+            if cfg!(feature = "fts") {
+                cases.push((true, argv(&["fts", "cache"]), Need::FullText));
+            }
+            if cfg!(feature = "timeseries") {
+                cases.push((true, argv(&["since", "1h"]), Need::TimeSeries));
+            }
+            #[cfg(feature = "embed")]
+            {
+                // The one-shot run would load the embedding model.
+                let embed = argv(&["store", "decisions", stored, "--embed", "summary"]);
+                cases.push((false, embed, Need::Vectors));
+                let dims = crate::resolve_embedding_model(&db_path).dimensions();
+                let vector = serde_json::to_string(&vec![0.5f32; dims]).unwrap();
+                let raw = argv(&["store", "decisions", stored, "--vector", &vector]);
+                cases.push((true, raw, Need::Vectors));
+            }
+
+            let warm = WarmDb::open(&db_path).unwrap();
+            let decisions = || warm.db().list("decisions").unwrap().len();
+            let before = decisions();
+            for (_, args, need) in &cases {
+                let mut args: Vec<&str> = args[1..].iter().map(String::as_str).collect();
+                args.splice(0..0, ["--db", db]);
+                let err = dispatch_warm(&warm, &args).unwrap_err();
+                assert_eq!(
+                    err.downcast_ref::<WarmLacks>(),
+                    Some(&WarmLacks(*need)),
+                    "{args:?}: {err:#}"
+                );
+            }
+            assert_eq!(decisions(), before, "a refused command wrote a record");
+            for suffix in [".fts", ".ts", ".vec"] {
+                assert!(
+                    !companion(suffix).exists(),
+                    "a refused command made {suffix}"
+                );
+            }
+            drop(warm);
+
+            // The vector store goes last: once it exists, every open loads
+            // the embedding model.
+            for (one_shot_serves, args, _) in &cases {
+                if !one_shot_serves {
+                    continue;
+                }
+                let mut args: Vec<&str> = args[1..].iter().map(String::as_str).collect();
+                args.splice(0..0, ["--db", db]);
+                let (out, err, code) = one_shot(&args, None);
+                assert_eq!(
+                    code,
+                    0,
+                    "{args:?}: {}{}",
+                    String::from_utf8_lossy(&out),
+                    String::from_utf8_lossy(&err)
+                );
+            }
+        }
+
+        /// The handoff a host performs for a refused command: release the
+        /// handle, let the one-shot process run the command, reopen. While the
+        /// host holds the handle the one-shot process can't open the database;
+        /// the release waits for a command still using the handle, and gives
+        /// the handle back if that takes longer than its timeout.
+        #[cfg(feature = "timeseries")]
+        #[test]
+        fn a_host_hands_a_refused_command_to_a_one_shot_run() {
+            let tmp = tempfile::tempdir().unwrap();
+            let proj = build_fixture(tmp.path());
+            let db_path = proj.join(".axil/memory.axil");
+            let db = db_path.to_str().unwrap();
+            let ts = axil_core::companion_path(&db_path, ".ts");
+            let _ = std::fs::remove_dir_all(&ts);
+            let _ = std::fs::remove_file(&ts);
+            let since = ["--db", db, "since", "1h"];
+
+            let warm = WarmDb::open(&db_path).unwrap();
+            let err = dispatch_warm(&warm, &since).unwrap_err();
+            assert_eq!(
+                err.downcast_ref::<WarmLacks>(),
+                Some(&WarmLacks(Need::TimeSeries))
+            );
+            let (_, err, _) = one_shot(&["--db", db, "boot"], None);
+            let err = String::from_utf8_lossy(&err);
+            assert!(err.contains("holds the writer lock"), "{err}");
+
+            // A command still running on the handle.
+            let in_use = Arc::clone(warm.db());
+            let command = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(300));
+                drop(in_use);
+            });
+            let Err(warm) = warm.release(Duration::from_millis(20)) else {
+                panic!("released a handle a command still holds");
+            };
+            let Ok(path) = warm.release(Duration::from_secs(30)) else {
+                panic!("the command's handle never went");
+            };
+            command.join().unwrap();
+
+            let (out, err, code) = one_shot(&since, None);
+            assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
+            let warm = WarmDb::open(&path).unwrap();
+            let (warm_out, _, warm_code) = in_process_with(warm_request(&warm, None), &since);
+            assert_eq!((warm_out, warm_code), (out, 0), "served once reopened");
+        }
+
+        /// Releasing a warm handle with an installed plugin closes the
+        /// database: a registered plugin holds no reference that keeps it open.
+        #[cfg(feature = "wasm-host")]
+        #[test]
+        fn a_warm_handle_with_a_plugin_closes_when_released() {
+            const HELLO: &[u8] =
+                include_bytes!("../../axil-runtime/tests/fixtures/hello-guest.component.wasm");
+            let tmp = tempfile::tempdir().unwrap();
+            let proj = build_fixture(tmp.path());
+            std::fs::create_dir_all(proj.join(".axil/plugins")).unwrap();
+            std::fs::write(proj.join(".axil/plugins/hello.wasm"), HELLO).unwrap();
+            let db_path = proj.join(".axil/memory.axil");
+            let boot = ["--db", db_path.to_str().unwrap(), "boot"];
+
+            let warm = WarmDb::open(&db_path).unwrap();
+            let (out, _, _) = in_process_with(warm_request(&warm, None), &boot);
+            assert!(String::from_utf8_lossy(&out).contains("hello plugin ready"));
+            let Ok(path) = warm.release(Duration::from_secs(10)) else {
+                panic!("the registered plugin kept the database open");
+            };
+            let (out, err, code) = one_shot(&boot, None);
+            assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
+            assert!(String::from_utf8_lossy(&out).contains("hello plugin ready"));
+
+            // Dropping the handle, as well as releasing it, closes it.
+            drop(WarmDb::open(&path).unwrap());
+            WarmDb::open(&path).unwrap();
+        }
+
+        /// `boot` on a warm handle shows an installed plugin's block, as the
+        /// one-shot `boot` does: opening the handle registered the plugin.
+        #[cfg(feature = "wasm-host")]
+        #[test]
+        fn warm_boot_shows_installed_plugins_like_one_shot() {
+            const HELLO: &[u8] =
+                include_bytes!("../../axil-runtime/tests/fixtures/hello-guest.component.wasm");
+            let tmp = tempfile::tempdir().unwrap();
+            let fixture = build_fixture(&tmp.path().join("fixture"));
+            std::fs::create_dir_all(fixture.join(".axil/plugins")).unwrap();
+            std::fs::write(fixture.join(".axil/plugins/hello.wasm"), HELLO).unwrap();
+            let proj = tmp.path().join("work/proj");
+            let db_path = proj.join(".axil/memory.axil");
+            let db = db_path.to_str().unwrap();
+
+            let cases = [
+                case("boot json", &["--db", db, "boot"]),
+                case(
+                    "boot narrative",
+                    &["--db", db, "boot", "--boot-format", "narrative"],
+                ),
+            ];
+            let results = check_parity(&fixture, &proj, &cases, |c, args| {
+                let warm = WarmDb::open(&db_path).unwrap();
+                in_process_with(warm_request(&warm, c.stdin), args)
+            });
+            for (name, (out, _, _)) in results {
+                let out = String::from_utf8_lossy(&out);
+                assert!(out.contains("hello plugin ready"), "{name}: {out}");
+            }
+        }
+
+        /// `recall --timeout-ms` on a long-lived handle. With every slot
+        /// taken it waits for one until its deadline, then answers with the
+        /// partial results; a slot freed in time lets it search. However many
+        /// requests time out, no more workers than slots stay behind, each
+        /// giving its slot and handle back when its search ends.
+        #[cfg(feature = "embed")]
+        #[test]
+        fn recall_timeout_workers_stay_within_the_slots() {
+            use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+            let tmp = tempfile::tempdir().unwrap();
+            let proj = build_fixture(tmp.path());
+            let db_path = proj.join(".axil/memory.axil");
+            let db = db_path.to_str().unwrap();
+            let warm = WarmDb::open(&db_path).unwrap();
+            let recall = |timeout_ms: &str| {
+                let ctx = ReqCtx {
+                    slow_query_log: false,
+                    ..warm_request(&warm, None)
+                };
+                let args = [
+                    "--db",
+                    db,
+                    "recall",
+                    "auth timeout",
+                    "--timeout-ms",
+                    timeout_ms,
+                ];
+                let (out, err, code) = in_process_with(ctx, &args);
+                assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
+                let hits = serde_json::from_slice::<Vec<serde_json::Value>>(&out).unwrap();
+                (hits.len(), String::from_utf8(err).unwrap())
+            };
+            let partial = |ms: u64| {
+                format!(
+                    "[axil recall] timeout_ms={ms} exceeded inside db.recall; returning partial results\n"
+                )
+            };
+
+            // Only this test runs recalls with a deadline, so every slot is
+            // free to take.
+            let take_all = || {
+                let soon = || Instant::now() + Duration::from_millis(10);
+                let held: Vec<RecallSlot> =
+                    std::iter::from_fn(|| RECALL_SLOTS.take_by(soon())).collect();
+                assert_eq!(held.len(), RECALL_SLOTS.cap);
+                held
+            };
+
+            // No slot frees up: the deadline passes waiting, and the
+            // command says so, with no search and no cascade after it.
+            let held = take_all();
+            let start = Instant::now();
+            let (hits, err) = recall("300");
+            assert!(start.elapsed() >= Duration::from_millis(300));
+            assert_eq!(hits, 0);
+            assert!(err.starts_with(&partial(300)), "{err}");
+            assert!(
+                err.contains("timeout_ms=300 exceeded; returned partial results"),
+                "{err}"
+            );
+            drop(held);
+
+            // A slot frees up well before the deadline: a full search.
+            let mut held = take_all();
+            let one = held.pop().unwrap();
+            let freer = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(200));
+                drop(one);
+            });
+            let start = Instant::now();
+            let (hits, err) = recall("60000");
+            assert!(start.elapsed() < Duration::from_secs(30));
+            assert!(hits > 0 && !err.contains("partial"), "{err}");
+            freer.join().unwrap();
+            drop(held);
+
+            // 100 requests from 10 clients at once, each with a deadline
+            // most searches miss.
+            let done = AtomicBool::new(false);
+            let peak = AtomicUsize::new(0);
+            let (clients, live_after) = std::thread::scope(|s| {
+                s.spawn(|| {
+                    while !done.load(Ordering::Acquire) {
+                        peak.fetch_max(RECALL_SLOTS.live(), Ordering::AcqRel);
+                        std::thread::sleep(Duration::from_micros(50));
+                    }
+                });
+                let clients: Vec<_> = (0..10)
+                    .map(|_| {
+                        s.spawn(|| {
+                            (0..10)
+                                .filter(|_| recall("1").1.contains(&partial(1)))
+                                .count()
+                        })
+                    })
+                    .collect();
+                let clients: Vec<_> = clients.into_iter().map(|c| c.join()).collect();
+                let live_after = RECALL_SLOTS.live();
+                done.store(true, Ordering::Release);
+                (clients, live_after)
+            });
+            let partials: usize = clients.into_iter().map(Result::unwrap).sum();
+            let peak = peak.load(Ordering::Acquire);
+            eprintln!(
+                "recall slots: {partials} of 100 recalls cut short; peak {peak} live workers"
+            );
+            assert!(peak <= RECALL_SLOTS.cap, "{peak} workers ran at once");
+            assert!(live_after <= RECALL_SLOTS.cap, "{live_after} workers left");
+
+            let deadline = Instant::now() + Duration::from_secs(60);
+            while RECALL_SLOTS.live() > 0 || Arc::strong_count(warm.db()) > 1 {
+                assert!(
+                    Instant::now() < deadline,
+                    "a worker never gave its slot back"
+                );
+                std::thread::sleep(Duration::from_millis(10));
             }
         }
 
