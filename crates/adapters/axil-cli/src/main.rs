@@ -4175,7 +4175,11 @@ fn require_db(db: &Option<PathBuf>) -> Result<PathBuf> {
 
 /// Walk up from cwd looking for `.axil/memory.axil`.
 fn find_axil_dir() -> Option<PathBuf> {
-    let mut dir = std::env::current_dir().ok()?;
+    find_axil_dir_from(std::env::current_dir().ok()?)
+}
+
+/// Walk up from `dir` looking for `.axil/memory.axil`.
+fn find_axil_dir_from(mut dir: PathBuf) -> Option<PathBuf> {
     loop {
         let candidate = dir.join(".axil").join("memory.axil");
         if candidate.exists() {
@@ -7043,6 +7047,53 @@ fn is_long_lived(command: &Command) -> bool {
     }
 }
 
+/// What an open handle must already have for `command` to run on it: the
+/// stores and providers the command's own open would attach or create. Checked
+/// before the command writes anything (see [`cli_io::hot_db`]). `None` for a
+/// command that opens its database itself.
+fn hot_needs(command: &Command) -> Option<Vec<cli_io::Need>> {
+    use cli_io::Need;
+    match command {
+        Command::Store {
+            #[cfg(feature = "embed")]
+            embed,
+            #[cfg(feature = "vector")]
+            vector,
+            #[cfg(feature = "vector")]
+            space,
+            llm,
+            ..
+        } => {
+            let mut needs = Vec::new();
+            #[cfg(feature = "embed")]
+            if embed.is_some() {
+                needs.extend([Need::Vectors, Need::Embedder]);
+            }
+            // A raw vector for the default space would size a new store.
+            #[cfg(feature = "vector")]
+            if vector.is_some() && space.is_none() {
+                needs.push(Need::Vectors);
+            }
+            if *llm {
+                needs.push(Need::Llm);
+            }
+            Some(needs)
+        }
+        #[cfg(feature = "fts")]
+        Command::Fts { .. } => Some(vec![Need::FullText]),
+        #[cfg(feature = "timeseries")]
+        Command::Since { .. } => Some(vec![Need::TimeSeries]),
+        #[cfg(feature = "embed")]
+        Command::Recall { .. } => Some(Vec::new()),
+        #[cfg(feature = "indexer")]
+        Command::CodeSearch { .. } => Some(Vec::new()),
+        #[cfg(feature = "checkpoint")]
+        Command::Checkpoint { .. } => Some(Vec::new()),
+        Command::Boot { .. } | Command::RecallForFile { .. } => Some(Vec::new()),
+        _ => None,
+    }
+}
+
 /// Set the process-wide state a command runs under: the vector exact-scan
 /// ceiling and the encryption cipher. Both outlive the command, which is why
 /// this is separate from [`dispatch_command`].
@@ -7069,6 +7120,9 @@ fn process_setup(cli: &Cli) -> Result<()> {
 /// caller to print with [`format_cli_error`].
 fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
     let db_opt = cli.db;
+    // What a handle the request already holds must have for this command.
+    // An in-process host checks the same before it runs the command.
+    let needs = hot_needs(&cli.command).unwrap_or_default();
 
     match cli.command {
         // ── Init ────────────────────────────────────────────────────
@@ -8857,20 +8911,6 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
                 ensure_default_space_dims(&db_path, v.len())?;
             }
 
-            // What an already-open handle must have, since this command's own
-            // open would attach or create it: checked before anything is written.
-            let mut needs = Vec::new();
-            #[cfg(feature = "embed")]
-            if embed.is_some() {
-                needs.extend([cli_io::Need::Vectors, cli_io::Need::Embedder]);
-            }
-            #[cfg(feature = "vector")]
-            if raw_vector.is_some() && space.is_none() {
-                needs.push(cli_io::Need::Vectors);
-            }
-            if llm {
-                needs.push(cli_io::Need::Llm);
-            }
             let db = cli_io::hot_db(&db_path, &needs, || {
                 // Open path: `--embed` needs the embedder; otherwise the raw-vector
                 // policy is shared across feature ladders by `open_for_store` (a
@@ -9371,7 +9411,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
                     .unwrap_or(false)
             };
 
-            let db = cli_io::hot_db(&db_path, &[], || open_read_command(&db_path))?;
+            let db = cli_io::hot_db(&db_path, &needs, || open_read_command(&db_path))?;
 
             // Expand BEFORE the similarity fetch so every downstream stage sees the same query.
             let query = if expand {
@@ -9954,7 +9994,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
             trace_graph,
         } => {
             let db_path = require_db(&db_opt)?;
-            let db = cli_io::hot_db(&db_path, &[], || open_read_command(&db_path))?;
+            let db = cli_io::hot_db(&db_path, &needs, || open_read_command(&db_path))?;
             // Fetch a larger pool so non-proxy hits (project/file index)
             // don't crowd proxies out before we filter.
             let pool = top_k.saturating_mul(5).max(15);
@@ -10226,9 +10266,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
         #[cfg(feature = "fts")]
         Command::Fts { query, limit } => {
             let db_path = require_db(&db_opt)?;
-            let db = cli_io::hot_db(&db_path, &[cli_io::Need::FullText], || {
-                open_read_command_fts(&db_path)
-            })?;
+            let db = cli_io::hot_db(&db_path, &needs, || open_read_command_fts(&db_path))?;
 
             let start = std::time::Instant::now();
             let results = db
@@ -10561,7 +10599,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
             let secs = parse_duration(&duration)?;
             // The Stop hook counts recent records with this: ride out a short
             // writer instead of failing on the first contended open.
-            let db = cli_io::hot_db(&db_path, &[cli_io::Need::TimeSeries], || {
+            let db = cli_io::hot_db(&db_path, &needs, || {
                 retry_busy_open(|| open_with_timeseries(&db_path))
             })?;
 
@@ -14672,7 +14710,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
             let db_path = require_db(&db_opt)?;
             // A hook runs this before every edit: ride out a short writer, and
             // fall back to a read-only open rather than fail.
-            let db = cli_io::hot_db(&db_path, &[], || open_read_command(&db_path))?;
+            let db = cli_io::hot_db(&db_path, &needs, || open_read_command(&db_path))?;
 
             let file_lower = file.to_lowercase();
             let short_name = std::path::Path::new(&file)
