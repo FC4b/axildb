@@ -52,8 +52,9 @@ model) has its own baseline: `baseline.jsonl` for the default 500-question
 for the rest, with `-rerank-<mode>` and `-model-<model>` appended when those
 differ from the defaults (off, bge-small). A comparison against a baseline
 recorded under another configuration fails instead of passing on a
-meaningless delta; the model is kept apart by file name, since the report
-does not record it.
+meaningless delta. Reports record the embedding model, and the comparison
+checks it; baselines written before the model was recorded count as
+bge-small, which they all are.
 
 The gate exit codes:
 

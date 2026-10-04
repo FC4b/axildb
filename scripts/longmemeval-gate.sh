@@ -77,7 +77,7 @@ done
 # wrong file.
 case "${MODEL}" in bge-small|bge-base|nomic) ;; *) echo "unknown --model: ${MODEL} (bge-small, bge-base or nomic)" ; exit 1 ;; esac
 case "${VARIANT}" in s|m|oracle) ;; *) echo "unknown --variant: ${VARIANT} (s, m or oracle)" ; exit 1 ;; esac
-[[ "${STRATEGY}" =~ ^[a-z][a-z-]*$ ]] || { echo "invalid --strategy: ${STRATEGY}" ; exit 1 ; }
+case "${STRATEGY}" in vector|fts|ask|recall|recall-qtc) ;; *) echo "unknown --strategy: ${STRATEGY} (vector, fts, ask, recall or recall-qtc)" ; exit 1 ;; esac
 [[ "${TOP_K}" =~ ^[0-9]+$ ]] || { echo "invalid --top-k: ${TOP_K}" ; exit 1 ; }
 [[ "${QUESTIONS}" =~ ^[0-9]+$ ]] || { echo "invalid --questions: ${QUESTIONS}" ; exit 1 ; }
 
@@ -104,8 +104,8 @@ N_LABEL="${QUESTIONS}"
 [[ "${QUESTIONS}" == "0" ]] && N_LABEL="all"
 CONFIG="${VARIANT}-${STRATEGY}-k${TOP_K}-n${N_LABEL}"
 [[ "${RERANK}" != "off" ]] && CONFIG="${CONFIG}-rerank-${RERANK}"
-# The report does not record the embedding model, so a non-default model
-# gets its own baseline file; bge-small keeps the existing paths.
+# Each model gets its own baseline file, and the comparison also checks the
+# model the report records; bge-small keeps the existing paths.
 [[ "${MODEL}" != "bge-small" ]] && CONFIG="${CONFIG}-model-${MODEL}"
 if [[ "${CONFIG}" == "s-recall-qtc-k5-n500" ]]; then
   BASELINE="${HARNESS}/baseline.jsonl"

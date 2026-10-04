@@ -407,10 +407,21 @@ struct QaContext {
 fn main() {
     let args = Args::parse();
 
+    // Unknown names used to fall through to the oracle split or to vector
+    // search while the report recorded the name given, so a typo could seed
+    // a mislabeled baseline.
+    if !matches!(args.strategy.as_str(), "vector" | "fts" | "ask" | "recall" | "recall-qtc") {
+        eprintln!("unknown --strategy {:?}: expected vector, fts, ask, recall or recall-qtc", args.strategy);
+        std::process::exit(2);
+    }
     let data_file = args.data_dir.join(match args.variant.as_str() {
         "s" => "longmemeval_s_cleaned.json",
         "m" => "longmemeval_m_cleaned.json",
-        _ => "longmemeval_oracle.json",
+        "oracle" => "longmemeval_oracle.json",
+        other => {
+            eprintln!("unknown --variant {other:?}: expected oracle, s or m");
+            std::process::exit(2);
+        }
     });
 
     eprintln!("╔══════════════════════════════════════════════════╗");
