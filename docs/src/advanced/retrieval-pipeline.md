@@ -183,21 +183,23 @@ axil recall "auth timeout" --explain
 
 ## Step 4b — Cross-encoder rerank (optional, off by default)
 
-`axil recall --rerank cross-encoder` re-scores the list recall is about
-to print with an ONNX cross-encoder and reorders it by its score (the
-fused order is replaced, not blended); the cross-encoder scores at most
-the first 20 entries. It changes the order of that list, never which
-records are in it. How long the list is decides what it can promote:
+`axil recall --rerank cross-encoder` re-scores a candidate list with an
+ONNX cross-encoder and reorders it by the cross-encoder's score (the fused
+order is replaced, not blended; at most the first 20 entries are scored).
 
-- **No filter:** the list is `--top-k` long (default 5), or up to
-  ⌈1.5 × `--top-k`⌉ when completeness widening fires (on by default;
-  `--no-widen` turns it off). Only in the widened case can a hit fused
-  below position `--top-k` move into the first `--top-k` positions, and
-  only from the widened tail.
-- **Any post-filter** (`--table`, `--type`, `--after`, `--before`,
-  `--agent`, `--min-importance`, `--fresh-only`): recall over-fetches,
-  filters, then cuts the list back to `--top-k` before the rerank, so
-  nothing fused below `--top-k` can be promoted.
+- **What the rerank receives.** With no post-filter: the first `--top-k`
+  fused hits (default 5), or up to ⌈1.5 × `--top-k`⌉ when completeness
+  widening fires (on by default; `--no-widen` turns it off). With a
+  post-filter (`--table`, `--type`, `--after`, `--before`, `--agent`,
+  `--min-importance`, `--fresh-only`): recall over-fetches 5 × `--top-k`
+  candidates (more if widening fires), filters them, and the rerank
+  receives the first `--top-k` that pass. Nothing outside this list can be
+  promoted.
+- **What is printed.** The whole reranked list in its new order, minus hits
+  the `--recall-format` has nothing to show for (`compact`, `oneline` and
+  `context-block` skip them; `context-block` also lists code hits before
+  memories). With `--budget`, only the prefix that fits is printed, so
+  the rerank can change which records appear.
 
 The implementation is
 [`crates/extensions/axil-indexer/src/rerank.rs`](../../../crates/extensions/axil-indexer/src/rerank.rs),
