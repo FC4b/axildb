@@ -12,16 +12,17 @@ pub enum PoolingStrategy {
 /// Supported embedding models.
 #[derive(Debug, Clone)]
 pub enum EmbeddingModel {
-    /// bge-small-en-v1.5: 384 dimensions, ~33MB ONNX.
+    /// bge-small-en-v1.5: 384 dimensions, ~127 MB ONNX.
     BgeSmall,
-    /// bge-small-en-v1.5 (int8 quantized): 384 dimensions, ~17MB ONNX.
-    /// Same quality (<1% MTEB loss), 4x smaller, 2-3x faster inference.
+    /// bge-small-en-v1.5 (int8 quantized): 384 dimensions, ~32 MB ONNX.
+    /// Dynamically quantized export of the same checkpoint, ~4x smaller than
+    /// the fp32 one; its quality and speed against fp32 are not benchmarked.
     BgeSmallInt8,
-    /// bge-base-en-v1.5: 768 dimensions, ~110MB ONNX.
+    /// bge-base-en-v1.5: 768 dimensions, ~416 MB ONNX.
     BgeBase,
-    /// nomic-embed-text-v1.5: 768 dimensions, ~500MB ONNX (Matryoshka).
+    /// nomic-embed-text-v1.5: 768 dimensions, ~522 MB ONNX (Matryoshka).
     Nomic,
-    /// BAAI/bge-m3: 1024 dimensions, ~2.2GB ONNX, 8192-token context.
+    /// BAAI/bge-m3: 1024 dimensions, ~2.1 GB ONNX, 8192-token context.
     ///
     /// Multilingual, multi-functionality: supports dense retrieval,
     /// multi-vector retrieval, and sparse retrieval from one checkpoint.
@@ -29,7 +30,7 @@ pub enum EmbeddingModel {
     /// retrieval quality matters more than insert throughput and disk.
     /// XLM-RoBERTa backbone → uses mean pooling like Nomic.
     BgeM3,
-    /// Alibaba-NLP/gte-modernbert-base: 768 dimensions, ~600MB ONNX, 8192-token context.
+    /// Alibaba-NLP/gte-modernbert-base: 768 dimensions, ~569 MB ONNX, 8192-token context.
     ///
     /// ModernBERT backbone, Apache-2.0, MTEB 64.38 (vs bge-small 62.17).
     /// 16× longer context than bge-small without truncation. Mean pooling.
@@ -108,15 +109,18 @@ impl EmbeddingModel {
         }
     }
 
-    /// Approximate download size for display purposes.
+    /// Approximate download size, for display: every file the model needs
+    /// (ONNX graph, external weights, tokenizer), rounded, with MB = 2^20
+    /// bytes as the download progress lines print it. The exact sizes are
+    /// the pinned ones in [`crate::download::pinned_model`].
     pub fn approx_size(&self) -> &'static str {
         match self {
-            Self::BgeSmall => "~33MB",
-            Self::BgeSmallInt8 => "~17MB",
-            Self::BgeBase => "~110MB",
-            Self::Nomic => "~500MB",
-            Self::BgeM3 => "~2.2GB",
-            Self::GteModernbertBase => "~600MB",
+            Self::BgeSmall => "~128 MB",
+            Self::BgeSmallInt8 => "~33 MB",
+            Self::BgeBase => "~416 MB",
+            Self::Nomic => "~523 MB",
+            Self::BgeM3 => "~2.1 GB",
+            Self::GteModernbertBase => "~572 MB",
             Self::Custom { .. } => "unknown",
         }
     }
@@ -354,6 +358,32 @@ mod tests {
             EmbeddingModel::from_name("BGEM3"),
             Some(EmbeddingModel::BgeM3)
         ));
+    }
+
+    #[test]
+    fn approx_sizes_match_the_pinned_files() {
+        for model in [
+            EmbeddingModel::BgeSmall,
+            EmbeddingModel::BgeSmallInt8,
+            EmbeddingModel::BgeBase,
+            EmbeddingModel::Nomic,
+            EmbeddingModel::BgeM3,
+            EmbeddingModel::GteModernbertBase,
+        ] {
+            let total = crate::download::pinned_model(&model).unwrap().total_size() as f64;
+            let label = model.approx_size();
+            let (number, unit) = label.trim_start_matches('~').split_once(' ').unwrap();
+            let scale = match unit {
+                "MB" => 1024.0 * 1024.0,
+                "GB" => 1024.0 * 1024.0 * 1024.0,
+                other => panic!("{model}: unit {other}"),
+            };
+            let shown = number.parse::<f64>().unwrap() * scale;
+            assert!(
+                (shown - total).abs() / total < 0.05,
+                "{model}: {label} for {total} bytes"
+            );
+        }
     }
 
     #[test]
