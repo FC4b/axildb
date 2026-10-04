@@ -13,8 +13,9 @@ The authoritative implementation lives in
 ## Why hybrid, not vector-only
 
 On LongMemEval-S, a conversational benchmark where every answer is a
-paraphrase of a past session, raw vector search and the full pipeline find
-the same answers:
+paraphrase of a past session, raw vector search and the full pipeline reach
+nearly the same aggregate recall (each misses 18 of the 500 questions,
+though not all the same ones):
 
 | Path (500 questions, top-5) | avg recall | Source |
 |------|---------------------------|--------|
@@ -200,9 +201,8 @@ order is replaced, not blended; at most the first 20 entries are scored).
 - **What is printed.** The whole reranked list in its new order, minus hits
   the `--recall-format` has nothing to show for (`compact`, `oneline` and
   `context-block` skip them; `context-block` also lists code hits before
-  memories). With `--budget`, only the prefix that fits is printed (the
-  first hit is always printed, even when it alone exceeds the budget, as
-  with `--budget 0`), so the rerank can change which records appear.
+  memories). With `--budget`, only the prefix that fits is printed, so
+  the rerank can change which records appear.
 
 The implementation is
 [`crates/extensions/axil-indexer/src/rerank.rs`](../../../crates/extensions/axil-indexer/src/rerank.rs),

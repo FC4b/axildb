@@ -117,8 +117,14 @@ jobs:
           failed=()
           for h in $harnesses; do
             manifest="$h/Cargo.toml"
-            features=$(cargo metadata --no-deps --format-version 1 --manifest-path "$manifest" \
-              | python3 -c 'import json, sys; m = json.load(sys.stdin); print(" ".join(f for p in m["packages"] for f in p["features"] if f != "default"))')
+            # A metadata failure must not quietly drop the feature checks:
+            # record it, and still check the default features below.
+            if ! features=$(cargo metadata --no-deps --format-version 1 --manifest-path "$manifest" \
+              | python3 -c 'import json, sys; m = json.load(sys.stdin); print(" ".join(f for p in m["packages"] for f in p["features"] if f != "default"))'); then
+              echo "::error::$h: could not list its features"
+              failed+=("$h (feature list)")
+              features=""
+            fi
             for f in "" $features; do
               label="$h${f:+ --features $f}"
               # The GPU execution providers load ONNX Runtime at run time, so
