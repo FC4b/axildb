@@ -318,6 +318,13 @@ impl WarmDb {
         &self.db
     }
 
+    /// The database's identity (see [`db_key`]): a command is for this
+    /// handle when its database path has this key.
+    #[cfg_attr(not(test), allow(dead_code))] // the in-process host is its first non-test caller
+    pub fn key(&self) -> &Path {
+        &self.key
+    }
+
     /// Close the database, so another process can open it, and return the
     /// path to reopen it from with [`WarmDb::open`].
     ///
@@ -377,7 +384,8 @@ pub enum Need {
 }
 
 impl Need {
-    fn met_by(self, db: &Axil) -> bool {
+    /// Whether `db` has it.
+    pub fn met_by(self, db: &Axil) -> bool {
         match self {
             Need::Vectors => db.has_vector_index(),
             Need::Embedder => db.has_embedder(),
@@ -520,7 +528,7 @@ impl Drop for RecallSlot {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn piped(bytes: &[u8]) -> ReqCtx {
@@ -874,31 +882,41 @@ mod tests {
         }
     }
 
+    /// The commands, and the daemon that runs them in-process, print and
+    /// read stdin only through this module. `hook_brain.rs` is exempt: the
+    /// hook commands never run in-process.
     #[test]
-    fn main_rs_reaches_stdio_only_through_cli_io() {
-        let src = include_str!("main.rs");
-        let mut code = code_only(src);
-        without_test_modules(&mut code);
-        let line_of = |pos: usize| src[..pos].matches('\n').count() + 1;
-        let mut found = Vec::new();
-        let banned = [
-            "println!",
-            "print!",
-            "eprintln!",
-            "eprint!",
-            "io::stdout()",
-            "io::stderr()",
-            "io::stdin()",
+    fn main_rs_and_the_daemon_reach_stdio_only_through_cli_io() {
+        let sources = [
+            ("main.rs", include_str!("main.rs")),
+            ("daemon/mod.rs", include_str!("daemon/mod.rs")),
+            ("daemon/exec.rs", include_str!("daemon/exec.rs")),
         ];
-        for needle in banned {
-            let n = needle.as_bytes();
-            for (pos, w) in code.windows(n.len()).enumerate() {
-                // `eprintln!` holds `println!`, and `cli_io::stdout()` holds
-                // `io::stdout()`: only a match that starts a token counts.
-                let starts_token =
-                    pos == 0 || !(code[pos - 1].is_ascii_alphanumeric() || code[pos - 1] == b'_');
-                if w == n && starts_token {
-                    found.push(format!("main.rs:{} {needle}", line_of(pos)));
+        let mut found = Vec::new();
+        for (file, src) in sources {
+            let mut code = code_only(src);
+            without_test_modules(&mut code);
+            let line_of = |pos: usize| src[..pos].matches('\n').count() + 1;
+            let banned = [
+                "println!",
+                "print!",
+                "eprintln!",
+                "eprint!",
+                "io::stdout()",
+                "io::stderr()",
+                "io::stdin()",
+            ];
+            for needle in banned {
+                let n = needle.as_bytes();
+                for (pos, w) in code.windows(n.len()).enumerate() {
+                    // `eprintln!` holds `println!`, and `cli_io::stdout()`
+                    // holds `io::stdout()`: only a match that starts a token
+                    // counts.
+                    let starts_token = pos == 0
+                        || !(code[pos - 1].is_ascii_alphanumeric() || code[pos - 1] == b'_');
+                    if w == n && starts_token {
+                        found.push(format!("{file}:{} {needle}", line_of(pos)));
+                    }
                 }
             }
         }
@@ -932,7 +950,7 @@ mod tests {
     /// The child is this test binary re-run with only [`one_shot_child`]
     /// selected, so it carries exactly the code under test. The fixture has
     /// no vector store, so no command loads an embedding model.
-    mod parity {
+    pub(crate) mod parity {
         use super::*;
         use crate::{run_cli, Cli};
         use clap::Parser;
@@ -956,7 +974,7 @@ mod tests {
                 .unwrap()
         }
 
-        fn argv(args: &[&str]) -> Vec<String> {
+        pub(crate) fn argv(args: &[&str]) -> Vec<String> {
             std::iter::once("axil")
                 .chain(args.iter().copied())
                 .map(str::to_string)
@@ -983,8 +1001,35 @@ mod tests {
             std::process::exit(code);
         }
 
-        fn one_shot(args: &[&str], stdin: Option<&[u8]>) -> (Vec<u8>, Vec<u8>, i32) {
-            let mut child = Command::new(std::env::current_exe().unwrap())
+        fn one_shot(args: &[&str], stdin: Option<&[u8]>) -> Run {
+            one_shot_with(args, stdin, |_| {})
+        }
+
+        /// [`one_shot`] in the working directory `cwd`, with `AXIL_DB` set to
+        /// `axil_db` or unset.
+        pub(crate) fn one_shot_at(
+            args: &[&str],
+            stdin: Option<&[u8]>,
+            cwd: &Path,
+            axil_db: Option<&str>,
+        ) -> Run {
+            one_shot_with(args, stdin, |child| {
+                child.current_dir(cwd);
+                match axil_db {
+                    Some(value) => child.env("AXIL_DB", value),
+                    None => child.env_remove("AXIL_DB"),
+                };
+            })
+        }
+
+        fn one_shot_with(
+            args: &[&str],
+            stdin: Option<&[u8]>,
+            setup: impl FnOnce(&mut Command),
+        ) -> Run {
+            let mut child = Command::new(std::env::current_exe().unwrap());
+            setup(&mut child);
+            let mut child = child
                 .args([
                     "cli_io::tests::parity::one_shot_child",
                     "--exact",
@@ -1055,7 +1100,7 @@ mod tests {
             })
         }
 
-        fn copy_dir(from: &Path, to: &Path) {
+        pub(crate) fn copy_dir(from: &Path, to: &Path) {
             std::fs::create_dir_all(to).unwrap();
             for entry in std::fs::read_dir(from).unwrap() {
                 let entry = entry.unwrap();
@@ -1120,19 +1165,19 @@ mod tests {
             out
         }
 
-        struct Case {
-            name: &'static str,
-            args: Vec<String>,
-            stdin: Option<&'static [u8]>,
+        pub(crate) struct Case {
+            pub(crate) name: &'static str,
+            pub(crate) args: Vec<String>,
+            pub(crate) stdin: Option<&'static [u8]>,
             /// Writes a record or stamps the time, so ids and timestamps
             /// are compared normalized.
-            volatile: bool,
+            pub(crate) volatile: bool,
             /// Opens the database itself rather than through [`hot_db`], so
             /// it can't run while a warm handle holds the file.
-            cold_only: bool,
+            pub(crate) cold_only: bool,
         }
 
-        fn case(name: &'static str, args: &[&str]) -> Case {
+        pub(crate) fn case(name: &'static str, args: &[&str]) -> Case {
             Case {
                 name,
                 args: args.iter().map(|a| a.to_string()).collect(),
@@ -1159,7 +1204,7 @@ mod tests {
 
         /// The fixture project and its database, built through the CLI
         /// itself. Returns the project directory.
-        fn build_fixture(root: &Path) -> std::path::PathBuf {
+        pub(crate) fn build_fixture(root: &Path) -> std::path::PathBuf {
             let proj = root.join("proj");
             std::fs::create_dir_all(proj.join("src")).unwrap();
             std::fs::create_dir_all(proj.join(".axil")).unwrap();
@@ -1232,7 +1277,7 @@ mod tests {
         /// The hot commands in each output format, with the errors, usage
         /// errors and help text around them. `db` is the work copy's
         /// database and `auth_rs` a file in its project.
-        fn matrix(db: &str, auth_rs: &str) -> Vec<Case> {
+        pub(crate) fn matrix(db: &str, auth_rs: &str) -> Vec<Case> {
             let cp = r#"{"goal":"parity","state":"fixture built","next_steps":["diff"],"references":[{"kind":"file","ref":"src/auth.rs"}]}"#;
 
             let mut cases = vec![
@@ -1363,7 +1408,8 @@ mod tests {
             cases
         }
 
-        type Run = (Vec<u8>, Vec<u8>, i32);
+        /// What a command printed on stdout and stderr, and its exit code.
+        pub(crate) type Run = (Vec<u8>, Vec<u8>, i32);
 
         /// Run each case through `captured` and as a one-shot child, each
         /// on a fresh copy of `fixture` at `proj`, and fail on any
@@ -1373,6 +1419,19 @@ mod tests {
             proj: &Path,
             cases: &[Case],
             run_captured: impl Fn(&Case, &[&str]) -> Run,
+        ) -> Vec<(&'static str, Run)> {
+            check_parity_with(fixture, proj, cases, run_captured, |c, args| {
+                one_shot(args, c.stdin)
+            })
+        }
+
+        /// [`check_parity`] with the one-shot side run by `run_one_shot`.
+        pub(crate) fn check_parity_with(
+            fixture: &Path,
+            proj: &Path,
+            cases: &[Case],
+            run_captured: impl Fn(&Case, &[&str]) -> Run,
+            run_one_shot: impl Fn(&Case, &[&str]) -> Run,
         ) -> Vec<(&'static str, Run)> {
             let work = proj.parent().unwrap();
             let mut failures = Vec::new();
@@ -1387,7 +1446,7 @@ mod tests {
                     fresh();
                     let captured = run_captured(c, &args);
                     fresh();
-                    (captured, one_shot(&args, c.stdin))
+                    (captured, run_one_shot(c, &args))
                 };
                 let same = |captured: &Run, real: &Run| {
                     if c.volatile {

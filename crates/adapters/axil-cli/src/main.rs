@@ -17,6 +17,8 @@ mod cli_io;
 #[cfg(feature = "http")]
 mod http_server;
 
+#[cfg(unix)]
+mod daemon;
 mod features;
 mod hook_brain;
 mod install_wizard;
