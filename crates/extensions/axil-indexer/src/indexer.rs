@@ -29,6 +29,15 @@ use axil_core::IndexConfig;
 
 // ── Table names ──────────────────────────────────────────────────────
 
+/// The root an index run records, so a later read can check this index's
+/// freshness without guessing a directory to walk.
+fn recorded_root(root: &Path) -> String {
+    std::fs::canonicalize(root)
+        .unwrap_or_else(|_| root.to_path_buf())
+        .to_string_lossy()
+        .into_owned()
+}
+
 pub const TABLE_PROJECT: &str = "_idx_project";
 pub const TABLE_FILES: &str = "_idx_files";
 pub const TABLE_MODULES: &str = "_idx_modules";
@@ -335,6 +344,9 @@ impl<'a> ProjectIndexer<'a> {
             .any(|p| !current_paths.contains(p.as_str()));
 
         if changed_count == 0 && !has_deletes {
+            // No indexed file changed, but the run may still have been made
+            // from another root, or found other files too large to index.
+            self.refresh_project_record(root, &skipped_large)?;
             self.progress.finish();
             return Ok(IndexResult {
                 indexed_files: 0,
@@ -586,6 +598,25 @@ impl<'a> ProjectIndexer<'a> {
     }
 
     // ── Private helpers ──────────────────────────────────────────────
+
+    /// Update the project record's `root` and `skipped_large` where they
+    /// differ from this run's, without rebuilding the overview.
+    fn refresh_project_record(
+        &self,
+        root: &Path,
+        skipped_large: &[SkippedFile],
+    ) -> axil_core::Result<()> {
+        let Some(record) = self.db.list(TABLE_PROJECT)?.into_iter().next() else {
+            return Ok(());
+        };
+        let mut data = record.data.clone();
+        data["root"] = json!(recorded_root(root));
+        data["skipped_large"] = json!(skipped_large);
+        if data != record.data {
+            self.db.update(&record.id, data)?;
+        }
+        Ok(())
+    }
 
     fn clear_index_tables(&self) -> axil_core::Result<()> {
         for table in &[
@@ -1239,13 +1270,10 @@ impl<'a> ProjectIndexer<'a> {
             conventions.insert("testing".to_string(), json!("inline tests detected"));
         }
 
-        // The root lets a later read check this index's freshness without
-        // guessing a directory to walk.
-        let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
         let project_data = json!({
             "name": name,
             "type": project_type.as_str(),
-            "root": root.to_string_lossy(),
+            "root": recorded_root(root),
             // Kept so a run nobody watched (an automatic re-index) still
             // leaves a trace: `axil index-stats` lists them.
             "skipped_large": skipped_large,
@@ -1745,6 +1773,47 @@ mod tests {
         );
         let stats = crate::recall::stats(&db, None, None).unwrap();
         assert_eq!(stats["index"]["skipped_large"][0]["path"], "big.rs");
+    }
+
+    /// An incremental run that changes no indexed file still records the
+    /// root it ran from and the files it left out for size now.
+    #[test]
+    fn an_unchanged_incremental_run_refreshes_root_and_skipped_files() {
+        let db_dir = tempfile::tempdir().unwrap();
+        let db = Axil::open(db_dir.path().join("t.axil")).build().unwrap();
+        let mut config = IndexConfig::default();
+        config.max_file_size_kb = 1;
+        let indexer = ProjectIndexer::new(&db, config);
+        let project = || db.list(TABLE_PROJECT).unwrap()[0].data.clone();
+
+        let first = tempfile::tempdir().unwrap();
+        std::fs::write(first.path().join("small.rs"), "fn a() {}\n").unwrap();
+        let big = first.path().join("big.rs");
+        std::fs::write(&big, "// pad\n".repeat(300)).unwrap();
+        indexer.index_full(first.path()).unwrap();
+        assert_eq!(project()["skipped_large"][0]["path"], "big.rs");
+
+        // The oversized file goes away; nothing indexed changes.
+        std::fs::remove_file(&big).unwrap();
+        let result = indexer.index_incremental(first.path()).unwrap();
+        assert_eq!(result.changed, Some(0));
+        assert_eq!(project()["skipped_large"], json!([]));
+
+        // Another one appears.
+        std::fs::write(first.path().join("huge.rs"), "// pad\n".repeat(400)).unwrap();
+        indexer.index_incremental(first.path()).unwrap();
+        assert_eq!(project()["skipped_large"][0]["path"], "huge.rs");
+
+        // The same tree at a new root.
+        let second = tempfile::tempdir().unwrap();
+        for entry in std::fs::read_dir(first.path()).unwrap() {
+            let entry = entry.unwrap();
+            std::fs::copy(entry.path(), second.path().join(entry.file_name())).unwrap();
+        }
+        let result = indexer.index_incremental(second.path()).unwrap();
+        assert_eq!(result.changed, Some(0));
+        let canonical = std::fs::canonicalize(second.path()).unwrap();
+        assert_eq!(project()["root"], canonical.to_string_lossy().as_ref());
     }
 
     #[test]
