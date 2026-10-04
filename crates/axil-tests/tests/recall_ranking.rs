@@ -7,6 +7,8 @@
 //! - The chunk blend goes to the most relevant candidates, ranked without
 //!   recency. When the window followed the plain fused order, a relevant old
 //!   record that recency pushed below it was never rescored.
+//! - Code-index rows, which code-search embeds into the same vector index,
+//!   take no place among recall's vector candidates.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -259,4 +261,47 @@ fn only_the_window_is_embedded_at_query_time() {
         3,
         "records with no stored chunk vectors are embedded only inside the window"
     );
+}
+
+#[test]
+fn code_index_vectors_take_no_place_among_memory_candidates() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("code.axil");
+    let db = open(&path, Arc::default(), false);
+
+    let memory = db
+        .insert(
+            "decisions",
+            json!({"summary": "raise the connection pool timeout for slow hosts"}),
+        )
+        .unwrap();
+    // More code proxies than recall's vector candidates, every one a closer
+    // match than the memory, embedded the way the indexer embeds them.
+    for i in 0..200 {
+        let text = format!("connection pool timeout f{i}");
+        let proxy = db
+            .insert(
+                "_idx_code_proxies",
+                json!({"proxy_text": text, "path": format!("src/f{i}.rs")}),
+            )
+            .unwrap();
+        db.embed_text(&proxy.id, &text).unwrap();
+    }
+
+    let results = db
+        .recall("connection pool timeout", 5, Some(cli_config()))
+        .unwrap();
+    let tables: Vec<&str> = results.iter().map(|r| r.record.table.as_str()).collect();
+    assert!(
+        !tables.iter().any(|t| t.starts_with("_idx_")),
+        "code-index rows are not memory recall results: {tables:?}"
+    );
+    assert_eq!(
+        results.first().map(|r| &r.record.id),
+        Some(&memory.id),
+        "the memory is found past the code rows"
+    );
+    // Code-search reads the same vectors through `similar_to`, unchanged.
+    let similar = db.similar_to("connection pool timeout", 5).unwrap();
+    assert!(similar.iter().all(|(r, _)| r.table == "_idx_code_proxies"));
 }

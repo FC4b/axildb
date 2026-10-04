@@ -652,9 +652,9 @@ impl<'a> ProjectIndexer<'a> {
     /// in this file).
     ///
     /// An unchanged proxy with no stored vector (written while the vector
-    /// store was unavailable) is deliberately left without one: embedded,
-    /// code-index rows compete with memories in recall and lower memory
-    /// recall, so only `axil heal --embed-internal` adds them, on request.
+    /// store was unavailable) is deliberately left without one: restoring
+    /// code-index vectors changes code-search rankings, so only
+    /// `axil heal --embed-internal` adds them, on request.
     fn store_proxy_with_dedupe(
         &self,
         proxy: &CodeProxy,

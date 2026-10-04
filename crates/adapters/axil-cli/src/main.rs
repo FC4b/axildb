@@ -1651,10 +1651,9 @@ enum Command {
         orphans: bool,
         /// Embed rows of internal tables (code index, dep docs, recall
         /// chunks, checkpoints) that have no vector, as rows written while
-        /// the vector store was unavailable. Opt-in, and it currently lowers
-        /// memory recall: embedded, these rows compete with memories, and on
-        /// the dogfood eval (snap-prefix, 2026-10-04) restoring 2,962
-        /// code-index vectors took hit@1 from 0.70 to 0.51.
+        /// the vector store was unavailable. Opt-in, because it changes
+        /// rankings: code-search's for code-index rows, memory recall's for
+        /// the others (memory recall passes over code-index vectors).
         #[arg(long)]
         embed_internal: bool,
         /// Show what would be fixed without doing it.

@@ -32,6 +32,13 @@ const RECALL_CHUNKS_TABLE: &str = "_recall_chunks";
 /// a pool of 40 cost top-10 recall a question.
 const RECALL_CANDIDATE_POOL: usize = 80;
 
+/// Table-name prefix of the code index: proxies, file / module / project
+/// summaries and the code-ref reverse index. Its writers embed rows into the
+/// default vector index for code-search, which shares that index with memory
+/// recall; recall's vector stage passes over them (see
+/// [`Axil::recall_vector_hits`]).
+const CODE_INDEX_TABLE_PREFIX: &str = "_idx_";
+
 /// Marker row written once after `migrate_entity_canonical_id` finishes.
 /// Presence of the marker lets `Axil::open()` skip the full-table scan
 /// on every subsequent open.
@@ -787,14 +794,15 @@ const EMBEDDED_INTERNAL_FIELDS: &[(&str, &str)] = &[
     ("_checkpoint_records", "summary"),
 ];
 
-/// Why rows of [`EMBEDDED_INTERNAL_FIELDS`] tables without a vector are
-/// left alone, said wherever `doctor` and `detect_problems` report them so
-/// nobody backfills them blindly. The figures are the dogfood eval in
-/// `benchmarks/results/dogfood-recall-2026-10-04-snap-prefix-orphans-removed.json`
-/// and `…-internal-embedded.json`.
-const INTERNAL_EMBED_COST: &str = "embedding them currently lowers memory recall: on the \
-     dogfood eval (snap-prefix, 2026-10-04) restoring 2,962 code-index vectors took hit@1 \
-     from 0.70 to 0.51";
+/// What restoring the vectors of [`EMBEDDED_INTERNAL_FIELDS`] rows changes,
+/// said wherever `doctor` and `detect_problems` report rows without one, so
+/// nobody backfills them blindly. The dogfood figure is
+/// `benchmarks/results/dogfood-recall-2026-10-14-recall-skips-code-vectors-after.json`
+/// against `…-after-embedded.json`.
+const INTERNAL_EMBED_EFFECT: &str = "embedding them changes rankings: code-search ranks \
+     code-index rows by their vectors, and dep-doc, recall-chunk and checkpoint vectors \
+     compete with memories in recall. Memory recall passes over code-index vectors: on the \
+     dogfood eval (snap-prefix, 2026-10-14) restoring 2,962 of them left it unchanged";
 
 /// Rows of [`EMBEDDED_INTERNAL_FIELDS`] tables that
 /// [`Axil::reembed_missing_internal`] embeds and commits together.
@@ -1339,9 +1347,9 @@ impl Axil {
     /// Those writers ignore a failed embed, so rows written while the vector
     /// store was unavailable have none. Restoring them is not automatic:
     /// [`Axil::reembed_missing`], `heal_all`, the end-of-session heal and the
-    /// indexer all leave them alone, because once embedded these rows compete
-    /// with memories in recall's vector channel and lower memory recall (see
-    /// [`INTERNAL_EMBED_COST`]). Callers opt in (`axil heal --embed-internal`).
+    /// indexer all leave them alone, because restoring them changes rankings
+    /// (see [`INTERNAL_EMBED_EFFECT`]). Callers opt in
+    /// (`axil heal --embed-internal`).
     ///
     /// Rows are embedded in micro-batches with one `.vec` commit each, as
     /// their writers' bulk paths do. A batch that fails is retried row by
@@ -3915,8 +3923,8 @@ impl Axil {
                         severity: Severity::Warning,
                         message: format!("{internal} have no vector embedding"),
                         recommendation: format!(
-                            "Leave them unless the cost is acceptable; {INTERNAL_EMBED_COST}. \
-                             To embed them anyway: axil heal --embed-internal"
+                            "Restore them on purpose: {INTERNAL_EMBED_EFFECT}. \
+                             To embed them: axil heal --embed-internal"
                         ),
                         auto_fixable: false,
                     });
@@ -4903,8 +4911,8 @@ impl Axil {
                 if let Some(internal) = gap.internal_summary() {
                     detail.push_str(&format!(
                         "; {internal} missing an embedding, so code search, dep docs and \
-                         recall match them only by keyword. Do not backfill them blindly: \
-                         {INTERNAL_EMBED_COST}"
+                         recall match them only by keyword. Backfilling is a ranking change: \
+                         {INTERNAL_EMBED_EFFECT}"
                     ));
                 }
                 checks.push(CheckResult {
@@ -5380,7 +5388,11 @@ impl Axil {
         {
             match embedder.embed_query(&effective_query) {
                 Ok(query_vec) => {
-                    let vector_results = vi.search(&query_vec, fetch_k.saturating_mul(2))?;
+                    let vector_results = self.recall_vector_hits(
+                        vi.as_ref(),
+                        &query_vec,
+                        fetch_k.saturating_mul(2),
+                    )?;
                     (Some(query_vec), vector_results)
                 }
                 // The embedder loads its model on first use, so a broken model
@@ -5423,8 +5435,8 @@ impl Axil {
 
         let mut candidates: std::collections::HashMap<RecordId, RecallCandidate> =
             std::collections::HashMap::new();
-        for (rank, (rid, vec_score)) in vector_results.iter().enumerate() {
-            let Some((source_id, source_record)) = self.resolve_recall_candidate(rid)? else {
+        for (rank, (resolved, vec_score)) in vector_results.into_iter().enumerate() {
+            let Some((source_id, source_record)) = resolved else {
                 continue;
             };
             let rrf = 1.0 / (RRF_K + rank as f32);
@@ -5432,14 +5444,14 @@ impl Axil {
                 .entry(source_id.clone())
                 .or_insert_with(|| RecallCandidate {
                     record: source_record,
-                    vector_score: *vec_score,
+                    vector_score: vec_score,
                     fts_score: 0.0,
                     first_rank: rank,
                     rrf_score: 0.0,
                     fts_rank: None,
                 });
-            if *vec_score > entry.vector_score {
-                entry.vector_score = *vec_score;
+            if vec_score > entry.vector_score {
+                entry.vector_score = vec_score;
             }
             entry.first_rank = entry.first_rank.min(rank);
             entry.rrf_score += rrf;
@@ -7828,6 +7840,50 @@ impl Axil {
             return Ok(None);
         };
         Ok(Some((source_id, source_record)))
+    }
+
+    /// Recall's vector candidates: the `want` nearest hits in the default
+    /// vector index that are not code-index rows, each resolved as
+    /// [`Axil::resolve_recall_candidate`] does, in rank order. A hit whose
+    /// record is gone resolves to `None` and keeps its rank, as before.
+    ///
+    /// Code-search embeds code proxies and file / module / project summaries
+    /// into the same index, and memory recall must not rank them: on the
+    /// dogfood eval (snap-prefix, 2026-10-14), restoring the code-index
+    /// vectors a dead `.vec` had left out took memory recall's hit@1 from 0.68
+    /// to 0.58 while recall still ranked them
+    /// (`benchmarks/results/dogfood-recall-2026-10-14-recall-skips-code-vectors-before.json`
+    /// against `…-before-embedded.json`). Skipping them after
+    /// the search would shrink the pool instead, so the search widens until
+    /// `want` hits remain or the index runs out.
+    fn recall_vector_hits(
+        &self,
+        vi: &dyn VectorIndex,
+        query: &[f32],
+        want: usize,
+    ) -> Result<Vec<(Option<(RecordId, Record)>, f32)>> {
+        let mut fetch = want;
+        loop {
+            let hits = vi.search(query, fetch)?;
+            let exhausted = hits.len() < fetch;
+            let mut kept = Vec::with_capacity(want);
+            for (id, score) in hits {
+                let resolved = self.resolve_recall_candidate(&id)?;
+                if let Some((_, ref record)) = resolved {
+                    if record.table.starts_with(CODE_INDEX_TABLE_PREFIX) {
+                        continue;
+                    }
+                }
+                kept.push((resolved, score));
+                if kept.len() == want {
+                    return Ok(kept);
+                }
+            }
+            if exhausted || fetch == usize::MAX {
+                return Ok(kept);
+            }
+            fetch = fetch.saturating_mul(4);
+        }
     }
 }
 
