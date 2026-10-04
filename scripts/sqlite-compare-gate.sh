@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# scripts/sqlite-compare-gate.sh — Phase 25 P0.2 CI gate.
+# scripts/sqlite-compare-gate.sh — per-PR vector-search speedup floor.
 #
 # Runs the in-tree sqlite-compare harness (Axil HNSW vs SQLite + sqlite-vec
 # brute force) on SYNTHETIC vectors — no dataset, no model, fully
@@ -19,9 +19,9 @@
 # reference baseline (--save) for informational regression context.
 #
 # Usage:
-#   scripts/sqlite-compare-gate.sh                 # gate at n=5000, floor 10x
-#   scripts/sqlite-compare-gate.sh --n 10000       # larger n
-#   scripts/sqlite-compare-gate.sh --min-speedup 8 # relax the floor
+#   scripts/sqlite-compare-gate.sh                 # gate at n=10000, floor 3x
+#   scripts/sqlite-compare-gate.sh --n 20000       # larger n
+#   scripts/sqlite-compare-gate.sh --min-speedup 2 # relax the floor
 #   scripts/sqlite-compare-gate.sh --save          # write reference baseline
 #
 # Exit codes:

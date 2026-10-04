@@ -17,23 +17,26 @@ retrieved in top-k; recall = fraction of answer sessions retrieved.
 > 94.5% / 90.9%, measured when stores above 128 vectors used approximate HNSW
 > search; search is now an exact scan below 20k vectors, so reruns reproduce). The **Recall-QTC and Recall-fusion** rows below, the
 > per-category breakdowns, Comparison, and MemEfficiency sections reflect this
-> run; the Vector / FTS / Oracle strategy rows and the investigation notes are
-> from earlier runs — treat their specific percentages as illustrative.
+> run. Every row in the table is a committed 500-question run
+> (`qtc-500.json`, `fusion-500.json`, `baseline-500.json`); the investigation
+> notes further down are from earlier runs.
 
-| Strategy | Variant | Questions | top-k | Hit Rate | Recall |
-|----------|---------|-----------|-------|----------|--------|
-| **Vector (BGE-small)** | Oracle | 50 | 5 | **100%** | **100%** |
-| **FTS (BM25)** | Oracle | 50 | 5 | **100%** | **100%** |
-| **Recall-QTC (query-time chunk)** | S (500 Qs) | 500 | 5 | **96.4%** | **93.5%** |
-| **Recall (full pipeline)** | S (500 Qs) | 500 | 5 | **96.2%** | **91.5%** |
-| **Vector (BGE-small)** | S (500 Qs) | 500 | 5 | **92.2%** | **88.0%** |
-| **FTS (BM25)** | S (500 Qs) | 500 | 5 | **85.8%** | **79.0%** |
+| Strategy | Variant | Questions | top-k | Hit Rate | Recall | Build | Source |
+|----------|---------|-----------|-------|----------|--------|-------|--------|
+| **Recall-QTC (query-time chunk)** | S (500 Qs) | 500 | 5 | **96.4%** | **93.5%** | 2026-06-27 rerun | `qtc-500.json` |
+| **Recall (full pipeline)** | S (500 Qs) | 500 | 5 | **96.2%** | **91.5%** | 2026-06-27 rerun | `fusion-500.json` |
+| **Vector (BGE-small)** *(historical)* | S (500 Qs) | 500 | 5 | **96.4%** | **93.6%** | initial release | `baseline-500.json` |
+
+The vector row is from an earlier build than the other two (vector search
+and fusion have changed since), so the table is not a head-to-head; no
+same-build vector run is committed.
 
 Recall strategy = `db.recall()` with RRF-style fusion of vector + FTS +
 recency + keyword overlap. Solid baseline for production agent use.
 
 **Recall-QTC** adds a query-time chunking pass: after session-level
-candidates are ranked, each top-20 session's text is split into overlapping
+candidates are ranked, the text of the 20 most relevant ones (fused score
+with the recency term taken out) is split into overlapping
 windows, the query is scored against each window, and the session's vector
 signal is replaced with the strongest chunk match (blend weight α=0.7). Avoids
 the index-time-chunking trap (shared timestamps across chunks let recency
@@ -199,10 +202,11 @@ without Axil on Django and Flask), see **[Context Economics](./context-economics
 
 > **Provenance note.** The competitor/latency harnesses
 > (`vector-latency-bench`, `sqlite-compare-bench`, `longmemeval-bench`,
-> `locomo`) are kept **out of the workspace and gitignored**, so a plain
-> `cargo bench` only runs the in-tree Criterion suites (core / vector / graph
-> / fts). The numbers above reflect the last run on those archived harnesses;
-> pull the benchmark archive to regenerate them. See the
+> `locomo`) are tracked under `benchmarks/` but kept **out of the workspace**,
+> so a plain `cargo bench` only runs the in-tree Criterion suites (core /
+> vector / graph / fts). Run a harness with
+> `cargo run --release --manifest-path benchmarks/<name>/Cargo.toml`; the
+> dataset-driven ones need their dataset downloaded first. See the
 > [Evaluation Log](./eval-log.md) for the methodology and the full
 > reproducibility caveat. The token-savings A/B (Context Economics) **is**
 > reproducible in-tree via `scripts/context-ab-*.sh`.

@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 #
-# scripts/longmemeval-gate.sh — Phase 15 P0.1 CI gate.
+# scripts/longmemeval-gate.sh — end-to-end recall-quality gate.
 #
-# Runs the LongMemEval recall harness on the `s` split (small,
-# single-session-user questions) and fails on >2% relative regression
+# Runs the LongMemEval recall harness on the `s` split (the small-haystack
+# setting; `m` is the paper's larger one) and fails on >2% relative regression
 # in overall avg_recall or ndcg_at_10 vs the baseline recorded for the same
 # configuration (benchmarks/longmemeval/baseline.jsonl for the default
 # 500-question recall-qtc run, benchmarks/longmemeval/baselines/<config>.json
-# for the rest).
+# for the rest). ndcg_at_10 counts only when the baseline carries it, and
+# baseline.jsonl predates the metric, so the full run gates avg_recall alone.
 #
 # The bench binary writes a JSON BenchmarkReport to stdout — this script
 # captures it, optionally promotes it to the baseline (--save), and
@@ -39,9 +40,10 @@ mkdir -p "${CANDIDATE_DIR}"
 
 VARIANT="s"
 # Default to the full 500-question Recall-QTC run that backs the README's
-# 94.5% figure — the committed baseline (benchmarks/longmemeval/baseline.jsonl)
+# 93.5% figure — the committed baseline (benchmarks/longmemeval/baseline.jsonl)
 # is that run, so a real (dataset-present) gate compares apples-to-apples.
-# Pass --questions 20 --strategy vector for a quick smoke instead.
+# Pass --questions 20 --strategy recall for a quick smoke instead (the PR
+# smoke CI runs, which has its own baseline).
 QUESTIONS=500
 TOP_K=5
 MODEL="bge-small"
@@ -65,10 +67,19 @@ while [[ $# -gt 0 ]]; do
       EXTRA_FEATURES="--features rerank"
       shift ;;
     -h|--help)
-      sed -n '2,28p' "${BASH_SOURCE[0]}" ; exit 0 ;;
+      sed -n '2,32p' "${BASH_SOURCE[0]}" ; exit 0 ;;
     *) echo "unknown flag: $1" ; exit 1 ;;
   esac
 done
+
+# Every value below ends up in a baseline file name: accept only known
+# names and plain numbers, so a typo or a "../" can't seed or overwrite the
+# wrong file.
+case "${MODEL}" in bge-small|bge-base|nomic) ;; *) echo "unknown --model: ${MODEL} (bge-small, bge-base or nomic)" ; exit 1 ;; esac
+case "${VARIANT}" in s|m|oracle) ;; *) echo "unknown --variant: ${VARIANT} (s, m or oracle)" ; exit 1 ;; esac
+case "${STRATEGY}" in vector|fts|ask|recall|recall-qtc|oracle-answer) ;; *) echo "unknown --strategy: ${STRATEGY} (vector, fts, ask, recall, recall-qtc or oracle-answer)" ; exit 1 ;; esac
+[[ "${TOP_K}" =~ ^[0-9]+$ ]] || { echo "invalid --top-k: ${TOP_K}" ; exit 1 ; }
+[[ "${QUESTIONS}" =~ ^[0-9]+$ ]] || { echo "invalid --questions: ${QUESTIONS}" ; exit 1 ; }
 
 # The requested split's own file: an `m` run must not proceed because the `s`
 # or oracle file happens to be present.
@@ -93,6 +104,9 @@ N_LABEL="${QUESTIONS}"
 [[ "${QUESTIONS}" == "0" ]] && N_LABEL="all"
 CONFIG="${VARIANT}-${STRATEGY}-k${TOP_K}-n${N_LABEL}"
 [[ "${RERANK}" != "off" ]] && CONFIG="${CONFIG}-rerank-${RERANK}"
+# Each model gets its own baseline file, and the comparison also checks the
+# model the report records; bge-small keeps the existing paths.
+[[ "${MODEL}" != "bge-small" ]] && CONFIG="${CONFIG}-model-${MODEL}"
 if [[ "${CONFIG}" == "s-recall-qtc-k5-n500" ]]; then
   BASELINE="${HARNESS}/baseline.jsonl"
 else
@@ -148,6 +162,9 @@ cand = load(cand_path)
 # A baseline recorded under another configuration can't judge this run.
 config_keys = ("variant", "strategy", "weights", "rerank", "top_k", "total_questions")
 mismatch = [k for k in config_keys if base.get(k) != cand.get(k)]
+# Reports from before the model was recorded were all bge-small runs.
+if base.get("model", "bge-small") != cand.get("model", "bge-small"):
+    mismatch.append("model")
 if mismatch:
     for k in mismatch:
         print(f"[gate] config mismatch: {k} baseline={base.get(k)!r} candidate={cand.get(k)!r}", file=sys.stderr)

@@ -8,7 +8,7 @@ edition = "2021"
 publish = false
 
 [workspace]
-# Phase 17 layout — crates are grouped by extensibility tier.
+# Crates are grouped by extensibility tier.
 # See docs/src/extending/overview.md for the three-tier taxonomy.
 members = [
     "crates/axil-core",
@@ -43,8 +43,10 @@ members = [
 # `exclude`d from the default workspace — not gitignored — so `cargo check
 # --workspace` stays fast and a clean checkout builds without them; run one on
 # demand with `cargo run --release --manifest-path benchmarks/<name>/Cargo.toml`.
-# CI gates them via explicit --manifest-path jobs (scripts/sqlite-compare-gate.sh,
-# scripts/bench-check.sh), never by adding them to the workspace.
+# CI builds them via --manifest-path, never by adding them to the workspace: the
+# nightly `harness-build` job (.github/workflows/nightly-bench.yml) checks every
+# `benchmarks/` entry below, and scripts/sqlite-compare-gate.sh runs
+# sqlite-compare on every PR.
 exclude = [
     # WASM guest component (built with cargo-component for wasm32-wasip2, not a
     # native workspace member) — a test fixture for the axil-runtime host.

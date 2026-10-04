@@ -2,7 +2,7 @@
 
 An **Extension** is a capability built on top of Axil's Engines. Extensions don't own a companion file — they live in the core `.axil` database with their own prefixed tables. They optionally expose CLI subcommands, MCP tools, brain hooks, and drift-refresh logic, and they're the primary third-party extensibility surface in Axil.
 
-This guide walks through writing an Extension end-to-end, using [`axil-docs`](../../../crates/axil-docs/) (the dependency-doc memory) as the reference implementation.
+This guide walks through writing an Extension end-to-end, using [`axil-docs`](../../../crates/extensions/axil-docs/) (the dependency-doc memory) as the reference implementation.
 
 ## When to write an Extension
 
@@ -167,7 +167,7 @@ That's the whole contract. The Adapter (`axil-cli`) discovers your Extension at 
 
 ## The `axil-docs` reference implementation
 
-Look at `crates/axil-docs/` for a production-grade Extension that exercises the full surface. The relevant patterns:
+Look at `crates/extensions/axil-docs/` for a production-grade Extension that exercises the full surface. The relevant patterns:
 
 | Pattern | Where in `axil-docs` |
 |---|---|
@@ -181,7 +181,7 @@ Look at `crates/axil-docs/` for a production-grade Extension that exercises the 
 | Version history | A version bump archives old chunks instead of deleting (`archived: true`) and links via `superseded_by` |
 | Feature gating | Default-on in `axil-cli` `default` and `full`; absent in `core` |
 
-Read [`crates/axil-docs/src/lib.rs`](../../../crates/axil-docs/src/lib.rs) end-to-end before authoring a non-trivial Extension. It's the canonical shape.
+Read [`crates/extensions/axil-docs/src/lib.rs`](../../../crates/extensions/axil-docs/src/lib.rs) end-to-end before authoring a non-trivial Extension. It's the canonical shape.
 
 ## Drift / refresh pattern
 

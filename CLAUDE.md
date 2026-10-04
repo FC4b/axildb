@@ -348,23 +348,33 @@ local, gitignored `tasks/` dir — they are not shipped in the public repo.)
   LongMemEval benchmark, A/B testing framework
 - Deferred: examples (vector_search, graph_queries, agent_memory), documentation site. (CI/CD shipped post-1.0: `.github/workflows/ci.yml` build/test/recall-quality gate + `release-plz.yml` auto-publish.)
 
-> **Benchmark harnesses are tracked and in-tree** (Phase 25). The LoCoMo /
+> **Benchmark harnesses are tracked and in-tree.** The LoCoMo /
 > LongMemEval / SQLite-compare / vector-latency / criterion-suite harnesses
 > live under `benchmarks/` with their sources committed (`git ls-files
 > benchmarks/`); only generated `data/`, `target/`, and `out/` are gitignored.
 > They are `exclude`d from the default workspace (so `cargo check --workspace`
 > stays fast/clean), not removed — run one with
 > `cargo run --release --manifest-path benchmarks/<name>/Cargo.toml`.
-> Regeneration in CI splits by data dependency:
-> - **Dataset-free, CI-gated:** `sqlite-compare` (reduced-n speedup floor) and
->   the needle-recall gate run on every PR; `bench-check.sh` (Criterion
->   `core`/`vector`/`graph`/`fts`, >5% latency regression) runs nightly.
-> - **Dataset-gated, skip-loud:** LongMemEval / LoCoMo / ConvoMem need an
->   out-of-tree dataset; their gates emit a loud `::warning` skip when it's
->   absent (a green CI run never means they verified anything). Committed
->   500-question baselines live in `benchmarks/results/` (e.g.
->   `qtc-500.json` backs the 93.5% Recall-QTC figure); the LongMemEval gate
->   compares against them when the dataset is present.
+> What CI runs (`.github/workflows/`):
+> - **Every PR (`ci.yml`):** the `sqlite-compare` speedup floor
+>   (`scripts/sqlite-compare-gate.sh`, ≥3× at n=10,000) and the needle-recall
+>   gate (`scripts/needle-recall-gate.sh`, FTS-only), beside the build, test,
+>   embed-smoke and semver jobs.
+> - **Nightly (`nightly-bench.yml`):** `scripts/bench-check.sh` (Criterion
+>   `core`/`vector`/`graph`/`fts`, >5% latency regression, warn-only), the HNSW
+>   recall oracle at N=20,000, an AxilQL parser fuzz run, and `cargo check` of
+>   every workspace-excluded harness (build-only coverage: nothing runs them).
+> - **Dataset-gated, skip-loud — LongMemEval only** (`longmemeval.yml` +
+>   `scripts/longmemeval-gate.sh`): a 20-question smoke on PRs that touch the
+>   recall core, the full 500-question run nightly. The dataset is out-of-tree;
+>   without it the gate emits a loud `::warning` skip (a green run never means
+>   it verified anything). It compares against
+>   `benchmarks/longmemeval/baseline.jsonl` (a copy of
+>   `benchmarks/results/qtc-500.json`, which backs the 93.5% Recall-QTC
+>   figure) or the per-configuration file in `benchmarks/longmemeval/baselines/`.
+> - **Local only, no CI gate:** LoCoMo (run its harness with its dataset) and
+>   the code-recall gate (`scripts/code-recall-gate.sh`, which needs the
+>   embedding model).
 
 ### Phase 7c: Web UI ✅
 - React 19 + Vite 6 + rust-embed. Database explorer with graph/vector viz, query console.
@@ -571,8 +581,9 @@ axil/
   *every* change: its quality oracle is threshold-based, not exact — the per-PR
   needle gate (`scripts/needle-recall-gate.sh`, FTS-only, fails if any planted
   needle misses top-5 — recall@5 must be 1.0 — or retention < 90%) and the
-  LongMemEval gate (`scripts/longmemeval-gate.sh`, on core
-  paths + nightly, fails on >2% recall regression) *bound* regressions but do
+  LongMemEval gate (`scripts/longmemeval-gate.sh`: a 20-question smoke at 10%
+  tolerance on core-path PRs, the full run nightly failing on >2% recall
+  regression; skips loudly without its dataset) *bound* regressions but do
   not *define* correctness, so a green run is necessary, never sufficient.
   Small edits to this mature code are harder for agents than net-new features
   (observed on pgrust, malisper.me) — route them through a human, not a swarm.

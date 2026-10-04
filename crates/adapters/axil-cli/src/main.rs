@@ -10003,7 +10003,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
             let value = axil_indexer::recall::context(&db, &opts).context("code-context failed")?;
             match context_format.as_str() {
                 "json" => out.print(&value),
-                // `compact` (default): lean pointer lines, ~10× smaller than
+                // `compact` (default): lean pointer lines, much smaller than
                 // the JSON bundle — the right shape for locating code.
                 _ => outp!("{}", axil_indexer::recall::render_context_compact(&value)),
             }

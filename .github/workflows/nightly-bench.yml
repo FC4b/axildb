@@ -1,6 +1,8 @@
 name: nightly-bench
 
-# Criterion latency regression watch (Phase 25 P0.5). Runs the 4 in-tree
+# Nightly checks that are too slow or too noisy for the per-PR gate.
+#
+# Criterion latency regression watch: runs the 4 in-tree
 # hot-path suites (core/vector/graph/fts) via scripts/bench-check.sh and
 # surfaces >5% regressions vs the previous night's baseline as WARNINGS —
 # informational, never blocking. Criterion variance on shared CI runners is
@@ -77,3 +79,69 @@ jobs:
         run: |
           cd fuzz
           cargo +nightly fuzz run ql_parse -- -max_total_time=300 -rss_limit_mb=2048
+
+  harness-build:
+    name: benchmark harnesses build
+    runs-on: ubuntu-latest
+    # The harnesses under benchmarks/ are `exclude`d from the workspace, so the
+    # per-PR build never compiles them (sqlite-compare is built by its gate;
+    # longmemeval only when its dataset is present). A crate move or an API
+    # rename elsewhere can break them with no red check until someone runs one
+    # by hand. A nightly `cargo check` of each catches that the next morning.
+    # A build break is not noise, so this job fails; being nightly, it never
+    # blocks a PR.
+    env:
+      # One target dir for every harness: they share most dependencies, so
+      # after the first check the rest mostly reuse its artifacts. It is the
+      # default `target` rust-cache saves.
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # The list comes from the root Cargo.toml `exclude`, so a new harness is
+      # covered the night it lands. Each harness is checked with its default
+      # features and then once per optional feature in its own [features]
+      # table (longmemeval: rerank and the GPU execution providers), since
+      # cfg-gated code rots unseen otherwise. Every check runs even after one
+      # fails, so the log names all the broken ones.
+      - name: cargo check each excluded harness
+        shell: bash
+        run: |
+          set -uo pipefail
+          harnesses=$(sed -n '/^exclude = \[/,/^\]/p' Cargo.toml | grep -o '"benchmarks/[^"]*"' | tr -d '"')
+          if [ -z "$harnesses" ]; then
+            echo "::error::found no benchmarks/ entries in the root Cargo.toml exclude list"
+            exit 1
+          fi
+          failed=()
+          for h in $harnesses; do
+            manifest="$h/Cargo.toml"
+            # A metadata failure must not quietly drop the feature checks:
+            # record it, and still check the default features below.
+            if ! features=$(cargo metadata --no-deps --format-version 1 --manifest-path "$manifest" \
+              | python3 -c 'import json, sys; m = json.load(sys.stdin); print(" ".join(f for p in m["packages"] for f in p["features"] if f != "default"))'); then
+              echo "::error::$h: could not list its features"
+              failed+=("$h (feature list)")
+              features=""
+            fi
+            for f in "" $features; do
+              label="$h${f:+ --features $f}"
+              # The GPU execution providers load ONNX Runtime at run time, so
+              # a check needs no runtime download; without ORT_SKIP_DOWNLOAD,
+              # ort's download-binaries would still fetch the CUDA build. The
+              # CPU build does need its download, so only gpu* features skip it.
+              skip_ort=""
+              case "$f" in gpu*) skip_ort=1 ;; esac
+              echo "::group::$label"
+              if ! env ${skip_ort:+ORT_SKIP_DOWNLOAD=1} cargo check --all-targets --manifest-path "$manifest" ${f:+--features "$f"}; then
+                echo "::error::$label does not build"
+                failed+=("$label")
+              fi
+              echo "::endgroup::"
+            done
+          done
+          if [ "${#failed[@]}" -gt 0 ]; then
+            printf 'broken: %s\n' "${failed[@]}"
+            exit 1
+          fi

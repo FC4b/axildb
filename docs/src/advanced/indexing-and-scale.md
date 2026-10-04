@@ -23,16 +23,16 @@ own drift-detection and refresh strategy:
 `axil index` runs **incremental by default**. The pipeline:
 
 1. Walk the project respecting `.gitignore` and `.axilignore`
-   ([crates/extensions/axil-indexer/src/scanner.rs:282](../../crates/extensions/axil-indexer/src/scanner.rs#L282))
+   ([crates/extensions/axil-indexer/src/scanner.rs:282](../../../crates/extensions/axil-indexer/src/scanner.rs#L282))
 2. For each file: read bytes, hash, compare against the
    `content_hash` stored in `_idx_files`. Unchanged files do
    **zero** downstream work — no parse, no embed, no FTS update
-   ([crates/extensions/axil-indexer/src/indexer.rs:268-335](../../crates/extensions/axil-indexer/src/indexer.rs#L268))
+   ([crates/extensions/axil-indexer/src/indexer.rs:268-335](../../../crates/extensions/axil-indexer/src/indexer.rs#L268))
 3. For each changed file: re-parse, then run the proxy pipeline through
    `ProxyDedupCache` — a symbol whose `proxy_text` AND nav metadata are
    identical to the stored version skips the (expensive) ONNX embed +
    FTS index calls. Pure line shifts call `db.update` for nav fields
-   only ([crates/extensions/axil-indexer/src/indexer.rs:87](../../crates/extensions/axil-indexer/src/indexer.rs#L87))
+   only ([crates/extensions/axil-indexer/src/indexer.rs:87](../../../crates/extensions/axil-indexer/src/indexer.rs#L87))
 4. Detect deleted files; prune their proxies + reverse refs
 
 Force a full rebuild with `axil index --full`. Use this after schema

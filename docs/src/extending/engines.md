@@ -152,10 +152,10 @@ The benchmark must run as part of `scripts/bench-check.sh` so regressions >5% br
 
 The four built-in Engines are the canonical examples:
 
-- **Vector**: [crates/axil-vector/](../../../crates/axil-vector/) — `hnsw_rs` incremental HNSW + ONNX embedding.
-- **Graph**: [crates/axil-graph/](../../../crates/axil-graph/) — pure-Rust edge storage in redb.
-- **FTS**: [crates/axil-fts/](../../../crates/axil-fts/) — tantivy wrapper with code tokenizer, fuzzy matching, field boosting.
-- **Time-series**: [crates/axil-timeseries/](../../../crates/axil-timeseries/) — redb-backed bucketed ranges.
+- **Vector**: [crates/engines/axil-vector/](../../../crates/engines/axil-vector/) — `hnsw_rs` incremental HNSW + ONNX embedding.
+- **Graph**: [crates/engines/axil-graph/](../../../crates/engines/axil-graph/) — pure-Rust edge storage in redb.
+- **FTS**: [crates/engines/axil-fts/](../../../crates/engines/axil-fts/) — tantivy wrapper with code tokenizer, fuzzy matching, field boosting.
+- **Time-series**: [crates/engines/axil-timeseries/](../../../crates/engines/axil-timeseries/) — redb-backed bucketed ranges.
 
 Start by reading `axil-fts` if you want the simplest end-to-end example, or `axil-vector` if you need the embedding-pipeline pattern.
 

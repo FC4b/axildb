@@ -71,7 +71,7 @@ Workload: `s` variant (500 questions × 30–40 sessions), top-k=5. Hit rate / r
 
 | Date | Axil ver | Recall (hit/recall) | Vector (hit/recall) | FTS (hit/recall) | Notes |
 |---|---|---:|---:|---:|---|
-| 2026-04-18 | Phase 13 | 94.4% / 90.9% | 92.2% / 88.0% | 85.8% / 79.0% | Hindsight (PostgreSQL + LLM) reports 91.4% on a similar split — Axil clears it without an LLM in the loop. Harness crate is `benchmarks/longmemeval/` (gitignored). |
+| 2026-04-18 | Phase 13 | 94.4% / 90.9% | 92.2% / 88.0% | 85.8% / 79.0% | Hindsight (PostgreSQL + LLM) reports 91.4% on a similar split — Axil clears it without an LLM in the loop. Harness crate is `benchmarks/longmemeval/` (tracked, outside the workspace). |
 | 2026-05-17 | 0.7.7 | — | 96.4% / 93.6% | — | First **git-tracked, CI-gated** full 500-q run — committed at `benchmarks/results/baseline-500.json`. GPU (RTX 3080), 15m19s wall, `vector` strategy. Higher than the Phase 13 vector row, but that row is untracked/historical (different tooling, possibly different dataset snapshot) — treat 96.4% as the new reproducible reference, **not** a measured +4.2-pt gain. precision@5 is 32.0% (denominator-capped at top-k=5; hit_rate/recall are the quality signals). |
 
 ### LoCoMo (retrieval quality, historical)
@@ -86,7 +86,7 @@ The full table — Axil vs Memvid / HelixDB / SurrealDB / Mem0 / Hindsight / Mem
 
 ### Adding a new competitor row
 
-1. Pull the relevant harness from the benchmark archive into `benchmarks/<name>/` (it's gitignored; that's intentional — these crates pin large datasets and competitor binaries).
+1. Add or reuse a harness under `benchmarks/<name>/`. Harness sources are tracked; they stay out of the workspace (the root `Cargo.toml` `exclude` list) and their `data/`, `target/` and `out/` directories are gitignored, so large datasets and competitor binaries never enter git.
 2. Run **on the same hardware and same day** as the in-tree Criterion suite for the version you're publishing — competitor delta is only meaningful when the Axil number is fresh.
 3. Append a row with: date, Axil version, headline metric for both engines, ratio/delta, and a one-line note on workload assumptions.
 4. If the competitor has a known asterisk (requires LLM, requires PostgreSQL, AGPL-licensed, etc.), call it out in the note column — the table is read by people deciding whether to adopt.

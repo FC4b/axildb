@@ -131,8 +131,8 @@ checkpoint = ["dep:axil-checkpoint", "axil-bundle/checkpoint"]
 # `main.rs` wiring: the Extension declares its CLI surface and the external-
 # subcommand path routes `axil cache …` to it.
 cache = ["dep:axil-cache", "axil-bundle/cache"]
-# Default-off built-in HTTP doc fetcher (Phase 16 Path B). Offline-first
-# is the default posture; implies `deps`.
+# Default-off built-in HTTP doc fetcher for dependencies with no docs on disk.
+# Off because offline-first is the default posture; implies `deps`.
 web-docs = ["deps", "axil-docs/web-docs"]
 memory = ["dep:axil-memory"]
 llm-http = ["axil-core/llm-http"]
@@ -154,7 +154,7 @@ mcp = ["dep:axil-mcp"]
 ql = ["dep:axil-ql", "dep:rustyline"]
 rerank = ["indexer", "axil-indexer/rerank"]
 http = ["dep:axum", "dep:tower-http"]
-# Runtime WASM plugins (Phase 22). Default-OFF: pulls Wasmtime in, so it's opt-in
+# Runtime WASM plugins. Default-OFF: pulls Wasmtime in, so it's opt-in
 # to preserve the small-binary posture. `axil ext …` + .axil/plugins discovery.
 wasm-host = ["dep:axil-runtime", "axil-runtime/wasm-host"]
 full = ["vector", "embed", "graph", "fts", "timeseries", "indexer", "scip", "deps", "checkpoint", "cache", "rerank", "memory", "llm-http", "mcp", "ql", "http"]

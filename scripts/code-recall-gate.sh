@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# code-recall-gate.sh — Phase 13b.9 / 13b.12 regression gate.
+# code-recall-gate.sh — regression gate for structural code recall.
 #
 # Indexes a corpus, runs the bench harness, then either saves the run as
 # a baseline or compares against a saved baseline. Two corpus modes:

@@ -7,27 +7,30 @@ Rank Fusion (RRF), multi-signal scoring, Query-Time Chunking (QTC),
 optional cross-encoder rerank, and the code-aware layer added in Phase 13b.
 
 The authoritative implementation lives in
-[`crates/axil-core/src/query.rs`](../../crates/axil-core/src/query.rs) and
-[`crates/axil-core/src/scoring.rs`](../../crates/axil-core/src/scoring.rs).
+[`crates/axil-core/src/query.rs`](../../../crates/axil-core/src/query.rs) and
+[`crates/axil-core/src/scoring.rs`](../../../crates/axil-core/src/scoring.rs).
 
 ## Why hybrid, not vector-only
 
-Axil's production recall is measurably better than naive vector search:
+No committed run compares raw vector search with the full pipeline on the
+same build. The committed 500-question LongMemEval-S runs come from two
+builds, so read them as history, not as a head-to-head:
 
-| Path | recall@1 (LongMemEval-S)* |
-|------|---------------------------|
-| `query().similar_to(...)` (raw vector only) | 0.100 |
-| `db.recall(...)` (full hybrid pipeline) | 0.760 |
+| Path (500 questions, top-5) | avg recall | Build | Source |
+|------|------|------|--------|
+| `vector` (raw vector only) | 0.936 | initial release | [`baseline-500.json`](../../../benchmarks/results/baseline-500.json) |
+| `recall-qtc` (full hybrid pipeline) | 0.935 | 2026-06-27 rerun | [`qtc-500.json`](../../../benchmarks/results/qtc-500.json) |
+| `recall` (fusion without query-time chunks) | 0.915 | 2026-06-27 rerun | [`fusion-500.json`](../../../benchmarks/results/fusion-500.json) |
 
-\* *Historical numbers from the Phase 15 verification run. The
-LongMemEval harness is not in-tree (see `.gitignore: /benchmarks/`),
-so CI cannot regenerate these. To re-verify, pull the harness from
-the project's benchmark archive and re-run. See the
-[Evaluation Log](./eval-log.md) for methodology and version history.*
+The harness is in-tree at [`benchmarks/longmemeval/`](../../../benchmarks/longmemeval/)
+and needs the dataset downloaded separately; see its README.
 
-The 7.6× gap is the difference made by FTS + RRF + multi-signal
-scoring + QTC. If you call the raw `QueryBuilder::similar_to` path you are
-leaving recall on the table.
+What the pipeline adds over the raw `QueryBuilder::similar_to` path are
+signals a vector alone cannot carry: exact matches on identifiers and error
+strings (FTS), how recent a record is, records connected to what the query
+names (graph), and what the agent used before (feedback). Their effect on
+recall is measured per change with the dogfood eval and LongMemEval, not
+claimed here.
 
 ## Pipeline overview
 
@@ -49,9 +52,10 @@ leaving recall on the table.
 │          (vector + recency + graph + keyword + temporal +   │
 │           feedback + preference + activation + importance)  │
 ├─────────────────────────────────────────────────────────────┤
-│ Step 4b — Cross-encoder rerank          (optional, off)     │
+│ Step 4b — Library reranker   (QueryBuilder only, optional)  │
+│           (the CLI's --rerank runs after recall returns)    │
 ├─────────────────────────────────────────────────────────────┤
-│ Step 4c — Query-Time Chunk rerank       (optional)          │
+│ Step 4c — Query-Time Chunk rerank   (Axil::recall only)     │
 ├─────────────────────────────────────────────────────────────┤
 │ Step 5 — Graph traversal                (optional)          │
 ├─────────────────────────────────────────────────────────────┤
@@ -183,18 +187,71 @@ axil recall "auth timeout" --explain
 
 ## Step 4b — Cross-encoder rerank (optional, off by default)
 
-Phase 15 added a pluggable `Rerank` trait with two ONNX implementations
-(MS-MARCO MiniLM, AnswerAI ColBERT-small) in
-[`crates/extensions/axil-rerank`](../../crates/extensions/axil-rerank). When attached via
-`with_reranker(...)`, the top `rerank_top_k_in` candidates are re-scored
-by a cross-encoder and blended with `weight = 0.7`.
+Two rerankers share this name and run at different points.
 
-**Status: disabled by default.** Phase 15 verification on LongMemEval-S
-showed both models *hurt* quality: MS-MARCO MiniLM dropped recall@1
-from 0.760 to 0.580 (-24%), and ColBERT-small showed similar regression.
-The infrastructure ships so users can attach domain-specific rerankers,
-but no model is enabled out of the box. See
-[Eval Log](./eval-log.md) for the full Phase 15 numbers.
+**The CLI's `--rerank`** is not a stage inside `db.recall()`: it runs after
+recall has returned, so after query-time chunk rescoring (Step 4c) and the
+post-filter. `axil recall --rerank cross-encoder` re-scores those returned
+hits with an ONNX cross-encoder and reorders them by its score (recall's
+order is replaced, not blended; at most the first 20 entries are scored).
+
+- **What the rerank receives.** Recall's final, QTC-scored hits. When the
+  primary recall returns nothing, the CLI cascades through fallbacks in
+  order and the rerank gets the first that returns hits: recall again with
+  the filters relaxed (and query-time chunks off), recall on the expanded
+  query, then direct FTS; `--no-cascade` turns all three off. With no
+  post-filter: the first `--top-k` hits (default 5), or up to ⌈1.5 × `--top-k`⌉ when completeness
+  widening fires (on by default; `--no-widen` turns it off). With a
+  post-filter (`--table`, `--type`, `--after`, `--before`, `--agent`,
+  `--min-importance`, `--fresh-only`): recall over-fetches 5 × `--top-k`
+  candidates (more if widening fires), filters them, and the rerank
+  receives the first `--top-k` that pass. Nothing outside this list can be
+  promoted.
+- **What is printed.** The whole reranked list in its new order, minus hits
+  the `--recall-format` has nothing to show for (`compact`, `oneline` and
+  `context-block` skip them; `context-block` also lists code hits before
+  memories). With `--budget`, only the prefix that fits is printed, except
+  that most formats print the first hit even when it alone is over the
+  budget (`context-block` may print just a code-section heading then), so
+  the rerank can change which records appear.
+
+The implementation is
+[`crates/extensions/axil-indexer/src/rerank.rs`](../../../crates/extensions/axil-indexer/src/rerank.rs),
+compiled in by the `rerank` Cargo feature (part of the CLI's `full`
+build, not `default`). It loads `models/cross-encoder.onnx`; the
+expected model is `cross-encoder/ms-marco-MiniLM-L-6-v2`.
+`--rerank llm` reorders the same list through the configured
+`LlmProvider` instead.
+
+**The library reranker** belongs to the `QueryBuilder` path only. Embedded
+library users can bring their own: implement the `Rerank` trait in
+`axil-core` and attach it with `QueryBuilder::with_reranker(...)`. It does
+not run inside `Axil::recall` (`db.recall()`), and `QueryBuilder` has no
+query-time chunk stage: the diagram shows both paths' stages, and Steps 4b
+and 4c each apply to one of them. The top `rerank_top_k_in` candidates
+(default 50) are re-scored and up to `rerank_top_k_out` (default 10) are
+kept.
+
+**Status: off by default.** Every committed rerank run lowered recall.
+On a 30-question LongMemEval-S subset, top-k 5
+([investigation](../../../benchmarks/results/lme-rerank-investigation.md)):
+
+- Recall-QTC with the MS-MARCO cross-encoder: 0.933
+  ([`lme-baseline-30.json`](../../../benchmarks/results/lme-baseline-30.json))
+  → 0.667
+  ([`lme-qtc-rerank-30.json`](../../../benchmarks/results/lme-qtc-rerank-30.json)).
+- The `recall` (fusion) strategy: 0.900 without rerank
+  ([`lme-recall-no-rerank-30.json`](../../../benchmarks/results/lme-recall-no-rerank-30.json))
+  → 0.667 with MS-MARCO
+  ([`lme-rerank-30.json`](../../../benchmarks/results/lme-rerank-30.json))
+  and 0.733 with a BGE reranker
+  ([`lme-bge-rerank-30.json`](../../../benchmarks/results/lme-bge-rerank-30.json)).
+
+Those runs used the LongMemEval harness, which reranks the top 20 of 40
+fused candidates before keeping 5, a wider window than the CLI's. The
+CLI path itself has not been measured since a fix to the text it hands
+the cross-encoder. The infrastructure ships so users can attach
+domain-specific rerankers, but no model is enabled out of the box.
 
 ## Step 4c — Query-Time Chunking (QTC)
 
