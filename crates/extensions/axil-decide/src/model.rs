@@ -175,7 +175,9 @@ const ATTEMPTS: u32 = 3;
 /// written, and only then is it renamed over the final name, which is atomic
 /// within one directory. A final file that already verifies is kept: it is
 /// either from an earlier run or from a concurrent downloader that finished
-/// first, and both copies are the pinned bytes.
+/// first, and both copies are the pinned bytes. For the same reason a failed
+/// fetch or a failed check is not the end: if another downloader has
+/// installed the verified file meanwhile, this one succeeds too.
 fn install<F>(dir: &Path, file: &ModelFile, fetch: F) -> Result<()>
 where
     F: Fn(&Path) -> std::result::Result<(), String>,
@@ -189,6 +191,9 @@ where
         let tmp = temp_path(dir, file.local);
         if let Err(e) = fetch(&tmp) {
             let _ = fs::remove_file(&tmp);
+            if verifies(&dest, file) {
+                return Ok(());
+            }
             last = e;
             if attempt < ATTEMPTS {
                 std::thread::sleep(Duration::from_secs(2u64.pow(attempt)));
@@ -197,7 +202,11 @@ where
         }
         if let Err(e) = check(&tmp, file) {
             let _ = fs::remove_file(&tmp);
-            return Err(e);
+            return if verifies(&dest, file) {
+                Ok(())
+            } else {
+                Err(e)
+            };
         }
         if verifies(&dest, file) {
             let _ = fs::remove_file(&tmp);
@@ -217,6 +226,9 @@ where
                 }
             }
         };
+    }
+    if verifies(&dest, file) {
+        return Ok(());
     }
     Err(DecideError::Model(format!(
         "{}: {last} (after {ATTEMPTS} attempts)",
@@ -427,6 +439,65 @@ mod tests {
             "{:?}",
             leftovers(dir.path())
         );
+    }
+
+    /// A fetch that signals `started` (once), waits until another downloader
+    /// has installed the file, then fails with `outcome`: an error, or bytes
+    /// that fail the check.
+    fn fail_after_install<'a>(
+        dest: &'a Path,
+        started: &'a std::sync::Barrier,
+        outcome: std::result::Result<&'a [u8], &'a str>,
+    ) -> impl Fn(&Path) -> std::result::Result<(), String> + 'a {
+        let once = std::sync::Once::new();
+        move |path| {
+            once.call_once(|| {
+                started.wait();
+            });
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while !dest.exists() {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the other downloader never finished"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            match outcome {
+                Ok(bytes) => fs::write(path, bytes).map_err(|e| e.to_string()),
+                Err(e) => Err(e.to_string()),
+            }
+        }
+    }
+
+    #[test]
+    fn a_failing_downloader_succeeds_when_another_installs_the_file() {
+        let payload: Vec<u8> = (0..64 * 1024u32).map(|i| (i * 7 % 253) as u8).collect();
+        let file = pinned(&payload);
+        let forged = vec![0u8; payload.len()];
+        // A transfer error, then same-size bytes that fail the hash.
+        for outcome in [Err("network down"), Ok(forged.as_slice())] {
+            let dir = tempfile::tempdir().unwrap();
+            let dest = dir.path().join("model.onnx");
+            let started = std::sync::Barrier::new(2);
+            std::thread::scope(|scope| {
+                let failing = scope.spawn(|| {
+                    install(
+                        dir.path(),
+                        &file,
+                        fail_after_install(&dest, &started, outcome),
+                    )
+                });
+                // Start only once the failing downloader is inside its fetch,
+                // past its own up-front check of the destination.
+                started.wait();
+                install(dir.path(), &file, slow_writer(&payload)).unwrap();
+                // Its own fetch failed, yet the file it needed is installed:
+                // it rechecks before retrying or giving up.
+                failing.join().unwrap().unwrap();
+            });
+            assert_eq!(fs::read(&dest).unwrap(), payload);
+            assert!(leftovers(dir.path()).is_empty());
+        }
     }
 
     #[test]
