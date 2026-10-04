@@ -107,9 +107,9 @@ def score_all(rows):
     opts = ort.SessionOptions()
     opts.intra_op_num_threads = THREADS
     opts.inter_op_num_threads = 1
+    model_path = pinned(MODEL["onnx"], MODEL["onnx_sha256"])
     t0 = time.perf_counter()
-    sess = ort.InferenceSession(pinned(MODEL["onnx"], MODEL["onnx_sha256"]), opts,
-                                providers=["CPUExecutionProvider"])
+    sess = ort.InferenceSession(model_path, opts, providers=["CPUExecutionProvider"])
     load_ms = (time.perf_counter() - t0) * 1000
     names = {i.name for i in sess.get_inputs()}
     out, lat = [], []

@@ -201,9 +201,9 @@
     "longmemeval_oracle": 0.7164473684210526
   },
   "python_latency": {
-    "load_ms": 962.7,
-    "p50_ms": 42.12,
-    "p95_ms": 122.72,
+    "load_ms": 1210.4,
+    "p50_ms": 82.79,
+    "p95_ms": 244.69,
     "note": "tokenize + run, batch 1, one run on this machine"
   },
   "onnxruntime_drift": {
