@@ -538,9 +538,10 @@ def main():
         "session_settings_check": session_check,
         "batch_check": batch_check,
         "notes": [
-            "Test ECE after temperature scaling misses the 0.05 bar of the bake-off's go rules. It is not "
-            "applied to this model: it only proposes a 'possible contradiction' review edge, never retires a "
-            "record (Axil decision 01M42C1K7XJK3NNG0JM9CYGDW0).",
+            "Test ECE after temperature scaling misses the 0.05 bar of the bake-off's go rules. The bar is "
+            "waived for this model's intended use, a 'possible contradiction' review suggestion that never "
+            "retires a record (Axil decision 01M42C1K7XJK3NNG0JM9CYGDW0). Nothing creates that review edge "
+            "yet; wiring it is later work.",
             "Latency is one run on a machine shared with other jobs; compare it only with numbers from the "
             "same day.",
         ],

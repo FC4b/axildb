@@ -18,8 +18,9 @@
 //! temperature fitted against pairs labelled as the newer text replacing,
 //! updating or contradicting the older. It is a review signal, not an update
 //! detector: at the shipped threshold it flagged 5 of the 46 plain updates in
-//! the U1 test set, so most updates pass unflagged, and a flag is a
-//! suggestion to review, never grounds to retire a record.
+//! the U1 test set, so most updates pass unflagged. Its intended use is a
+//! suggestion to review, never grounds to retire a record; nothing in Axil
+//! acts on its verdicts yet.
 //!
 //! ```no_run
 //! use axil_decide::{Calibration, PairClassifier, NLI_DEBERTA_V3_XSMALL_QINT8 as U1};
