@@ -183,14 +183,19 @@ axil recall "auth timeout" --explain
 
 ## Step 4b — Cross-encoder rerank (optional, off by default)
 
-`axil recall --rerank cross-encoder` re-scores the top 20 fused
-candidates with an ONNX cross-encoder and reorders them by its score
-(the fused order is replaced, not blended). The implementation is
+`axil recall --rerank cross-encoder` re-scores the results recall has
+already chosen with an ONNX cross-encoder and reorders them by its score
+(the fused order is replaced, not blended). Recall cuts its list to
+`--top-k` (default 5) before the rerank runs, and the cross-encoder scores
+at most the first 20 of those. So the rerank changes the order of the
+returned hits, never which hits are returned: a candidate fused below
+`--top-k` cannot be promoted. The implementation is
 [`crates/extensions/axil-indexer/src/rerank.rs`](../../../crates/extensions/axil-indexer/src/rerank.rs),
 compiled in by the `rerank` Cargo feature (part of the CLI's `full`
 build, not `default`). It loads `models/cross-encoder.onnx`; the
 expected model is `cross-encoder/ms-marco-MiniLM-L-6-v2`.
-`--rerank llm` reranks through the configured `LlmProvider` instead.
+`--rerank llm` reorders the same list through the configured
+`LlmProvider` instead.
 
 Embedded library users can bring their own reranker: implement the
 `Rerank` trait in `axil-core` and attach it with
