@@ -3,6 +3,8 @@
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
 
@@ -26,10 +28,10 @@ pub struct ModelFile {
 
 /// A pair-classifier model pinned to one Hugging Face revision.
 ///
-/// [`PairModel::download`] fetches the files from that revision and accepts
-/// them only if their sha256 matches; [`PairModel::is_available`] (and
-/// therefore every load) checks presence and size, and
-/// [`PairModel::verify`] re-hashes on demand.
+/// [`PairModel::download`] fetches the files from that revision and installs
+/// them only if their size and sha256 match. [`PairModel::is_available`] is
+/// the cheap check (presence and size); [`PairModel::verify`] re-hashes, and
+/// every [`crate::PairClassifier`] load runs it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PairModel {
     /// Local name, also the model directory's name.
@@ -50,8 +52,10 @@ pub struct PairModel {
     ///
     /// False for dynamically quantized graphs: they quantize activations with
     /// one scale for the whole input tensor, so other pairs and padding in a
-    /// batch change every pair's result (on the U1 model, by up to 0.27 in
-    /// probability). Such models score one pair per run.
+    /// batch change every pair's result. On the U1 model, padded batches of 8
+    /// move logits by up to 1.4 and flip 4 of 249 verdicts (`batch_check` in
+    /// `benchmarks/results/typed-decisions-u1-calibration-2026-10-04.json`).
+    /// Such models score one pair per run.
     pub batch_invariant: bool,
 }
 
@@ -120,95 +124,150 @@ impl PairModel {
         })
     }
 
-    /// Fetch every missing file into `dir` from the pinned revision.
+    /// Fetch every file that is missing or fails verification into `dir`,
+    /// from the pinned revision.
     ///
-    /// Each file downloads to a temporary name, is hashed as it streams, and
-    /// is renamed into place only if its sha256 matches the pin. A file
-    /// already present with the pinned size is kept.
+    /// Safe to run from several processes at once: each download writes its
+    /// own temporary file, which must match the pinned size and sha256 before
+    /// it is renamed into place, and a file another process already installed
+    /// and verified is kept.
     pub fn download(&self, dir: &Path) -> Result<()> {
         fs::create_dir_all(dir)
             .map_err(|e| DecideError::Model(format!("create {}: {e}", dir.display())))?;
         for file in self.files() {
-            let dest = dir.join(file.local);
-            if fs::metadata(&dest)
-                .map(|m| m.len() == file.size)
-                .unwrap_or(false)
-            {
-                continue;
-            }
-            download_verified(&self.url(&file), &dest, file.sha256)?;
+            let url = self.url(&file);
+            install(dir, &file, |tmp| fetch(&url, tmp))?;
         }
         Ok(())
     }
 
-    /// Re-hash every file in `dir` against its pin.
+    /// Check every file in `dir` against its pinned size and sha256.
     pub fn verify(&self, dir: &Path) -> Result<()> {
-        for file in self.files() {
-            let path = dir.join(file.local);
-            let actual = sha256_file(&path)?;
-            if actual != file.sha256 {
-                return Err(DecideError::Model(format!(
-                    "{}: sha256 {actual} does not match the pinned {}",
-                    path.display(),
-                    file.sha256
-                )));
-            }
-        }
-        Ok(())
+        self.files()
+            .iter()
+            .try_for_each(|file| check(&dir.join(file.local), file))
     }
 }
 
-/// Download `url` to `dest`, keeping it only if its sha256 is `expected`.
-/// Retries transient failures twice; a hash mismatch is not retried.
-fn download_verified(url: &str, dest: &Path, expected: &str) -> Result<()> {
-    const ATTEMPTS: u32 = 3;
-    let tmp = dest.with_extension("part");
+/// Attempts per file; a transfer error is retried, a verification failure is not.
+const ATTEMPTS: u32 = 3;
+
+/// Install `file` into `dir`, with `fetch` writing its bytes to the path it
+/// is given.
+///
+/// Each attempt writes to its own temporary file in `dir` (process id, time
+/// and a counter in the name), so concurrent downloaders never share one.
+/// That file's size and sha256 are checked on disk, after it is fully
+/// written, and only then is it renamed over the final name, which is atomic
+/// within one directory. A final file that already verifies is kept: it is
+/// either from an earlier run or from a concurrent downloader that finished
+/// first, and both copies are the pinned bytes.
+fn install<F>(dir: &Path, file: &ModelFile, fetch: F) -> Result<()>
+where
+    F: Fn(&Path) -> std::result::Result<(), String>,
+{
+    let dest = dir.join(file.local);
+    if verifies(&dest, file) {
+        return Ok(());
+    }
     let mut last = String::new();
     for attempt in 1..=ATTEMPTS {
-        match fetch(url, &tmp) {
-            Ok(actual) if actual == expected => {
-                return fs::rename(&tmp, dest).map_err(|e| {
-                    let _ = fs::remove_file(&tmp);
-                    DecideError::Model(format!("rename to {}: {e}", dest.display()))
-                });
+        let tmp = temp_path(dir, file.local);
+        if let Err(e) = fetch(&tmp) {
+            let _ = fs::remove_file(&tmp);
+            last = e;
+            if attempt < ATTEMPTS {
+                std::thread::sleep(Duration::from_secs(2u64.pow(attempt)));
             }
-            Ok(actual) => {
-                let _ = fs::remove_file(&tmp);
-                return Err(DecideError::Model(format!(
-                    "{url}: sha256 {actual} does not match the pinned {expected}"
-                )));
-            }
+            continue;
+        }
+        if let Err(e) = check(&tmp, file) {
+            let _ = fs::remove_file(&tmp);
+            return Err(e);
+        }
+        if verifies(&dest, file) {
+            let _ = fs::remove_file(&tmp);
+            return Ok(());
+        }
+        return match fs::rename(&tmp, &dest) {
+            Ok(()) => Ok(()),
             Err(e) => {
                 let _ = fs::remove_file(&tmp);
-                last = e;
-                if attempt < ATTEMPTS {
-                    std::thread::sleep(std::time::Duration::from_secs(2u64.pow(attempt)));
+                if verifies(&dest, file) {
+                    Ok(())
+                } else {
+                    Err(DecideError::Model(format!(
+                        "install {}: {e}",
+                        dest.display()
+                    )))
                 }
             }
-        }
+        };
     }
     Err(DecideError::Model(format!(
-        "{url}: {last} (after {ATTEMPTS} attempts)"
+        "{}: {last} (after {ATTEMPTS} attempts)",
+        file.remote
     )))
 }
 
-/// Stream `url` into `path`; returns the sha256 of what was written.
-fn fetch(url: &str, path: &Path) -> std::result::Result<String, String> {
+/// A temporary path in `dir` that no other download, in this process or
+/// another, will use.
+fn temp_path(dir: &Path, local: &str) -> PathBuf {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    dir.join(format!(
+        ".{local}.{}.{nanos}.{}.part",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ))
+}
+
+/// Whether `path` holds exactly the pinned bytes of `file`.
+fn verifies(path: &Path, file: &ModelFile) -> bool {
+    check(path, file).is_ok()
+}
+
+/// Check `path` against `file`'s pinned size, then its sha256.
+fn check(path: &Path, file: &ModelFile) -> Result<()> {
+    let size = fs::metadata(path)
+        .map_err(|e| DecideError::Model(format!("{}: {e}", path.display())))?
+        .len();
+    if size != file.size {
+        return Err(DecideError::Model(format!(
+            "{}: {size} bytes, pinned {} for {}",
+            path.display(),
+            file.size,
+            file.remote
+        )));
+    }
+    let actual = sha256_file(path)?;
+    if actual != file.sha256 {
+        return Err(DecideError::Model(format!(
+            "{}: sha256 {actual} does not match the pinned {} for {}",
+            path.display(),
+            file.sha256,
+            file.remote
+        )));
+    }
+    Ok(())
+}
+
+/// Stream `url` into `path`.
+fn fetch(url: &str, path: &Path) -> std::result::Result<(), String> {
     let response = ureq::get(url).call().map_err(|e| e.to_string())?;
     let mut reader = response.into_body().into_reader();
     let mut out = fs::File::create(path).map_err(|e| e.to_string())?;
-    let mut hasher = Sha256::new();
     let mut buf = vec![0u8; 1 << 16];
     loop {
         let n = reader.read(&mut buf).map_err(|e| e.to_string())?;
         if n == 0 {
             break;
         }
-        hasher.update(&buf[..n]);
         out.write_all(&buf[..n]).map_err(|e| e.to_string())?;
     }
-    out.sync_all().map_err(|e| e.to_string())?;
-    Ok(hex(&hasher.finalize()))
+    out.sync_all().map_err(|e| e.to_string())
 }
 
 /// sha256 of a file, lowercase hex.
@@ -296,6 +355,97 @@ mod tests {
         assert!(TINY.is_available(dir.path()));
         let err = TINY.verify(dir.path()).unwrap_err().to_string();
         assert!(err.contains("does not match the pinned"), "{err}");
+    }
+
+    /// A pinned file for `bytes`, as the tests' download payload.
+    fn pinned(bytes: &[u8]) -> ModelFile {
+        ModelFile {
+            remote: "onnx/model.onnx",
+            local: "model.onnx",
+            sha256: Box::leak(hex(&Sha256::digest(bytes)).into_boxed_str()),
+            size: bytes.len() as u64,
+        }
+    }
+
+    /// Writes `bytes` to the path in small chunks, yielding between them, so
+    /// concurrent writers interleave.
+    fn slow_writer(bytes: &[u8]) -> impl Fn(&Path) -> std::result::Result<(), String> + '_ {
+        move |path| {
+            let mut out = fs::File::create(path).map_err(|e| e.to_string())?;
+            for chunk in bytes.chunks(4096) {
+                out.write_all(chunk).map_err(|e| e.to_string())?;
+                std::thread::sleep(Duration::from_micros(200));
+            }
+            Ok(())
+        }
+    }
+
+    fn leftovers(dir: &Path) -> Vec<String> {
+        fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".part"))
+            .collect()
+    }
+
+    #[test]
+    fn concurrent_downloads_install_one_verified_file() {
+        let payload: Vec<u8> = (0..256 * 1024u32).map(|i| (i * 31 % 251) as u8).collect();
+        let file = pinned(&payload);
+        let dir = tempfile::tempdir().unwrap();
+        let start = std::sync::Barrier::new(4);
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..4)
+                .map(|_| {
+                    scope.spawn(|| {
+                        start.wait();
+                        install(dir.path(), &file, slow_writer(&payload))
+                    })
+                })
+                .collect();
+            for handle in handles {
+                handle.join().unwrap().unwrap();
+            }
+        });
+        assert_eq!(fs::read(dir.path().join("model.onnx")).unwrap(), payload);
+        assert!(
+            leftovers(dir.path()).is_empty(),
+            "{:?}",
+            leftovers(dir.path())
+        );
+    }
+
+    #[test]
+    fn a_download_that_fails_verification_is_never_installed() {
+        let file = pinned(b"pinned bytes");
+        let dir = tempfile::tempdir().unwrap();
+        // Right size, wrong bytes: only the hash catches it.
+        let err = install(dir.path(), &file, slow_writer(b"forged bytes")).unwrap_err();
+        assert!(
+            err.to_string().contains("does not match the pinned"),
+            "{err}"
+        );
+        let err = install(dir.path(), &file, slow_writer(b"short")).unwrap_err();
+        assert!(err.to_string().contains("bytes, pinned"), "{err}");
+        assert!(!dir.path().join("model.onnx").exists());
+        assert!(leftovers(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn a_verified_file_is_kept_and_a_corrupt_one_replaced() {
+        let file = pinned(b"pinned bytes");
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("model.onnx");
+        fs::write(&dest, b"pinned bytes").unwrap();
+        install(dir.path(), &file, |_| {
+            panic!("a verified file must not be fetched")
+        })
+        .unwrap();
+
+        fs::write(&dest, b"forged bytes").unwrap();
+        install(dir.path(), &file, slow_writer(b"pinned bytes")).unwrap();
+        assert_eq!(fs::read(&dest).unwrap(), b"pinned bytes");
+        assert!(leftovers(dir.path()).is_empty());
     }
 
     #[test]

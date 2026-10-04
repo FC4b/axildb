@@ -35,6 +35,10 @@ fn main() {
     let options = LoadOptions {
         intra_threads: threads,
     };
+    // A load hashes the model files first; time that part on its own too.
+    let started = Instant::now();
+    U1.verify(&dir).expect("pinned files");
+    let verify_ms = started.elapsed().as_secs_f64() * 1e3;
     let started = Instant::now();
     let judge = PairClassifier::load_with(&U1, &dir, Calibration::u1(), options).expect("load");
     let load_ms = started.elapsed().as_secs_f64() * 1e3;
@@ -96,6 +100,8 @@ fn main() {
         "model": format!("{}@{}", U1.name, U1.revision),
         "threads": options.intra_threads,
         "load_ms": load_ms,
+        "verify_ms": verify_ms,
+        "load_note": "load_ms includes hashing the pinned files (verify_ms, timed separately before it)",
         "latency": {
             "pairs": pairs.len(),
             "p50_ms": p50,

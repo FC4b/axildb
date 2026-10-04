@@ -18,7 +18,9 @@ const MAX_BATCH: usize = 8;
 /// Session settings for [`PairClassifier::load_with`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LoadOptions {
-    /// ONNX intra-op threads. The thread count does not change the scores.
+    /// ONNX intra-op threads. On the U1 model, 1, 2, 4 and 8 threads give
+    /// identical logits (`session_settings_check` in
+    /// `benchmarks/results/typed-decisions-u1-calibration-2026-10-04.json`).
     pub intra_threads: usize,
 }
 
@@ -48,8 +50,10 @@ pub struct PairScore {
 ///
 /// Scores match Python onnxruntime 1.22 (the version this build's `ort`
 /// bundles) at the same graph optimisation level, which is what the bundled
-/// calibrations were fitted on: the session is CPU-only at `Level3`, since a
-/// lower level moves the int8 model's logits by up to 0.7.
+/// calibrations were fitted on. The session is CPU-only at `Level3`: on the
+/// U1 model, the basic level moves logits by up to 0.95 and flips 4 of 249
+/// verdicts (`session_settings_check` in
+/// `benchmarks/results/typed-decisions-u1-calibration-2026-10-04.json`).
 pub struct PairClassifier {
     session: Mutex<Session>,
     tokenizer: tokenizers::Tokenizer,
@@ -70,14 +74,19 @@ impl PairClassifier {
     }
 
     /// Load `model` from `dir`, which must hold its pinned files (see
-    /// [`PairModel::download`]). Fails if `calibration` was fitted for a
-    /// different model or revision, or names a label the model lacks.
+    /// [`PairModel::download`]).
+    ///
+    /// Fails if `calibration` has unusable values, was fitted for a
+    /// different model or revision, or names a label the model lacks, and
+    /// if any file in `dir` does not match its pinned sha256. Hashing the
+    /// files is part of every load.
     pub fn load_with(
         model: &PairModel,
         dir: &Path,
         calibration: Calibration,
         options: LoadOptions,
     ) -> Result<Self> {
+        calibration.validate()?;
         if calibration.model != model.name || calibration.revision != model.revision {
             return Err(DecideError::Calibration(format!(
                 "fitted for {}@{}, not {}@{}",
@@ -97,6 +106,7 @@ impl PairClassifier {
                 dir.display()
             )));
         }
+        model.verify(dir)?;
 
         let session = Session::builder()
             .and_then(|b| b.with_optimization_level(GraphOptimizationLevel::Level3))
@@ -362,6 +372,56 @@ mod tests {
             .err()
             .expect("unknown label");
         assert!(matches!(err, DecideError::Calibration(_)), "{err}");
+    }
+
+    #[test]
+    fn load_refuses_unusable_calibration_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let model = crate::NLI_DEBERTA_V3_XSMALL_QINT8;
+        let bad = [
+            (0.0, 0.5),
+            (-1.0, 0.5),
+            (f64::NAN, 0.5),
+            (f64::INFINITY, 0.5),
+            (1.0, f64::NAN),
+            (1.0, 0.0),
+            (1.0, 1.0),
+            (1.0, 1.5),
+            (1.0, -0.1),
+        ];
+        for (temperature, threshold) in bad {
+            let calibration = Calibration {
+                temperature,
+                threshold,
+                ..Calibration::u1()
+            };
+            let err = PairClassifier::load(&model, dir.path(), calibration)
+                .err()
+                .expect("unusable calibration");
+            assert!(
+                matches!(err, DecideError::Calibration(_)),
+                "T = {temperature}, threshold = {threshold}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn load_refuses_files_that_fail_their_hash() {
+        // Pinned sizes, wrong bytes: the size check passes, the hash does not.
+        let dir = tempfile::tempdir().unwrap();
+        let model = crate::NLI_DEBERTA_V3_XSMALL_QINT8;
+        for file in model.files() {
+            let f = std::fs::File::create(dir.path().join(file.local)).unwrap();
+            f.set_len(file.size).unwrap();
+        }
+        assert!(model.is_available(dir.path()));
+        let err = PairClassifier::load(&model, dir.path(), Calibration::u1())
+            .err()
+            .expect("hash mismatch");
+        assert!(
+            err.to_string().contains("does not match the pinned"),
+            "{err}"
+        );
     }
 
     #[test]

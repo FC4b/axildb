@@ -40,7 +40,8 @@ pub struct Calibration {
 impl Calibration {
     /// The U1 judge: P(contradiction | premise = OLD, hypothesis = NEW) from
     /// [`crate::NLI_DEBERTA_V3_XSMALL_QINT8`], cut at a threshold chosen for a
-    /// low false-positive rate. Fit and test numbers are in
+    /// low false-positive rate. A possible-contradiction signal for review,
+    /// not an update detector: it flags few plain updates. Fit and test numbers are in
     /// `benchmarks/results/typed-decisions-u1-calibration-2026-10-04.json`.
     pub fn u1() -> Self {
         Self::from_json(U1_JSON).expect("the bundled U1 calibration parses")
@@ -54,7 +55,11 @@ impl Calibration {
         Ok(calibration)
     }
 
-    fn validate(&self) -> Result<()> {
+    /// Check the values are usable: a finite temperature above 0 and a
+    /// threshold strictly between 0 and 1. [`Calibration::from_json`] and
+    /// every [`crate::PairClassifier`] load run it, so a calibration built
+    /// field by field is checked too.
+    pub fn validate(&self) -> Result<()> {
         if !(self.temperature.is_finite() && self.temperature > 0.0) {
             return Err(DecideError::Calibration(format!(
                 "temperature must be a positive number, got {}",
