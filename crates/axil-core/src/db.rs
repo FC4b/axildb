@@ -566,6 +566,8 @@ impl AxilBuilder {
             };
         #[cfg(feature = "event-log")]
         let event_log_enabled = file_config.healing.event_log;
+        let vector_store_detached =
+            self.vector_index.is_none() && companion_path(&self.path, ".vec").exists();
         let db = Axil {
             path: self.path,
             storage,
@@ -590,6 +592,7 @@ impl AxilBuilder {
             lifecycle,
             lifecycle_warnings,
             degraded_engines: self.degraded_engines,
+            vector_store_detached,
             supersede_threshold,
             #[cfg(feature = "event-log")]
             event_log_enabled: std::sync::atomic::AtomicBool::new(event_log_enabled),
@@ -610,6 +613,18 @@ impl AxilBuilder {
             let _ = db
                 .migrate_entity_canonical_id()
                 .and_then(|_| db.mark_entity_migration_done());
+        }
+
+        // Vectors of records deleted while the store was detached. Reading the
+        // (normally absent) note table is the whole cost of an open with
+        // nothing pending. A read-only handle leaves them to the writer.
+        if db.vector_index.is_some() && !db.storage.is_read_only() {
+            if let Err(e) = db.apply_pending_vector_deletes() {
+                eprintln!(
+                    "axil: warning: removing the vectors of records deleted while the \
+                     vector store was unavailable failed: {e}. The next open retries."
+                );
+            }
         }
 
         // Auto-reindex FTS if schema migration rebuilt the index. Never on a
@@ -732,6 +747,11 @@ pub struct Axil {
     lifecycle_warnings: Vec<String>,
     /// Engines found on disk that the adapter could not attach.
     degraded_engines: Vec<crate::diagnostics::DegradedEngine>,
+    /// The default vector store (`<db>.vec`) exists but no vector index is
+    /// attached: it failed to open, `[engines] disabled` lists it, or the
+    /// caller opened without it. A delete cannot reach that store, so it
+    /// notes the id for the next handle that attaches it.
+    vector_store_detached: bool,
     /// Auto-supersede similarity threshold, resolved at build time from
     /// `healing.supersede_similarity_threshold` (default 0.92).
     supersede_threshold: f32,
@@ -1529,6 +1549,10 @@ impl Axil {
     ///
     /// Engine hooks run after the storage write commits. See `insert` for
     /// the rationale on swallowing plugin errors.
+    ///
+    /// When the default vector store exists on disk but this handle has no
+    /// vector index attached, the delete commits a note of the id with it,
+    /// and the next handle that attaches the store removes the vector.
     pub fn delete(&self, id: &RecordId) -> Result<bool> {
         let _span = crate::otel::span("axil.delete", &[]);
         let timer = self.metrics.start_timer(OpType::Delete);
@@ -1540,7 +1564,9 @@ impl Axil {
             .map(|r| r.table.clone())
             .unwrap_or_default();
 
-        let deleted = self.storage.delete(id)?;
+        let deleted = self
+            .storage
+            .delete_noting_vector(id, self.vector_store_detached)?;
 
         if deleted {
             if table_name != RECALL_CHUNKS_TABLE {
@@ -3199,6 +3225,33 @@ impl Axil {
                 0
             }
         }
+    }
+
+    /// Remove the vectors of records deleted while the default vector store
+    /// was detached (see [`Axil::delete`]) and clear their notes. Returns how
+    /// many vectors were removed.
+    ///
+    /// Only an id whose record is still gone loses its vector. One whose
+    /// record exists again, re-inserted under the same id before the store
+    /// came back, keeps it: this never takes a vector a live record may own.
+    fn apply_pending_vector_deletes(&self) -> Result<usize> {
+        let Some(ref vi) = self.vector_index else {
+            return Ok(0);
+        };
+        let pending = self.storage.pending_vector_deletes()?;
+        if pending.is_empty() {
+            return Ok(0);
+        }
+        let gone: Vec<RecordId> = pending
+            .iter()
+            .filter(|id| matches!(self.storage.get(id), Ok(None)))
+            .cloned()
+            .collect();
+        let removed = vi.remove_batch(&gone)?;
+        // Cleared only once the vectors are gone, so a failure above leaves
+        // the notes for the next open.
+        self.storage.clear_pending_vector_deletes(&pending)?;
+        Ok(removed)
     }
 
     /// Remove orphaned FTS entries (indexed docs whose records no longer exist).

@@ -302,3 +302,38 @@ fn doctor_reports_orphaned_vectors_and_heal_reindex_removes_them() {
     let check = doctor_check(&report, "orphaned_vectors");
     assert_eq!(check["status"], "ok", "{check}");
 }
+
+/// Uses the default embedding model (bge-small, 384 dims), so like the other
+/// model-backed tests in this crate it runs locally and nightly, not per-PR.
+#[test]
+fn a_cli_delete_with_the_vector_engine_disabled_leaves_no_orphan() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("memory.axil");
+    let id = Axil::open(&path)
+        .build()
+        .unwrap()
+        .insert(
+            "decisions",
+            json!({"summary": "the connection pool size is 32"}),
+        )
+        .unwrap()
+        .id;
+    let engine = axil_vector::VectorEngine::open(&path, 384).unwrap();
+    let mut v = vec![0.0f32; 384];
+    v[0] = 1.0;
+    engine.add(id.clone(), &v).unwrap();
+    drop(engine);
+
+    // The operator turns the engine off for a while and deletes meanwhile.
+    let config = dir.path().join("axil.toml");
+    std::fs::write(&config, "[engines]\ndisabled = [\"vec\"]\n").unwrap();
+    let (_, stderr, code) = axil(&path, &["delete", id.as_str()]);
+    assert_eq!(code, 0, "{stderr}");
+    std::fs::remove_file(&config).unwrap();
+
+    let (stdout, _, _) = axil(&path, &["doctor"]);
+    let report: Value = serde_json::from_str(&stdout).expect(&stdout);
+    let check = doctor_check(&report, "orphaned_vectors");
+    assert_eq!(check["status"], "ok", "{check}");
+    assert_eq!(check["detail"], "0 vectors, no orphans", "{check}");
+}

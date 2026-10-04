@@ -395,3 +395,141 @@ fn pinned_seed_regression() {
     // is reproducible — rerun `run_fanout_workload(0x0000_0000_0042_1A4E)`.
     run_fanout_workload(0x0000_0000_0042_1A4E);
 }
+
+// ── Deletes while the vector store is detached ───────────────────────────
+
+/// Open `path` with its default vector store attached, as a healthy CLI open
+/// does.
+fn open_with_vectors(path: &std::path::Path) -> Axil {
+    let vector = axil_vector::VectorEngine::open(path, 4).unwrap();
+    Axil::open(path)
+        .with_vector_index(Box::new(vector))
+        .with_embedder(Box::new(FrontWindowEmbedder))
+        .build()
+        .unwrap()
+}
+
+/// Open `path` without a vector index while its `.vec` store is on disk: what
+/// the CLI does when the store fails to open or `[engines] disabled` lists it.
+fn open_detached(path: &std::path::Path) -> Axil {
+    assert!(axil_vector::vector_db_path(path).exists());
+    Axil::open(path).build().unwrap()
+}
+
+#[test]
+fn a_delete_while_the_vector_store_is_detached_leaves_no_orphan() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("test.axil");
+    let (gone, kept) = {
+        let db = open_with_vectors(&path);
+        let gone = db
+            .insert("sessions", json!({"summary": "auth timeout in the pool"}))
+            .unwrap()
+            .id;
+        let kept = db
+            .insert("sessions", json!({"summary": "connection pool sizing"}))
+            .unwrap()
+            .id;
+        assert!(db.get_vector(&gone).unwrap().is_some());
+        (gone, kept)
+    };
+
+    assert!(open_detached(&path).delete(&gone).unwrap());
+
+    let db = open_with_vectors(&path);
+    assert_eq!(
+        db.get_vector(&gone).unwrap(),
+        None,
+        "the deleted record's vector must go once the store is attached again"
+    );
+    assert!(
+        db.get_vector(&kept).unwrap().is_some(),
+        "other vectors stay"
+    );
+    assert!(detect_problems_is_clean(&db), "{:?}", db.detect_problems());
+    assert_eq!(db.vector_count(), Some(1));
+}
+
+#[test]
+fn a_record_reinserted_under_its_id_while_detached_keeps_its_vector() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("test.axil");
+    let record = open_with_vectors(&path)
+        .insert("sessions", json!({"summary": "auth timeout in the pool"}))
+        .unwrap();
+
+    {
+        let db = open_detached(&path);
+        assert!(db.delete(&record.id).unwrap());
+        db.insert_preserving(record.clone()).unwrap();
+    }
+
+    // The note is cleared without taking a vector a live record owns.
+    let db = open_with_vectors(&path);
+    assert!(db.get_vector(&record.id).unwrap().is_some());
+    drop(db);
+    assert!(open_with_vectors(&path)
+        .get_vector(&record.id)
+        .unwrap()
+        .is_some());
+}
+
+/// The paths that delete on their own (compaction, recall-chunk cleanup, a
+/// code re-index) all go through `Axil::delete`, so a detached store must not
+/// leave an orphan behind any of them.
+#[test]
+fn cleanup_deletes_while_detached_leave_no_orphans() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("test.axil");
+    let project = dir.path().join("project");
+    std::fs::create_dir_all(project.join("src")).unwrap();
+    std::fs::write(
+        project.join("Cargo.toml"),
+        "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("src/lib.rs"),
+        "/// Retry an auth call after a timeout.\npub fn retry_auth() {}\n\n\
+         /// Size the connection pool.\npub fn pool_size() -> usize { 32 }\n",
+    )
+    .unwrap();
+
+    let long_id = {
+        let db = open_with_vectors(&path);
+        let past = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
+        db.insert(
+            "notes",
+            json!({"summary": "auth timeout note", "valid_until": past, "_importance": 0.1}),
+        )
+        .unwrap();
+        let long = db
+            .insert(
+                "notes",
+                json!({"summary": "auth timeout in the pool, again. ".repeat(200)}),
+            )
+            .unwrap();
+        axil_indexer::ProjectIndexer::new(&db, axil_indexer::IndexConfig::default())
+            .index_full(&project)
+            .unwrap();
+        assert!(
+            db.vector_count().unwrap() > 3,
+            "the long note's chunks and the code index must hold vectors"
+        );
+        long.id
+    };
+
+    {
+        let db = open_detached(&path);
+        let report = db.compact().unwrap();
+        assert_eq!(report.purged_expired, 1);
+        assert!(db.delete(&long_id).unwrap());
+        axil_indexer::ProjectIndexer::new(&db, axil_indexer::IndexConfig::default())
+            .index_full(&project)
+            .unwrap();
+    }
+
+    let db = open_with_vectors(&path);
+    assert!(detect_problems_is_clean(&db), "{:?}", db.detect_problems());
+    assert_eq!(db.clean_orphaned_vectors(), 0);
+}
