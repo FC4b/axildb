@@ -2,8 +2,9 @@
 //!
 //! The first one is a generic ONNX *pair classifier*: a cross-encoder that
 //! reads two texts together and returns one logit per label. A
-//! [`Calibration`] picks the label, turns its logit into a calibrated
-//! probability with a fitted temperature, and cuts it at a threshold.
+//! [`Calibration`] picks the label, turns its logit into a score calibrated
+//! against the decision's own labels with a fitted temperature, and cuts it
+//! at a threshold.
 //! [`PairClassifier`] implements [`axil_core::PairJudge`], the seam core
 //! code calls.
 //!
@@ -11,12 +12,14 @@
 //! ([`PairModel`]); nothing is bundled.
 //!
 //! The U1 judge is [`NLI_DEBERTA_V3_XSMALL_QINT8`] with [`Calibration::u1`],
-//! fitted by `benchmarks/typed-decisions/calibrate_u1.py`. It gives a
-//! *possible contradiction* signal for review: the calibrated probability
-//! that a newer text contradicts an older one, under an NLI model. It is not
-//! an update detector. At the shipped threshold it flagged 5 of the 46 plain
-//! updates in the U1 test set, so most updates pass unflagged, and a flag is
-//! a suggestion to review, never grounds to retire a record.
+//! fitted by `benchmarks/typed-decisions/calibrate_u1.py`. Its score is a
+//! contradiction-model score calibrated against U1 labels (replace, update or
+//! contradict): the NLI model's contradiction logit for (older, newer), with a
+//! temperature fitted against pairs labelled as the newer text replacing,
+//! updating or contradicting the older. It is a review signal, not an update
+//! detector: at the shipped threshold it flagged 5 of the 46 plain updates in
+//! the U1 test set, so most updates pass unflagged, and a flag is a
+//! suggestion to review, never grounds to retire a record.
 //!
 //! ```no_run
 //! use axil_decide::{Calibration, PairClassifier, NLI_DEBERTA_V3_XSMALL_QINT8 as U1};

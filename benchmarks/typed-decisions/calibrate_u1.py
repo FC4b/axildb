@@ -3,6 +3,9 @@
 
 The U1 judge scores P(contradiction | premise=OLD, hypothesis=NEW) with
 cross-encoder/nli-deberta-v3-xsmall (dynamic int8 ONNX), one pair per run.
+U1's labels are broader than contradiction (NEW replaces, updates or
+contradicts OLD), so what ships is a contradiction-model score calibrated
+against U1 labels, not a probability of contradiction.
 Raw NLI probabilities are over-confident, so the runtime divides the
 one-vs-rest logit z_c - logsumexp(z_other) by a temperature T before the
 sigmoid, and flags a pair when that calibrated probability reaches a threshold.
@@ -441,8 +444,9 @@ def main():
     date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     runtime = {
         "decision": "U1",
-        "signal": "possible contradiction for review: P(contradiction | premise=OLD, hypothesis=NEW); "
-                  "not an update detector, it flags few plain updates",
+        "signal": "contradiction-model score calibrated against U1 labels (replace, update or contradict): "
+                  "the NLI contradiction logit for (premise=OLD, hypothesis=NEW) with a fitted temperature; "
+                  "a review signal, not an update detector, it flags few plain updates",
         "model": MODEL["name"],
         "repo": MODEL["repo"],
         "revision": MODEL["revision"],
