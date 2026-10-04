@@ -353,9 +353,11 @@ fn drain_never_retries_an_interrupted_job() {
     assert!(log.contains("not retried"), "{log}");
 }
 
-/// A paired search injects a record once per session: a later search that
-/// finds it again leaves it out, a search with nothing new injects nothing,
-/// and a session start (a compaction, `/clear`) makes it injectable again.
+/// A paired search or a pre-edit lookup injects a record once per session: a
+/// later search that finds it again leaves it out, a search with nothing new
+/// injects nothing, a second edit of a file stays quiet, and a session start
+/// (a compaction, `/clear`) makes the same search and the same file inject
+/// again.
 #[test]
 fn paired_search_injects_each_record_once_per_session() {
     let p = Project::new(true);
@@ -388,7 +390,15 @@ fn paired_search_injects_each_record_once_per_session() {
         "decisions",
         r#"{"summary":"the kafka broker retries on timeout"}"#,
     ]);
+    let ledger = axil(&[
+        "store",
+        "decisions",
+        r#"{"summary":"ledger.rs rounds every amount to cents"}"#,
+    ]);
     let (pool, retry) = (pool["id"].as_str().unwrap(), retry["id"].as_str().unwrap());
+    let ledger = ledger["id"].as_str().unwrap();
+    std::fs::create_dir_all(p.path().join("src")).unwrap();
+    std::fs::write(p.path().join("src/ledger.rs"), "fn round() {}\n").unwrap();
 
     let sid = "s-dedup";
     p.booted(sid);
@@ -398,6 +408,27 @@ fn paired_search_injects_each_record_once_per_session() {
             "session_id": sid,
             "tool_name": "Bash",
             "tool_input": {"command": format!("grep -rn '{pattern}' .")},
+        }));
+        if out.trim().is_empty() {
+            return String::new();
+        }
+        let v: Value = serde_json::from_str(out.trim()).expect(&out);
+        v["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
+    };
+
+    let edit = || -> String {
+        let out = p.hook(json!({
+            "hook_event_name": "PreToolUse",
+            "session_id": sid,
+            "tool_name": "Edit",
+            "tool_input": {
+                "file_path": p.path().join("src/ledger.rs").to_string_lossy(),
+                "old_string": "fn round() {}",
+                "new_string": "fn round_cents() {}",
+            },
         }));
         if out.trim().is_empty() {
             return String::new();
@@ -421,12 +452,26 @@ fn paired_search_injects_each_record_once_per_session() {
         "an injected record is left out: {second}"
     );
     assert_eq!(search("broker"), "", "nothing new, nothing injected");
+    let edited = edit();
+    assert!(
+        edited.contains(&format!("(id={ledger})")),
+        "the pre-edit memory carries its id: {edited}"
+    );
+    assert_eq!(edit(), "", "a second edit of the file stays quiet");
 
     p.hook(json!({
         "hook_event_name": "SessionStart",
         "session_id": sid,
         "source": "compact",
     }));
-    let after = search("broker timeout");
-    assert!(after.contains(retry), "a session start forgets: {after}");
+    let again = search("pool size");
+    assert!(
+        again.contains(pool),
+        "the same search injects again after a session start: {again}"
+    );
+    let edited = edit();
+    assert!(
+        edited.contains(ledger),
+        "the same file injects again after a session start: {edited}"
+    );
 }

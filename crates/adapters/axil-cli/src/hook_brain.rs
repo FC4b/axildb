@@ -1041,8 +1041,9 @@ impl HookCtx {
                 let _ = std::fs::write(self.sfile("booted"), "");
                 // The model starts over (a new session, or the context was
                 // compacted or cleared), so nothing injected before is
-                // still in front of it.
-                self.forget_injected();
+                // still in front of it: every record, file and search may
+                // be injected again.
+                self.forget_injections();
                 self.start_session();
                 self.boot_push();
                 Ok(())
@@ -1144,9 +1145,10 @@ impl HookCtx {
 
     // ── Injected-record dedup ─────────────────────────────────────────
     // `<sid>.injected` holds the record ids this session's prompt and
-    // pre-tool hooks have injected, one per line. Appends are single short
-    // writes; a race between parallel hooks can at worst inject a record
-    // twice, never drop one.
+    // pre-tool hooks have injected, one per line. Every change to it runs
+    // under an OS lock on `<sid>.injected.lock`, so trimming the list never
+    // drops an id a parallel hook appended meanwhile. Reads take no lock: a
+    // read racing a write can at worst inject a record twice.
 
     fn injected_ids(&self) -> HashSet<String> {
         std::fs::read_to_string(self.sfile("injected"))
@@ -1159,6 +1161,19 @@ impl HookCtx {
             .unwrap_or_default()
     }
 
+    /// Run `f` holding the session's lock on its injected-id list. The OS
+    /// releases the lock when the file closes, also when a hook is killed.
+    /// A filesystem that refuses the lock still runs `f`, unserialized.
+    fn with_injected_lock<T>(&self, f: impl FnOnce() -> T) -> T {
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(self.sfile("injected.lock"));
+        let _held = lock.as_ref().ok().filter(|file| file.lock().is_ok());
+        f()
+    }
+
     /// Remember `ids` as injected, keeping the file at most
     /// [`INJECTED_IDS_MAX`] ids long.
     fn note_injected(&self, ids: &[String]) {
@@ -1166,22 +1181,39 @@ impl HookCtx {
             return;
         }
         let path = self.sfile("injected");
-        append_line(&path, &ids.join("\n"));
-        let Ok(all) = std::fs::read_to_string(&path) else {
-            return;
-        };
-        let lines: Vec<&str> = all.lines().filter(|l| !l.is_empty()).collect();
-        if lines.len() > INJECTED_IDS_MAX {
-            let keep = &lines[lines.len() - INJECTED_IDS_MAX / 2..];
-            let tmp = self.sfile("injected.tmp");
-            if std::fs::write(&tmp, keep.join("\n") + "\n").is_ok() {
-                let _ = std::fs::rename(&tmp, &path);
+        self.with_injected_lock(|| {
+            append_line(&path, &ids.join("\n"));
+            let Ok(all) = std::fs::read_to_string(&path) else {
+                return;
+            };
+            let lines: Vec<&str> = all.lines().filter(|l| !l.is_empty()).collect();
+            if lines.len() > INJECTED_IDS_MAX {
+                let keep = &lines[lines.len() - INJECTED_IDS_MAX / 2..];
+                let tmp = self.sfile("injected.tmp");
+                if std::fs::write(&tmp, keep.join("\n") + "\n").is_ok() {
+                    let _ = std::fs::rename(&tmp, &path);
+                }
             }
-        }
+        });
     }
 
-    fn forget_injected(&self) {
-        let _ = std::fs::remove_file(self.sfile("injected"));
+    /// Forget everything this session injected: the record ids, and the
+    /// per-file and per-search sentinels that let a file's memories or a
+    /// search's hits be injected only once.
+    fn forget_injections(&self) {
+        self.with_injected_lock(|| {
+            let _ = std::fs::remove_file(self.sfile("injected"));
+        });
+        let prefix = self.files.prefix();
+        for path in self.files.own() {
+            let name = path.file_name().map(|n| n.to_string_lossy().into_owned());
+            let suffix = name
+                .as_deref()
+                .and_then(|n| n.strip_prefix(prefix.as_str()));
+            if suffix.is_some_and(|s| s.starts_with("recalled-") || s.starts_with("searched-")) {
+                let _ = std::fs::remove_file(path);
+            }
+        }
     }
 
     // ── Heartbeat counters ────────────────────────────────────────────
@@ -3359,8 +3391,9 @@ fn unseen_table_rows(table: &str, seen: &HashSet<String>) -> Option<(String, Vec
 }
 
 /// `axil code-search --json` hits rendered the way the plain output prints
-/// them, one `path:line symbol — why` line each, leaving out the hits whose
-/// record is in `seen`. Returns the lines and their ids, or `None` when no
+/// them, one `path:line symbol — why` line each with its record id added
+/// (`(id=…)`, for `axil get`), leaving out the hits whose record is in
+/// `seen`. Returns the lines and their ids, or `None` when no
 /// hit is left.
 fn unseen_code_hits(json: &str, seen: &HashSet<String>) -> Option<(String, Vec<String>)> {
     let hits: Vec<Value> = serde_json::from_str(json.trim()).ok()?;
@@ -3371,13 +3404,20 @@ fn unseen_code_hits(json: &str, seen: &HashSet<String>) -> Option<(String, Vec<S
         if seen.contains(id) {
             continue;
         }
-        lines.push(crate::code_hit_line(
-            hit.get("path").and_then(Value::as_str),
+        let path = hit.get("path").and_then(Value::as_str);
+        let line = crate::code_hit_line(
+            path,
             hit.get("line_start").and_then(Value::as_u64),
             hit.get("symbol").and_then(Value::as_str),
             id,
             hit.get("why").and_then(Value::as_str),
-        ));
+        );
+        // Without a path the pointer already is the id.
+        lines.push(if path.is_some() && !id.is_empty() {
+            format!("{line} (id={id})")
+        } else {
+            line
+        });
         if !id.is_empty() {
             fresh.push(id.to_string());
         }
@@ -3393,7 +3433,8 @@ fn unseen_code_hits(json: &str, seen: &HashSet<String>) -> Option<(String, Vec<S
 /// uses (an error's fix and cause, a decision's reason); other rows fall back
 /// to their `summary`, collapsed to one line and cut to the same bound. Rows
 /// with neither, such as the related-files and impact entries, are left out
-/// rather than shown blank.
+/// rather than shown blank. A row that is a record ends with its id
+/// (`(id=…)`), for `axil get`.
 fn file_memory_line(row: &Value) -> Option<String> {
     let text = ["line", "summary"]
         .iter()
@@ -3404,8 +3445,13 @@ fn file_memory_line(row: &Value) -> Option<String> {
         .iter()
         .find_map(|k| row.get(*k).and_then(Value::as_str))
         .unwrap_or("");
+    let id = row
+        .get("id")
+        .and_then(Value::as_str)
+        .map(|id| format!(" (id={id})"))
+        .unwrap_or_default();
     Some(format!(
-        "  • [{label}] {}",
+        "  • [{label}] {}{id}",
         crate::truncate_str(&text, crate::CONTEXT_LINE_MAX_BYTES)
     ))
 }
@@ -4063,11 +4109,96 @@ mod tests {
             r#"[{{"id":"{ID_A}","path":"src/a.rs","line_start":3,"symbol":"run","why":"matched via vector proxy"}},{{"id":"{ID_B}","path":"docs/x.md"}}]"#
         );
         let (lines, fresh) = unseen_code_hits(&json, &seen(&[ID_B])).unwrap();
-        assert_eq!(lines, "src/a.rs:3 run — matched via vector proxy");
+        assert_eq!(
+            lines,
+            format!("src/a.rs:3 run — matched via vector proxy (id={ID_A})")
+        );
         assert_eq!(fresh, vec![ID_A.to_string()]);
         let (lines, _) = unseen_code_hits(&json, &HashSet::new()).unwrap();
-        assert_eq!(lines.lines().nth(1), Some("docs/x.md — matched code proxy"));
+        assert_eq!(
+            lines.lines().nth(1),
+            Some(format!("docs/x.md — matched code proxy (id={ID_B})").as_str())
+        );
+        // A hit without a path shows its id as the pointer, once.
+        let bare = format!(r#"[{{"id":"{ID_C}","why":"matched code proxy"}}]"#);
+        let (line, _) = unseen_code_hits(&bare, &HashSet::new()).unwrap();
+        assert_eq!(line, format!("{ID_C} — matched code proxy"));
         assert_eq!(unseen_code_hits(&json, &seen(&[ID_A, ID_B])), None);
+    }
+
+    #[test]
+    fn pre_edit_memory_lines_carry_their_record_id() {
+        let row = json!({"table": "decisions", "id": ID_A, "line": "pool size is 32"});
+        assert_eq!(
+            file_memory_line(&row).as_deref(),
+            Some(format!("  • [decisions] pool size is 32 (id={ID_A})").as_str())
+        );
+    }
+
+    #[test]
+    fn concurrent_hooks_lose_no_injected_id_across_the_trim() {
+        const THREADS: usize = 8;
+        const CALLS: usize = 20;
+        const CHUNK: usize = 7;
+        let project = tempfile::tempdir().unwrap();
+        let session = tempfile::tempdir().unwrap();
+        std::thread::scope(|scope| {
+            for t in 0..THREADS {
+                let (project, session) = (project.path(), session.path());
+                scope.spawn(move || {
+                    let ctx = edit_ctx(project, session);
+                    for c in 0..CALLS {
+                        let ids: Vec<String> = (0..CHUNK)
+                            .map(|i| format!("01M42C1J287BWJQYJD{t:02}{c:03}{i:03}"))
+                            .collect();
+                        ctx.note_injected(&ids);
+                    }
+                });
+            }
+        });
+        // Each call appends CHUNK ids and trims past the cap as one step, so
+        // the surviving count is what a single writer would leave.
+        let mut expected = 0;
+        for _ in 0..THREADS * CALLS {
+            expected += CHUNK;
+            if expected > INJECTED_IDS_MAX {
+                expected = INJECTED_IDS_MAX / 2;
+            }
+        }
+        let ctx = edit_ctx(project.path(), session.path());
+        let raw = std::fs::read_to_string(ctx.sfile("injected")).unwrap();
+        let lines: Vec<&str> = raw.lines().collect();
+        assert!(
+            THREADS * CALLS * CHUNK > INJECTED_IDS_MAX,
+            "the test crosses the cap"
+        );
+        assert_eq!(
+            lines.len(),
+            expected,
+            "an id appended during a trim was lost"
+        );
+        assert_eq!(
+            ctx.injected_ids().len(),
+            lines.len(),
+            "no id is written twice"
+        );
+    }
+
+    #[test]
+    fn forgetting_injections_reopens_files_and_searches() {
+        let project = tempfile::tempdir().unwrap();
+        let session = tempfile::tempdir().unwrap();
+        let ctx = edit_ctx(project.path(), session.path());
+        ctx.note_injected(&[ID_A.to_string()]);
+        for sentinel in ["recalled-abc", "searched-def", "booted", "manifest"] {
+            std::fs::write(ctx.sfile(sentinel), "").unwrap();
+        }
+        ctx.forget_injections();
+        assert!(ctx.injected_ids().is_empty());
+        assert!(!ctx.sfile("recalled-abc").exists());
+        assert!(!ctx.sfile("searched-def").exists());
+        // Session state that is not about injections stays.
+        assert!(ctx.sfile("booted").exists() && ctx.sfile("manifest").exists());
     }
 
     #[test]
@@ -4086,7 +4217,7 @@ mod tests {
         assert!(kept.contains(ids.last().unwrap()), "the newest id is kept");
         assert!(!kept.contains(&ids[0]), "the oldest id is forgotten");
 
-        ctx.forget_injected();
+        ctx.forget_injections();
         assert!(ctx.injected_ids().is_empty());
     }
 

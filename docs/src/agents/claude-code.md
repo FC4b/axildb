@@ -41,8 +41,9 @@ Claude Code sends `SessionStart` again after a compaction (source `compact`,
 auto or manual) and after `/clear`. Axil registers `SessionStart` with no
 matcher, so every source reaches the hook, which re-injects `axil boot`,
 including the latest checkpoint's "Resume Here" block, as
-`additionalContext`. It also forgets which records the session has injected,
-since the compacted or cleared context no longer holds them. `PostCompact` is not registered: Claude Code documents
+`additionalContext`. It also forgets which records, files and searches the
+session has injected, since the compacted or cleared context no longer holds
+them. `PostCompact` is not registered: Claude Code documents
 no `additionalContext` for it, so it has no way to put the boot in front of
 the model.
 
