@@ -69,9 +69,9 @@ const DERIVED_SUFFIXES: &[&str] = &[
 /// core file is named `db_name`: the core file, its engine companions, the
 /// other files derived from its path, named vector spaces
 /// (`<db>.vec.<space>`), and branches (`<db>.branch.<name>`, staged as
-/// `<db>.branch.<name>.staging` while being created) with all of theirs. A
-/// file that merely starts with the name, like `memory.axil.helpers.ts`, is
-/// not.
+/// `<db>.branch.<name>.staging-<pid>-<nonce>` while being created) with all
+/// of theirs. A file that merely starts with the name, like
+/// `memory.axil.helpers.ts`, is not.
 pub fn is_database_file_name(db_name: &str, name: &str) -> bool {
     if name == db_name {
         return true;
@@ -95,8 +95,20 @@ pub fn is_database_file_name(db_name: &str, name: &str) -> bool {
             return false;
         }
         let base = format!("{db_name}.branch.{branch_name}");
+        let staging = name
+            .strip_prefix(&base)
+            .and_then(|rest| rest.strip_prefix(".staging-"))
+            .and_then(|rest| rest.split('.').next())
+            .filter(|token| {
+                !token.is_empty()
+                    && token
+                        .bytes()
+                        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+            });
         return is_database_file_name(&base, name)
-            || is_database_file_name(&format!("{base}.staging"), name);
+            || staging.is_some_and(|token| {
+                is_database_file_name(&format!("{base}.staging-{token}"), name)
+            });
     }
     false
 }
@@ -7532,8 +7544,8 @@ mod database_file_name_tests {
             "memory.axil.branch.try-1",
             "memory.axil.branch.try-1.ts",
             "memory.axil.branch.try-1.vec.code",
-            "memory.axil.branch.try-1.staging",
-            "memory.axil.branch.try-1.staging.fts",
+            "memory.axil.branch.try-1.staging-4242-1f3a0",
+            "memory.axil.branch.try-1.staging-4242-1f3a0.fts",
         ] {
             assert!(is_database_file_name("memory.axil", name), "{name}");
         }
@@ -7545,6 +7557,7 @@ mod database_file_name_tests {
             "memory.axil.helpers.ts",
             "memory.axil.vec.helpers.ts",
             "memory.axil.branch.try-1.helpers.ts",
+            "memory.axil.branch.try-1.staging-4242.helpers.ts",
             "memory.axil.branch.has.dot",
             "memory.axilx.ts",
             "memory.ax",
