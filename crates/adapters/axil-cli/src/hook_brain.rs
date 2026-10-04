@@ -3321,10 +3321,12 @@ fn context_line_id(line: &str) -> Option<&str> {
 }
 
 /// A recall `<context>` block without the memory lines whose record is in
-/// `seen`, and without a section heading left with no line under it. Returns
-/// the block and the ids it still shows, or `None` when every memory in it
-/// was already injected. A block with no memory line at all (a warning about
-/// a missing Engine, say) passes through as is.
+/// `seen`, and without a section heading left with no line under it. Its
+/// warnings (an Engine that could not be attached, say) always stay, so a
+/// block whose memories were all injected comes back with only its warnings.
+/// Returns the block and the ids it still shows, or `None` when nothing new
+/// and no warning is left. A block with no memory line at all passes through
+/// as is.
 fn unseen_context_block(block: &str, seen: &HashSet<String>) -> Option<(String, Vec<String>)> {
     let lines: Vec<&str> = block.lines().collect();
     let ids: Vec<Option<&str>> = lines.iter().map(|l| context_line_id(l)).collect();
@@ -3338,7 +3340,10 @@ fn unseen_context_block(block: &str, seen: &HashSet<String>) -> Option<(String, 
         .flatten()
         .map(|id| id.to_string())
         .collect();
-    if fresh.is_empty() {
+    let warns = lines
+        .iter()
+        .any(|l| l.trim_start().starts_with("# Warning:"));
+    if fresh.is_empty() && !warns {
         return None;
     }
     let mut kept: Vec<&str> = Vec::with_capacity(lines.len());
@@ -4081,6 +4086,25 @@ mod tests {
     }
 
     #[test]
+    fn context_block_keeps_its_warning_when_every_memory_was_injected() {
+        let warned = block().replacen(
+            "<context source=\"axil\">\n",
+            "<context source=\"axil\">\n  # Warning: vector engine unavailable\n",
+            1,
+        );
+        let (text, fresh) = unseen_context_block(&warned, &seen(&[ID_A, ID_B, ID_C])).unwrap();
+        assert!(fresh.is_empty());
+        assert!(
+            text.contains("# Warning: vector engine unavailable"),
+            "{text}"
+        );
+        for gone in [ID_A, ID_B, ID_C, "# Relevant code", "# Related memories"] {
+            assert!(!text.contains(gone), "{gone} should be gone: {text}");
+        }
+        assert!(text.starts_with("<context") && text.ends_with("</context>\n"));
+    }
+
+    #[test]
     fn context_block_without_memories_passes_through() {
         let warning =
             "<context source=\"axil\">\n  # Warning: vector engine unavailable\n</context>\n";
@@ -4132,6 +4156,13 @@ mod tests {
         assert_eq!(
             file_memory_line(&row).as_deref(),
             Some(format!("  • [decisions] pool size is 32 (id={ID_A})").as_str())
+        );
+        // The file's own index summary is a record too.
+        let index = json!({"match": "file_index", "id": ID_B, "file": "src/ledger.rs",
+            "summary": "Ledger rounding."});
+        assert_eq!(
+            file_memory_line(&index).as_deref(),
+            Some(format!("  • [file_index] Ledger rounding. (id={ID_B})").as_str())
         );
     }
 

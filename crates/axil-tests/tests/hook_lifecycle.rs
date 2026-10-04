@@ -475,3 +475,77 @@ fn paired_search_injects_each_record_once_per_session() {
         "the same file injects again after a session start: {edited}"
     );
 }
+
+/// A file's own index summary reaches the pre-edit context as a record: it
+/// carries the `_idx_files` id, which `axil get` expands, and a second edit
+/// in the session does not inject it again.
+#[test]
+fn pre_edit_index_summary_carries_its_record_id() {
+    let p = Project::new(true);
+    std::fs::remove_dir_all(p.db.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(p.db.parent().unwrap()).unwrap();
+    let axil = |args: &[&str]| -> Value {
+        let out = Command::new(axil_bin())
+            .arg("--db")
+            .arg(&p.db)
+            .args(args)
+            .current_dir(p.path())
+            .env_remove("AXIL_DB")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        serde_json::from_slice(&out.stdout).unwrap_or(Value::Null)
+    };
+    axil(&["init"]);
+    std::fs::create_dir_all(p.path().join("src")).unwrap();
+    std::fs::write(
+        p.path().join("src/ledger.rs"),
+        "//! Ledger rounding for invoice totals.\n\npub fn round_cents(x: f64) -> f64 {\n    (x * 100.0).round() / 100.0\n}\n",
+    )
+    .unwrap();
+    axil(&["index", "."]);
+
+    let found = axil(&["recall-for-file", "src/ledger.rs", "--top-k", "3"]);
+    let row = found["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["match"] == "file_index")
+        .unwrap_or_else(|| panic!("no file_index row: {found}"))
+        .clone();
+    let id = row["id"]
+        .as_str()
+        .expect("the file_index row names its record");
+    assert_eq!(axil(&["get", id])["table"], "_idx_files");
+
+    let sid = "s-index";
+    p.booted(sid);
+    let edit = || {
+        p.hook(json!({
+            "hook_event_name": "PreToolUse",
+            "session_id": sid,
+            "tool_name": "Edit",
+            "tool_input": {
+                "file_path": p.path().join("src/ledger.rs").to_string_lossy(),
+                "old_string": "round_cents",
+                "new_string": "round_to_cents",
+            },
+        }))
+    };
+    let first = edit();
+    assert!(
+        first.contains(&format!("(id={id})")),
+        "the index summary carries its id: {first}"
+    );
+    assert!(
+        p.state(sid, "injected").exists()
+            && std::fs::read_to_string(p.state(sid, "injected"))
+                .unwrap()
+                .contains(id),
+        "the index summary counts as injected"
+    );
+}

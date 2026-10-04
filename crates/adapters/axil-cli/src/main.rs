@@ -14769,11 +14769,14 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
                             }
                         }
                     }
-                    // Include the file's own summary from the index
+                    // Include the file's own summary from the index, with the
+                    // index record's id so a hook can dedup it and `axil get`
+                    // can expand it.
                     if let Some(summary) = idx_record.data.get("summary").and_then(|v| v.as_str()) {
                         if !summary.is_empty() {
                             hits.push(json!({
                                 "match": "file_index",
+                                "id": idx_record.id.to_string(),
                                 "file": file,
                                 "summary": summary,
                                 "imports": idx_record.data.get("imports").cloned().unwrap_or(json!([])),
