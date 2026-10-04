@@ -1674,6 +1674,35 @@ mod tests {
             assert_eq!((warm_out, warm_code), (out, 0), "served once reopened");
         }
 
+        /// Releasing a warm handle with an installed plugin closes the
+        /// database: a registered plugin holds no reference that keeps it open.
+        #[cfg(feature = "wasm-host")]
+        #[test]
+        fn a_warm_handle_with_a_plugin_closes_when_released() {
+            const HELLO: &[u8] =
+                include_bytes!("../../axil-runtime/tests/fixtures/hello-guest.component.wasm");
+            let tmp = tempfile::tempdir().unwrap();
+            let proj = build_fixture(tmp.path());
+            std::fs::create_dir_all(proj.join(".axil/plugins")).unwrap();
+            std::fs::write(proj.join(".axil/plugins/hello.wasm"), HELLO).unwrap();
+            let db_path = proj.join(".axil/memory.axil");
+            let boot = ["--db", db_path.to_str().unwrap(), "boot"];
+
+            let warm = WarmDb::open(&db_path).unwrap();
+            let (out, _, _) = in_process_with(warm_request(&warm, None), &boot);
+            assert!(String::from_utf8_lossy(&out).contains("hello plugin ready"));
+            let Ok(path) = warm.release(Duration::from_secs(10)) else {
+                panic!("the registered plugin kept the database open");
+            };
+            let (out, err, code) = one_shot(&boot, None);
+            assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
+            assert!(String::from_utf8_lossy(&out).contains("hello plugin ready"));
+
+            // Dropping the handle, as well as releasing it, closes it.
+            drop(WarmDb::open(&path).unwrap());
+            WarmDb::open(&path).unwrap();
+        }
+
         /// `boot` on a warm handle shows an installed plugin's block, as the
         /// one-shot `boot` does: opening the handle registered the plugin.
         #[cfg(feature = "wasm-host")]

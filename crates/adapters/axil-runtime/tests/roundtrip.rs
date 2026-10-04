@@ -105,3 +105,37 @@ fn wasm_extension_behaves_as_a_native_extension() {
         Dispatch::NotHandled => panic!("the WASM plugin should have handled `hello`"),
     }
 }
+
+#[test]
+fn a_registered_plugin_does_not_keep_its_database_open() {
+    use axil_core::Extension;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("t.axil");
+    let db = Arc::new(Axil::open(&path).build().unwrap());
+    let state = PluginState::for_registration(
+        &db,
+        Capabilities::all(),
+        vec!["_hello_".to_string()],
+        AxilConfig::default(),
+    );
+    let host = WasmHost::new().unwrap();
+    let component = host.load_component(HELLO_COMPONENT).unwrap();
+    let ext = WasmExtension::load(&host, &component, state).unwrap();
+    db.register_extension(Arc::new(ext)).unwrap();
+    assert_eq!(
+        db.extensions()
+            .iter()
+            .find(|e| e.id() == "hello")
+            .and_then(|e| e.boot_block(&db))
+            .as_deref(),
+        Some("hello plugin ready")
+    );
+
+    // The database owns the plugin, and the plugin doesn't own it back: its
+    // last handle going closes it, so the file opens again.
+    let weak = Arc::downgrade(&db);
+    drop(db);
+    assert!(weak.upgrade().is_none(), "the plugin kept it alive");
+    Axil::open(&path).build().unwrap();
+}

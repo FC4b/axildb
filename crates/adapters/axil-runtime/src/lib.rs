@@ -783,7 +783,7 @@ mod shim {
 /// granted capability set and the plugin's declared table prefixes.
 #[cfg(feature = "wasm-host")]
 mod abi {
-    use std::sync::Arc;
+    use std::sync::{Arc, Weak};
 
     use axil_core::{Axil, AxilConfig, AxilError, RecordId};
     use serde_json::Value;
@@ -850,12 +850,22 @@ mod abi {
         config_read => "config.read",
     }
 
+    /// How a plugin reaches the database it calls back into.
+    enum DbRef {
+        /// The plugin keeps the database open.
+        Owned(Arc<Axil>),
+        /// The database owns the plugin, which is registered into it, so the
+        /// plugin must not keep it open: a strong reference back would be a
+        /// cycle that never drops the database or releases its writer lock.
+        Registered(Weak<Axil>),
+    }
+
     /// Per-plugin host state threaded through Wasmtime as the store data. Holds
     /// the shared `Axil`, the plugin's granted capabilities, the table prefixes
     /// it owns (writes outside them are rejected), and a config snapshot for
     /// `config-get`.
     pub struct PluginState {
-        db: Arc<Axil>,
+        db: DbRef,
         caps: Capabilities,
         prefixes: Vec<String>,
         config: AxilConfig,
@@ -871,8 +881,33 @@ mod abi {
 
     impl PluginState {
         /// Build host state for a plugin granted `caps` and owning `prefixes`.
+        /// The plugin keeps `db` open; for a plugin that will be registered
+        /// into `db` itself, use [`PluginState::for_registration`].
         pub fn new(
             db: Arc<Axil>,
+            caps: Capabilities,
+            prefixes: Vec<String>,
+            config: AxilConfig,
+        ) -> Self {
+            Self::with_db(DbRef::Owned(db), caps, prefixes, config)
+        }
+
+        /// Build host state for a plugin that will be registered into `db`, the
+        /// database it calls back into. The state holds `db` weakly, so dropping
+        /// the database's last handle closes it even though it owns the plugin;
+        /// a host call made after that fails with an internal error.
+        pub fn for_registration(
+            db: &Arc<Axil>,
+            caps: Capabilities,
+            prefixes: Vec<String>,
+            config: AxilConfig,
+        ) -> Self {
+            let db = DbRef::Registered(Arc::downgrade(db));
+            Self::with_db(db, caps, prefixes, config)
+        }
+
+        fn with_db(
+            db: DbRef,
             caps: Capabilities,
             prefixes: Vec<String>,
             config: AxilConfig,
@@ -893,6 +928,16 @@ mod abi {
         /// tables it declares it owns.
         pub fn set_prefixes(&mut self, prefixes: Vec<String>) {
             self.prefixes = prefixes;
+        }
+
+        /// The database, while it is open.
+        fn db(&self) -> Result<Arc<Axil>, wit::PluginError> {
+            match &self.db {
+                DbRef::Owned(db) => Ok(Arc::clone(db)),
+                DbRef::Registered(db) => db.upgrade().ok_or_else(|| {
+                    wit::PluginError::Internal("the plugin's database is closed".to_string())
+                }),
+            }
         }
 
         fn require(&self, granted: bool, cap: &str) -> Result<(), wit::PluginError> {
@@ -974,7 +1019,7 @@ mod abi {
                 self.require(self.caps.records_write, "records.write")?;
                 self.check_prefix(&table)?;
                 let value = parse_json(&data)?;
-                let rec = self.db.insert(&table, value).map_err(to_wit_err)?;
+                let rec = self.db()?.insert(&table, value).map_err(to_wit_err)?;
                 Ok(rec.id.to_string())
             })()
         }
@@ -985,7 +1030,7 @@ mod abi {
         ) -> Result<Option<String>, wit::PluginError> {
             (|| {
                 self.require(self.caps.records_read, "records.read")?;
-                let rec = self.db.get(&RecordId(id)).map_err(to_wit_err)?;
+                let rec = self.db()?.get(&RecordId(id)).map_err(to_wit_err)?;
                 Ok(rec.map(|r| record_to_json(&r.data)))
             })()
         }
@@ -999,13 +1044,13 @@ mod abi {
                 self.require(self.caps.records_write, "records.write")?;
                 let rid = RecordId(id);
                 let existing = self
-                    .db
+                    .db()?
                     .get(&rid)
                     .map_err(to_wit_err)?
                     .ok_or_else(|| wit::PluginError::NotFound(format!("record {}", rid)))?;
                 self.check_prefix(&existing.table)?;
                 let value = parse_json(&data)?;
-                self.db.update(&rid, value).map_err(to_wit_err)?;
+                self.db()?.update(&rid, value).map_err(to_wit_err)?;
                 Ok(())
             })()
         }
@@ -1014,10 +1059,10 @@ mod abi {
             (|| {
                 self.require(self.caps.records_write, "records.write")?;
                 let rid = RecordId(id);
-                if let Some(existing) = self.db.get(&rid).map_err(to_wit_err)? {
+                if let Some(existing) = self.db()?.get(&rid).map_err(to_wit_err)? {
                     self.check_prefix(&existing.table)?;
                 }
-                self.db.delete(&rid).map_err(to_wit_err)
+                self.db()?.delete(&rid).map_err(to_wit_err)
             })()
         }
 
@@ -1032,7 +1077,7 @@ mod abi {
                 // matching get/recall/neighbors/fts). Gating list here while
                 // leaving get ungated was an inconsistency; both are now
                 // capability-gated only.
-                let recs = self.db.list(&table).map_err(to_wit_err)?;
+                let recs = self.db()?.list(&table).map_err(to_wit_err)?;
                 Ok(recs.iter().map(|r| record_to_json(&r.data)).collect())
             })()
         }
@@ -1045,7 +1090,7 @@ mod abi {
             (|| {
                 self.require(self.caps.recall, "recall")?;
                 let hits = self
-                    .db
+                    .db()?
                     .recall(&query, top_k as usize, None)
                     .map_err(to_wit_err)?
                     .into_iter()
@@ -1068,7 +1113,7 @@ mod abi {
                 self.require(self.caps.embed, "embed")?;
                 // Stored-text side: what a plugin keeps or compares with its
                 // own texts. Searching memory goes through `recall`.
-                self.db.embed_passage(&text).map_err(to_wit_err)
+                self.db()?.embed_passage(&text).map_err(to_wit_err)
             })()
         }
 
@@ -1085,7 +1130,7 @@ mod abi {
                 let to = RecordId(target);
                 let props = parse_json(&props)?;
                 let id = self
-                    .db
+                    .db()?
                     .relate(&from, &edge_type, &to, Some(props))
                     .map_err(to_wit_err)?;
                 Ok(id.to_string())
@@ -1106,7 +1151,7 @@ mod abi {
                     wit::Direction::Both => axil_core::Direction::Both,
                 };
                 let recs = self
-                    .db
+                    .db()?
                     .neighbors(&RecordId(id), edge_type.as_deref(), direction)
                     .map_err(to_wit_err)?;
                 Ok(recs.iter().map(|r| r.id.to_string()).collect())
@@ -1121,7 +1166,7 @@ mod abi {
             (|| {
                 self.require(self.caps.fts, "fts")?;
                 let hits = self
-                    .db
+                    .db()?
                     .search_text(&query, limit as usize)
                     .map_err(to_wit_err)?
                     .into_iter()
