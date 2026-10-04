@@ -396,8 +396,8 @@ static DECLARATION_LINE: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 /// English words that follow a declaration keyword in prose ("a trait with
-/// …", "the class that …"). Outside fenced blocks a declaration that names
-/// one of these is prose, not a symbol.
+/// …", "the class that …"). A match on a prose line that names one of these
+/// is prose, not a symbol; code (`fn with(self) -> Self`) keeps it.
 const PROSE_WORDS: &[&str] = &[
     "a", "about", "after", "all", "also", "an", "and", "any", "are", "as", "at", "be", "because",
     "been", "before", "but", "by", "can", "could", "did", "do", "does", "each", "every", "for",
@@ -411,14 +411,10 @@ const PROSE_WORDS: &[&str] = &[
 /// A stretch of text the declaration patterns may read.
 struct CodeSegment<'a> {
     text: &'a str,
-    /// Inside a fenced block: real code, read as is. Anything else may be
-    /// prose that only looks like code, so names that are [`PROSE_WORDS`]
-    /// are skipped.
-    fenced: bool,
     /// From a prose line: a match counts only when its name is shaped like
     /// an identifier (`impl Decoder`, `fn parse_token`) or is called or
-    /// parameterized right away (`def login(u)`, `struct Pool<T>`). See
-    /// [`prose_declaration_counts`].
+    /// parameterized right away (`def login(u)`, `struct Pool<T>`), and is
+    /// not one of the [`PROSE_WORDS`]. See [`prose_declaration_counts`].
     prose: bool,
 }
 
@@ -431,7 +427,6 @@ fn code_segments(text: &str) -> Vec<CodeSegment<'_>> {
         if fenced || is_code_like_line(line) {
             segments.push(CodeSegment {
                 text: line,
-                fenced,
                 prose: false,
             });
             continue;
@@ -439,13 +434,11 @@ fn code_segments(text: &str) -> Vec<CodeSegment<'_>> {
         for span in inline_code_spans(line) {
             segments.push(CodeSegment {
                 text: span,
-                fenced: false,
                 prose: false,
             });
         }
         segments.push(CodeSegment {
             text: line,
-            fenced: false,
             prose: true,
         });
     }
@@ -476,9 +469,6 @@ fn extract_code_symbols(text: &str, entities: &mut Vec<Entity>, seen: &mut HashS
                 if segment.prose && !prose_declaration_counts(pattern, segment.text, m) {
                     continue;
                 }
-                if !segment.fenced && PROSE_WORDS.contains(&name.to_ascii_lowercase().as_str()) {
-                    continue;
-                }
                 push_code_symbol(pattern.lang, name, entities, seen);
             }
         }
@@ -489,10 +479,14 @@ fn extract_code_symbols(text: &str, entities: &mut Vec<Entity>, seen: &mut HashS
 /// words after `trait`, `class` and `function` ("a trait with …"), so the
 /// name must be called or parameterized right away (`def login(u)`,
 /// `struct Pool<T>`), or be shaped like an identifier: a capital, an
-/// underscore or a digit (`impl Decoder`, `fn parse_token`). The Java
+/// underscore or a digit (`impl Decoder`, `fn parse_token`). Either way it
+/// must not be one of the [`PROSE_WORDS`] ("a trait with(…)"). The Java
 /// pattern spans several words before the name, so on prose it only takes
 /// the call shape.
 fn prose_declaration_counts(pattern: &SymbolPattern, line: &str, name: regex::Match<'_>) -> bool {
+    if PROSE_WORDS.contains(&name.as_str().to_ascii_lowercase().as_str()) {
+        return false;
+    }
     if line[name.end()..].starts_with(['(', '<']) {
         return true;
     }
@@ -728,9 +722,23 @@ mod tests {
     }
 
     #[test]
-    fn inline_code_skips_prose_words() {
-        let syms = code_syms("Wrote `impl with` by mistake, meant `impl Store`");
-        assert!(syms.iter().any(|(n, _)| n == "Store"));
+    fn code_outside_fences_keeps_names_that_are_english_words() {
+        // An unfenced signature, a code-like line and an inline span are code:
+        // a method named `with` or `is` is a real symbol there.
+        for text in [
+            "Builder method:\nfn with(self) -> Self",
+            "Builder method:\n    pub fn with(self, n: usize) -> Self {",
+            "Call `fn with(self)` last.",
+        ] {
+            let syms = code_syms(text);
+            assert!(
+                syms.iter()
+                    .any(|(n, l)| n == "with" && l.as_deref() == Some("rust")),
+                "{text:?} lost `with`: {syms:?}"
+            );
+        }
+        // On a prose line the same word stays prose, even in call shape.
+        let syms = code_syms("Then the builder takes a trait with(care) in mind");
         assert!(!syms.iter().any(|(n, _)| n == "with"), "{syms:?}");
     }
 
