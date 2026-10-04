@@ -601,6 +601,11 @@ impl<'a> ProjectIndexer<'a> {
     /// removed symbols afterwards. Failures inside embed/index calls are
     /// silently ignored (matches existing `embed_field` style elsewhere
     /// in this file).
+    ///
+    /// An unchanged proxy with no stored vector (written while the vector
+    /// store was unavailable) is deliberately left without one: embedded,
+    /// code-index rows compete with memories in recall and lower memory
+    /// recall, so only `axil heal --embed-internal` adds them, on request.
     fn store_proxy_with_dedupe(
         &self,
         proxy: &CodeProxy,

@@ -17,7 +17,7 @@
 //! Determinism: an in-test xorshift PRNG (no `rand` dependency) drives the
 //! fan-out workload; the seed is printed on failure so any flake reproduces.
 
-use axil_core::{Axil, HealingConfig, RecordId, Severity, TextEmbedder};
+use axil_core::{Axil, Engine, HealingConfig, RecordId, Severity, TextEmbedder, VectorIndex};
 use axil_fts::AxilBuilderFtsExt;
 use axil_graph::AxilBuilderGraphExt;
 use serde_json::json;
@@ -144,6 +144,62 @@ fn orphaned_vector_is_detected_and_healed() {
         "recovery must be idempotent"
     );
     assert!(detect_problems_is_clean(&db));
+}
+
+/// The `orphaned_vectors` check from `doctor`.
+fn orphaned_vectors_check(db: &Axil) -> axil_core::CheckResult {
+    db.doctor()
+        .unwrap()
+        .checks
+        .into_iter()
+        .find(|c| c.name == "orphaned_vectors")
+        .expect("doctor must report orphaned_vectors when a vector index is attached")
+}
+
+#[test]
+fn doctor_reports_orphaned_vectors_by_share_of_the_index() {
+    let (db, _dir) = full_db();
+    let ids: Vec<RecordId> = (0..20)
+        .map(|i| {
+            db.insert(
+                "sessions",
+                json!({"summary": format!("auth timeout pool record {i}")}),
+            )
+            .unwrap()
+            .id
+        })
+        .collect();
+    let clean = orphaned_vectors_check(&db);
+    assert_eq!(clean.status, Severity::Ok, "{}", clean.detail);
+
+    // One orphan in twenty vectors: a warning, with the targeted fix.
+    torn_delete(&db, &ids[0]);
+    let check = orphaned_vectors_check(&db);
+    assert_eq!(check.status, Severity::Warning, "{}", check.detail);
+    assert!(
+        check.detail.starts_with("1 of 20 vectors"),
+        "{}",
+        check.detail
+    );
+    assert_eq!(check.fix.as_deref(), Some("axil heal --orphans"));
+
+    // Four in twenty is past a tenth of the index: an error, in doctor and in
+    // detect_problems alike.
+    for id in &ids[1..4] {
+        torn_delete(&db, id);
+    }
+    assert_eq!(orphaned_vectors_check(&db).status, Severity::Error);
+    let problem = db
+        .detect_problems()
+        .into_iter()
+        .find(|p| p.detector == "orphaned_vectors")
+        .expect("detect_problems must report the orphans too");
+    assert_eq!(problem.severity, Severity::Error, "{}", problem.message);
+
+    assert_eq!(db.clean_orphaned_vectors(), 4);
+    let healed = orphaned_vectors_check(&db);
+    assert_eq!(healed.status, Severity::Ok, "{}", healed.detail);
+    assert_eq!(healed.detail, "16 vectors, no orphans");
 }
 
 #[test]
@@ -338,4 +394,297 @@ fn pinned_seed_regression() {
     // guarding against regressions in the repair path. If this fails, the seed
     // is reproducible — rerun `run_fanout_workload(0x0000_0000_0042_1A4E)`.
     run_fanout_workload(0x0000_0000_0042_1A4E);
+}
+
+// ── Deletes while the vector store is detached ───────────────────────────
+
+/// Open `path` with its default vector store attached, as a healthy CLI open
+/// does.
+fn open_with_vectors(path: &std::path::Path) -> Axil {
+    let vector = axil_vector::VectorEngine::open(path, 4).unwrap();
+    Axil::open(path)
+        .with_vector_index(Box::new(vector))
+        .with_embedder(Box::new(FrontWindowEmbedder))
+        .build()
+        .unwrap()
+}
+
+/// Open `path` without a vector index while its `.vec` store is on disk: what
+/// the CLI does when the store fails to open or `[engines] disabled` lists it.
+fn open_detached(path: &std::path::Path) -> Axil {
+    assert!(axil_vector::vector_db_path(path).exists());
+    Axil::open(path).build().unwrap()
+}
+
+#[test]
+fn a_delete_while_the_vector_store_is_detached_leaves_no_orphan() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("test.axil");
+    let (gone, kept) = {
+        let db = open_with_vectors(&path);
+        let gone = db
+            .insert("sessions", json!({"summary": "auth timeout in the pool"}))
+            .unwrap()
+            .id;
+        let kept = db
+            .insert("sessions", json!({"summary": "connection pool sizing"}))
+            .unwrap()
+            .id;
+        assert!(db.get_vector(&gone).unwrap().is_some());
+        (gone, kept)
+    };
+
+    assert!(open_detached(&path).delete(&gone).unwrap());
+
+    let db = open_with_vectors(&path);
+    assert_eq!(
+        db.get_vector(&gone).unwrap(),
+        None,
+        "the deleted record's vector must go once the store is attached again"
+    );
+    assert!(
+        db.get_vector(&kept).unwrap().is_some(),
+        "other vectors stay"
+    );
+    assert!(detect_problems_is_clean(&db), "{:?}", db.detect_problems());
+    assert_eq!(db.vector_count(), Some(1));
+}
+
+#[test]
+fn a_record_reinserted_with_other_text_while_detached_is_embedded_afresh() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("test.axil");
+    let (memory, proxy, bare) = {
+        let db = open_with_vectors(&path);
+        let memory = db
+            .insert("sessions", json!({"summary": "auth timeout in the pool"}))
+            .unwrap();
+        // Internal rows are embedded by their writers, not by insert.
+        let proxy = db
+            .insert(
+                "_idx_code_proxies",
+                json!({"proxy_id": "p", "proxy_text": "fn auth_timeout"}),
+            )
+            .unwrap();
+        db.embed_text(&proxy.id, "fn auth_timeout").unwrap();
+        let bare = db
+            .insert(
+                "_idx_code_proxies",
+                json!({"proxy_id": "q", "proxy_text": "fn auth_pool"}),
+            )
+            .unwrap();
+        assert_eq!(
+            db.get_vector(&memory.id).unwrap(),
+            Some(vec![1.0, 1.0, 1.0, 1.0])
+        );
+        (memory, proxy, bare)
+    };
+
+    // Deleted and re-inserted under the same ids, with other text, while
+    // nothing could reach the vector store.
+    {
+        let db = open_detached(&path);
+        for (record, field, text) in [
+            (&memory, "summary", "connection sizing notes"),
+            (&proxy, "proxy_text", "fn pool_size"),
+            (&bare, "proxy_text", "fn pool_size"),
+        ] {
+            assert!(db.delete(&record.id).unwrap());
+            let mut again = record.clone();
+            again.data[field] = json!(text);
+            db.insert_preserving(again).unwrap();
+        }
+    }
+
+    // The deleted text's vectors are gone; each live record that should have
+    // one is embedded from its new text, and a row that had none stays
+    // without (code-index vectors are never added implicitly).
+    let db = open_with_vectors(&path);
+    assert_eq!(
+        db.get_vector(&memory.id).unwrap(),
+        Some(vec![0.0, 0.0, 0.0, 1.0])
+    );
+    assert_eq!(
+        db.get_vector(&proxy.id).unwrap(),
+        Some(vec![0.0, 0.0, 1.0, 1.0])
+    );
+    assert_eq!(db.get_vector(&bare.id).unwrap(), None);
+    drop(db);
+    // The notes are cleared: a later open changes nothing.
+    let db = open_with_vectors(&path);
+    assert_eq!(
+        db.get_vector(&memory.id).unwrap(),
+        Some(vec![0.0, 0.0, 0.0, 1.0])
+    );
+    assert_eq!(
+        db.get_vector(&proxy.id).unwrap(),
+        Some(vec![0.0, 0.0, 1.0, 1.0])
+    );
+}
+
+/// A vector index that, when asked to remove vectors, first lets a re-insert
+/// land: the record goes back into storage and gets a new vector. That is
+/// the interleaving a concurrent `insert_preserving` produces between an
+/// orphan sweep's scan and its removal, made deterministic.
+struct ReinsertDuringRemoval {
+    inner: axil_vector::VectorEngine,
+    db: std::sync::Arc<std::sync::OnceLock<std::sync::Weak<Axil>>>,
+    record: std::sync::Arc<std::sync::Mutex<Option<axil_core::Record>>>,
+}
+
+impl ReinsertDuringRemoval {
+    fn reinsert_first(&self) {
+        if let Some(record) = self.record.lock().unwrap().take() {
+            let db = self.db.get().and_then(std::sync::Weak::upgrade).unwrap();
+            db.storage().insert(&record).unwrap();
+            self.inner
+                .add(record.id.clone(), &[0.0, 0.0, 0.0, 1.0])
+                .unwrap();
+        }
+    }
+}
+
+impl Engine for ReinsertDuringRemoval {
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+    fn capabilities(&self) -> Vec<axil_core::Capability> {
+        self.inner.capabilities()
+    }
+    fn on_record_insert(&self, record: &axil_core::Record) -> axil_core::Result<()> {
+        self.inner.on_record_insert(record)
+    }
+    fn on_record_delete(&self, id: &RecordId) -> axil_core::Result<()> {
+        self.inner.on_record_delete(id)
+    }
+}
+
+impl VectorIndex for ReinsertDuringRemoval {
+    fn add(&self, id: RecordId, vector: &[f32]) -> axil_core::Result<()> {
+        self.inner.add(id, vector)
+    }
+    fn remove_batch(&self, ids: &[RecordId]) -> axil_core::Result<usize> {
+        self.reinsert_first();
+        self.inner.remove_batch(ids)
+    }
+    fn remove_batch_if(
+        &self,
+        ids: &[RecordId],
+        doomed: &dyn Fn(&RecordId) -> bool,
+    ) -> axil_core::Result<usize> {
+        self.reinsert_first();
+        self.inner.remove_batch_if(ids, doomed)
+    }
+    fn search(&self, query: &[f32], top_k: usize) -> axil_core::Result<Vec<(RecordId, f32)>> {
+        self.inner.search(query, top_k)
+    }
+    fn count(&self) -> usize {
+        self.inner.count()
+    }
+    fn dimensions(&self) -> usize {
+        self.inner.dimensions()
+    }
+    fn all_ids(&self) -> axil_core::Result<Vec<RecordId>> {
+        self.inner.all_ids()
+    }
+    fn get_vector(&self, id: &RecordId) -> axil_core::Result<Option<Vec<f32>>> {
+        self.inner.get_vector(id)
+    }
+}
+
+#[test]
+fn orphan_cleanup_keeps_the_vector_of_a_record_reinserted_meanwhile() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("test.axil");
+    let slot = std::sync::Arc::new(std::sync::OnceLock::new());
+    let reinsert = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let index = ReinsertDuringRemoval {
+        inner: axil_vector::VectorEngine::open(&path, 4).unwrap(),
+        db: slot.clone(),
+        record: reinsert.clone(),
+    };
+    let db = std::sync::Arc::new(
+        Axil::open(&path)
+            .with_vector_index(Box::new(index))
+            .with_embedder(Box::new(FrontWindowEmbedder))
+            .build()
+            .unwrap(),
+    );
+    slot.set(std::sync::Arc::downgrade(&db)).unwrap();
+
+    let record = db
+        .insert("sessions", json!({"summary": "auth timeout in the pool"}))
+        .unwrap();
+    torn_delete(&db, &record.id);
+    // The sweep sees the record gone; by the time it removes vectors, the
+    // record is back with a new one.
+    *reinsert.lock().unwrap() = Some(record.clone());
+
+    assert_eq!(db.clean_orphaned_vectors(), 0);
+    assert_eq!(
+        db.get_vector(&record.id).unwrap(),
+        Some(vec![0.0, 0.0, 0.0, 1.0]),
+        "the re-insert's vector must survive the sweep"
+    );
+    assert!(detect_problems_is_clean(&db), "{:?}", db.detect_problems());
+}
+
+/// The paths that delete on their own (compaction, recall-chunk cleanup, a
+/// code re-index) all go through `Axil::delete`, so a detached store must not
+/// leave an orphan behind any of them.
+#[test]
+fn cleanup_deletes_while_detached_leave_no_orphans() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("test.axil");
+    let project = dir.path().join("project");
+    std::fs::create_dir_all(project.join("src")).unwrap();
+    std::fs::write(
+        project.join("Cargo.toml"),
+        "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("src/lib.rs"),
+        "/// Retry an auth call after a timeout.\npub fn retry_auth() {}\n\n\
+         /// Size the connection pool.\npub fn pool_size() -> usize { 32 }\n",
+    )
+    .unwrap();
+
+    let long_id = {
+        let db = open_with_vectors(&path);
+        let past = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
+        db.insert(
+            "notes",
+            json!({"summary": "auth timeout note", "valid_until": past, "_importance": 0.1}),
+        )
+        .unwrap();
+        let long = db
+            .insert(
+                "notes",
+                json!({"summary": "auth timeout in the pool, again. ".repeat(200)}),
+            )
+            .unwrap();
+        axil_indexer::ProjectIndexer::new(&db, axil_indexer::IndexConfig::default())
+            .index_full(&project)
+            .unwrap();
+        assert!(
+            db.vector_count().unwrap() > 3,
+            "the long note's chunks and the code index must hold vectors"
+        );
+        long.id
+    };
+
+    {
+        let db = open_detached(&path);
+        let report = db.compact().unwrap();
+        assert_eq!(report.purged_expired, 1);
+        assert!(db.delete(&long_id).unwrap());
+        axil_indexer::ProjectIndexer::new(&db, axil_indexer::IndexConfig::default())
+            .index_full(&project)
+            .unwrap();
+    }
+
+    let db = open_with_vectors(&path);
+    assert!(detect_problems_is_clean(&db), "{:?}", db.detect_problems());
+    assert_eq!(db.clean_orphaned_vectors(), 0);
 }

@@ -1640,12 +1640,22 @@ enum Command {
         /// Just compact (purge expired/superseded).
         #[arg(long)]
         compact: bool,
-        /// Rebuild all indexes from records.
+        /// Rebuild all indexes from records: drop vectors whose record is
+        /// gone, compact the vector index, and re-embed / re-index records
+        /// missing from it.
         #[arg(long)]
         reindex: bool,
-        /// Clean orphaned edges/vectors/FTS.
+        /// Clean orphaned edges and vectors.
         #[arg(long)]
         orphans: bool,
+        /// Embed rows of internal tables (code index, dep docs, recall
+        /// chunks, checkpoints) that have no vector, as rows written while
+        /// the vector store was unavailable. Opt-in, and it currently lowers
+        /// memory recall: embedded, these rows compete with memories, and on
+        /// the dogfood eval (snap-prefix, 2026-10-04) restoring 2,962
+        /// code-index vectors took hit@1 from 0.70 to 0.51.
+        #[arg(long)]
+        embed_internal: bool,
         /// Show what would be fixed without doing it.
         #[arg(long)]
         dry_run: bool,
@@ -6350,6 +6360,15 @@ fn open_with_all_detected(path: &Path) -> Result<Axil> {
     builder.build().context("failed to open database")
 }
 
+/// Open a database with all detected plugins for a command that only
+/// inspects it (diagnostics, dry runs). Deletes noted while the vector store
+/// was detached are left for a later open rather than applied by this one,
+/// so the command changes nothing.
+fn open_for_inspection(path: &Path) -> Result<Axil> {
+    let builder = attach_detected_engines(Axil::open(path).defer_vector_delete_notes(true))?;
+    builder.build().context("failed to open database")
+}
+
 /// Number of times a hot read command retries the writable open when the
 /// single-writer lock is contended before falling back to a read-only open.
 const BUSY_RETRY_ATTEMPTS: u32 = 3;
@@ -7911,7 +7930,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
         // ── Info ────────────────────────────────────────────────────
         Command::Info => {
             let db_path = require_db(&db_opt)?;
-            let db = open_with_all_detected(&db_path)?;
+            let db = open_for_inspection(&db_path)?;
             let info = db.info().context("failed to get database info")?;
 
             let mut features = Vec::new();
@@ -7964,7 +7983,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
         // ── Detect ──────────────────────────────────────────────────
         Command::Detect => {
             let db_path = require_db(&db_opt)?;
-            let db = open_with_all_detected(&db_path)?;
+            let db = open_for_inspection(&db_path)?;
             let results = axil_core::run_all_detectors(&db);
             let triggered: Vec<_> = results.iter().filter(|r| r.triggered).collect();
             out.print(&json!({
@@ -7977,7 +7996,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
         // ── Doctor ───────────────────────────────────────────────────
         Command::Doctor => {
             let db_path = require_db(&db_opt)?;
-            let db = open_with_all_detected(&db_path)?;
+            let db = open_for_inspection(&db_path)?;
             let mut report = db.doctor().context("doctor failed")?;
 
             // Check if downloaded models have checksum sidecar files.
@@ -8350,7 +8369,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
             activation,
         } => {
             let db_path = require_db(&db_opt)?;
-            let db = open_with_all_detected(&db_path)?;
+            let db = open_for_inspection(&db_path)?;
 
             if activation {
                 let config = axil_core::ActivationConfig::default();
@@ -8547,7 +8566,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
             compare,
         } => {
             let db_path = require_db(&db_opt)?;
-            let db = open_with_all_detected(&db_path)?;
+            let db = open_for_inspection(&db_path)?;
             let report = db.report().context("report generation failed")?;
             let report_json = serde_json::to_value(&report).unwrap();
 
@@ -10663,6 +10682,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
             compact,
             reindex,
             orphans,
+            embed_internal,
             dry_run,
         } => {
             let db_path = require_db(&db_opt)?;
@@ -10671,16 +10691,27 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
             let missing_vector_store = heal_vector_store_check(&db_path, &config)?;
             #[cfg(not(feature = "embed"))]
             let missing_vector_store: Option<String> = None;
-            let db = open_with_all_detected(&db_path)?;
+            let db = if dry_run {
+                open_for_inspection(&db_path)?
+            } else {
+                open_with_all_detected(&db_path)?
+            };
 
+            let mut exit = EXIT_OK;
             // If specific flags are given, run only those actions
-            if compact || reindex || orphans {
+            if compact || reindex || orphans || embed_internal {
                 let mut actions = Vec::new();
 
                 if dry_run {
                     // Dry-run: report what would happen without modifying anything
                     let problems = db.detect_problems();
                     for p in &problems {
+                        if embed_internal && p.detector == "missing_internal_embeddings" {
+                            actions.push(json!({
+                                "action": p.detector,
+                                "result": format!("[dry-run] would fix: {}", p.message),
+                            }));
+                        }
                         if p.auto_fixable {
                             let dominated = match p.detector.as_str() {
                                 "expired_records" | "superseded_records" | "storage_bloat" => {
@@ -10691,7 +10722,8 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
                                 | "missing_fts"
                                 | "vector_load_skips"
                                 | "entity_key_index_drift" => reindex,
-                                "orphaned_edges" | "orphaned_vectors" => orphans,
+                                "orphaned_vectors" => orphans || reindex,
+                                "orphaned_edges" => orphans,
                                 _ => compact || orphans,
                             };
                             if dominated {
@@ -10729,6 +10761,23 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
                                 "action": "clean_orphans",
                                 "result": format!(
                                     "removed {} orphaned edges, {} orphaned vectors", oe, ov
+                                ),
+                            }));
+                        }
+                    }
+
+                    if reindex {
+                        // Rebuilding from the records means dropping vectors
+                        // no record backs: recall would fetch them and throw
+                        // them away. First, so the rebuild below compacts the
+                        // tombstones this leaves. Finds nothing after
+                        // --compact or --orphans.
+                        let ov = db.clean_orphaned_vectors();
+                        if ov > 0 {
+                            actions.push(json!({
+                                "action": "clean_orphaned_vectors",
+                                "result": format!(
+                                    "removed {ov} vectors whose record no longer exists"
                                 ),
                             }));
                         }
@@ -10793,6 +10842,29 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
                             }
                         }
                     }
+
+                    if embed_internal {
+                        let (embedded, failed) = db
+                            .reembed_missing_internal()
+                            .context("embedding internal rows failed")?;
+                        if embedded + failed > 0 {
+                            actions.push(json!({
+                                "action": "reembed_missing_internal",
+                                "result": format!(
+                                    "embedded {embedded} internal-table rows that had no vector, \
+                                     {failed} failed"
+                                ),
+                                "failed": failed,
+                            }));
+                        }
+                        if failed > 0 {
+                            out.status(&format!(
+                                "axil: {failed} internal-table row(s) could not be embedded and \
+                                 still have no vector; `axil doctor` lists them by table"
+                            ));
+                            exit = EXIT_ERROR;
+                        }
+                    }
                 }
 
                 let mut output = json!({
@@ -10829,6 +10901,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
                 && !compact
                 && !reindex
                 && !orphans
+                && !embed_internal
                 && db.has_timeseries_index()
                 && config.timeseries.auto_downsample
             {
@@ -10842,7 +10915,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
                 }
             }
 
-            Ok(EXIT_OK)
+            Ok(exit)
         }
 
         // ── Session-Heal ────────────────────────────────────────────
@@ -10854,7 +10927,11 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
         } => {
             let db_path = require_db(&db_opt)?;
             let config = load_config(&db_path)?;
-            let db = open_with_all_detected(&db_path)?;
+            let db = if dry_run {
+                open_for_inspection(&db_path)?
+            } else {
+                open_with_all_detected(&db_path)?
+            };
 
             let problems = problems_file
                 .as_ref()

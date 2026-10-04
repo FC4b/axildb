@@ -113,6 +113,39 @@ pub trait VectorIndex: Engine {
         Ok(())
     }
 
+    /// Remove the vectors of many records in one call. Returns how many
+    /// vectors were removed.
+    ///
+    /// The default loops over [`Engine::on_record_delete`] and, having no way
+    /// to tell which ids held a vector, counts every id. Backends with an
+    /// independent durable store should override it to commit the whole batch
+    /// under one write transaction, as [`add_batch`](Self::add_batch) does for
+    /// inserts, and count only the ids they actually held.
+    fn remove_batch(&self, ids: &[RecordId]) -> Result<usize> {
+        for id in ids {
+            self.on_record_delete(id)?;
+        }
+        Ok(ids.len())
+    }
+
+    /// Like [`remove_batch`](Self::remove_batch), for the ids for which
+    /// `doomed` still holds when they are removed. A repair that found a
+    /// vector's record gone passes the same check here, so a record
+    /// re-inserted and re-embedded since keeps its new vector.
+    ///
+    /// Backends that serialize their mutations should run `doomed` under
+    /// that serialization, so an add for one of these ids lands either
+    /// before the check (which then sees its record) or after the removal.
+    /// The default checks first and removes after, without that guarantee.
+    fn remove_batch_if(
+        &self,
+        ids: &[RecordId],
+        doomed: &dyn Fn(&RecordId) -> bool,
+    ) -> Result<usize> {
+        let ids: Vec<RecordId> = ids.iter().filter(|id| doomed(id)).cloned().collect();
+        self.remove_batch(&ids)
+    }
+
     /// Search for the top-k most similar vectors.
     fn search(&self, query: &[f32], top_k: usize) -> Result<Vec<(RecordId, f32)>>;
 
