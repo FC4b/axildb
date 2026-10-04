@@ -10824,16 +10824,25 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
                     }
 
                     if embed_internal {
-                        let embedded = db
+                        let (embedded, failed) = db
                             .reembed_missing_internal()
                             .context("embedding internal rows failed")?;
-                        if embedded > 0 {
+                        if embedded + failed > 0 {
                             actions.push(json!({
                                 "action": "reembed_missing_internal",
                                 "result": format!(
-                                    "embedded {embedded} internal-table rows that had no vector"
+                                    "embedded {embedded} internal-table rows that had no vector, \
+                                     {failed} failed"
                                 ),
+                                "failed": failed,
                             }));
+                        }
+                        if failed > 0 {
+                            out.status(&format!(
+                                "axil: {failed} internal-table row(s) could not be embedded and \
+                                 still have no vector; `axil doctor` lists them by table"
+                            ));
+                            exit = EXIT_ERROR;
                         }
                     }
                 }
@@ -10886,7 +10895,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
                 }
             }
 
-            Ok(EXIT_OK)
+            Ok(exit)
         }
 
         // ── Session-Heal ────────────────────────────────────────────

@@ -1271,7 +1271,9 @@ impl Axil {
     /// Embed the rows of internal tables whose writers embed them (code
     /// proxies, file / module / project summaries, dep docs, recall chunks,
     /// checkpoints; see [`EMBEDDED_INTERNAL_FIELDS`]) that have no vector,
-    /// with the text their writer embeds. Returns how many were embedded.
+    /// with the text their writer embeds. Returns `(embedded, failed)`: rows
+    /// that got a vector, and rows that still have none because embedding
+    /// them failed.
     ///
     /// Those writers ignore a failed embed, so rows written while the vector
     /// store was unavailable have none. Restoring them is not automatic:
@@ -1281,14 +1283,15 @@ impl Axil {
     /// [`INTERNAL_EMBED_COST`]). Callers opt in (`axil heal --embed-internal`).
     ///
     /// Rows are embedded in micro-batches with one `.vec` commit each, as
-    /// their writers' bulk paths do; a failed batch costs only its own rows.
+    /// their writers' bulk paths do. A batch that fails is retried row by
+    /// row, so only the rows that cannot be embedded count as failed.
     /// A no-op without a vector index and an embedder.
-    pub fn reembed_missing_internal(&self) -> Result<usize> {
+    pub fn reembed_missing_internal(&self) -> Result<(usize, usize)> {
         if !self.has_vector_index() || self.embedder.is_none() {
-            return Ok(0);
+            return Ok((0, 0));
         }
         let Some(ref vi) = self.vector_index else {
-            return Ok(0);
+            return Ok((0, 0));
         };
         let records = self.storage.scan_all_records()?;
         let indexed: std::collections::HashSet<RecordId> =
@@ -1298,19 +1301,29 @@ impl Axil {
             .filter(|r| !indexed.contains(&r.id))
             .filter_map(|r| Self::embedded_internal_text(r).map(|(_, text)| (&r.id, text)))
             .collect();
-        let mut embedded = 0usize;
+        let (mut embedded, mut failed) = (0usize, 0usize);
         for batch in missing.chunks(REEMBED_BATCH) {
             if self.embed_fields_batch(batch).is_ok() {
                 embedded += batch.len();
+                continue;
+            }
+            for (id, text) in batch {
+                if self.embed_text(id, text).is_ok() {
+                    embedded += 1;
+                } else {
+                    failed += 1;
+                }
             }
         }
-        if embedded > 0 {
+        if embedded + failed > 0 {
             self.audit_heal_action(
                 "reembed_missing_internal",
-                &format!("embedded {embedded} internal-table rows that had no vector"),
+                &format!(
+                    "embedded {embedded} internal-table rows that had no vector, {failed} failed"
+                ),
             );
         }
-        Ok(embedded)
+        Ok((embedded, failed))
     }
 
     /// Insert a new record into the given table.

@@ -965,7 +965,7 @@ fn doctor_flags_code_proxies_without_a_vector_and_only_an_opt_in_restores_them()
     assert_eq!(db.get_vector(&proxy).unwrap(), None);
 
     // The opt-in embeds it from its proxy_text, as the indexer does.
-    assert_eq!(db.reembed_missing_internal().unwrap(), 1);
+    assert_eq!(db.reembed_missing_internal().unwrap(), (1, 0));
     assert_eq!(
         db.get_vector(&proxy).unwrap(),
         Some(vec![1.0, 1.0, 0.0, 1.0])
@@ -974,7 +974,7 @@ fn doctor_flags_code_proxies_without_a_vector_and_only_an_opt_in_restores_them()
         .detect_problems()
         .iter()
         .all(|p| p.detector != "missing_internal_embeddings"));
-    assert_eq!(db.reembed_missing_internal().unwrap(), 0);
+    assert_eq!(db.reembed_missing_internal().unwrap(), (0, 0));
 }
 
 #[test]
@@ -1033,6 +1033,51 @@ fn an_incremental_index_leaves_an_unchanged_proxy_without_a_vector() {
     // Embedded code-index rows lower memory recall, so a routine re-index
     // must not add them; only the explicit opt-in does.
     assert_eq!(db.get_vector(&after.id).unwrap(), None);
-    assert!(db.reembed_missing_internal().unwrap() > 0);
+    assert!(db.reembed_missing_internal().unwrap().0 > 0);
     assert!(db.get_vector(&after.id).unwrap().is_some());
+}
+
+/// Embeds like [`FrontWindowEmbedder`], but refuses any text that mentions
+/// `unembeddable`, in a batch or alone.
+struct RefusingEmbedder;
+
+impl axil_core::TextEmbedder for RefusingEmbedder {
+    fn embed(&self, text: &str) -> axil_core::Result<Vec<f32>> {
+        if text.contains("unembeddable") {
+            return Err(axil_core::AxilError::plugin("refused"));
+        }
+        FrontWindowEmbedder.embed(text)
+    }
+}
+
+#[test]
+fn embed_internal_counts_the_rows_it_could_not_embed() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("test.axil");
+    let vector = axil_vector::VectorEngine::open(&path, 4).unwrap();
+    let db = Axil::open(&path)
+        .with_vector_index(Box::new(vector))
+        .with_embedder(Box::new(RefusingEmbedder))
+        .build()
+        .unwrap();
+    let good = unembedded_proxy(&db, "fn retry_auth after a timeout");
+    let bad = unembedded_proxy(&db, "fn unembeddable");
+    let other = unembedded_proxy(&db, "fn pool_size");
+
+    // All three share a batch, which fails; the retry row by row embeds
+    // the two that can be and counts the one that cannot.
+    assert_eq!(db.reembed_missing_internal().unwrap(), (2, 1));
+    assert!(db.get_vector(&good).unwrap().is_some());
+    assert!(db.get_vector(&other).unwrap().is_some());
+    assert_eq!(db.get_vector(&bad).unwrap(), None);
+    let problem = db
+        .detect_problems()
+        .into_iter()
+        .find(|p| p.detector == "missing_internal_embeddings")
+        .expect("the row left without a vector is still reported");
+    assert!(
+        problem.message.starts_with("1 of 3 _idx_code_proxies"),
+        "{}",
+        problem.message
+    );
 }
