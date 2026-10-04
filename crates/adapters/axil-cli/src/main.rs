@@ -183,9 +183,10 @@ fn reindex_scip(db_path: &Path, root: &Path, full: bool, wait: bool, quiet: bool
 }
 
 /// SCIP feature compiled out — `reindex` still rebuilds the proxy index and
-/// reports the skip so the combined JSON shape stays stable.
+/// reports the skip so the combined JSON shape stays stable. Same signature as
+/// the real one so the call site needs no gate of its own.
 #[cfg(all(feature = "indexer", not(feature = "scip")))]
-fn reindex_scip(_db_path: &Path, _full: bool, _wait: bool, _quiet: bool) -> Value {
+fn reindex_scip(_db_path: &Path, _root: &Path, _full: bool, _wait: bool, _quiet: bool) -> Value {
     json!({ "status": "skipped", "reason": "scip_feature_disabled" })
 }
 

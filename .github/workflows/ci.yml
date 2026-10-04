@@ -27,6 +27,10 @@ jobs:
             cmd: cargo check --workspace --all-targets
           - label: full
             cmd: cargo check -p axildb --no-default-features --features full
+          # `indexer` without `scip`: catches code that assumes the SCIP
+          # half is compiled in whenever the indexer is.
+          - label: indexer without scip
+            cmd: cargo check -p axildb --no-default-features --features vector,fts,timeseries,checkpoint,indexer
           # axil-sync's HTTP transport is behind a default-off `http` feature
           # (the `--workspace` check above only exercises its default, network-
           # free build); this guards the feature-gated SyncClient.
