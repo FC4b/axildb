@@ -39,9 +39,10 @@ mkdir -p "${CANDIDATE_DIR}"
 
 VARIANT="s"
 # Default to the full 500-question Recall-QTC run that backs the README's
-# 94.5% figure — the committed baseline (benchmarks/longmemeval/baseline.jsonl)
+# 93.5% figure — the committed baseline (benchmarks/longmemeval/baseline.jsonl)
 # is that run, so a real (dataset-present) gate compares apples-to-apples.
-# Pass --questions 20 --strategy vector for a quick smoke instead.
+# Pass --questions 20 --strategy recall for a quick smoke instead (the PR
+# smoke CI runs, which has its own baseline).
 QUESTIONS=500
 TOP_K=5
 MODEL="bge-small"
