@@ -9352,14 +9352,17 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
             }
             let recall_start = std::time::Instant::now();
             let deadline = timeout_ms.map(|ms| recall_start + std::time::Duration::from_millis(ms));
+            // Set when the deadline-bounded recall gets no worker slot: the
+            // command then returns partial results as if the deadline had passed.
+            let no_slot = std::cell::Cell::new(false);
             let deadline_exceeded = || -> bool {
-                deadline
-                    .map(|d| std::time::Instant::now() > d)
-                    .unwrap_or(false)
+                no_slot.get()
+                    || deadline
+                        .map(|d| std::time::Instant::now() > d)
+                        .unwrap_or(false)
             };
 
-            #[allow(unused_mut)]
-            let mut db = open_read_command(&db_path)?;
+            let db = cli_io::hot_db(&db_path, || open_read_command(&db_path))?;
 
             // Expand BEFORE the similarity fetch so every downstream stage sees the same query.
             let query = if expand {
@@ -9482,24 +9485,32 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
             // Deadline-bounded recall: when --timeout-ms is set we run db.recall in a worker
             // thread and wait up to the remaining budget on a channel. If it doesn't finish
             // in time we return empty partial results and abandon the thread — the CLI process
-            // exits shortly afterward and tears down any lingering work.
-            // The handle lives in an Arc from here on: the timeout path shares it
-            // with a worker thread, and every later use in this command is by
-            // reference, so the shared form costs nothing.
-            let (db, mut recall_results) = if deadline_exceeded() {
-                (Arc::new(db), Vec::new())
+            // exits shortly afterward and tears down any lingering work. A long-lived process
+            // doesn't, so a worker needs one of the process's few recall slots; with none free
+            // the recall goes straight to the partial results.
+            let mut recall_results = if deadline_exceeded() {
+                Vec::new()
             } else if let Some(d) = deadline {
-                let db_arc: Arc<axil_core::Axil> = Arc::new(db);
-                let db_handle = db_arc.clone();
-                let q = query.clone();
-                let cfg_clone = cfg.clone();
-                let tk = fetch_k;
                 let (tx, rx) = std::sync::mpsc::channel();
-                std::thread::spawn(move || {
-                    let _ = tx.send(db_handle.recall(&q, tk, Some(cfg_clone)));
-                });
+                match cli_io::RECALL_SLOTS.try_take() {
+                    Some(slot) => {
+                        let db_handle = Arc::clone(&db);
+                        let q = query.clone();
+                        let cfg_clone = cfg.clone();
+                        let tk = fetch_k;
+                        std::thread::spawn(move || {
+                            let _ = tx.send(db_handle.recall(&q, tk, Some(cfg_clone)));
+                            drop(slot);
+                        });
+                    }
+                    None => {
+                        no_slot.set(true);
+                        // With no sender left, the wait below ends at once.
+                        drop(tx);
+                    }
+                }
                 let remaining = d.saturating_duration_since(std::time::Instant::now());
-                let result = match rx.recv_timeout(remaining) {
+                match rx.recv_timeout(remaining) {
                     Ok(Ok(r)) => r,
                     Ok(Err(e)) => return Err(e.into()),
                     Err(_) => {
@@ -9510,17 +9521,9 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
                         );
                         Vec::new()
                     }
-                };
-                // Keep the Arc rather than trying to reclaim the inner value: on
-                // timeout the worker still owns a clone, and that clone holds the
-                // single-writer file lock, so re-opening the database here could
-                // never succeed. One extra live handle for the remainder of this
-                // command is bounded and harmless.
-                (db_arc, result)
+                }
             } else {
-                let db = Arc::new(db);
-                let r = db.recall(&query, fetch_k, Some(cfg))?;
-                (db, r)
+                db.recall(&query, fetch_k, Some(cfg))?
             };
 
             // Normalize the --type facet filter once (case-insensitive,

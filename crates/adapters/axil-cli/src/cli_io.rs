@@ -17,12 +17,15 @@
 //!
 //! The context can also carry a database the host already has open. The hot
 //! commands get their handle through [`hot_db`], which returns that handle
-//! instead of opening the file again.
+//! instead of opening the file again. [`RECALL_SLOTS`] bounds the recall
+//! workers a deadline leaves running, which a one-shot run never outlives but
+//! a long-lived host would accumulate.
 
 use std::cell::RefCell;
 use std::fmt;
 use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use axil_core::Axil;
@@ -285,6 +288,62 @@ pub fn hot_db(
     }
 }
 
+/// A process-wide cap on threads that run a recall past its caller's
+/// deadline.
+///
+/// `recall --timeout-ms` runs the search on a worker and stops waiting at the
+/// deadline; the worker carries on until the search finishes. A one-shot
+/// process exits right after and takes the worker with it. A long-lived
+/// process keeps it, so without a cap each timed-out request would leave
+/// another thread behind.
+#[cfg_attr(not(feature = "embed"), allow(dead_code))] // recall, the one taker, needs `embed`
+pub struct RecallSlots {
+    live: AtomicUsize,
+    cap: usize,
+}
+
+/// The recall worker cap shared by every command in this process.
+#[cfg_attr(not(feature = "embed"), allow(dead_code))]
+pub static RECALL_SLOTS: RecallSlots = RecallSlots::new(4);
+
+/// A taken [`RecallSlots`] slot. The worker holds it while it runs, and
+/// dropping it frees the slot.
+#[cfg_attr(not(feature = "embed"), allow(dead_code))]
+pub struct RecallSlot(&'static RecallSlots);
+
+#[cfg_attr(not(feature = "embed"), allow(dead_code))]
+impl RecallSlots {
+    /// A cap of `cap` concurrent workers.
+    pub const fn new(cap: usize) -> Self {
+        Self {
+            live: AtomicUsize::new(0),
+            cap,
+        }
+    }
+
+    /// Take a slot, or `None` when `cap` workers already hold one.
+    pub fn try_take(&'static self) -> Option<RecallSlot> {
+        self.live
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                (n < self.cap).then_some(n + 1)
+            })
+            .ok()
+            .map(|_| RecallSlot(self))
+    }
+
+    /// How many slots are taken right now.
+    #[cfg_attr(not(test), allow(dead_code))] // read by tests until a host reports it
+    pub fn live(&self) -> usize {
+        self.live.load(Ordering::Acquire)
+    }
+}
+
+impl Drop for RecallSlot {
+    fn drop(&mut self) {
+        self.0.live.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -436,6 +495,22 @@ mod tests {
         assert!(opened && got.is_err());
         assert!(warm_db(&path).is_none());
         assert_eq!(Arc::strong_count(&warm), 1, "a request's clone outlived it");
+    }
+
+    #[test]
+    fn recall_slots_cap_concurrent_holders() {
+        static SLOTS: RecallSlots = RecallSlots::new(2);
+        let a = SLOTS.try_take().unwrap();
+        // Slots are per process, not per thread.
+        let b = std::thread::spawn(|| SLOTS.try_take()).join().unwrap();
+        let b = b.unwrap();
+        assert!(SLOTS.try_take().is_none());
+        assert_eq!(SLOTS.live(), 2);
+        drop(a);
+        let c = SLOTS.try_take().expect("a dropped slot is free again");
+        assert!(SLOTS.try_take().is_none());
+        drop((b, c));
+        assert_eq!(SLOTS.live(), 0);
     }
 
     /// `src` with comments and the contents of string and char literals
