@@ -8856,9 +8856,21 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
                 ensure_default_space_dims(&db_path, v.len())?;
             }
 
-            // An already-open handle is used as its host opened it, LLM
-            // included.
-            let db = cli_io::hot_db(&db_path, || {
+            // What an already-open handle must have, since this command's own
+            // open would attach or create it: checked before anything is written.
+            let mut needs = Vec::new();
+            #[cfg(feature = "embed")]
+            if embed.is_some() {
+                needs.extend([cli_io::Need::Vectors, cli_io::Need::Embedder]);
+            }
+            #[cfg(feature = "vector")]
+            if raw_vector.is_some() && space.is_none() {
+                needs.push(cli_io::Need::Vectors);
+            }
+            if llm {
+                needs.push(cli_io::Need::Llm);
+            }
+            let db = cli_io::hot_db(&db_path, &needs, || {
                 // Open path: `--embed` needs the embedder; otherwise the raw-vector
                 // policy is shared across feature ladders by `open_for_store` (a
                 // default-space vector creates the store at the vector's dimension;
@@ -9358,7 +9370,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
                     .unwrap_or(false)
             };
 
-            let db = cli_io::hot_db(&db_path, || open_read_command(&db_path))?;
+            let db = cli_io::hot_db(&db_path, &[], || open_read_command(&db_path))?;
 
             // Expand BEFORE the similarity fetch so every downstream stage sees the same query.
             let query = if expand {
@@ -9941,7 +9953,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
             trace_graph,
         } => {
             let db_path = require_db(&db_opt)?;
-            let db = cli_io::hot_db(&db_path, || open_read_command(&db_path))?;
+            let db = cli_io::hot_db(&db_path, &[], || open_read_command(&db_path))?;
             // Fetch a larger pool so non-proxy hits (project/file index)
             // don't crowd proxies out before we filter.
             let pool = top_k.saturating_mul(5).max(15);
@@ -10213,7 +10225,9 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
         #[cfg(feature = "fts")]
         Command::Fts { query, limit } => {
             let db_path = require_db(&db_opt)?;
-            let db = cli_io::hot_db(&db_path, || open_read_command_fts(&db_path))?;
+            let db = cli_io::hot_db(&db_path, &[cli_io::Need::FullText], || {
+                open_read_command_fts(&db_path)
+            })?;
 
             let start = std::time::Instant::now();
             let results = db
@@ -10546,7 +10560,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
             let secs = parse_duration(&duration)?;
             // The Stop hook counts recent records with this: ride out a short
             // writer instead of failing on the first contended open.
-            let db = cli_io::hot_db(&db_path, || {
+            let db = cli_io::hot_db(&db_path, &[cli_io::Need::TimeSeries], || {
                 retry_busy_open(|| open_with_timeseries(&db_path))
             })?;
 
@@ -14657,7 +14671,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
             let db_path = require_db(&db_opt)?;
             // A hook runs this before every edit: ride out a short writer, and
             // fall back to a read-only open rather than fail.
-            let db = cli_io::hot_db(&db_path, || open_read_command(&db_path))?;
+            let db = cli_io::hot_db(&db_path, &[], || open_read_command(&db_path))?;
 
             let file_lower = file.to_lowercase();
             let short_name = std::path::Path::new(&file)
@@ -16394,7 +16408,7 @@ fn run_checkpoint_extension(
     };
 
     let db_path = require_db(db_opt)?;
-    let db = cli_io::hot_db(&db_path, || {
+    let db = cli_io::hot_db(&db_path, &[], || {
         open_waiting_for_writer(|| open_with_all_detected(&db_path))
     })?;
     match axil_core::dispatch_cli(&db, &db.extensions(), &invocation)? {

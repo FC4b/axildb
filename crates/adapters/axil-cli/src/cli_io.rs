@@ -17,9 +17,11 @@
 //!
 //! The context can also carry a database the host already has open, a
 //! [`WarmDb`]. The hot commands get their handle through [`hot_db`], which
-//! returns that handle instead of opening the file again. [`RECALL_SLOTS`]
-//! bounds the recall workers a deadline leaves running, which a one-shot run
-//! never outlives but a long-lived host would accumulate.
+//! returns that handle instead of opening the file again, or refuses with
+//! [`WarmLacks`] when the handle is missing something the command's own open
+//! would have provided. [`RECALL_SLOTS`] bounds the recall workers a deadline
+//! leaves running, which a one-shot run never outlives but a long-lived host
+//! would accumulate.
 
 use std::cell::RefCell;
 use std::fmt;
@@ -285,7 +287,7 @@ pub fn db_key(path: &Path) -> io::Result<PathBuf> {
 /// hot command's own open finds the database: every engine whose store
 /// exists, no LLM provider, and the installed plugins registered as a
 /// one-shot `boot` registers them. A store that appears after the open is
-/// not attached.
+/// not attached: commands that need it get [`WarmLacks`].
 #[derive(Clone)]
 pub struct WarmDb {
     db: Arc<Axil>,
@@ -317,19 +319,84 @@ pub fn warm_db(path: &Path) -> Option<Arc<Axil>> {
     (db_key(path).ok()? == warm.key).then_some(warm.db)
 }
 
+/// Something a command needs from its database handle beyond the core store.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code)] // which variants a build constructs depends on its features
+pub enum Need {
+    /// The default vector store.
+    Vectors,
+    /// A text embedder.
+    Embedder,
+    /// The full-text index.
+    FullText,
+    /// The time-series index.
+    TimeSeries,
+    /// An LLM provider.
+    Llm,
+}
+
+impl Need {
+    fn met_by(self, db: &Axil) -> bool {
+        match self {
+            Need::Vectors => db.has_vector_index(),
+            Need::Embedder => db.has_embedder(),
+            Need::FullText => db.has_fts_index(),
+            Need::TimeSeries => db.has_timeseries_index(),
+            Need::Llm => db.has_llm(),
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Need::Vectors => "vector store",
+            Need::Embedder => "embedder",
+            Need::FullText => "full-text index",
+            Need::TimeSeries => "time-series index",
+            Need::Llm => "LLM provider",
+        }
+    }
+}
+
+/// The request's open database can't serve a command: it lacks something
+/// the command's own open would have attached or created. Nothing has been
+/// written when a command returns this, so a host can run the command again
+/// in a process of its own, which opens the database the one-shot way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WarmLacks(pub Need);
+
+impl fmt::Display for WarmLacks {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "the open database handle has no {}; run the command in its own process",
+            self.0.name()
+        )
+    }
+}
+
+impl std::error::Error for WarmLacks {}
+
 /// The handle a command runs against: the request's open database when it is
 /// the one at `path` (see [`warm_db`]), otherwise a new handle from `open`.
+///
+/// A warm handle must meet every one of `needs`, or this returns
+/// [`WarmLacks`] before the command has done anything. `open` is the
+/// command's one-shot open, which attaches or creates what it needs itself.
 ///
 /// Without such a request this is exactly `open`, so a one-shot run opens and
 /// closes the database as it always has. A warm handle is shared: the command
 /// neither opens nor closes it, and only drops its own reference.
 pub fn hot_db(
     path: &Path,
+    needs: &[Need],
     open: impl FnOnce() -> anyhow::Result<Axil>,
 ) -> anyhow::Result<Arc<Axil>> {
-    match warm_db(path) {
-        Some(db) => Ok(db),
-        None => open().map(Arc::new),
+    let Some(db) = warm_db(path) else {
+        return open().map(Arc::new);
+    };
+    match needs.iter().find(|need| !need.met_by(&db)) {
+        Some(&need) => Err(WarmLacks(need).into()),
+        None => Ok(db),
     }
 }
 
@@ -534,19 +601,19 @@ mod tests {
             warm: Some(warm.clone()),
             ..ReqCtx::default()
         };
-        let warm_hit = |p: &Path| {
+        let warm_hit = |p: &Path, needs: &[Need]| {
             capture(ctx(), || {
-                hot_db(p, || panic!("opened a database the request holds"))
+                hot_db(p, needs, || panic!("opened a database the request holds"))
             })
             .2
         };
         let opens = |p: &Path| {
-            let (_, _, got) = capture(ctx(), || hot_db(p, || anyhow::bail!("cold open")));
+            let (_, _, got) = capture(ctx(), || hot_db(p, &[], || anyhow::bail!("cold open")));
             got.is_err_and(|e| e.to_string() == "cold open")
         };
 
         // The same database under another spelling: no open.
-        let got = warm_hit(&dir.join(".").join("a.axil")).unwrap();
+        let got = warm_hit(&dir.join(".").join("a.axil"), &[]).unwrap();
         assert!(Arc::ptr_eq(&got, warm.db()));
         drop(got);
 
@@ -560,7 +627,7 @@ mod tests {
         {
             let dir_link = tmp.path().join("db-link");
             std::os::unix::fs::symlink(&dir, &dir_link).unwrap();
-            let got = warm_hit(&dir_link.join("a.axil")).unwrap();
+            let got = warm_hit(&dir_link.join("a.axil"), &[]).unwrap();
             assert!(Arc::ptr_eq(&got, warm.db()));
             drop(got);
             let file_link = dir.join("link.axil");
@@ -568,9 +635,18 @@ mod tests {
             assert!(opens(&file_link));
         }
 
+        // The handle lacks what the command needs: refused, unopened.
+        let Err(err) = warm_hit(&path, &[Need::FullText]) else {
+            panic!("served a command the handle lacks a store for");
+        };
+        assert_eq!(
+            err.downcast_ref::<WarmLacks>(),
+            Some(&WarmLacks(Need::FullText))
+        );
+
         // No request: always the command's own open.
         let mut opened = false;
-        let got = hot_db(&path, || {
+        let got = hot_db(&path, &[Need::FullText], || {
             opened = true;
             Err(anyhow::anyhow!("cold open"))
         });
@@ -1384,6 +1460,104 @@ mod tests {
                 }
                 run
             });
+        }
+
+        /// Run a command in-process on `warm` and return what
+        /// `dispatch_command` returned, which an in-process host sees before
+        /// any error is printed.
+        fn dispatch_warm(warm: &WarmDb, args: &[&str]) -> anyhow::Result<i32> {
+            let ctx = warm_request(warm, None);
+            let args = argv(args);
+            on_cli_stack(move || {
+                capture(ctx, || {
+                    let cli = Cli::try_parse_from(&args).unwrap();
+                    let out = crate::Output::for_cli(&cli);
+                    crate::dispatch_command(cli, &out)
+                })
+                .2
+            })
+        }
+
+        /// A warm handle opened before a store existed can't serve a command
+        /// whose own open would create that store, and one without an LLM
+        /// can't serve `store --llm`. The command refuses with [`WarmLacks`]
+        /// before it writes anything, and the one-shot binary, which a host
+        /// falls back to, serves it.
+        #[test]
+        fn a_warm_handle_refuses_what_it_lacks() {
+            let tmp = tempfile::tempdir().unwrap();
+            let proj = build_fixture(tmp.path());
+            let db_path = proj.join(".axil/memory.axil");
+            let db = db_path.to_str().unwrap();
+            let companion = |suffix: &str| axil_core::companion_path(&db_path, suffix);
+            for suffix in [".fts", ".ts"] {
+                let _ = std::fs::remove_dir_all(companion(suffix));
+                let _ = std::fs::remove_file(companion(suffix));
+            }
+            let stored = r#"{"summary":"stored through a handle that lacks a store"}"#;
+
+            // (one-shot serves it too, args, what the handle lacks)
+            let mut cases: Vec<(bool, Vec<String>, Need)> = vec![(
+                true,
+                argv(&["store", "decisions", stored, "--llm"]),
+                Need::Llm,
+            )];
+            if cfg!(feature = "fts") {
+                cases.push((true, argv(&["fts", "cache"]), Need::FullText));
+            }
+            if cfg!(feature = "timeseries") {
+                cases.push((true, argv(&["since", "1h"]), Need::TimeSeries));
+            }
+            #[cfg(feature = "embed")]
+            {
+                // The one-shot run would load the embedding model.
+                let embed = argv(&["store", "decisions", stored, "--embed", "summary"]);
+                cases.push((false, embed, Need::Vectors));
+                let dims = crate::resolve_embedding_model(&db_path).dimensions();
+                let vector = serde_json::to_string(&vec![0.5f32; dims]).unwrap();
+                let raw = argv(&["store", "decisions", stored, "--vector", &vector]);
+                cases.push((true, raw, Need::Vectors));
+            }
+
+            let warm = WarmDb::open(&db_path).unwrap();
+            let decisions = || warm.db().list("decisions").unwrap().len();
+            let before = decisions();
+            for (_, args, need) in &cases {
+                let mut args: Vec<&str> = args[1..].iter().map(String::as_str).collect();
+                args.splice(0..0, ["--db", db]);
+                let err = dispatch_warm(&warm, &args).unwrap_err();
+                assert_eq!(
+                    err.downcast_ref::<WarmLacks>(),
+                    Some(&WarmLacks(*need)),
+                    "{args:?}: {err:#}"
+                );
+            }
+            assert_eq!(decisions(), before, "a refused command wrote a record");
+            for suffix in [".fts", ".ts", ".vec"] {
+                assert!(
+                    !companion(suffix).exists(),
+                    "a refused command made {suffix}"
+                );
+            }
+            drop(warm);
+
+            // The vector store goes last: once it exists, every open loads
+            // the embedding model.
+            for (one_shot_serves, args, _) in &cases {
+                if !one_shot_serves {
+                    continue;
+                }
+                let mut args: Vec<&str> = args[1..].iter().map(String::as_str).collect();
+                args.splice(0..0, ["--db", db]);
+                let (out, err, code) = one_shot(&args, None);
+                assert_eq!(
+                    code,
+                    0,
+                    "{args:?}: {}{}",
+                    String::from_utf8_lossy(&out),
+                    String::from_utf8_lossy(&err)
+                );
+            }
         }
 
         /// `boot` on a warm handle shows an installed plugin's block, as the
