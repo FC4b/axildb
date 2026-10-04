@@ -121,8 +121,14 @@ jobs:
               | python3 -c 'import json, sys; m = json.load(sys.stdin); print(" ".join(f for p in m["packages"] for f in p["features"] if f != "default"))')
             for f in "" $features; do
               label="$h${f:+ --features $f}"
+              # The GPU execution providers load ONNX Runtime at run time, so
+              # a check needs no runtime download; without ORT_SKIP_DOWNLOAD,
+              # ort's download-binaries would still fetch the CUDA build. The
+              # CPU build does need its download, so only gpu* features skip it.
+              skip_ort=""
+              case "$f" in gpu*) skip_ort=1 ;; esac
               echo "::group::$label"
-              if ! cargo check --all-targets --manifest-path "$manifest" ${f:+--features "$f"}; then
+              if ! env ${skip_ort:+ORT_SKIP_DOWNLOAD=1} cargo check --all-targets --manifest-path "$manifest" ${f:+--features "$f"}; then
                 echo "::error::$label does not build"
                 failed+=("$label")
               fi
