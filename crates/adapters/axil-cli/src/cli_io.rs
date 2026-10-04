@@ -5,11 +5,26 @@
 //! collected into buffers instead of landing on the process's fds.
 //!
 //! A one-shot `axil` run installs no request context. The print macros then
-//! hand their arguments to the std `print!` / `eprint!` macros, so the bytes,
-//! the line buffering, and the failure mode are exactly a bare `println!`'s:
-//! the binary installs no SIGPIPE handler, so writing to a closed pipe panics
-//! with "failed printing to stdout: Broken pipe", and `main` turns the
-//! panicked thread into exit code 1.
+//! write their arguments to the locked process stdout / stderr, so the bytes
+//! and the line buffering are exactly a bare `println!`'s.
+//!
+//! A reader that goes away (`axil recall … | head`) is the one difference.
+//! Rust ignores SIGPIPE, so the write fails with `BrokenPipe`, where
+//! `println!` would panic. A panic is the wrong way out: unwinding still drops
+//! the database, but redb skips its clean shutdown on a panicking thread, so
+//! the next open finds the stores "not closed cleanly" and repairs them.
+//! Restoring SIGPIPE's default action would be worse: the signal kills the
+//! process before anything closes. So the stream is marked closed instead
+//! ([`stdout_closed`]), and that write and every later one to it is
+//! discarded. The command runs to its end, the database closes normally, and
+//! the process exits with the command's own code: 0 for a command that
+//! succeeded. That is the convention ripgrep and fd follow, and it fits a
+//! reader that stopped because it had what it wanted. 141 (what a process
+//! killed by SIGPIPE reports) would fail every `set -o pipefail` script that
+//! pipes `axil` into `head`. Running on also means a closed pipe never cuts a
+//! write command off halfway. Commands that print in an endless loop (the
+//! `--watch` modes) check [`stdout_closed`] and stop. Any other write error
+//! panics with `println!`'s message.
 //!
 //! [`capture`] installs a [`ReqCtx`] on the current thread for the duration
 //! of a closure. Output then appends to the context's buffers and stdin is
@@ -19,11 +34,17 @@ use std::cell::RefCell;
 use std::fmt;
 use std::io::{self, IsTerminal, Read, Write};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 thread_local! {
     static REQ: RefCell<Option<ReqCtx>> = const { RefCell::new(None) };
 }
+
+/// Set once a write finds the process's stdout closed by its reader.
+static STDOUT_CLOSED: AtomicBool = AtomicBool::new(false);
+/// Set once a write finds the process's stderr closed by its reader.
+static STDERR_CLOSED: AtomicBool = AtomicBool::new(false);
 
 /// I/O state for one command run in-process.
 pub struct ReqCtx {
@@ -109,15 +130,49 @@ fn append_fmt(to_err: bool, args: fmt::Arguments<'_>, newline: bool) -> bool {
     append(to_err, text.as_bytes())
 }
 
+/// Whether a write found the process's stdout closed by its reader. Output
+/// printed since then was discarded. Never set by a captured request.
+pub fn stdout_closed() -> bool {
+    STDOUT_CLOSED.load(Ordering::Relaxed)
+}
+
+/// Write to the process's stdout or stderr the way `print!` / `eprint!` do,
+/// except for a reader that has gone away: the stream is marked closed and
+/// this write and every later one to it is dropped. See the module docs.
+fn write_process(to_err: bool, args: fmt::Arguments<'_>, newline: bool) {
+    fn write_args(w: &mut impl Write, args: fmt::Arguments<'_>, newline: bool) -> io::Result<()> {
+        if newline {
+            writeln!(w, "{args}")
+        } else {
+            write!(w, "{args}")
+        }
+    }
+
+    let (closed, label) = if to_err {
+        (&STDERR_CLOSED, "stderr")
+    } else {
+        (&STDOUT_CLOSED, "stdout")
+    };
+    if closed.load(Ordering::Relaxed) {
+        return;
+    }
+    let written = if to_err {
+        write_args(&mut io::stderr().lock(), args, newline)
+    } else {
+        write_args(&mut io::stdout().lock(), args, newline)
+    };
+    match written {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::BrokenPipe => closed.store(true, Ordering::Relaxed),
+        Err(e) => panic!("failed printing to {label}: {e}"),
+    }
+}
+
 /// Backs [`outln!`] and [`outp!`].
 #[doc(hidden)]
 pub fn out_fmt(args: fmt::Arguments<'_>, newline: bool) {
     if !append_fmt(false, args, newline) {
-        if newline {
-            std::println!("{args}");
-        } else {
-            std::print!("{args}");
-        }
+        write_process(false, args, newline);
     }
 }
 
@@ -125,11 +180,7 @@ pub fn out_fmt(args: fmt::Arguments<'_>, newline: bool) {
 #[doc(hidden)]
 pub fn err_fmt(args: fmt::Arguments<'_>, newline: bool) {
     if !append_fmt(true, args, newline) {
-        if newline {
-            std::eprintln!("{args}");
-        } else {
-            std::eprint!("{args}");
-        }
+        write_process(true, args, newline);
     }
 }
 
@@ -169,7 +220,9 @@ macro_rules! errp {
 
 /// A [`Write`] handle on the command's stdout, for output streamed through a
 /// writer rather than printed: the request's buffer when one is installed,
-/// the locked process stdout otherwise.
+/// the locked process stdout otherwise. A closed stdout is handled as the
+/// print macros handle it: the bytes are dropped and the write reports
+/// success, so the command runs to its end.
 pub struct Stdout(Option<io::StdoutLock<'static>>);
 
 /// The command's stdout as a [`Write`] handle; see [`Stdout`].
@@ -181,18 +234,33 @@ pub fn stdout() -> Stdout {
     }
 }
 
+/// Turn a write to the process stdout that found its reader gone into a
+/// success worth `dropped`, marking stdout closed.
+fn unless_closed<T>(result: io::Result<T>, dropped: T) -> io::Result<T> {
+    match result {
+        Err(e) if e.kind() == io::ErrorKind::BrokenPipe => {
+            STDOUT_CLOSED.store(true, Ordering::Relaxed);
+            Ok(dropped)
+        }
+        other => other,
+    }
+}
+
 impl Write for Stdout {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         match &mut self.0 {
-            Some(lock) => lock.write(buf),
+            Some(_) if stdout_closed() => Ok(buf.len()),
+            Some(lock) => unless_closed(lock.write(buf), buf.len()),
             None if append(false, buf) => Ok(buf.len()),
-            None => io::stdout().write(buf),
+            None if stdout_closed() => Ok(buf.len()),
+            None => unless_closed(io::stdout().write(buf), buf.len()),
         }
     }
 
     fn flush(&mut self) -> io::Result<()> {
         match &mut self.0 {
-            Some(lock) => lock.flush(),
+            Some(_) if stdout_closed() => Ok(()),
+            Some(lock) => unless_closed(lock.flush(), ()),
             None => Ok(()),
         }
     }
@@ -550,6 +618,9 @@ mod tests {
         use std::process::{Command, Stdio};
 
         const CHILD_ARGS_ENV: &str = "AXIL_CLI_IO_PARITY_ARGS";
+        /// Set when the child should wait, after writing [`MARK`], until its
+        /// stdin closes before it runs the command.
+        const CHILD_WAIT_ENV: &str = "AXIL_CLI_IO_PARITY_WAIT";
         /// Written on both streams before the command runs, so the child's
         /// output can be told apart from the test harness's.
         const MARK: &[u8] = b"\x01axil-cli-io-parity\x01\n";
@@ -589,19 +660,34 @@ mod tests {
                 stream.write_all(MARK).unwrap();
                 stream.flush().unwrap();
             }
+            if std::env::var_os(CHILD_WAIT_ENV).is_some() {
+                io::stdin().read_to_end(&mut Vec::new()).unwrap();
+            }
             let code = on_cli_stack(move || run_cli(Cli::parse_from(args)));
             std::process::exit(code);
         }
 
+        /// This test binary, set to run [`one_shot_child`] on `args`.
+        fn one_shot_command(args: &[&str]) -> Command {
+            let mut cmd = Command::new(std::env::current_exe().unwrap());
+            cmd.args([
+                "cli_io::tests::parity::one_shot_child",
+                "--exact",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(CHILD_ARGS_ENV, serde_json::to_string(&argv(args)).unwrap());
+            cmd
+        }
+
+        /// The bytes of `stream` after [`MARK`].
+        fn after_mark(stream: &[u8]) -> Option<Vec<u8>> {
+            let at = stream.windows(MARK.len()).position(|w| w == MARK)?;
+            Some(stream[at + MARK.len()..].to_vec())
+        }
+
         fn one_shot(args: &[&str], stdin: Option<&[u8]>) -> (Vec<u8>, Vec<u8>, i32) {
-            let mut child = Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "cli_io::tests::parity::one_shot_child",
-                    "--exact",
-                    "--nocapture",
-                    "--test-threads=1",
-                ])
-                .env(CHILD_ARGS_ENV, serde_json::to_string(&argv(args)).unwrap())
+            let mut child = one_shot_command(args)
                 .stdin(if stdin.is_some() {
                     Stdio::piped()
                 } else {
@@ -618,16 +704,12 @@ mod tests {
             }
             let output = child.wait_with_output().unwrap();
             let after_mark = |stream: &[u8]| {
-                let at = stream
-                    .windows(MARK.len())
-                    .position(|w| w == MARK)
-                    .unwrap_or_else(|| {
-                        panic!(
-                            "child never ran: {}",
-                            String::from_utf8_lossy(&output.stderr)
-                        )
-                    });
-                stream[at + MARK.len()..].to_vec()
+                after_mark(stream).unwrap_or_else(|| {
+                    panic!(
+                        "child never ran: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    )
+                })
             };
             (
                 after_mark(&output.stdout),
@@ -1053,6 +1135,51 @@ mod tests {
             if cfg!(feature = "checkpoint") {
                 assert!(get("checkpoint -").0.contains(r#""kind":"snapshot""#));
                 assert!(get("checkpoint --final").0.contains(r#""kind":"final""#));
+            }
+        }
+
+        /// `axil … | head` once `head` has exited: the command prints into
+        /// a pipe nobody reads. It must run to its end and exit 0 without a
+        /// panic, as the module docs describe.
+        #[test]
+        fn a_closed_stdout_ends_the_command_cleanly() {
+            let tmp = tempfile::tempdir().unwrap();
+            let proj = build_fixture(tmp.path());
+            let db = proj.join(".axil/memory.axil");
+            let db = db.to_str().unwrap();
+            let commands = [
+                vec!["--db", db, "boot"],
+                vec!["--db", db, "--format", "table", "query", "decisions"],
+                vec!["--db", db, "export"],
+            ];
+            for args in commands {
+                let mut child = one_shot_command(&args)
+                    .env(CHILD_WAIT_ENV, "1")
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .unwrap();
+                // Read up to the mark, past the harness's own lines, then
+                // hang up. The child waits on its stdin until then.
+                let mut stdout = child.stdout.take().unwrap();
+                let mut seen = Vec::new();
+                while after_mark(&seen).is_none() {
+                    let mut chunk = [0u8; 256];
+                    let n = stdout.read(&mut chunk).unwrap();
+                    assert!(n > 0, "child exited before its mark");
+                    seen.extend_from_slice(&chunk[..n]);
+                }
+                drop(stdout);
+                drop(child.stdin.take());
+                let output = child.wait_with_output().unwrap();
+                let err = after_mark(&output.stderr).unwrap();
+                let err = String::from_utf8_lossy(&err);
+                assert_eq!(output.status.code(), Some(0), "{args:?}: {err}");
+                assert!(
+                    !err.contains("panicked") && !err.contains("Broken pipe"),
+                    "{args:?}: {err}"
+                );
             }
         }
 

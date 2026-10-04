@@ -56,3 +56,11 @@ These three families overlap by name, which is the usual source of confusion. Th
 ## JSON output
 
 All commands output JSON by default, making them easy to parse programmatically. Use `--format pretty` for human-readable output.
+
+## Piping
+
+A reader that stops early, as in `axil recall "auth" | head -1`, ends `axil`
+cleanly: the rest of the output is discarded, the command finishes and closes
+the database normally, and the exit code is the command's own (0 when it
+succeeded), the same convention `rg` and `fd` follow. The `--watch` modes stop
+once their reader has gone away.

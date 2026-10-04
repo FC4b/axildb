@@ -8368,6 +8368,9 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
                     errp!("\x1B[2J\x1B[H");
                     let stats = db.stats(table.as_deref()).context("stats failed")?;
                     out.print(&serde_json::to_value(&stats).unwrap());
+                    if cli_io::stdout_closed() {
+                        break Ok(EXIT_OK);
+                    }
                     out.status(&format!(
                         "(refreshing every {interval_secs}s — Ctrl+C to stop)"
                     ));
@@ -12651,6 +12654,9 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
                         Err(e) => {
                             errln!("axil ingest-scip --watch: stat failed: {e}");
                         }
+                    }
+                    if cli_io::stdout_closed() {
+                        break Ok(EXIT_OK);
                     }
                     std::thread::sleep(std::time::Duration::from_secs(2));
                 }
