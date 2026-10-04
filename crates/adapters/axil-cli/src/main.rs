@@ -7657,11 +7657,13 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
                         .unwrap_or_default();
                     let index_result = (|| -> anyhow::Result<Value> {
                         let db = open_with_all_detected(&db_path)?;
+                        let max_file_size_kb = index_config.max_file_size_kb;
                         let indexer = axil_indexer::ProjectIndexer::new(&db, index_config)
                             .with_progress(make_index_progress(out.quiet));
                         let report = indexer
                             .index_full(&cwd)
                             .map_err(|e| anyhow::anyhow!("{e}"))?;
+                        warn_skipped_large(&report, max_file_size_kb);
                         Ok(serde_json::to_value(&report)?)
                     })();
                     match index_result {
@@ -8406,6 +8408,9 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
                     errp!("\x1B[2J\x1B[H");
                     let stats = db.stats(table.as_deref()).context("stats failed")?;
                     out.print(&serde_json::to_value(&stats).unwrap());
+                    if cli_io::stdout_closed() {
+                        break Ok(EXIT_OK);
+                    }
                     out.status(&format!(
                         "(refreshing every {interval_secs}s — Ctrl+C to stop)"
                     ));
@@ -9420,7 +9425,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
             // Resolve project root and config once for freshness + auto-refresh.
             #[cfg(feature = "indexer")]
             let (resolved_root, resolved_config) = {
-                let root = detect_project_root(&db_path);
+                let root = freshness_root(&db, &db_path);
                 let cfg = root
                     .as_ref()
                     .and_then(|r| axil_core::load_config_from(r).ok());
@@ -11694,18 +11699,23 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
 
             if dry_run {
                 let project_type = axil_indexer::scanner::detect_project_type(&root);
-                let files = axil_indexer::scanner::scan_files(&root, &config);
+                // No database is needed for a dry run, but when there is one
+                // its files are left out exactly as the real run leaves them.
+                let db_path = require_db(&db_opt).ok();
+                let scan = axil_indexer::scanner::scan_files(&root, &config, db_path.as_deref());
                 out.print(&json!({
                     "dry_run": true,
                     "project_type": project_type.as_str(),
-                    "files_to_index": files.len(),
-                    "files": files.iter().map(|f| &f.rel_path).collect::<Vec<_>>(),
+                    "files_to_index": scan.files.len(),
+                    "files": scan.files.iter().map(|f| &f.rel_path).collect::<Vec<_>>(),
+                    "skipped_large": scan.skipped_large,
                 }));
                 return Ok(EXIT_OK);
             }
 
             let db_path = require_db(&db_opt)?;
             let db = open_with_all_detected(&db_path)?;
+            let max_file_size_kb = config.max_file_size_kb;
             let indexer = axil_indexer::ProjectIndexer::new(&db, config)
                 .with_progress(make_index_progress(out.quiet));
 
@@ -11719,6 +11729,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
                     .map_err(|e| anyhow::anyhow!("{e}"))?
             };
 
+            warn_skipped_large(&result, max_file_size_kb);
             out.print(&serde_json::to_value(&result)?);
             Ok(EXIT_OK)
         }
@@ -11740,6 +11751,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
             let db_path = require_db(&db_opt)?;
             let proxies = {
                 let db = open_with_all_detected(&db_path)?;
+                let max_file_size_kb = config.max_file_size_kb;
                 let indexer = axil_indexer::ProjectIndexer::new(&db, config)
                     .with_progress(make_index_progress(out.quiet));
                 let result = if full || !indexer.has_index() {
@@ -11751,6 +11763,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
                         .index_incremental(&root)
                         .map_err(|e| anyhow::anyhow!("{e}"))?
                 };
+                warn_skipped_large(&result, max_file_size_kb);
                 // Drop the DB handle (end of scope) before spawning the SCIP
                 // child so the worker can take the redb write lock cleanly.
                 serde_json::to_value(&result)?
@@ -11795,7 +11808,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
             let db_path = require_db(&db_opt)?;
             let db = open_with_best_effort(&db_path)?;
 
-            let project_root = detect_project_root(&db_path);
+            let project_root = freshness_root(&db, &db_path);
             let index_config = project_root
                 .as_ref()
                 .and_then(|root| axil_core::load_config_from(root).ok())
@@ -11841,7 +11854,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
         Command::IndexStats => {
             let db_path = require_db(&db_opt)?;
             let db = open_with_all_detected(&db_path)?;
-            let project_root = detect_project_root(&db_path);
+            let project_root = freshness_root(&db, &db_path);
             let index_config = project_root
                 .as_ref()
                 .and_then(|root| axil_core::load_config_from(root).ok())
@@ -12766,6 +12779,9 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
                         Err(e) => {
                             errln!("axil ingest-scip --watch: stat failed: {e}");
                         }
+                    }
+                    if cli_io::stdout_closed() {
+                        break Ok(EXIT_OK);
                     }
                     std::thread::sleep(std::time::Duration::from_secs(2));
                 }
@@ -13980,7 +13996,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
             #[cfg(feature = "indexer")]
             {
                 // Freshness check
-                let project_root = detect_project_root(&db_path);
+                let project_root = freshness_root(&db, &db_path);
                 if let Some(ref root) = project_root {
                     let idx_config = load_config(&db_path).map(|c| c.index).unwrap_or_default();
                     let freshness =
@@ -16129,9 +16145,19 @@ fn run_worker_and_report(db: &axil_core::Axil, out: &Output) {
 /// Walk up from the database path to find the project root.
 /// Looks for Cargo.toml, package.json, pyproject.toml, go.mod, etc.
 ///
+/// `None` when no directory above holds a marker, and when the nearest one
+/// that does is the home directory or the filesystem root (a dotfiles repo
+/// puts `.git` in `$HOME`). Callers walk the root they get, and walking a
+/// home directory on every read is never what a marker meant.
+///
 /// Not feature-gated: pure `std::path` walking with no indexer dependency,
 /// called from ungated handlers (`memory-pressure`, `decay`).
 fn detect_project_root(db_path: &Path) -> Option<PathBuf> {
+    detect_project_root_under(db_path, axil_core::home_dir().as_deref())
+}
+
+/// [`detect_project_root`] with the home directory passed in.
+fn detect_project_root_under(db_path: &Path, home: Option<&Path>) -> Option<PathBuf> {
     let mut dir = db_path.parent()?.to_path_buf();
     let markers = [
         "Cargo.toml",
@@ -16143,17 +16169,55 @@ fn detect_project_root(db_path: &Path) -> Option<PathBuf> {
         ".git",
     ];
     loop {
-        for marker in &markers {
-            if dir.join(marker).exists() {
-                return Some(dir);
+        if markers.iter().any(|marker| dir.join(marker).exists()) {
+            if dir.as_os_str().is_empty() {
+                dir = PathBuf::from(".");
             }
+            return (!is_home_or_filesystem_root(&dir, home)).then_some(dir);
         }
         if !dir.pop() {
-            break;
+            return None;
         }
     }
-    // Fallback: db parent directory
-    db_path.parent().map(|p| p.to_path_buf())
+}
+
+/// Whether `dir` is the home directory or the filesystem root.
+fn is_home_or_filesystem_root(dir: &Path, home: Option<&Path>) -> bool {
+    let Ok(dir) = std::fs::canonicalize(dir) else {
+        return false;
+    };
+    dir.parent().is_none()
+        || home
+            .and_then(|home| std::fs::canonicalize(home).ok())
+            .is_some_and(|home| home == dir)
+}
+
+/// The directory a read may walk to check the code index's freshness, or
+/// `None` when no walk is safe.
+///
+/// That is the project root a marker shows ([`detect_project_root`]), or else
+/// the directory the index was last built from: someone ran `axil index` on
+/// it. With neither, the read skips the check. An unmarked directory can be a
+/// whole home directory, and recall and boot would walk and hash all of it
+/// on every call.
+#[cfg(feature = "indexer")]
+fn freshness_root(db: &Axil, db_path: &Path) -> Option<PathBuf> {
+    detect_project_root(db_path).or_else(|| axil_indexer::freshness::indexed_root(db))
+}
+
+/// Warn, on stderr, about the source files an index run left out for size:
+/// their symbols are missing from code-search and fts, and nothing else says
+/// why. Commands run to index call this. The re-index that `recall` and
+/// `code-context` start on their own stays quiet: its stderr reaches agent
+/// hooks on every stale read, and the index records the files for
+/// `axil index-stats` instead.
+#[cfg(feature = "indexer")]
+fn warn_skipped_large(result: &axil_indexer::IndexResult, max_file_size_kb: u64) {
+    if let Some(warning) =
+        axil_indexer::scanner::skipped_large_warning(&result.skipped_large, max_file_size_kb)
+    {
+        errln!("{warning}");
+    }
 }
 
 // ─── dependency documentation memory ──────────────────────────────
@@ -22490,5 +22554,32 @@ mod open_helper_tests {
             #[cfg(feature = "indexer")]
             check("open_with_best_effort", open_with_best_effort(&path));
         }
+    }
+}
+
+#[cfg(test)]
+mod project_root_tests {
+    use super::*;
+
+    #[test]
+    fn only_a_marker_makes_a_project_root_and_never_home() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let proj = home.join("proj");
+        let db = proj.join(".axil").join("memory.axil");
+        std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+        let root = |db: &Path| detect_project_root_under(db, Some(&home));
+
+        // No marker anywhere above: no root, not the directory holding `.axil/`.
+        assert_eq!(root(&db), None);
+
+        // A marker in home (a dotfiles repo) does not make home the root.
+        std::fs::create_dir_all(home.join(".git")).unwrap();
+        assert_eq!(root(&db), None);
+        assert_eq!(root(&home.join(".axil").join("memory.axil")), None);
+
+        // A marker in the project does.
+        std::fs::write(proj.join("Cargo.toml"), "").unwrap();
+        assert_eq!(root(&db), Some(proj));
     }
 }

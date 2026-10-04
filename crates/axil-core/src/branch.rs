@@ -58,66 +58,224 @@ fn named_space_files(db_path: &Path) -> Vec<(PathBuf, String)> {
     out
 }
 
-/// Best-effort cross-process serialization for branch file copies.
+/// Serializes branch creation across processes for the whole create.
+///
+/// The lock is an OS file lock on `<db>.branch-lock`, held from before the
+/// first copy until after the branch is published. The OS releases it when
+/// its holder exits, so it never expires under a creator that is still
+/// copying, however long that takes, and a second creator only ever finds
+/// the leftovers of one that died.
+///
+/// Where the filesystem refuses OS locks, the lock is the file's existence
+/// instead, judged stale after five minutes without change: the scheme older
+/// axil binaries use. A holder from one of those writes only its pid, so a
+/// fresh file not written by an OS-lock holder is honored even when the OS
+/// lock is free.
 ///
 /// redb's own file lock cannot be held across the copy — on Windows its
 /// byte-range lock makes the file uncopyable while held (verified: OS error 33),
 /// and on Unix the copy succeeds but captures a header redb marks "recovery
 /// required" while the file is open, so the branch would need a full repair
-/// on first open — so the handles must be dropped first. This marker file
-/// closes the resulting two-writers-both-branching race. It is advisory: it serializes
-/// processes that go through branch creation, but not an unrelated writer that
-/// opens the database mid-copy (see the quiesce notes on [`copy_branch_files`]).
+/// on first open — so the handles must be dropped first. This lock serializes
+/// branch creators, but not an unrelated writer that opens the database
+/// mid-copy (see the quiesce notes on [`copy_branch_files`]).
 struct BranchCopyGuard {
     lock_path: PathBuf,
-    #[allow(dead_code)]
-    held: bool,
+    /// The OS-locked handle, or `None` when the lock is held by the file's
+    /// existence alone.
+    file: Option<fs::File>,
+    /// What this holder wrote into the file, so that releasing a lock held
+    /// by existence never removes a file another holder wrote since.
+    body: String,
 }
 
-impl BranchCopyGuard {
-    fn acquire(db_path: &Path) -> std::io::Result<Self> {
-        let mut p = db_path.as_os_str().to_owned();
-        p.push(".branch-lock");
-        let lock_path = PathBuf::from(p);
+/// How long a creator waits for another to finish before giving up.
+const BRANCH_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+/// Age after which a lock held by existence alone counts as abandoned.
+const BRANCH_LOCK_STALE_SECS: u64 = 300;
+/// Content prefix of a lock file written by a holder of the OS lock.
+const BRANCH_LOCK_TAG: &str = "flock";
 
-        const RETRIES: usize = 50; // ~5s total wait
-        const STALE_SECS: u64 = 300;
-        for _ in 0..RETRIES {
-            match std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&lock_path)
-            {
-                Ok(_) => return Ok(Self { lock_path, held: true }),
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                    // Break a stale marker left by a crashed creator.
-                    let stale = std::fs::metadata(&lock_path)
-                        .and_then(|m| m.modified())
-                        .ok()
-                        .and_then(|m| m.elapsed().ok())
-                        .is_some_and(|age| age.as_secs() > STALE_SECS);
-                    if stale {
-                        let _ = std::fs::remove_file(&lock_path);
-                        continue;
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(100));
+impl BranchCopyGuard {
+    fn acquire(db_path: &Path, wait: std::time::Duration) -> std::io::Result<Self> {
+        Self::acquire_with(db_path, wait, fs::File::try_lock)
+    }
+
+    /// `acquire`, with the OS lock call passed in so tests can stand in for a
+    /// filesystem that refuses it.
+    fn acquire_with(
+        db_path: &Path,
+        wait: std::time::Duration,
+        try_lock: impl Fn(&fs::File) -> std::result::Result<(), fs::TryLockError>,
+    ) -> std::io::Result<Self> {
+        let lock_path = crate::companion_path(db_path, ".branch-lock");
+        let deadline = std::time::Instant::now() + wait;
+        loop {
+            if let Some(guard) = Self::try_acquire(&lock_path, &try_lock)? {
+                return Ok(guard);
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "another branch creation is in progress",
+                ));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
+    /// One attempt; `Ok(None)` while someone else holds the lock.
+    fn try_acquire(
+        lock_path: &Path,
+        try_lock: &impl Fn(&fs::File) -> std::result::Result<(), fs::TryLockError>,
+    ) -> std::io::Result<Option<Self>> {
+        let (file, created) = match open_lock_file(lock_path, true) {
+            Ok(file) => (file, true),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                match open_lock_file(lock_path, false) {
+                    Ok(file) => (file, false),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                    Err(e) => return Err(e),
                 }
-                Err(e) => return Err(e),
+            }
+            Err(e) => return Err(e),
+        };
+        match try_lock(&file) {
+            Ok(()) => {}
+            Err(fs::TryLockError::WouldBlock) => return Ok(None),
+            Err(fs::TryLockError::Error(_)) => {
+                drop(file);
+                if created {
+                    let body = staging_token();
+                    let _ = fs::write(lock_path, &body);
+                    return Ok(Some(Self {
+                        lock_path: lock_path.to_path_buf(),
+                        file: None,
+                        body,
+                    }));
+                }
+                if !lock_age_fresh(fs::metadata(lock_path)) {
+                    let _ = fs::remove_file(lock_path);
+                }
+                return Ok(None);
             }
         }
-        Err(std::io::Error::new(
-            std::io::ErrorKind::WouldBlock,
-            "another branch creation appears in progress (lock marker present)",
-        ))
+        // A holder unlinks the path before it unlocks, so a lock taken on the
+        // file it just unlinked proves nothing: try again on the file the
+        // path names now.
+        if !same_file(&file, lock_path) {
+            return Ok(None);
+        }
+        // An older axil holds the lock by the file's existence and writes
+        // only its pid. An empty file is free: one just created, or one whose
+        // holder died before writing.
+        let body = read_lock_body(&file);
+        if !created
+            && !body.is_empty()
+            && !body.starts_with(BRANCH_LOCK_TAG)
+            && lock_age_fresh(file.metadata())
+        {
+            return Ok(None);
+        }
+        let body = format!("{BRANCH_LOCK_TAG} {}", std::process::id());
+        {
+            use std::io::{Seek as _, Write as _};
+            let mut handle = &file;
+            let _ = handle.set_len(0);
+            let _ = handle.seek(std::io::SeekFrom::Start(0));
+            let _ = handle.write_all(body.as_bytes());
+        }
+        Ok(Some(Self {
+            lock_path: lock_path.to_path_buf(),
+            file: Some(file),
+            body,
+        }))
+    }
+
+    /// Whether the OS lock is held: no other live creator can run, so what
+    /// another creator left behind is safe to remove.
+    fn exclusive(&self) -> bool {
+        self.file.is_some()
     }
 }
 
 impl Drop for BranchCopyGuard {
     fn drop(&mut self) {
-        if self.held {
-            let _ = std::fs::remove_file(&self.lock_path);
+        match self.file.take() {
+            // Unlink while still locked, so nobody can lock this file after
+            // the path stops naming it and believe they hold the lock.
+            #[cfg(unix)]
+            Some(file) => {
+                if same_file(&file, &self.lock_path) {
+                    let _ = fs::remove_file(&self.lock_path);
+                }
+                drop(file);
+            }
+            // The handle withholds delete sharing, so the path cannot be
+            // removed while it is open: close it, then remove the path. That
+            // fails harmlessly if another creator opened it in between.
+            #[cfg(not(unix))]
+            Some(file) => {
+                drop(file);
+                let _ = fs::remove_file(&self.lock_path);
+            }
+            None => {
+                if fs::read_to_string(&self.lock_path).is_ok_and(|body| body.trim() == self.body) {
+                    let _ = fs::remove_file(&self.lock_path);
+                }
+            }
         }
     }
+}
+
+/// Open the branch lock file for reading and writing, creating it
+/// exclusively when `create_new` is set.
+fn open_lock_file(path: &Path, create_new: bool) -> std::io::Result<fs::File> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true).write(true).create_new(create_new);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        // FILE_SHARE_READ | FILE_SHARE_WRITE without FILE_SHARE_DELETE, so
+        // the path cannot be unlinked while a holder has it open.
+        options.share_mode(0x1 | 0x2);
+    }
+    options.open(path)
+}
+
+/// Whether `path` still names the file open as `file`.
+#[cfg(unix)]
+fn same_file(file: &fs::File, path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+    match (file.metadata(), fs::metadata(path)) {
+        (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino(),
+        _ => false,
+    }
+}
+
+/// Whether `path` still names the file open as `file`: always, since
+/// `open_lock_file` withholds delete sharing.
+#[cfg(not(unix))]
+fn same_file(_file: &fs::File, _path: &Path) -> bool {
+    true
+}
+
+/// The trimmed content of the lock file, or "" when it cannot be read.
+fn read_lock_body(file: &fs::File) -> String {
+    use std::io::Read as _;
+    let mut body = String::new();
+    if (&*file).read_to_string(&mut body).is_err() {
+        return String::new();
+    }
+    body.trim().to_string()
+}
+
+/// Whether a lock held by existence alone is still live by its age.
+fn lock_age_fresh(meta: std::io::Result<fs::Metadata>) -> bool {
+    meta.and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .is_none_or(|age| age.as_secs() <= BRANCH_LOCK_STALE_SECS)
 }
 
 /// Build the branch base path: `<db_path>.branch.<name>`.
@@ -173,13 +331,37 @@ fn copy_file_retry(src: &Path, dest: &Path) -> std::io::Result<u64> {
 /// [`branch_create`] function and [`Axil::branch_create`](crate::Axil::branch_create),
 /// which flushes the engines and closes the handles before copying.
 ///
-/// Concurrency: the copy is serialized against other branch creations with an
-/// advisory marker file (`<db>.branch-lock`, auto-broken after 5 minutes).
-/// The core file is copied first, so the only remaining window is an external
-/// writer acquiring the lock mid-copy and mutating *companion* files after
-/// their core snapshot was taken — `doctor` + `heal --reindex` reconcile that.
+/// The files are copied under staging names owned by this call
+/// (`<branch>.staging-<pid>-<nonce>…`) and renamed into place only once every
+/// copy has succeeded, companions first and the core last, since a branch
+/// exists once its core does. A copy that fails removes its own staged files
+/// and whatever it already moved into place, and nothing else: no branch that
+/// lists but cannot open is left, and nothing blocks creating the same branch
+/// again. A staging name holds a dot, which no branch name can, so
+/// [`branch_list`] never shows one.
+///
+/// Concurrency: creators are serialized by [`BranchCopyGuard`], held for the
+/// whole create. Only while it holds the OS lock does a creator remove what
+/// an earlier, dead creator left under this branch's names; with the
+/// existence-only fallback another holder may still be alive. The core file
+/// is copied first, so the only remaining window is an external writer
+/// acquiring the database's own lock mid-copy and mutating *companion* files
+/// after their core snapshot was taken — `doctor` + `heal --reindex`
+/// reconcile that.
 pub(crate) fn copy_branch_files(db_path: &Path, name: &str) -> Result<PathBuf> {
-    let _guard = BranchCopyGuard::acquire(db_path)
+    copy_branch_files_with(db_path, name, BRANCH_LOCK_WAIT, &|_| {})
+}
+
+/// [`copy_branch_files`] with the lock wait passed in, and `after_step` called
+/// after each file or directory is staged (`"core"`, the companion suffix,
+/// `".fts"`), so tests can stall a copy partway.
+fn copy_branch_files_with(
+    db_path: &Path,
+    name: &str,
+    lock_wait: std::time::Duration,
+    after_step: &dyn Fn(&str),
+) -> Result<PathBuf> {
+    let guard = BranchCopyGuard::acquire(db_path, lock_wait)
         .map_err(|e| AxilError::plugin(format!("branch copy could not start: {e}")))?;
     let dest = branch_path(db_path, name);
     if dest.exists() {
@@ -188,53 +370,167 @@ pub(crate) fn copy_branch_files(db_path: &Path, name: &str) -> Result<PathBuf> {
             dest.display()
         )));
     }
-
-    // Copy main database file.
-    if db_path.exists() {
-        fs::copy(db_path, &dest)
-            .map_err(|e| AxilError::plugin(format!("failed to copy database: {e}")))?;
-    } else {
+    if !db_path.exists() {
         return Err(AxilError::plugin(format!(
             "database not found: {}",
             db_path.display()
         )));
     }
 
+    if guard.exclusive() {
+        // No other creator is alive, and with no core at `dest` nothing under
+        // this branch's names is a usable branch: clear what a creator that
+        // died left behind.
+        for staging in staging_bases(&dest) {
+            remove_branch_files(&staging);
+        }
+        remove_branch_companions(&dest);
+    }
+
+    let staging = crate::companion_path(&dest, &format!(".staging-{}", staging_token()));
+    let mut published = Vec::new();
+    let result = stage_branch_files(db_path, &staging, after_step).and_then(|()| {
+        publish_staged_branch(&staging, &dest, &mut published)
+            .map_err(|e| AxilError::plugin(format!("failed to publish branch '{name}': {e}")))
+    });
+    if result.is_err() {
+        remove_branch_files(&staging);
+        for path in &published {
+            let _ = fs::remove_file(path).or_else(|_| fs::remove_dir_all(path));
+        }
+    }
+    drop(guard);
+    result.map(|()| dest)
+}
+
+/// A name part no other creator uses: this process's pid and a nonce.
+fn staging_token() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or_default();
+    format!(
+        "{}-{nanos:x}{:x}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
+/// The staging bases (`<branch>.staging-<token>`) left beside a branch.
+fn staging_bases(dest: &Path) -> Vec<PathBuf> {
+    let parent = dest.parent().unwrap_or(Path::new("."));
+    let Some(prefix) = dest
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(|n| format!("{n}.staging-"))
+    else {
+        return Vec::new();
+    };
+    let mut bases: Vec<PathBuf> = fs::read_dir(parent)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().to_str()?.to_string();
+            let token = name.strip_prefix(&prefix)?.split('.').next()?.to_string();
+            Some(crate::companion_path(dest, &format!(".staging-{token}")))
+        })
+        .collect();
+    bases.sort();
+    bases.dedup();
+    bases
+}
+
+/// Copy the database and every companion under the branch base `staging`.
+fn stage_branch_files(db_path: &Path, staging: &Path, after_step: &dyn Fn(&str)) -> Result<()> {
+    // Copy main database file.
+    fs::copy(db_path, staging)
+        .map_err(|e| AxilError::plugin(format!("failed to copy database: {e}")))?;
+    after_step("core");
+
     // Copy companion files.
     for suffix in COMPANION_SUFFIXES {
         let src = crate::companion_path(db_path, suffix);
         if src.exists() {
-            let companion_dest = crate::companion_path(&dest, suffix);
+            let companion_dest = crate::companion_path(staging, suffix);
             copy_file_retry(&src, &companion_dest).map_err(|e| {
                 AxilError::plugin(format!(
                     "failed to copy companion file {}: {e}",
                     src.display()
                 ))
             })?;
+            after_step(suffix);
         }
     }
 
     // Copy named vector-space companions (`<db>.vec.<name>`) — a branch
     // without them loses every named-space index.
     for (src, space) in named_space_files(db_path) {
-        let companion_dest = crate::companion_path(&dest, &format!(".vec.{space}"));
+        let suffix = format!(".vec.{space}");
+        let companion_dest = crate::companion_path(staging, &suffix);
         copy_file_retry(&src, &companion_dest).map_err(|e| {
             AxilError::plugin(format!(
                 "failed to copy named vector space {}: {e}",
                 src.display()
             ))
         })?;
+        after_step(&suffix);
     }
 
     // Copy FTS directory if it exists.
     let fts_src = crate::companion_path(db_path, ".fts");
     if fts_src.is_dir() {
-        let fts_dest = crate::companion_path(&dest, ".fts");
-        copy_dir_recursive(&fts_src, &fts_dest)
+        let fts_dest = crate::companion_path(staging, ".fts");
+        copy_dir_stable(&fts_src, &fts_dest)
             .map_err(|e| AxilError::plugin(format!("failed to copy FTS directory: {e}")))?;
+        after_step(".fts");
     }
+    Ok(())
+}
 
-    Ok(dest)
+/// Rename a staged branch's files to their final names, the core last,
+/// recording each final path in `published` as it is moved.
+fn publish_staged_branch(
+    staging: &Path,
+    dest: &Path,
+    published: &mut Vec<PathBuf>,
+) -> std::io::Result<()> {
+    let mut moves = Vec::new();
+    for suffix in COMPANION_SUFFIXES.iter().copied().chain([".fts"]) {
+        let from = crate::companion_path(staging, suffix);
+        if from.exists() {
+            moves.push((from, crate::companion_path(dest, suffix)));
+        }
+    }
+    for (from, space) in named_space_files(staging) {
+        moves.push((from, crate::companion_path(dest, &format!(".vec.{space}"))));
+    }
+    moves.push((staging.to_path_buf(), dest.to_path_buf()));
+    for (from, to) in moves {
+        fs::rename(from, &to)?;
+        published.push(to);
+    }
+    Ok(())
+}
+
+/// Remove a branch's companions under the branch base `base`, best effort:
+/// engine files, named vector spaces, and the FTS directory.
+fn remove_branch_companions(base: &Path) {
+    for suffix in COMPANION_SUFFIXES {
+        let _ = fs::remove_file(crate::companion_path(base, suffix));
+    }
+    for (companion, _space) in named_space_files(base) {
+        let _ = fs::remove_file(companion);
+    }
+    let _ = fs::remove_dir_all(crate::companion_path(base, ".fts"));
+}
+
+/// [`remove_branch_companions`], then the core file too.
+fn remove_branch_files(base: &Path) {
+    remove_branch_companions(base);
+    let _ = fs::remove_file(base);
 }
 
 /// List all branches for a database.
@@ -271,26 +567,8 @@ pub fn branch_delete(db_path: &Path, name: &str) -> Result<()> {
         return Err(AxilError::plugin(format!("branch '{name}' does not exist")));
     }
 
-    // Delete companion files first.
-    for suffix in COMPANION_SUFFIXES {
-        let companion = crate::companion_path(&dest, suffix);
-        if companion.exists() {
-            let _ = fs::remove_file(&companion);
-        }
-    }
-
-    // Delete named vector-space companions too.
-    for (companion, _space) in named_space_files(&dest) {
-        let _ = fs::remove_file(&companion);
-    }
-
-    // Delete FTS directory.
-    let fts = crate::companion_path(&dest, ".fts");
-    if fts.is_dir() {
-        let _ = fs::remove_dir_all(&fts);
-    }
-
-    // Delete main branch file.
+    // Delete companion files first, then the main branch file.
+    remove_branch_companions(&dest);
     fs::remove_file(&dest)
         .map_err(|e| AxilError::plugin(format!("failed to delete branch: {e}")))?;
 
@@ -684,6 +962,67 @@ fn merge_via_changelog(
 }
 
 /// Recursively copy a directory.
+/// Copy a directory that something may still be changing, retrying until one
+/// copy starts and ends with the same files in place.
+///
+/// The FTS index's merge threads write new segment files, rewrite
+/// `meta.json`, and delete the segments they replaced.
+/// [`Axil::branch_create`](crate::Axil::branch_create) waits for them before
+/// closing the handle, so the first attempt normally stands. The retry covers
+/// a copy taken some other way: a file listed and then deleted fails the copy
+/// outright, and a copy taken while the files changed can hold a `meta.json`
+/// that names segments the copy lacks, so neither attempt is kept.
+fn copy_dir_stable(src: &Path, dest: &Path) -> std::io::Result<()> {
+    const ATTEMPTS: u64 = 5;
+    let mut last_err = None;
+    for attempt in 0..ATTEMPTS {
+        if attempt > 0 {
+            let _ = fs::remove_dir_all(dest);
+            std::thread::sleep(std::time::Duration::from_millis(50 * attempt));
+        }
+        let before = dir_state(src)?;
+        match copy_dir_recursive(src, dest) {
+            Ok(()) if dir_state(src)? == before => return Ok(()),
+            Ok(()) => {
+                last_err = Some(std::io::Error::other(
+                    "its files changed while it was being copied",
+                ))
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => last_err = Some(e),
+            Err(e) => return Err(e),
+        }
+    }
+    Err(last_err.expect("at least one attempt ran"))
+}
+
+/// Every file under `dir` with its length and modification time, sorted. A
+/// file deleted while it is listed is left out.
+fn dir_state(dir: &Path) -> std::io::Result<Vec<(PathBuf, u64, Option<std::time::SystemTime>)>> {
+    fn walk(
+        dir: &Path,
+        out: &mut Vec<(PathBuf, u64, Option<std::time::SystemTime>)>,
+    ) -> std::io::Result<()> {
+        for entry in fs::read_dir(dir)? {
+            let entry = entry?;
+            let meta = match entry.metadata() {
+                Ok(meta) => meta,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(e),
+            };
+            if meta.is_dir() {
+                walk(&entry.path(), out)?;
+            } else {
+                out.push((entry.path(), meta.len(), meta.modified().ok()));
+            }
+        }
+        Ok(())
+    }
+    let mut out = Vec::new();
+    walk(dir, &mut out)?;
+    out.sort();
+    Ok(out)
+}
+
 fn copy_dir_recursive(src: &Path, dest: &Path) -> std::io::Result<()> {
     fs::create_dir_all(dest)?;
     for entry in fs::read_dir(src)? {
@@ -723,6 +1062,189 @@ mod tests {
 
         let branches = branch_list(&db_path).unwrap();
         assert_eq!(branches, vec!["experiment"]);
+    }
+
+    #[test]
+    fn branch_copies_the_fts_directory_tree() {
+        let (_dir, db_path) = temp_db();
+        let fts = crate::companion_path(&db_path, ".fts");
+        fs::create_dir_all(fts.join("nested")).unwrap();
+        fs::write(fts.join("meta.json"), "{}").unwrap();
+        fs::write(fts.join("nested").join("seg.idx"), "segment bytes").unwrap();
+
+        let bp = branch_create(&db_path, "fts-copy").unwrap();
+        let copied = crate::companion_path(&bp, ".fts");
+        assert_eq!(fs::read_to_string(copied.join("meta.json")).unwrap(), "{}");
+        assert_eq!(
+            fs::read_to_string(copied.join("nested").join("seg.idx")).unwrap(),
+            "segment bytes"
+        );
+        let names = |dir: &Path| -> Vec<(PathBuf, u64)> {
+            dir_state(dir)
+                .unwrap()
+                .into_iter()
+                .map(|(p, len, _)| (p.strip_prefix(dir).unwrap().to_path_buf(), len))
+                .collect()
+        };
+        assert_eq!(names(&copied), names(&fts));
+    }
+
+    /// A copy that fails partway publishes nothing: no branch lists, no
+    /// branch file is left, and the same name can be created afterwards.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_copy_leaves_no_branch_behind() {
+        use std::os::unix::fs::PermissionsExt;
+        let (dir, db_path) = temp_db();
+        let fts = crate::companion_path(&db_path, ".fts");
+        fs::create_dir_all(&fts).unwrap();
+        fs::write(fts.join("meta.json"), "{}").unwrap();
+        let unreadable = fts.join("segment.idx");
+        fs::write(&unreadable, "bytes").unwrap();
+        fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::read(&unreadable).is_ok() {
+            // Running as root: permissions cannot make the copy fail.
+            return;
+        }
+        // Leftovers of a creator that died mid-copy.
+        let stale = crate::companion_path(&branch_path(&db_path, "exp"), ".staging-999-dead");
+        fs::write(&stale, "stale core").unwrap();
+        fs::write(crate::companion_path(&stale, ".vec"), "stale").unwrap();
+
+        let err = branch_create(&db_path, "exp").unwrap_err();
+        assert!(
+            err.to_string().contains("failed to copy FTS directory"),
+            "{err}"
+        );
+        assert!(branch_list(&db_path).unwrap().is_empty());
+        let db_name = db_path.file_name().unwrap().to_str().unwrap().to_string();
+        let left: Vec<String> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with(&format!("{db_name}.branch")))
+            .collect();
+        assert!(left.is_empty(), "{left:?}");
+
+        fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o644)).unwrap();
+        let bp = branch_create(&db_path, "exp").unwrap();
+        assert_eq!(branch_list(&db_path).unwrap(), ["exp"]);
+        let copied = crate::companion_path(&bp, ".fts");
+        assert_eq!(
+            fs::read_to_string(copied.join("segment.idx")).unwrap(),
+            "bytes"
+        );
+        assert!(staging_bases(&bp).is_empty());
+        Axil::open(&bp).build().unwrap();
+    }
+
+    fn set_age(path: &Path, secs: u64) {
+        let when = std::time::SystemTime::now() - std::time::Duration::from_secs(secs);
+        fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(when)
+            .unwrap();
+    }
+
+    /// A copy that stalls keeps its lock however old the lock file looks,
+    /// and a second creator neither starts nor touches the first one's
+    /// staged files.
+    #[test]
+    fn a_stalled_copy_keeps_its_lock_and_its_files() {
+        use std::sync::mpsc;
+        let (_dir, db_path) = temp_db();
+        fs::write(crate::companion_path(&db_path, ".ts"), "series").unwrap();
+        let dest = branch_path(&db_path, "exp");
+
+        let (staged, staged_rx) = mpsc::channel();
+        let (resume, resume_rx) = mpsc::channel::<()>();
+        let first = std::thread::spawn({
+            let db_path = db_path.clone();
+            move || {
+                let stall = move |step: &str| {
+                    if step == "core" {
+                        staged.send(()).unwrap();
+                        resume_rx.recv().unwrap();
+                    }
+                };
+                copy_branch_files_with(&db_path, "exp", BRANCH_LOCK_WAIT, &stall)
+            }
+        });
+        staged_rx.recv().unwrap();
+
+        // Older than the existence-only rule would allow.
+        let lock = crate::companion_path(&db_path, ".branch-lock");
+        set_age(&lock, 2 * BRANCH_LOCK_STALE_SECS);
+        let staged_files = staging_bases(&dest);
+        assert_eq!(staged_files.len(), 1, "{staged_files:?}");
+
+        let second = copy_branch_files_with(
+            &db_path,
+            "exp",
+            std::time::Duration::from_millis(300),
+            &|_| {},
+        );
+        let err = second.unwrap_err().to_string();
+        assert!(err.contains("in progress"), "{err}");
+        assert!(
+            staged_files[0].exists(),
+            "the second creator removed staged files"
+        );
+
+        resume.send(()).unwrap();
+        assert_eq!(first.join().unwrap().unwrap(), dest);
+        assert_eq!(branch_list(&db_path).unwrap(), ["exp"]);
+        assert_eq!(
+            fs::read_to_string(crate::companion_path(&dest, ".ts")).unwrap(),
+            "series"
+        );
+        assert!(staging_bases(&dest).is_empty());
+        assert!(!lock.exists());
+        Axil::open(&dest).build().unwrap();
+    }
+
+    /// An older axil holds the lock by the file's existence and writes its
+    /// pid. Its lock is honored until it goes stale.
+    #[test]
+    fn an_older_axils_lock_is_honored_until_stale() {
+        let (_dir, db_path) = temp_db();
+        let lock = crate::companion_path(&db_path, ".branch-lock");
+        fs::write(&lock, "4242").unwrap();
+        let wait = std::time::Duration::from_millis(200);
+        let held = BranchCopyGuard::acquire(&db_path, wait).err().unwrap();
+        assert_eq!(held.kind(), std::io::ErrorKind::WouldBlock);
+
+        set_age(&lock, 2 * BRANCH_LOCK_STALE_SECS);
+        let guard = BranchCopyGuard::acquire(&db_path, wait).unwrap();
+        assert!(guard.exclusive());
+        drop(guard);
+        assert!(!lock.exists());
+    }
+
+    /// Where OS locks are refused, the lock is the file's existence, broken
+    /// once stale.
+    #[test]
+    fn without_os_locks_the_lock_is_the_file() {
+        let (_dir, db_path) = temp_db();
+        let refuse = |_: &fs::File| {
+            Err(fs::TryLockError::Error(std::io::Error::other(
+                "locks unsupported",
+            )))
+        };
+        let wait = std::time::Duration::from_millis(200);
+        let lock = crate::companion_path(&db_path, ".branch-lock");
+
+        let first = BranchCopyGuard::acquire_with(&db_path, wait, refuse).unwrap();
+        assert!(!first.exclusive());
+        assert!(BranchCopyGuard::acquire_with(&db_path, wait, refuse).is_err());
+        set_age(&lock, 2 * BRANCH_LOCK_STALE_SECS);
+        let second = BranchCopyGuard::acquire_with(&db_path, wait, refuse).unwrap();
+        // The first holder's release leaves the second holder's file alone.
+        drop(first);
+        assert!(lock.exists());
+        drop(second);
+        assert!(!lock.exists());
     }
 
     #[test]

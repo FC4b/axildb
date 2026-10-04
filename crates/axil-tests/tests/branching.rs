@@ -173,6 +173,10 @@ fn diff_detects_new_table_in_branch() {
 /// reflect. This exercises the cross-platform copy path — on Windows redb holds
 /// a byte-range lock on an open core file, so `Axil::branch_create` must flush
 /// the engines and close every handle before copying.
+///
+/// Each insert commits the FTS index as a new segment, and with eight of them
+/// tantivy starts merging in the background. The branch must wait for that: a
+/// merge that finishes mid-copy deletes segment files the copy has listed.
 #[test]
 fn live_branch_is_internally_consistent() {
     let dir = tempfile::tempdir().unwrap();
@@ -181,20 +185,26 @@ fn live_branch_is_internally_consistent() {
     const DIMS: usize = 4;
     const N: usize = 8;
 
-    let db = Axil::open(&path)
-        .with_vector(DIMS)
-        .unwrap()
-        .with_fts_engine()
-        .unwrap()
-        .build()
-        .unwrap();
+    let open = |path: &std::path::Path| {
+        Axil::open(path)
+            .with_vector(DIMS)
+            .unwrap()
+            .with_fts_engine()
+            .unwrap()
+            .build()
+            .unwrap()
+    };
+    let db = open(&path);
 
     // Insert N records, each with a unique FTS term and a manual vector. The
     // insert path auto-indexes the text field for FTS; add a vector per record.
     let mut ids = Vec::with_capacity(N);
     for i in 0..N {
         let rec = db
-            .insert("notes", json!({"text": format!("alpharecord{i}")}))
+            .insert(
+                "notes",
+                json!({"text": format!("alpharecord{i} sharedterm")}),
+            )
             .unwrap();
         db.add_vector(&rec.id, &[i as f32, 1.0, 0.0, 0.0]).unwrap();
         ids.push(rec.id);
@@ -205,13 +215,7 @@ fn live_branch_is_internally_consistent() {
     assert!(bp.exists(), "branch core file should exist");
 
     // Reopen the branch with the same engines and verify all three stores agree.
-    let branch = Axil::open(&bp)
-        .with_vector(DIMS)
-        .unwrap()
-        .with_fts_engine()
-        .unwrap()
-        .build()
-        .unwrap();
+    let branch = open(&bp);
 
     let core_count = branch.list("notes").unwrap().len();
     assert_eq!(core_count, N, "branch core should hold every record");
@@ -235,4 +239,23 @@ fn live_branch_is_internally_consistent() {
             "FTS index in branch missing record {id}"
         );
     }
+
+    // And a term every record shares finds the same records in the branch as
+    // in the source.
+    let shared = |db: &Axil| {
+        let mut found: Vec<_> = db
+            .search_text("sharedterm", 2 * N)
+            .unwrap()
+            .into_iter()
+            .map(|(r, _)| r.id)
+            .collect();
+        found.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+        found
+    };
+    let in_branch = shared(&branch);
+    drop(branch);
+    let mut all = ids.clone();
+    all.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+    assert_eq!(in_branch, all);
+    assert_eq!(shared(&open(&path)), in_branch);
 }

@@ -131,11 +131,12 @@ impl Engine for FtsEngine {
     }
 
     /// Flush the Tantivy write buffer so the on-disk index reflects every
-    /// document indexed so far. The per-record `index_text`/`on_record_*` paths
-    /// already commit, but a caller copying the `.fts` directory needs a hard
-    /// guarantee the segments on disk are current.
+    /// document indexed so far, and wait for background segment merges. The
+    /// per-record `index_text`/`on_record_*` paths already commit, but a
+    /// caller copying the `.fts` directory needs a hard guarantee the segments
+    /// on disk are current and that no merge is still replacing them.
     fn flush(&self) -> Result<()> {
-        self.index.commit()
+        self.index.wait_for_merges()
     }
 }
 

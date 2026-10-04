@@ -1676,6 +1676,16 @@ pub fn stats(
         }
     });
 
+    // Source files the last index run left out for size, listed only when
+    // there are some.
+    if let Some(skipped) = project_records
+        .first()
+        .and_then(|r| r.data.get("skipped_large"))
+        .filter(|v| v.as_array().is_some_and(|a| !a.is_empty()))
+    {
+        result["index"]["skipped_large"] = skipped.clone();
+    }
+
     if let (Some(root), Some(cfg)) = (project_root, config) {
         let report = crate::freshness::check_freshness(db, root, cfg);
         result["freshness"] = crate::freshness::freshness_to_json(&report);

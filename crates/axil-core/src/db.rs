@@ -52,6 +52,67 @@ pub fn companion_path(base: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(p)
 }
 
+/// Suffixes of the other files Axil derives from a database path: the FTS
+/// rebuild's swap directories, the mmap vector file, the branch lock,
+/// snapshots, the prefetch cache, and the re-embed backup of the vector store.
+const DERIVED_SUFFIXES: &[&str] = &[
+    ".fts.old",
+    ".fts.new",
+    ".mmap",
+    ".branch-lock",
+    ".snapshots",
+    ".prefetch-cache",
+    ".reembed-bak",
+];
+
+/// Whether `name` is a file or directory Axil keeps beside the database whose
+/// core file is named `db_name`: the core file, its engine companions, the
+/// other files derived from its path, named vector spaces
+/// (`<db>.vec.<space>`), and branches (`<db>.branch.<name>`, staged as
+/// `<db>.branch.<name>.staging-<pid>-<nonce>` while being created) with all
+/// of theirs. A file that merely starts with the name, like
+/// `memory.axil.helpers.ts`, is not.
+pub fn is_database_file_name(db_name: &str, name: &str) -> bool {
+    if name == db_name {
+        return true;
+    }
+    let Some(rest) = name.strip_prefix(db_name) else {
+        return false;
+    };
+    let mut suffixes = COMPANION_SUFFIXES
+        .iter()
+        .map(|(suffix, _)| *suffix)
+        .chain(DERIVED_SUFFIXES.iter().copied());
+    if suffixes.any(|suffix| suffix == rest) {
+        return true;
+    }
+    if let Some(space) = rest.strip_prefix(".vec.") {
+        return is_valid_space_name(space);
+    }
+    if let Some(branch) = rest.strip_prefix(".branch.") {
+        let branch_name = branch.split('.').next().unwrap_or_default();
+        if crate::branch::validate_branch_name(branch_name).is_err() {
+            return false;
+        }
+        let base = format!("{db_name}.branch.{branch_name}");
+        let staging = name
+            .strip_prefix(&base)
+            .and_then(|rest| rest.strip_prefix(".staging-"))
+            .and_then(|rest| rest.split('.').next())
+            .filter(|token| {
+                !token.is_empty()
+                    && token
+                        .bytes()
+                        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+            });
+        return is_database_file_name(&base, name)
+            || staging.is_some_and(|token| {
+                is_database_file_name(&format!("{base}.staging-{token}"), name)
+            });
+    }
+    false
+}
+
 /// Map an Engine role or bare companion suffix to its canonical `(role, suffix)`.
 ///
 /// Accepts the role (`vector`/`graph`/`timeseries`/`fts`) or the suffix with or
@@ -4482,7 +4543,10 @@ impl Axil {
     /// 1. While this handle is open it holds redb's **exclusive** OS write lock,
     ///    so no other process can mutate the database.
     /// 2. [`flush_engines`](Self::flush_engines) commits any buffered engine
-    ///    state (notably the FTS index) so every companion file is current.
+    ///    state (notably the FTS index) so every companion file is current,
+    ///    and waits for the FTS index's background segment merges, which
+    ///    would otherwise go on rewriting and deleting its files after the
+    ///    handle is dropped.
     /// 3. The handle is then **dropped**, releasing the OS lock, and only then
     ///    are the files copied. On Windows, redb holds a byte-range lock on the
     ///    core file for the lifetime of the [`Database`], so an open file cannot
@@ -7809,6 +7873,52 @@ pub(crate) fn entity_canonical_id(
             crate::entity::provisional_canonical_id(&entity.name, lang_hint.as_deref(), file_hint)
         }
         _ => crate::entity::natural_canonical_id(&entity.name),
+    }
+}
+
+#[cfg(test)]
+mod database_file_name_tests {
+    use super::is_database_file_name;
+
+    #[test]
+    fn the_database_and_everything_derived_from_its_path() {
+        for name in [
+            "memory.axil",
+            "memory.axil.vec",
+            "memory.axil.graph",
+            "memory.axil.ts",
+            "memory.axil.fts",
+            "memory.axil.fts.old",
+            "memory.axil.vec.code",
+            "memory.axil.mmap",
+            "memory.axil.branch-lock",
+            "memory.axil.snapshots",
+            "memory.axil.prefetch-cache",
+            "memory.axil.reembed-bak",
+            "memory.axil.branch.try-1",
+            "memory.axil.branch.try-1.ts",
+            "memory.axil.branch.try-1.vec.code",
+            "memory.axil.branch.try-1.staging-4242-1f3a0",
+            "memory.axil.branch.try-1.staging-4242-1f3a0.fts",
+        ] {
+            assert!(is_database_file_name("memory.axil", name), "{name}");
+        }
+    }
+
+    #[test]
+    fn not_a_source_file_that_shares_the_name() {
+        for name in [
+            "memory.axil.helpers.ts",
+            "memory.axil.vec.helpers.ts",
+            "memory.axil.branch.try-1.helpers.ts",
+            "memory.axil.branch.try-1.staging-4242.helpers.ts",
+            "memory.axil.branch.has.dot",
+            "memory.axilx.ts",
+            "memory.ax",
+            "other.axil.ts",
+        ] {
+            assert!(!is_database_file_name("memory.axil", name), "{name}");
+        }
     }
 }
 

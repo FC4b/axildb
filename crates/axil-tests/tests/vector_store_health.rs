@@ -1,10 +1,13 @@
 //! A vector store that is dirty, busy, or corrupt must never make recall
 //! silently keyword-only. A dirty store (left by a killed writer) is repaired
 //! on open; a corrupt one is reported by doctor, heal, boot, and the recall
-//! context block that hooks inject.
+//! context block that hooks inject. A reader that closes `axil`'s stdout early
+//! must not leave a dirty one behind.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
 
 use axil_core::{Axil, BootOptions, DegradedEngine, Severity, VectorIndex};
 use serde_json::{json, Value};
@@ -215,6 +218,88 @@ fn cli_repairs_a_vector_store_left_dirty_by_a_killed_writer() {
     // Repaired for good: the next open is quiet.
     let (_, stderr, _) = axil(&path, &["doctor"]);
     assert!(!stderr.contains("repaired"), "{stderr}");
+}
+
+/// Spawn `axil --db <db> <args>` with its stdout on a pipe whose reader is
+/// already gone, the way `axil … | head` looks once `head` has exited.
+fn spawn_into_closed_pipe(db: &Path, args: &[&str]) -> Child {
+    let (reader, writer) = std::io::pipe().unwrap();
+    drop(reader);
+    Command::new(axil_bin())
+        .current_dir(db.parent().unwrap())
+        .arg("--db")
+        .arg(db)
+        .args(args)
+        .env_remove("AXIL_DB")
+        .stdout(writer)
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to run axil")
+}
+
+/// Uses the default embedding model, like the dirty-store test above.
+#[test]
+fn a_closed_stdout_ends_recall_cleanly_and_leaves_the_stores_closed() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("memory.axil");
+    let (_, stderr, code) = axil(&db, &["init"]);
+    assert_eq!(code, 0, "{stderr}");
+    let (_, stderr, code) = axil(
+        &db,
+        &[
+            "store",
+            "decisions",
+            r#"{"summary":"the connection pool size is 32"}"#,
+        ],
+    );
+    assert_eq!(code, 0, "{stderr}");
+
+    let out = spawn_into_closed_pipe(&db, &["recall", "connection pool"])
+        .wait_with_output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    assert!(
+        !stderr.contains("panicked") && !stderr.contains("Broken pipe"),
+        "{stderr}"
+    );
+
+    // The stores were closed normally, so nothing needs repair.
+    let (stdout, stderr, code) = axil(&db, &["recall", "connection pool"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(!stderr.contains("not closed cleanly"), "{stderr}");
+    assert!(stdout.contains("connection pool size"), "{stdout}");
+}
+
+#[test]
+fn a_closed_stdout_ends_stats_watch() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("memory.axil");
+    let (_, stderr, code) = axil(&db, &["init"]);
+    assert_eq!(code, 0, "{stderr}");
+
+    let mut child = spawn_into_closed_pipe(&db, &["stats", "--watch", "1"]);
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if Instant::now() > deadline {
+            child.kill().unwrap();
+            panic!("stats --watch kept running after its reader went away");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let mut stderr = String::new();
+    child
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut stderr)
+        .unwrap();
+    assert_eq!(status.code(), Some(0), "{stderr}");
+    let (_, stderr, _) = axil(&db, &["doctor"]);
+    assert!(!stderr.contains("not closed cleanly"), "{stderr}");
 }
 
 #[test]
