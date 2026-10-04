@@ -8856,27 +8856,35 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
                 ensure_default_space_dims(&db_path, v.len())?;
             }
 
-            // Open path: `--embed` needs the embedder; otherwise the raw-vector
-            // policy is shared across feature ladders by `open_for_store` (a
-            // default-space vector creates the store at the vector's dimension;
-            // a named space or no vector opens all detected engines).
-            #[cfg(feature = "embed")]
-            let db = open_waiting_for_writer(|| {
-                if embed.is_some() {
-                    open_with_embedder_creating(&db_path)
-                } else {
+            // An already-open handle is used as its host opened it, LLM
+            // included.
+            let db = cli_io::hot_db(&db_path, || {
+                // Open path: `--embed` needs the embedder; otherwise the raw-vector
+                // policy is shared across feature ladders by `open_for_store` (a
+                // default-space vector creates the store at the vector's dimension;
+                // a named space or no vector opens all detected engines).
+                #[cfg(feature = "embed")]
+                let db = open_waiting_for_writer(|| {
+                    if embed.is_some() {
+                        open_with_embedder_creating(&db_path)
+                    } else {
+                        open_for_store(&db_path, raw_vector.as_deref(), space.is_some())
+                    }
+                })?;
+                #[cfg(all(feature = "vector", not(feature = "embed")))]
+                let db = open_waiting_for_writer(|| {
                     open_for_store(&db_path, raw_vector.as_deref(), space.is_some())
+                })?;
+                #[cfg(not(feature = "vector"))]
+                let db = open_waiting_for_writer(|| open_with_all_detected(&db_path))?;
+
+                // Wire up LLM if --llm flag is set and config exists.
+                if llm {
+                    wire_llm(db, &db_path)
+                } else {
+                    Ok(db)
                 }
             })?;
-            #[cfg(all(feature = "vector", not(feature = "embed")))]
-            let db = open_waiting_for_writer(|| {
-                open_for_store(&db_path, raw_vector.as_deref(), space.is_some())
-            })?;
-            #[cfg(not(feature = "vector"))]
-            let db = open_waiting_for_writer(|| open_with_all_detected(&db_path))?;
-
-            // Wire up LLM if --llm flag is set and config exists.
-            let db = if llm { wire_llm(db, &db_path)? } else { db };
 
             let mut data = read_json_input(&json_data)?;
 
@@ -9937,7 +9945,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
             trace_graph,
         } => {
             let db_path = require_db(&db_opt)?;
-            let db = open_read_command(&db_path)?;
+            let db = cli_io::hot_db(&db_path, || open_read_command(&db_path))?;
             // Fetch a larger pool so non-proxy hits (project/file index)
             // don't crowd proxies out before we filter.
             let pool = top_k.saturating_mul(5).max(15);
@@ -10209,7 +10217,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
         #[cfg(feature = "fts")]
         Command::Fts { query, limit } => {
             let db_path = require_db(&db_opt)?;
-            let db = open_read_command_fts(&db_path)?;
+            let db = cli_io::hot_db(&db_path, || open_read_command_fts(&db_path))?;
 
             let start = std::time::Instant::now();
             let results = db
@@ -10542,7 +10550,9 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
             let secs = parse_duration(&duration)?;
             // The Stop hook counts recent records with this: ride out a short
             // writer instead of failing on the first contended open.
-            let db = retry_busy_open(|| open_with_timeseries(&db_path))?;
+            let db = cli_io::hot_db(&db_path, || {
+                retry_busy_open(|| open_with_timeseries(&db_path))
+            })?;
 
             let mut records = db.since(table.as_deref(), secs)?;
             // `since` yields oldest-first; a limit should keep the *newest* N,
@@ -13547,10 +13557,18 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
             schema,
         } => {
             let db_path = require_db(&db_opt)?;
-            let db = std::sync::Arc::new(open_read_command(&db_path)?);
-            // Register installed WASM plugins so their boot_block contributions
-            // render in `axil boot`, like a native Extension's.
-            register_installed_plugins(&db, &db_path);
+            let db = match cli_io::warm_db(&db_path) {
+                // Its host registered the installed plugins when it opened it.
+                Some(db) => db,
+                None => {
+                    let db = std::sync::Arc::new(open_read_command(&db_path)?);
+                    // Register installed WASM plugins so their boot_block
+                    // contributions render in `axil boot`, like a native
+                    // Extension's.
+                    register_installed_plugins(&db, &db_path);
+                    db
+                }
+            };
 
             // Opt-in structured schema; the flat JSON below stays the default.
             if schema.as_deref() == Some("v1") {
@@ -14643,7 +14661,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
             let db_path = require_db(&db_opt)?;
             // A hook runs this before every edit: ride out a short writer, and
             // fall back to a read-only open rather than fail.
-            let db = open_read_command(&db_path)?;
+            let db = cli_io::hot_db(&db_path, || open_read_command(&db_path))?;
 
             let file_lower = file.to_lowercase();
             let short_name = std::path::Path::new(&file)
@@ -16380,7 +16398,9 @@ fn run_checkpoint_extension(
     };
 
     let db_path = require_db(db_opt)?;
-    let db = open_waiting_for_writer(|| open_with_all_detected(&db_path))?;
+    let db = cli_io::hot_db(&db_path, || {
+        open_waiting_for_writer(|| open_with_all_detected(&db_path))
+    })?;
     match axil_core::dispatch_cli(&db, &db.extensions(), &invocation)? {
         axil_core::Dispatch::Handled(output) => {
             if !output.stdout.is_empty() {

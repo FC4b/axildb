@@ -14,12 +14,18 @@
 //! [`capture`] installs a [`ReqCtx`] on the current thread for the duration
 //! of a closure. Output then appends to the context's buffers and stdin is
 //! served from its bytes.
+//!
+//! The context can also carry a database the host already has open. The hot
+//! commands get their handle through [`hot_db`], which returns that handle
+//! instead of opening the file again.
 
 use std::cell::RefCell;
 use std::fmt;
 use std::io::{self, IsTerminal, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+use axil_core::Axil;
 
 thread_local! {
     static REQ: RefCell<Option<ReqCtx>> = const { RefCell::new(None) };
@@ -35,11 +41,10 @@ pub struct ReqCtx {
     pub stdin: Option<Vec<u8>>,
     /// Whether the command records slow queries in the database's log.
     pub slow_query_log: bool,
-    /// An open database the command may use instead of opening its own.
-    #[allow(dead_code)] // set by an in-process host; no command reads it yet
-    pub warm: Option<Arc<axil_core::Axil>>,
+    /// An open database the command uses instead of opening its own, when
+    /// the command's database is the one at `db_canon`. See [`hot_db`].
+    pub warm: Option<Arc<Axil>>,
     /// Canonical path of the database `warm` was opened from.
-    #[allow(dead_code)] // pairs with `warm`
     pub db_canon: PathBuf,
 }
 
@@ -252,6 +257,34 @@ pub fn slow_query_log_enabled() -> bool {
     REQ.with(|r| r.borrow().as_ref().is_none_or(|ctx| ctx.slow_query_log))
 }
 
+/// The installed request's open database, when `path` names the file it was
+/// opened from. `None` when no request is installed, it carries no handle, or
+/// `path` is another database (or can't be resolved).
+pub fn warm_db(path: &Path) -> Option<Arc<Axil>> {
+    let (warm, db_canon) = REQ.with(|r| {
+        let r = r.borrow();
+        let ctx = r.as_ref()?;
+        Some((ctx.warm.clone()?, ctx.db_canon.clone()))
+    })?;
+    (std::fs::canonicalize(path).ok()? == db_canon).then_some(warm)
+}
+
+/// The handle a command runs against: the request's open database when it is
+/// the one at `path` (see [`warm_db`]), otherwise a new handle from `open`.
+///
+/// Without such a request this is exactly `open`, so a one-shot run opens and
+/// closes the database as it always has. A warm handle is shared: the command
+/// neither opens nor closes it, and only drops its own reference.
+pub fn hot_db(
+    path: &Path,
+    open: impl FnOnce() -> anyhow::Result<Axil>,
+) -> anyhow::Result<Arc<Axil>> {
+    match warm_db(path) {
+        Some(db) => Ok(db),
+        None => open().map(Arc::new),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -370,6 +403,39 @@ mod tests {
                 .collect::<Vec<_>>()
         });
         assert_eq!(lines, ["a", "b"]);
+    }
+
+    #[test]
+    fn hot_db_serves_the_warm_handle_only_for_its_own_database() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("a.axil");
+        let open = |p: &Path| Axil::open(p).build().map_err(anyhow::Error::from);
+        let warm = Arc::new(open(&path).unwrap());
+        let ctx = || ReqCtx {
+            warm: Some(warm.clone()),
+            db_canon: std::fs::canonicalize(&path).unwrap(),
+            ..ReqCtx::default()
+        };
+
+        // The same file under another spelling: no open.
+        let same = tmp.path().join(".").join("a.axil");
+        let (_, _, got) = capture(ctx(), || {
+            hot_db(&same, || panic!("opened a database the request holds"))
+        });
+        assert!(Arc::ptr_eq(&got.unwrap(), &warm));
+
+        // Another database, or no request: the command opens its own.
+        let other = tmp.path().join("b.axil");
+        let (_, _, got) = capture(ctx(), || hot_db(&other, || open(&other)));
+        assert!(!Arc::ptr_eq(&got.unwrap(), &warm));
+        let mut opened = false;
+        let got = hot_db(&path, || {
+            opened = true;
+            Err(anyhow::anyhow!("cold open"))
+        });
+        assert!(opened && got.is_err());
+        assert!(warm_db(&path).is_none());
+        assert_eq!(Arc::strong_count(&warm), 1, "a request's clone outlived it");
     }
 
     /// `src` with comments and the contents of string and char literals
