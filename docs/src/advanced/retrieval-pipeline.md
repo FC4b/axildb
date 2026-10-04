@@ -214,9 +214,20 @@ Embedded library users can bring their own reranker: implement the
 kept.
 
 **Status: off by default.** Every committed rerank run lowered recall.
-On a 30-question LongMemEval-S subset, the MS-MARCO cross-encoder cut
-recall from 0.933 (recall-qtc, no rerank) to 0.667, and a BGE reranker
-to 0.733 ([investigation](../../../benchmarks/results/lme-rerank-investigation.md)).
+On a 30-question LongMemEval-S subset, top-k 5
+([investigation](../../../benchmarks/results/lme-rerank-investigation.md)):
+
+- Recall-QTC with the MS-MARCO cross-encoder: 0.933
+  ([`lme-baseline-30.json`](../../../benchmarks/results/lme-baseline-30.json))
+  → 0.667
+  ([`lme-qtc-rerank-30.json`](../../../benchmarks/results/lme-qtc-rerank-30.json)).
+- The `recall` (fusion) strategy: 0.900 without rerank
+  ([`lme-recall-no-rerank-30.json`](../../../benchmarks/results/lme-recall-no-rerank-30.json))
+  → 0.667 with MS-MARCO
+  ([`lme-rerank-30.json`](../../../benchmarks/results/lme-rerank-30.json))
+  and 0.733 with a BGE reranker
+  ([`lme-bge-rerank-30.json`](../../../benchmarks/results/lme-bge-rerank-30.json)).
+
 Those runs used the LongMemEval harness, which reranks the top 20 of 40
 fused candidates before keeping 5, a wider window than the CLI's. The
 CLI path itself has not been measured since a fix to the text it hands
