@@ -1,7 +1,7 @@
 //! Pair judgements from a small local model.
 //!
 //! A [`PairJudge`] answers one fixed question about two texts, such as "does
-//! the second update or contradict the first?", with a calibrated probability
+//! the second contradict the first?", with a calibrated probability
 //! and a yes/no cut at the judge's threshold. Only the trait lives in core, so
 //! the ONNX and tokenizer machinery stays out of `axil-core` (as with
 //! [`crate::query::Rerank`]); the shipped implementation is the
