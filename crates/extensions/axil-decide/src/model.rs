@@ -115,7 +115,9 @@ impl PairModel {
         self.labels.iter().position(|l| *l == label)
     }
 
-    /// Whether every file is in `dir` with its pinned size.
+    /// Whether every file is in `dir` with its pinned size. A cheap check
+    /// that misses a corrupt file of the right size; [`PairModel::download`]
+    /// verifies and repairs, and a load verifies.
     pub fn is_available(&self, dir: &Path) -> bool {
         self.files().iter().all(|f| {
             fs::metadata(dir.join(f.local))
@@ -124,14 +126,24 @@ impl PairModel {
         })
     }
 
-    /// Fetch every file that is missing or fails verification into `dir`,
-    /// from the pinned revision.
+    /// Make `dir` hold the pinned files: verify each one present (size and
+    /// sha256), and fetch from the pinned revision any that is missing or
+    /// fails. With every file intact it only hashes them, so it is the usual
+    /// step before a load, and it repairs a corrupt cache.
     ///
     /// Safe to run from several processes at once: each download writes its
     /// own temporary file, which must match the pinned size and sha256 before
     /// it is renamed into place, and a file another process already installed
     /// and verified is kept.
     pub fn download(&self, dir: &Path) -> Result<()> {
+        self.download_with(dir, fetch)
+    }
+
+    /// [`PairModel::download`] with `fetch(url, path)` writing each file.
+    fn download_with<F>(&self, dir: &Path, fetch: F) -> Result<()>
+    where
+        F: Fn(&str, &Path) -> std::result::Result<(), String>,
+    {
         fs::create_dir_all(dir)
             .map_err(|e| DecideError::Model(format!("create {}: {e}", dir.display())))?;
         for file in self.files() {
@@ -446,6 +458,32 @@ mod tests {
         install(dir.path(), &file, slow_writer(b"pinned bytes")).unwrap();
         assert_eq!(fs::read(&dest).unwrap(), b"pinned bytes");
         assert!(leftovers(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn download_repairs_a_same_size_corrupt_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let serve = |url: &str, path: &Path| -> std::result::Result<(), String> {
+            let bytes: &[u8] = if url.ends_with("model.onnx") {
+                b"abc"
+            } else {
+                b""
+            };
+            fs::write(path, bytes).map_err(|e| e.to_string())
+        };
+        // Right sizes, wrong bytes: looks available, fails verification.
+        fs::write(dir.path().join("model.onnx"), b"xyz").unwrap();
+        fs::write(dir.path().join("tokenizer.json"), b"").unwrap();
+        assert!(TINY.is_available(dir.path()));
+        assert!(TINY.verify(dir.path()).is_err());
+
+        TINY.download_with(dir.path(), serve).unwrap();
+        TINY.verify(dir.path()).unwrap();
+        // Intact files are only hashed, never fetched again.
+        TINY.download_with(dir.path(), |_, _| {
+            panic!("intact files must not be fetched")
+        })
+        .unwrap();
     }
 
     #[test]

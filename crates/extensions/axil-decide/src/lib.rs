@@ -22,9 +22,8 @@
 //! use axil_decide::{Calibration, PairClassifier, NLI_DEBERTA_V3_XSMALL_QINT8 as U1};
 //!
 //! let dir = U1.default_dir().expect("home directory");
-//! if !U1.is_available(&dir) {
-//!     U1.download(&dir)?;
-//! }
+//! // Verifies what is there, fetches what is missing, repairs what is corrupt.
+//! U1.download(&dir)?;
 //! let judge = PairClassifier::load(&U1, &dir, Calibration::u1())?;
 //! let old = "Auth tokens never expire.";
 //! let new = "Auth tokens expire after 24 hours.";

@@ -27,9 +27,7 @@ fn main() {
         .map(PathBuf::from)
         .or_else(|| U1.default_dir())
         .expect("a model directory");
-    if !U1.is_available(&dir) {
-        U1.download(&dir).expect("model download");
-    }
+    U1.download(&dir).expect("model download");
 
     let threads = flag("--threads").map_or(4, |n| n.parse().expect("--threads N"));
     let options = LoadOptions {
