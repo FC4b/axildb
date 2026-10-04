@@ -173,6 +173,13 @@ fn copy_file_retry(src: &Path, dest: &Path) -> std::io::Result<u64> {
 /// [`branch_create`] function and [`Axil::branch_create`](crate::Axil::branch_create),
 /// which flushes the engines and closes the handles before copying.
 ///
+/// The files are copied under staging names (`<branch>.staging…`) and renamed
+/// into place only once every copy has succeeded, companions first and the
+/// core last, since a branch exists once its core does. A copy that fails
+/// leaves nothing behind: no branch that lists but cannot open, and nothing
+/// that blocks creating the same branch again. `.staging` holds a dot, which
+/// no branch name can, so [`branch_list`] never shows a staged copy.
+///
 /// Concurrency: the copy is serialized against other branch creations with an
 /// advisory marker file (`<db>.branch-lock`, auto-broken after 5 minutes).
 /// The core file is copied first, so the only remaining window is an external
@@ -188,23 +195,40 @@ pub(crate) fn copy_branch_files(db_path: &Path, name: &str) -> Result<PathBuf> {
             dest.display()
         )));
     }
-
-    // Copy main database file.
-    if db_path.exists() {
-        fs::copy(db_path, &dest)
-            .map_err(|e| AxilError::plugin(format!("failed to copy database: {e}")))?;
-    } else {
+    if !db_path.exists() {
         return Err(AxilError::plugin(format!(
             "database not found: {}",
             db_path.display()
         )));
     }
 
+    let staging = crate::companion_path(&dest, ".staging");
+    // Anything an interrupted create left under either set of names: with no
+    // core at `dest`, none of it is a usable branch.
+    remove_branch_files(&staging);
+    remove_branch_files(&dest);
+    let result = stage_branch_files(db_path, &staging).and_then(|()| {
+        publish_staged_branch(&staging, &dest)
+            .map_err(|e| AxilError::plugin(format!("failed to publish branch '{name}': {e}")))
+    });
+    if result.is_err() {
+        remove_branch_files(&staging);
+        remove_branch_files(&dest);
+    }
+    result.map(|()| dest)
+}
+
+/// Copy the database and every companion under the branch base `staging`.
+fn stage_branch_files(db_path: &Path, staging: &Path) -> Result<()> {
+    // Copy main database file.
+    fs::copy(db_path, staging)
+        .map_err(|e| AxilError::plugin(format!("failed to copy database: {e}")))?;
+
     // Copy companion files.
     for suffix in COMPANION_SUFFIXES {
         let src = crate::companion_path(db_path, suffix);
         if src.exists() {
-            let companion_dest = crate::companion_path(&dest, suffix);
+            let companion_dest = crate::companion_path(staging, suffix);
             copy_file_retry(&src, &companion_dest).map_err(|e| {
                 AxilError::plugin(format!(
                     "failed to copy companion file {}: {e}",
@@ -217,7 +241,7 @@ pub(crate) fn copy_branch_files(db_path: &Path, name: &str) -> Result<PathBuf> {
     // Copy named vector-space companions (`<db>.vec.<name>`) — a branch
     // without them loses every named-space index.
     for (src, space) in named_space_files(db_path) {
-        let companion_dest = crate::companion_path(&dest, &format!(".vec.{space}"));
+        let companion_dest = crate::companion_path(staging, &format!(".vec.{space}"));
         copy_file_retry(&src, &companion_dest).map_err(|e| {
             AxilError::plugin(format!(
                 "failed to copy named vector space {}: {e}",
@@ -229,12 +253,48 @@ pub(crate) fn copy_branch_files(db_path: &Path, name: &str) -> Result<PathBuf> {
     // Copy FTS directory if it exists.
     let fts_src = crate::companion_path(db_path, ".fts");
     if fts_src.is_dir() {
-        let fts_dest = crate::companion_path(&dest, ".fts");
+        let fts_dest = crate::companion_path(staging, ".fts");
         copy_dir_stable(&fts_src, &fts_dest)
             .map_err(|e| AxilError::plugin(format!("failed to copy FTS directory: {e}")))?;
     }
+    Ok(())
+}
 
-    Ok(dest)
+/// Rename a staged branch's files to their final names, the core last.
+fn publish_staged_branch(staging: &Path, dest: &Path) -> std::io::Result<()> {
+    let mut moves = Vec::new();
+    for suffix in COMPANION_SUFFIXES.iter().copied().chain([".fts"]) {
+        let from = crate::companion_path(staging, suffix);
+        if from.exists() {
+            moves.push((from, crate::companion_path(dest, suffix)));
+        }
+    }
+    for (from, space) in named_space_files(staging) {
+        moves.push((from, crate::companion_path(dest, &format!(".vec.{space}"))));
+    }
+    moves.push((staging.to_path_buf(), dest.to_path_buf()));
+    for (from, to) in moves {
+        fs::rename(from, to)?;
+    }
+    Ok(())
+}
+
+/// Remove a branch's companions under the branch base `base`, best effort:
+/// engine files, named vector spaces, and the FTS directory.
+fn remove_branch_companions(base: &Path) {
+    for suffix in COMPANION_SUFFIXES {
+        let _ = fs::remove_file(crate::companion_path(base, suffix));
+    }
+    for (companion, _space) in named_space_files(base) {
+        let _ = fs::remove_file(companion);
+    }
+    let _ = fs::remove_dir_all(crate::companion_path(base, ".fts"));
+}
+
+/// [`remove_branch_companions`], then the core file too.
+fn remove_branch_files(base: &Path) {
+    remove_branch_companions(base);
+    let _ = fs::remove_file(base);
 }
 
 /// List all branches for a database.
@@ -271,26 +331,8 @@ pub fn branch_delete(db_path: &Path, name: &str) -> Result<()> {
         return Err(AxilError::plugin(format!("branch '{name}' does not exist")));
     }
 
-    // Delete companion files first.
-    for suffix in COMPANION_SUFFIXES {
-        let companion = crate::companion_path(&dest, suffix);
-        if companion.exists() {
-            let _ = fs::remove_file(&companion);
-        }
-    }
-
-    // Delete named vector-space companions too.
-    for (companion, _space) in named_space_files(&dest) {
-        let _ = fs::remove_file(&companion);
-    }
-
-    // Delete FTS directory.
-    let fts = crate::companion_path(&dest, ".fts");
-    if fts.is_dir() {
-        let _ = fs::remove_dir_all(&fts);
-    }
-
-    // Delete main branch file.
+    // Delete companion files first, then the main branch file.
+    remove_branch_companions(&dest);
     fs::remove_file(&dest)
         .map_err(|e| AxilError::plugin(format!("failed to delete branch: {e}")))?;
 
@@ -809,6 +851,53 @@ mod tests {
                 .collect()
         };
         assert_eq!(names(&copied), names(&fts));
+    }
+
+    /// A copy that fails partway publishes nothing: no branch lists, no
+    /// branch file is left, and the same name can be created afterwards.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_copy_leaves_no_branch_behind() {
+        use std::os::unix::fs::PermissionsExt;
+        let (dir, db_path) = temp_db();
+        let fts = crate::companion_path(&db_path, ".fts");
+        fs::create_dir_all(&fts).unwrap();
+        fs::write(fts.join("meta.json"), "{}").unwrap();
+        let unreadable = fts.join("segment.idx");
+        fs::write(&unreadable, "bytes").unwrap();
+        fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::read(&unreadable).is_ok() {
+            // Running as root: permissions cannot make the copy fail.
+            return;
+        }
+        // Leftovers of an earlier interrupted create.
+        let stale = crate::companion_path(&branch_path(&db_path, "exp"), ".staging.vec");
+        fs::write(&stale, "stale").unwrap();
+
+        let err = branch_create(&db_path, "exp").unwrap_err();
+        assert!(
+            err.to_string().contains("failed to copy FTS directory"),
+            "{err}"
+        );
+        assert!(branch_list(&db_path).unwrap().is_empty());
+        let db_name = db_path.file_name().unwrap().to_str().unwrap().to_string();
+        let left: Vec<String> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with(&format!("{db_name}.branch")))
+            .collect();
+        assert!(left.is_empty(), "{left:?}");
+
+        fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o644)).unwrap();
+        let bp = branch_create(&db_path, "exp").unwrap();
+        assert_eq!(branch_list(&db_path).unwrap(), ["exp"]);
+        let copied = crate::companion_path(&bp, ".fts");
+        assert_eq!(
+            fs::read_to_string(copied.join("segment.idx")).unwrap(),
+            "bytes"
+        );
+        assert!(!crate::companion_path(&bp, ".staging").exists());
+        Axil::open(&bp).build().unwrap();
     }
 
     #[test]
