@@ -2,7 +2,7 @@
 
 An **Adapter** is the interface between Axil and the outside world. It translates an external protocol (CLI argv, MCP stdio JSON-RPC, HTTP, AxilQL, GraphQL, gRPC) to and from `Axil::query()` calls. Adapters don't store anything themselves — they live on the process boundary.
 
-This guide covers writing a new Adapter, using [`axil-cli`](../../../crates/axil-cli/) and [`axil-mcp`](../../../crates/axil-mcp/) as the reference implementations.
+This guide covers writing a new Adapter, using [`axil-cli`](../../../crates/adapters/axil-cli/) and [`axil-mcp`](../../../crates/adapters/axil-mcp/) as the reference implementations.
 
 ## When to write an Adapter
 
@@ -176,9 +176,9 @@ fn main() -> Result<()> {
 
 | Adapter | Crate | Protocol |
 |---|---|---|
-| CLI | [`axil-cli`](../../../crates/axil-cli/) | argv → dispatch (clap) |
-| MCP | [`axil-mcp`](../../../crates/axil-mcp/) | stdio JSON-RPC |
-| AxilQL | [`axil-ql`](../../../crates/axil-ql/) | Query string → `QueryBuilder` |
+| CLI | [`axil-cli`](../../../crates/adapters/axil-cli/) | argv → dispatch (clap) |
+| MCP | [`axil-mcp`](../../../crates/adapters/axil-mcp/) | stdio JSON-RPC |
+| AxilQL | [`axil-ql`](../../../crates/adapters/axil-ql/) | Query string → `QueryBuilder` |
 
 Read `axil-mcp` first if you want the simplest end-to-end example (one transport, well-defined tool list). Read `axil-cli` for the more sprawling case (argument parsing, multiple subcommand groups, embedded Extension surfaces, brain-hook orchestration).
 

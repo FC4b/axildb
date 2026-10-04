@@ -7,8 +7,8 @@ Rank Fusion (RRF), multi-signal scoring, Query-Time Chunking (QTC),
 optional cross-encoder rerank, and the code-aware layer added in Phase 13b.
 
 The authoritative implementation lives in
-[`crates/axil-core/src/query.rs`](../../crates/axil-core/src/query.rs) and
-[`crates/axil-core/src/scoring.rs`](../../crates/axil-core/src/scoring.rs).
+[`crates/axil-core/src/query.rs`](../../../crates/axil-core/src/query.rs) and
+[`crates/axil-core/src/scoring.rs`](../../../crates/axil-core/src/scoring.rs).
 
 ## Why hybrid, not vector-only
 
@@ -183,18 +183,28 @@ axil recall "auth timeout" --explain
 
 ## Step 4b — Cross-encoder rerank (optional, off by default)
 
-Phase 15 added a pluggable `Rerank` trait with two ONNX implementations
-(MS-MARCO MiniLM, AnswerAI ColBERT-small) in
-[`crates/extensions/axil-rerank`](../../crates/extensions/axil-rerank). When attached via
-`with_reranker(...)`, the top `rerank_top_k_in` candidates are re-scored
-by a cross-encoder and blended with `weight = 0.7`.
+`axil recall --rerank cross-encoder` re-scores the top 20 fused
+candidates with an ONNX cross-encoder and reorders them by its score
+(the fused order is replaced, not blended). The implementation is
+[`crates/extensions/axil-indexer/src/rerank.rs`](../../../crates/extensions/axil-indexer/src/rerank.rs),
+compiled in by the `rerank` Cargo feature (part of the CLI's `full`
+build, not `default`). It loads `models/cross-encoder.onnx`; the
+expected model is `cross-encoder/ms-marco-MiniLM-L-6-v2`.
+`--rerank llm` reranks through the configured `LlmProvider` instead.
 
-**Status: disabled by default.** Phase 15 verification on LongMemEval-S
-showed both models *hurt* quality: MS-MARCO MiniLM dropped recall@1
-from 0.760 to 0.580 (-24%), and ColBERT-small showed similar regression.
-The infrastructure ships so users can attach domain-specific rerankers,
-but no model is enabled out of the box. See
-[Eval Log](./eval-log.md) for the full Phase 15 numbers.
+Embedded library users can bring their own reranker: implement the
+`Rerank` trait in `axil-core` and attach it with
+`QueryBuilder::with_reranker(...)`. The top `rerank_top_k_in` candidates
+(default 50) are re-scored and up to `rerank_top_k_out` (default 10) are
+kept.
+
+**Status: off by default.** Every committed rerank run lowered recall.
+On a 30-question LongMemEval-S subset, the MS-MARCO cross-encoder cut
+recall from 0.933 (recall-qtc, no rerank) to 0.667, and a BGE reranker
+to 0.733 ([investigation](../../../benchmarks/results/lme-rerank-investigation.md)).
+Those runs predate a fix to the text the CLI hands the cross-encoder, and
+have not been repeated since. The infrastructure ships so users can
+attach domain-specific rerankers, but no model is enabled out of the box.
 
 ## Step 4c — Query-Time Chunking (QTC)
 

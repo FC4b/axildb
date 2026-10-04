@@ -22,8 +22,7 @@ The taxonomy is **the** organizing principle of the codebase. Every `axil-*` cra
 | `axil-fts` (`crates/engines/`) | Engine | `*.axil.fts/` |
 | `axil-timeseries` (`crates/engines/`) | Engine | `*.axil.ts` |
 | `axil-memory` (`crates/extensions/`) | Extension | agent memory patterns (TTL, supersede, recency) |
-| `axil-indexer` (`crates/extensions/`) | Extension | project source indexer + section splitters |
-| `axil-rerank` (`crates/extensions/`) | Extension | reranker (no tables — pure compute) |
+| `axil-indexer` (`crates/extensions/`) | Extension | project source indexer + section splitters; cross-encoder reranker in `src/rerank.rs` behind the `rerank` feature (no tables — pure compute) |
 | `axil-scip` (`crates/extensions/`) | Extension | `_scip_*`, `_entities`, `_entity_aliases` |
 | `axil-docs` (`crates/extensions/`) | Extension *(reference impl)* | `_dep_manifests`, `_deps`, `_dep_docs` |
 | `axil-workspace` (`crates/extensions/`) | Extension | `.axil-workspace.toml` + federation tables |
