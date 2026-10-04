@@ -18,6 +18,12 @@ use serde_json::Value;
 /// The fixture's logits and probabilities come from Python onnxruntime 1.22.0
 /// (`benchmarks/typed-decisions/calibrate_u1.py`).
 const FIXTURE: &str = include_str!("fixtures/u1_parity.json");
+/// Bound on every logit and probability difference from the fixture. On
+/// macOS arm64 the measured gap is 4.4e-16 in logits (the same float32
+/// values) and 5.6e-17 in probability
+/// (`benchmarks/results/typed-decisions-u1-rust-runtime-2026-10-04.json`);
+/// 1e-4 leaves room for float rounding on other CPUs while staying far below
+/// the 0.95 logit shift that a different optimisation level causes.
 const TOLERANCE: f64 = 1e-4;
 
 /// `(old, new)` text of every U1 pair, by id.
@@ -112,6 +118,10 @@ fn u1_scores_match_python_onnxruntime() {
             "{id}: verdict"
         );
         for (g, w) in got_logits.iter().zip(&logits) {
+            assert!(
+                (g - w).abs() <= TOLERANCE,
+                "{id}: logit {g} vs Python {w}, beyond {TOLERANCE:e}"
+            );
             max_logit = max_logit.max((g - w).abs());
         }
         max_p = max_p.max((got.probability - want["p"].as_f64().unwrap()).abs());

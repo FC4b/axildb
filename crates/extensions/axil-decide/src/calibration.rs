@@ -1,4 +1,4 @@
-//! Turning a classifier's logits into a calibrated probability and a verdict.
+//! Turning a classifier's logits into a calibrated score and a verdict.
 
 use serde::Deserialize;
 
@@ -8,14 +8,16 @@ use crate::{DecideError, Result};
 /// The U1 calibration, fitted by `benchmarks/typed-decisions/calibrate_u1.py`.
 const U1_JSON: &str = include_str!("../calibration/u1-nli-deberta-v3-xsmall-qint8.json");
 
-/// How one decision reads a pair classifier: which label it asks about, the
-/// temperature that calibrates that label's probability, and the threshold
-/// that turns the probability into a verdict.
+/// How one decision reads a pair classifier: which model label's logit it
+/// scores, the temperature that calibrates that score against the decision's
+/// own labels, and the threshold that turns the score into a verdict. The
+/// decision's labels need not be the model's: U1 calibrates the NLI
+/// `contradiction` logit against labels for replace, update or contradict.
 ///
-/// The probability is `sigmoid((z_label - logsumexp(z_other)) / temperature)`.
+/// The score is `sigmoid((z_label - logsumexp(z_other)) / temperature)`.
 /// At a temperature of 1 that is the label's softmax probability; for any
 /// temperature it ranks pairs the same way, so it changes what the
-/// probability means but never which pair scores higher. Dividing every logit
+/// score means but never which pair scores higher. Dividing every logit
 /// by the temperature before the softmax would move mass between the other
 /// labels and reorder pairs.
 ///
@@ -31,12 +33,12 @@ pub struct Calibration {
     pub model: String,
     /// Hugging Face revision of that model.
     pub revision: String,
-    /// The label whose probability is the verdict, e.g. `contradiction`.
+    /// The model label whose logit is scored, e.g. `contradiction`.
     pub label: String,
     /// Divides the label's one-vs-rest logit; above 1 softens an
     /// over-confident model.
     pub temperature: f64,
-    /// Calibrated probability at or above which a pair is flagged.
+    /// Calibrated score at or above which a pair is flagged.
     pub threshold: f64,
     /// sha256 of the ONNX graph the fitted scores came from.
     pub onnx_sha256: String,
@@ -44,7 +46,8 @@ pub struct Calibration {
     pub tokenizer_sha256: String,
     /// Truncation length they were tokenized with.
     pub max_len: usize,
-    /// onnxruntime version that produced them, e.g. `1.22.0`.
+    /// onnxruntime version that produced them, e.g. `1.22.0`. The loaded
+    /// runtime must be exactly this version.
     pub onnxruntime: String,
     /// Graph optimisation level that produced them, e.g. `ORT_ENABLE_ALL`.
     pub optimization_level: String,
@@ -56,10 +59,11 @@ pub struct Calibration {
 }
 
 impl Calibration {
-    /// The U1 judge: P(contradiction | premise = OLD, hypothesis = NEW) from
-    /// [`crate::NLI_DEBERTA_V3_XSMALL_QINT8`], cut at a threshold chosen for a
-    /// low false-positive rate. A possible-contradiction signal for review,
-    /// not an update detector: it flags few plain updates. Fit and test
+    /// The U1 judge: a contradiction-model score (premise = OLD, hypothesis =
+    /// NEW) from [`crate::NLI_DEBERTA_V3_XSMALL_QINT8`], calibrated against
+    /// U1 labels (replace, update or contradict) and cut at a threshold
+    /// chosen for a low false-positive rate. A review signal, not an update
+    /// detector: it flags few plain updates. Fit and test
     /// numbers are in
     /// `benchmarks/results/typed-decisions-u1-calibration-2026-10-04.json`.
     pub fn u1() -> Self {
@@ -100,9 +104,11 @@ impl Calibration {
     /// logits.
     ///
     /// Refuses a different model, revision, graph or tokenizer file,
-    /// truncation length or optimisation level; an onnxruntime whose
-    /// major.minor differs from the one the scores were measured on (the
-    /// int8 U1 model's verdicts change between 1.22 and 1.30); and a
+    /// truncation length or optimisation level; any onnxruntime other than
+    /// the exact version the scores were measured on, patch releases
+    /// included (the int8 U1 model's verdicts change between 1.22 and 1.30,
+    /// and only 1.22.0 was measured; another version needs its own
+    /// calibration run); and a
     /// calibration fitted on batched scores of a model whose scores change
     /// in a batch.
     pub fn check_fit(
@@ -137,9 +143,8 @@ impl Calibration {
         if self.max_len != model.max_len {
             return differs("max_len", &self.max_len, &model.max_len);
         }
-        match (major_minor(&self.onnxruntime), major_minor(runtime)) {
-            (Some(fitted), Some(loaded)) if fitted == loaded => {}
-            _ => return differs("onnxruntime", &self.onnxruntime, &runtime),
+        if self.onnxruntime.trim() != runtime.trim() {
+            return differs("onnxruntime", &self.onnxruntime, &runtime);
         }
         if self.optimization_level != optimization_level {
             return differs(
@@ -163,24 +168,15 @@ impl Calibration {
         })
     }
 
-    /// Calibrated probability of the label at `label_index` in `logits`.
+    /// Calibrated score of the label at `label_index` in `logits`.
     pub fn probability(&self, logits: &[f32], label_index: usize) -> f64 {
         sigmoid(one_vs_rest_logit(logits, label_index) / self.temperature)
     }
 
-    /// Whether a calibrated probability reaches the threshold.
+    /// Whether a calibrated score reaches the threshold.
     pub fn flags(&self, probability: f64) -> bool {
         probability >= self.threshold
     }
-}
-
-/// `(major, minor)` of a version such as `1.22.0`; `None` if it has no
-/// numeric major and minor.
-fn major_minor(version: &str) -> Option<(u32, u32)> {
-    let mut parts = version.trim().split('.');
-    let major = parts.next()?.parse().ok()?;
-    let minor = parts.next()?.parse().ok()?;
-    Some((major, minor))
 }
 
 /// `z[label] - logsumexp(z[others])`: the log-odds of the label under a
@@ -312,22 +308,11 @@ mod tests {
     }
 
     #[test]
-    fn major_minor_parses_versions() {
-        assert_eq!(major_minor("1.22.0"), Some((1, 22)));
-        assert_eq!(major_minor("1.22"), Some((1, 22)));
-        assert_eq!(major_minor(" 1.30.1 "), Some((1, 30)));
-        assert_eq!(major_minor("1"), None);
-        assert_eq!(major_minor("main"), None);
-        assert_eq!(major_minor(""), None);
-    }
-
-    #[test]
     fn check_fit_refuses_every_mismatch() {
         let u1 = crate::NLI_DEBERTA_V3_XSMALL_QINT8;
         let all = "ORT_ENABLE_ALL";
         let ok = Calibration::u1();
         assert!(ok.check_fit(&u1, "1.22.0", all).is_ok());
-        assert!(ok.check_fit(&u1, "1.22.1", all).is_ok(), "patch release");
 
         // Same name and revision, different files or settings.
         let other_graph = PairModel {
@@ -349,8 +334,11 @@ mod tests {
             let err = ok.check_fit(&model, "1.22.0", all).unwrap_err();
             assert!(matches!(err, DecideError::Calibration(_)), "{err}");
         }
-        // A newer runtime that still serves API 22 is not the one measured.
-        for runtime in ["1.23.0", "1.30.0", "1.21.4", "2.22.0", "unknown", ""] {
+        // Only 1.22.0 was measured: a patch release, or a newer runtime that
+        // still serves API 22, is not it.
+        for runtime in [
+            "1.22.1", "1.22", "1.23.0", "1.30.0", "1.21.4", "2.22.0", "unknown", "",
+        ] {
             let err = ok.check_fit(&u1, runtime, all).unwrap_err();
             assert!(err.to_string().contains("onnxruntime"), "{runtime}: {err}");
         }

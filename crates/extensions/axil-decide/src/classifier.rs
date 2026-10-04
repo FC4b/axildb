@@ -44,7 +44,8 @@ pub struct PairScore {
     pub logits: Vec<f32>,
     /// Tokens the pair took after truncation, special tokens included.
     pub tokens: usize,
-    /// Calibrated probability of the calibration's label.
+    /// The calibration's label score, calibrated against the decision's
+    /// labels (see [`Calibration`]).
     pub probability: f64,
     /// Whether `probability` reached the calibration's threshold.
     pub flagged: bool,
@@ -384,8 +385,11 @@ mod tests {
         );
         assert_eq!(version_from_build_info("git-branch=rel-, x"), None);
         assert_eq!(version_from_build_info(""), None);
-        // The runtime this crate links reports the version U1 was fitted on.
-        assert!(loaded_runtime_version().unwrap().starts_with("1.22."));
+        // The runtime this crate links is exactly the version U1 was fitted on.
+        assert_eq!(
+            loaded_runtime_version().unwrap(),
+            Calibration::u1().onnxruntime
+        );
     }
 
     #[test]
