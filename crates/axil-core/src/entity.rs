@@ -386,11 +386,13 @@ static DECLARATION_PATTERNS: LazyLock<Vec<SymbolPattern>> = LazyLock::new(|| {
     ]
 });
 
-/// A line that opens with a declaration (`pub fn parse(`, `class User:`,
-/// `def run(self):`) and carries code punctuation after it.
+/// A line that opens with a declaration: a keyword, then a name followed
+/// right away by code punctuation (`pub fn parse(`, `struct Pool<`,
+/// `class User:`, `trait Store: Send`, `struct Unit;`), or a Go method
+/// receiver (`func (s *Server)`).
 static DECLARATION_LINE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"^(?:(?:pub(?:\([^)]*\))?|export|async|unsafe|const|public|private|protected|internal|static|abstract|final|override)\s+)*(?:fn|struct|impl|trait|enum|def|class|function|func|interface)\s+\S.*[(){}:<;=]",
+        r"^(?:(?:pub(?:\([^)]*\))?|export|default|async|unsafe|const|public|private|protected|internal|static|abstract|final|override)\s+)*(?:func\s*\(|(?:fn|struct|impl|trait|enum|def|class|function|func|interface)\s+[A-Za-z_$][A-Za-z0-9_$]*\s*(?:[(<{:=;]|->))",
     )
     .unwrap()
 });
@@ -445,11 +447,11 @@ fn code_segments(text: &str) -> Vec<CodeSegment<'_>> {
     segments
 }
 
-/// Whether a line outside a fenced block reads as code: it ends a statement
-/// or block, or it opens with a declaration followed by code punctuation.
+/// Whether a line outside a fenced block reads as code: it opens with a
+/// declaration (see [`DECLARATION_LINE`]). Punctuation alone proves nothing;
+/// prose ends lines with `;` and `:` too.
 fn is_code_like_line(line: &str) -> bool {
-    let t = line.trim();
-    t.ends_with('{') || t.ends_with('}') || t.ends_with(';') || DECLARATION_LINE.is_match(t)
+    DECLARATION_LINE.is_match(line.trim())
 }
 
 fn extract_code_symbols(text: &str, entities: &mut Vec<Entity>, seen: &mut HashSet<String>) {
@@ -652,6 +654,25 @@ mod tests {
         ] {
             let syms = code_syms(text);
             assert!(syms.is_empty(), "{text:?} minted {syms:?}");
+        }
+    }
+
+    #[test]
+    fn punctuation_does_not_make_prose_code() {
+        for text in [
+            "The trait with a default method;",
+            "trait with a default method;",
+            "We kept the class that wins {",
+            "a function returns early }",
+            "enum with three cases: on, off, auto",
+        ] {
+            let syms = code_syms(text);
+            assert!(syms.is_empty(), "{text:?} minted {syms:?}");
+        }
+        // A declaration line is code, so its names count as written.
+        let syms = code_syms("struct Unit;\ntrait Store: Send + Sync\nfn is(self) -> bool;");
+        for name in ["Unit", "Store", "is"] {
+            assert!(syms.iter().any(|(n, _)| n == name), "{name}: {syms:?}");
         }
     }
 
