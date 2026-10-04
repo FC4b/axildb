@@ -3362,13 +3362,13 @@ impl Axil {
         let Ok(vec_ids) = vi.all_ids() else {
             return 0;
         };
-        let orphans: Vec<RecordId> = vec_ids
-            .into_iter()
-            .filter(|vid| matches!(self.storage.get(vid), Ok(None)))
-            .collect();
+        let is_orphan = |vid: &RecordId| matches!(self.storage.get(vid), Ok(None));
+        let orphans: Vec<RecordId> = vec_ids.into_iter().filter(|vid| is_orphan(vid)).collect();
         // One commit for the lot: a store holding hundreds of orphans would
-        // otherwise pay a durable write per vector.
-        match vi.remove_batch(&orphans) {
+        // otherwise pay a durable write per vector. The check is repeated as
+        // each vector is removed: a record re-inserted under one of these ids
+        // since the scan above keeps the vector it was embedded with.
+        match vi.remove_batch_if(&orphans, &is_orphan) {
             Ok(removed) => removed,
             Err(e) => {
                 eprintln!(

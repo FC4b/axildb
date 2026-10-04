@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use redb::{
     Database, ReadOnlyDatabase, ReadableDatabase, ReadableTable, ReadableTableMetadata,
     TableDefinition,
@@ -54,6 +54,11 @@ pub struct VectorConfig {
 pub struct VectorEngine {
     config: VectorConfig,
     index: RwLock<HnswIndex>,
+    /// Held by every mutation across its `.vec` commit and its live-index
+    /// update, so the two never interleave with another mutation's (a delete
+    /// cannot land between an add's disk write and its index insert). Kept
+    /// apart from `index` so searches never wait on a disk commit.
+    mutation: Mutex<()>,
     vector_db: Database,
     embedder: Option<Embedder>,
     /// Entries present in the on-disk store but not loadable into the live
@@ -179,6 +184,7 @@ impl VectorEngine {
         Ok(Self {
             config,
             index: RwLock::new(index),
+            mutation: Mutex::new(()),
             vector_db,
             embedder: None,
             skipped_at_load: AtomicUsize::new(skipped_at_load),
@@ -255,6 +261,7 @@ impl VectorEngine {
                 auto_embed_fields: Vec::new(),
             },
             index: RwLock::new(index),
+            mutation: Mutex::new(()),
             vector_db,
             embedder: None,
             skipped_at_load: AtomicUsize::new(skipped_at_load),
@@ -350,6 +357,7 @@ impl Engine for VectorEngine {
 
         // Persist to disk first so a crash can't leave the in-memory index
         // ahead of storage.
+        let _mutation = self.mutation.lock();
         persist_vector(&self.vector_db, &record.id, &vector)?;
         self.index
             .write()
@@ -360,6 +368,7 @@ impl Engine for VectorEngine {
     }
 
     fn on_record_delete(&self, id: &RecordId) -> axil_core::Result<()> {
+        let _mutation = self.mutation.lock();
         self.index.write().remove(id);
         delete_vector(&self.vector_db, id)
     }
@@ -372,6 +381,7 @@ impl VectorIndex for VectorEngine {
 
     fn purge_unloadable(&self) -> axil_core::Result<usize> {
         let dimensions = self.config.dimensions;
+        let _mutation = self.mutation.lock();
         let txn = self.vector_db.begin_write().map_err(plugin_err)?;
         let purged = {
             let mut table = txn.open_table(VECTORS_TABLE).map_err(plugin_err)?;
@@ -401,6 +411,7 @@ impl VectorIndex for VectorEngine {
         self.validate_vector(&id, vector)?;
         // Persist to disk first so a crash can't leave the in-memory
         // index ahead of storage.
+        let _mutation = self.mutation.lock();
         persist_vector(&self.vector_db, &id, vector)?;
         self.index
             .write()
@@ -420,6 +431,7 @@ impl VectorIndex for VectorEngine {
         }
         // Persist the whole batch to disk first (one fsync) so a crash can't
         // leave the in-memory index ahead of storage, then add to the live index.
+        let _mutation = self.mutation.lock();
         persist_vectors_batch(&self.vector_db, items)?;
         let mut idx = self.index.write();
         for (id, vector) in items {
@@ -430,12 +442,28 @@ impl VectorIndex for VectorEngine {
     }
 
     fn remove_batch(&self, ids: &[RecordId]) -> axil_core::Result<usize> {
+        self.remove_batch_if(ids, &|_| true)
+    }
+
+    fn remove_batch_if(
+        &self,
+        ids: &[RecordId],
+        doomed: &dyn Fn(&RecordId) -> bool,
+    ) -> axil_core::Result<usize> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        // The check runs under the mutation lock, so an add for one of these
+        // ids either finished before it (and the check sees its record) or
+        // waits until the removal is done.
+        let _mutation = self.mutation.lock();
+        let ids: Vec<RecordId> = ids.iter().filter(|id| doomed(id)).cloned().collect();
         if ids.is_empty() {
             return Ok(0);
         }
         // One commit for the whole batch, before the live index changes, so a
         // failed commit leaves the two in step.
-        delete_vectors_batch(&self.vector_db, ids)?;
+        delete_vectors_batch(&self.vector_db, &ids)?;
         let mut idx = self.index.write();
         Ok(ids.iter().filter(|id| idx.remove(id)).count())
     }
@@ -1505,6 +1533,42 @@ mod tests {
             assert_eq!(plugin.search(&[1.0, 0.0, 0.0], 1).unwrap()[0].0, id1);
             assert_eq!(plugin.search(&[0.0, 1.0, 0.0], 1).unwrap()[0].0, id2);
         }
+    }
+
+    #[test]
+    fn an_add_waits_for_a_removal_in_progress() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("serialized.axil");
+        let id = RecordId::new();
+        let engine = VectorEngine::open(&path, 3).unwrap();
+        engine.add(id.clone(), &[1.0, 0.0, 0.0]).unwrap();
+
+        // The removal decides while an add for the same id is under way. The
+        // add must wait for it rather than land between its disk delete and
+        // its live-index update, which would leave the two disagreeing.
+        let (started, start) = std::sync::mpsc::channel::<()>();
+        let (shared, add_id) = (&engine, id.clone());
+        std::thread::scope(|scope| {
+            let adder = scope.spawn(move || {
+                start.recv().unwrap();
+                shared.add(add_id, &[0.0, 1.0, 0.0]).unwrap();
+            });
+            let removed = engine
+                .remove_batch_if(&[id.clone()], &|_| {
+                    started.send(()).unwrap();
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    true
+                })
+                .unwrap();
+            assert_eq!(removed, 1);
+            adder.join().unwrap();
+        });
+
+        // The add came after the removal: its vector is live and on disk.
+        assert_eq!(engine.get_vector(&id).unwrap(), Some(vec![0.0, 1.0, 0.0]));
+        drop(engine);
+        let reopened = VectorEngine::open(&path, 3).unwrap();
+        assert_eq!(reopened.get_vector(&id).unwrap(), Some(vec![0.0, 1.0, 0.0]));
     }
 
     #[test]

@@ -17,7 +17,7 @@
 //! Determinism: an in-test xorshift PRNG (no `rand` dependency) drives the
 //! fan-out workload; the seed is printed on failure so any flake reproduces.
 
-use axil_core::{Axil, HealingConfig, RecordId, Severity, TextEmbedder};
+use axil_core::{Axil, Engine, HealingConfig, RecordId, Severity, TextEmbedder, VectorIndex};
 use axil_fts::AxilBuilderFtsExt;
 use axil_graph::AxilBuilderGraphExt;
 use serde_json::json;
@@ -472,6 +472,113 @@ fn a_record_reinserted_under_its_id_while_detached_keeps_its_vector() {
         .get_vector(&record.id)
         .unwrap()
         .is_some());
+}
+
+/// A vector index that, when asked to remove vectors, first lets a re-insert
+/// land: the record goes back into storage and gets a new vector. That is
+/// the interleaving a concurrent `insert_preserving` produces between an
+/// orphan sweep's scan and its removal, made deterministic.
+struct ReinsertDuringRemoval {
+    inner: axil_vector::VectorEngine,
+    db: std::sync::Arc<std::sync::OnceLock<std::sync::Weak<Axil>>>,
+    record: std::sync::Arc<std::sync::Mutex<Option<axil_core::Record>>>,
+}
+
+impl ReinsertDuringRemoval {
+    fn reinsert_first(&self) {
+        if let Some(record) = self.record.lock().unwrap().take() {
+            let db = self.db.get().and_then(std::sync::Weak::upgrade).unwrap();
+            db.storage().insert(&record).unwrap();
+            self.inner
+                .add(record.id.clone(), &[0.0, 0.0, 0.0, 1.0])
+                .unwrap();
+        }
+    }
+}
+
+impl Engine for ReinsertDuringRemoval {
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+    fn capabilities(&self) -> Vec<axil_core::Capability> {
+        self.inner.capabilities()
+    }
+    fn on_record_insert(&self, record: &axil_core::Record) -> axil_core::Result<()> {
+        self.inner.on_record_insert(record)
+    }
+    fn on_record_delete(&self, id: &RecordId) -> axil_core::Result<()> {
+        self.inner.on_record_delete(id)
+    }
+}
+
+impl VectorIndex for ReinsertDuringRemoval {
+    fn add(&self, id: RecordId, vector: &[f32]) -> axil_core::Result<()> {
+        self.inner.add(id, vector)
+    }
+    fn remove_batch(&self, ids: &[RecordId]) -> axil_core::Result<usize> {
+        self.reinsert_first();
+        self.inner.remove_batch(ids)
+    }
+    fn remove_batch_if(
+        &self,
+        ids: &[RecordId],
+        doomed: &dyn Fn(&RecordId) -> bool,
+    ) -> axil_core::Result<usize> {
+        self.reinsert_first();
+        self.inner.remove_batch_if(ids, doomed)
+    }
+    fn search(&self, query: &[f32], top_k: usize) -> axil_core::Result<Vec<(RecordId, f32)>> {
+        self.inner.search(query, top_k)
+    }
+    fn count(&self) -> usize {
+        self.inner.count()
+    }
+    fn dimensions(&self) -> usize {
+        self.inner.dimensions()
+    }
+    fn all_ids(&self) -> axil_core::Result<Vec<RecordId>> {
+        self.inner.all_ids()
+    }
+    fn get_vector(&self, id: &RecordId) -> axil_core::Result<Option<Vec<f32>>> {
+        self.inner.get_vector(id)
+    }
+}
+
+#[test]
+fn orphan_cleanup_keeps_the_vector_of_a_record_reinserted_meanwhile() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("test.axil");
+    let slot = std::sync::Arc::new(std::sync::OnceLock::new());
+    let reinsert = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let index = ReinsertDuringRemoval {
+        inner: axil_vector::VectorEngine::open(&path, 4).unwrap(),
+        db: slot.clone(),
+        record: reinsert.clone(),
+    };
+    let db = std::sync::Arc::new(
+        Axil::open(&path)
+            .with_vector_index(Box::new(index))
+            .with_embedder(Box::new(FrontWindowEmbedder))
+            .build()
+            .unwrap(),
+    );
+    slot.set(std::sync::Arc::downgrade(&db)).unwrap();
+
+    let record = db
+        .insert("sessions", json!({"summary": "auth timeout in the pool"}))
+        .unwrap();
+    torn_delete(&db, &record.id);
+    // The sweep sees the record gone; by the time it removes vectors, the
+    // record is back with a new one.
+    *reinsert.lock().unwrap() = Some(record.clone());
+
+    assert_eq!(db.clean_orphaned_vectors(), 0);
+    assert_eq!(
+        db.get_vector(&record.id).unwrap(),
+        Some(vec![0.0, 0.0, 0.0, 1.0]),
+        "the re-insert's vector must survive the sweep"
+    );
+    assert!(detect_problems_is_clean(&db), "{:?}", db.detect_problems());
 }
 
 /// The paths that delete on their own (compaction, recall-chunk cleanup, a
