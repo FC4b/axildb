@@ -19468,21 +19468,30 @@ fn format_context_block(values: &[Value], budget: Option<usize>, warnings: &[Str
             xml_escape_for_context(id),
         ));
     }
-    // Build the combined `lines` list: code first, then memories — so the
-    // first thing the agent sees is the actionable pointer.
-    let mut lines: Vec<String> = Vec::with_capacity(code_lines.len() + other_lines.len() + 2);
-    if !code_lines.is_empty() {
-        lines.push("  # Relevant code".to_string());
+    // Build the combined list: code first, then memories — so the first
+    // thing the agent sees is the actionable pointer. Each entry is one unit
+    // for the budget below, and a section heading shares a unit with the
+    // section's first hit: packing them separately could keep a heading and
+    // drop every hit under it.
+    let mut lines: Vec<String> = Vec::with_capacity(code_lines.len() + other_lines.len());
+    let mut code_lines = code_lines.into_iter();
+    if let Some(first) = code_lines.next() {
+        lines.push(format!("  # Relevant code\n{first}"));
         lines.extend(code_lines);
     }
-    if !other_lines.is_empty() {
-        if !lines.is_empty() {
-            lines.push("  # Related memories".to_string());
+    let mut other_lines = other_lines.into_iter();
+    if let Some(first) = other_lines.next() {
+        if lines.is_empty() {
+            lines.push(first);
+        } else {
+            lines.push(format!("  # Related memories\n{first}"));
         }
         lines.extend(other_lines);
     }
 
     // Apply token budget (bytes/4 ≈ tokens) packing highest-ranked first.
+    // The first unit is always kept, so a block never comes out empty when
+    // there was a hit to show.
     if let Some(max_tokens) = budget {
         let max_bytes = max_tokens.saturating_mul(4);
         let opener = "<context source=\"axil\">\n";
@@ -21745,6 +21754,43 @@ mod recall_summary_tests {
         );
         assert!(
             block.contains("  [decisions] one hook binary — the &lt;bash&gt; copy drifted (id=D)"),
+            "{block}"
+        );
+    }
+
+    #[cfg(feature = "indexer")]
+    #[test]
+    fn a_budget_never_keeps_a_section_heading_without_its_first_hit() {
+        let hits = vec![
+            json!({"id": "C", "table": axil_indexer::TABLE_CODE_PROXIES, "data": {
+                "path": "src/auth.rs", "line_start": 42, "symbol": "login"}}),
+            json!({"id": "D", "table": "decisions", "data": {"summary": "use redb"}}),
+        ];
+
+        // A budget too small for anything still shows the first hit, with its
+        // heading.
+        let block = format_context_block(&hits, Some(0), &[]);
+        assert!(
+            block.contains("  # Relevant code\n  [code] src/auth.rs:42 login"),
+            "{block}"
+        );
+        assert!(!block.contains("Related memories"), "{block}");
+
+        // Room for the memories heading but not for its hit: neither prints.
+        let code_only = format_context_block(&hits[..1], None, &[]);
+        let tools = code_only
+            .lines()
+            .find(|l| l.starts_with("  # Tools"))
+            .map_or(0, |l| l.len() + 1);
+        let budget = (code_only.len() - tools + "  # Related memories\n".len()).div_ceil(4);
+        let block = format_context_block(&hits, Some(budget), &[]);
+        assert!(block.contains("(id=C)"), "{block}");
+        assert!(!block.contains("Related memories"), "{block}");
+
+        // With room for both, both sections print.
+        let block = format_context_block(&hits, Some(2000), &[]);
+        assert!(
+            block.contains("  # Related memories\n  [decisions] use redb (id=D)"),
             "{block}"
         );
     }
