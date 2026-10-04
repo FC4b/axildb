@@ -471,18 +471,23 @@ impl RecallSlots {
         }
     }
 
-    /// Take a slot, waiting for one to be freed until `deadline`. `None`
-    /// only once `deadline` has passed with all `cap` slots still taken.
+    /// Take a slot, waiting for one to be freed until `deadline`. `None` once
+    /// `deadline` has passed, even with a slot free by then: the caller has
+    /// stopped waiting for the search the slot would run.
     pub fn take_by(&'static self, deadline: Instant) -> Option<RecallSlot> {
         let mut live = self.live.lock().unwrap_or_else(PoisonError::into_inner);
         loop {
+            let now = Instant::now();
+            if now > deadline {
+                if *live < self.cap {
+                    // The wakeup may have been meant for this waiter: pass it on.
+                    self.freed.notify_one();
+                }
+                return None;
+            }
             if *live < self.cap {
                 *live += 1;
                 return Some(RecallSlot(self));
-            }
-            let now = Instant::now();
-            if now > deadline {
-                return None;
             }
             live = self
                 .freed
@@ -697,11 +702,11 @@ mod tests {
 
     #[test]
     fn recall_slots_cap_holders_and_hand_a_freed_slot_to_a_waiter() {
-        use std::time::Duration;
         static SLOTS: RecallSlots = RecallSlots::new(2);
-        let a = SLOTS.take_by(Instant::now()).unwrap();
+        let soon = || Instant::now() + Duration::from_secs(1);
+        let a = SLOTS.take_by(soon()).unwrap();
         // Slots are per process, not per thread.
-        let b = std::thread::spawn(|| SLOTS.take_by(Instant::now()));
+        let b = std::thread::spawn(move || SLOTS.take_by(soon()));
         let b = b.join().unwrap().unwrap();
         assert_eq!(SLOTS.live(), 2);
 
@@ -721,6 +726,31 @@ mod tests {
         assert!(c.is_some() && start.elapsed() < Duration::from_secs(30));
         freer.join().unwrap();
         drop((b, c));
+        assert_eq!(SLOTS.live(), 0);
+    }
+
+    #[test]
+    fn a_slot_freed_after_the_deadline_is_not_taken() {
+        static SLOTS: RecallSlots = RecallSlots::new(1);
+        let soon = Instant::now() + Duration::from_secs(1);
+        let held = SLOTS.take_by(soon).unwrap();
+        let start = Instant::now();
+        let deadline = start + Duration::from_millis(50);
+        let waiter = std::thread::spawn(move || SLOTS.take_by(deadline).is_some());
+
+        // Hold the lock across the waiter's deadline and free the slot under
+        // it: the waiter's timed-out wait can only return once the slot is
+        // free, and must still give up.
+        std::thread::sleep(Duration::from_millis(20));
+        let mut live = SLOTS.live.lock().unwrap();
+        while Instant::now() <= deadline + Duration::from_millis(30) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        *live -= 1;
+        std::mem::forget(held);
+        SLOTS.freed.notify_one();
+        drop(live);
+        assert!(!waiter.join().unwrap(), "took a slot after its deadline");
         assert_eq!(SLOTS.live(), 0);
     }
 
@@ -1685,7 +1715,6 @@ mod tests {
         #[test]
         fn recall_timeout_workers_stay_within_the_slots() {
             use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-            use std::time::Duration;
 
             let tmp = tempfile::tempdir().unwrap();
             let proj = build_fixture(tmp.path());
@@ -1719,8 +1748,9 @@ mod tests {
             // Only this test runs recalls with a deadline, so every slot is
             // free to take.
             let take_all = || {
+                let soon = || Instant::now() + Duration::from_millis(10);
                 let held: Vec<RecallSlot> =
-                    std::iter::from_fn(|| RECALL_SLOTS.take_by(Instant::now())).collect();
+                    std::iter::from_fn(|| RECALL_SLOTS.take_by(soon())).collect();
                 assert_eq!(held.len(), RECALL_SLOTS.cap);
                 held
             };
