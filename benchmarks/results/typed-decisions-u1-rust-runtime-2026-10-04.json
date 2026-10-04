@@ -21,7 +21,8 @@
     "model": "onnx/model.onnx (fp32) of the same revision, batch-invariant",
     "pairs": 40,
     "max_abs_probability_diff_batched_vs_single": 1.95e-06,
-    "note": "The int8 model is not batch-invariant (one activation scale per batch tensor), so the runtime scores it one pair per call: padded batches of 8 move its logits by up to 1.4 and flip 4 of 249 verdicts (batch_check in benchmarks/results/typed-decisions-u1-calibration-2026-10-04.json)."
+    "note": "Padded batches of 8 against one pair per call, temperature 1 and the U1 threshold; asserted by tests/u1_parity.rs. The runtime batches only a batch-invariant model whose calibration was fitted on batched scores, so the U1 calibration (fitted one pair per call) never batches. The int8 model is not batch-invariant (one activation scale per batch tensor), so the runtime scores it one pair per call: padded batches of 8 move its logits by up to 1.4 and flip 4 of 249 verdicts (batch_check in benchmarks/results/typed-decisions-u1-calibration-2026-10-04.json).",
+    "verdict_flips_batched_vs_single": 0
   },
   "latency": {
     "what": "one pair per call (tokenize + run + calibrate), 249 U1 pairs; Rust after 5 warm-up pairs, Python without; one run each, Rust first",
