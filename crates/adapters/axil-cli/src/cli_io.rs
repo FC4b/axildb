@@ -25,8 +25,8 @@ use std::cell::RefCell;
 use std::fmt;
 use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
+use std::time::Instant;
 
 use axil_core::Axil;
 
@@ -298,7 +298,8 @@ pub fn hot_db(
 /// another thread behind.
 #[cfg_attr(not(feature = "embed"), allow(dead_code))] // recall, the one taker, needs `embed`
 pub struct RecallSlots {
-    live: AtomicUsize,
+    live: Mutex<usize>,
+    freed: Condvar,
     cap: usize,
 }
 
@@ -316,31 +317,44 @@ impl RecallSlots {
     /// A cap of `cap` concurrent workers.
     pub const fn new(cap: usize) -> Self {
         Self {
-            live: AtomicUsize::new(0),
+            live: Mutex::new(0),
+            freed: Condvar::new(),
             cap,
         }
     }
 
-    /// Take a slot, or `None` when `cap` workers already hold one.
-    pub fn try_take(&'static self) -> Option<RecallSlot> {
-        self.live
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
-                (n < self.cap).then_some(n + 1)
-            })
-            .ok()
-            .map(|_| RecallSlot(self))
+    /// Take a slot, waiting for one to be freed until `deadline`. `None`
+    /// only once `deadline` has passed with all `cap` slots still taken.
+    pub fn take_by(&'static self, deadline: Instant) -> Option<RecallSlot> {
+        let mut live = self.live.lock().unwrap_or_else(PoisonError::into_inner);
+        loop {
+            if *live < self.cap {
+                *live += 1;
+                return Some(RecallSlot(self));
+            }
+            let now = Instant::now();
+            if now > deadline {
+                return None;
+            }
+            live = self
+                .freed
+                .wait_timeout(live, deadline - now)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        }
     }
 
     /// How many slots are taken right now.
     #[cfg_attr(not(test), allow(dead_code))] // read by tests until a host reports it
     pub fn live(&self) -> usize {
-        self.live.load(Ordering::Acquire)
+        *self.live.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
 impl Drop for RecallSlot {
     fn drop(&mut self) {
-        self.0.live.fetch_sub(1, Ordering::AcqRel);
+        *self.0.live.lock().unwrap_or_else(PoisonError::into_inner) -= 1;
+        self.0.freed.notify_one();
     }
 }
 
@@ -498,17 +512,30 @@ mod tests {
     }
 
     #[test]
-    fn recall_slots_cap_concurrent_holders() {
+    fn recall_slots_cap_holders_and_hand_a_freed_slot_to_a_waiter() {
+        use std::time::Duration;
         static SLOTS: RecallSlots = RecallSlots::new(2);
-        let a = SLOTS.try_take().unwrap();
+        let a = SLOTS.take_by(Instant::now()).unwrap();
         // Slots are per process, not per thread.
-        let b = std::thread::spawn(|| SLOTS.try_take()).join().unwrap();
-        let b = b.unwrap();
-        assert!(SLOTS.try_take().is_none());
+        let b = std::thread::spawn(|| SLOTS.take_by(Instant::now()));
+        let b = b.join().unwrap().unwrap();
         assert_eq!(SLOTS.live(), 2);
-        drop(a);
-        let c = SLOTS.try_take().expect("a dropped slot is free again");
-        assert!(SLOTS.try_take().is_none());
+
+        // All taken: wait for the deadline, then give up.
+        let start = Instant::now();
+        assert!(SLOTS.take_by(start + Duration::from_millis(50)).is_none());
+        assert!(start.elapsed() >= Duration::from_millis(50));
+
+        // A slot freed during the wait goes to the waiter, long before its
+        // deadline.
+        let start = Instant::now();
+        let freer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            drop(a);
+        });
+        let c = SLOTS.take_by(start + Duration::from_secs(60));
+        assert!(c.is_some() && start.elapsed() < Duration::from_secs(30));
+        freer.join().unwrap();
         drop((b, c));
         assert_eq!(SLOTS.live(), 0);
     }
@@ -1294,14 +1321,15 @@ mod tests {
         }
 
         /// `recall --timeout-ms` on a long-lived handle. With every slot
-        /// taken it answers at once with the partial results; and however
-        /// many requests time out, no more workers than slots stay behind,
-        /// each giving its slot and handle back when its search ends.
+        /// taken it waits for one until its deadline, then answers with the
+        /// partial results; a slot freed in time lets it search. However many
+        /// requests time out, no more workers than slots stay behind, each
+        /// giving its slot and handle back when its search ends.
         #[cfg(feature = "embed")]
         #[test]
         fn recall_timeout_workers_stay_within_the_slots() {
-            use std::sync::atomic::AtomicBool;
-            use std::time::{Duration, Instant};
+            use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+            use std::time::Duration;
 
             let tmp = tempfile::tempdir().unwrap();
             let proj = build_fixture(tmp.path());
@@ -1334,23 +1362,40 @@ mod tests {
 
             // Only this test runs recalls with a deadline, so every slot is
             // free to take.
-            let held: Vec<RecallSlot> = std::iter::from_fn(|| RECALL_SLOTS.try_take()).collect();
-            assert_eq!(held.len(), RECALL_SLOTS.cap);
+            let take_all = || {
+                let held: Vec<RecallSlot> =
+                    std::iter::from_fn(|| RECALL_SLOTS.take_by(Instant::now())).collect();
+                assert_eq!(held.len(), RECALL_SLOTS.cap);
+                held
+            };
+
+            // No slot frees up: the deadline passes waiting, and the
+            // command says so, with no search and no cascade after it.
+            let held = take_all();
             let start = Instant::now();
-            let (hits, err) = recall("60000");
+            let (hits, err) = recall("300");
+            assert!(start.elapsed() >= Duration::from_millis(300));
+            assert_eq!(hits, 0);
+            assert!(err.starts_with(&partial(300)), "{err}");
             assert!(
-                start.elapsed() < Duration::from_secs(30),
-                "it waited for the deadline"
-            );
-            assert_eq!(hits, 0, "no slot means no search, and no cascade after it");
-            assert!(err.starts_with(&partial(60000)), "{err}");
-            assert!(
-                err.contains("timeout_ms=60000 exceeded; returned partial results"),
+                err.contains("timeout_ms=300 exceeded; returned partial results"),
                 "{err}"
             );
             drop(held);
+
+            // A slot frees up well before the deadline: a full search.
+            let mut held = take_all();
+            let one = held.pop().unwrap();
+            let freer = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(200));
+                drop(one);
+            });
+            let start = Instant::now();
             let (hits, err) = recall("60000");
+            assert!(start.elapsed() < Duration::from_secs(30));
             assert!(hits > 0 && !err.contains("partial"), "{err}");
+            freer.join().unwrap();
+            drop(held);
 
             // 100 requests from 10 clients at once, each with a deadline
             // most searches miss.

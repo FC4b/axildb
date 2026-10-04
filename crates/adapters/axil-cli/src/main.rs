@@ -9352,14 +9352,10 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
             }
             let recall_start = std::time::Instant::now();
             let deadline = timeout_ms.map(|ms| recall_start + std::time::Duration::from_millis(ms));
-            // Set when the deadline-bounded recall gets no worker slot: the
-            // command then returns partial results as if the deadline had passed.
-            let no_slot = std::cell::Cell::new(false);
             let deadline_exceeded = || -> bool {
-                no_slot.get()
-                    || deadline
-                        .map(|d| std::time::Instant::now() > d)
-                        .unwrap_or(false)
+                deadline
+                    .map(|d| std::time::Instant::now() > d)
+                    .unwrap_or(false)
             };
 
             let db = cli_io::hot_db(&db_path, || open_read_command(&db_path))?;
@@ -9486,28 +9482,25 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
             // thread and wait up to the remaining budget on a channel. If it doesn't finish
             // in time we return empty partial results and abandon the thread — the CLI process
             // exits shortly afterward and tears down any lingering work. A long-lived process
-            // doesn't, so a worker needs one of the process's few recall slots; with none free
-            // the recall goes straight to the partial results.
+            // doesn't, so a worker needs one of the process's few recall slots, and waits for
+            // one until the deadline.
             let mut recall_results = if deadline_exceeded() {
                 Vec::new()
             } else if let Some(d) = deadline {
                 let (tx, rx) = std::sync::mpsc::channel();
-                match cli_io::RECALL_SLOTS.try_take() {
-                    Some(slot) => {
-                        let db_handle = Arc::clone(&db);
-                        let q = query.clone();
-                        let cfg_clone = cfg.clone();
-                        let tk = fetch_k;
-                        std::thread::spawn(move || {
-                            let _ = tx.send(db_handle.recall(&q, tk, Some(cfg_clone)));
-                            drop(slot);
-                        });
-                    }
-                    None => {
-                        no_slot.set(true);
-                        // With no sender left, the wait below ends at once.
-                        drop(tx);
-                    }
+                if let Some(slot) = cli_io::RECALL_SLOTS.take_by(d) {
+                    let db_handle = Arc::clone(&db);
+                    let q = query.clone();
+                    let cfg_clone = cfg.clone();
+                    let tk = fetch_k;
+                    std::thread::spawn(move || {
+                        let _ = tx.send(db_handle.recall(&q, tk, Some(cfg_clone)));
+                        drop(slot);
+                    });
+                } else {
+                    // The deadline passed waiting for a slot. With no sender
+                    // left, the wait below ends at once.
+                    drop(tx);
                 }
                 let remaining = d.saturating_duration_since(std::time::Instant::now());
                 match rx.recv_timeout(remaining) {
