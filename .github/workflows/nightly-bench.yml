@@ -100,7 +100,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # The list comes from the root Cargo.toml `exclude`, so a new harness is
-      # covered the night it lands. Every harness is checked even after one
+      # covered the night it lands. Each harness is checked with its default
+      # features and then once per optional feature in its own [features]
+      # table (longmemeval: rerank and the GPU execution providers), since
+      # cfg-gated code rots unseen otherwise. Every check runs even after one
       # fails, so the log names all the broken ones.
       - name: cargo check each excluded harness
         shell: bash
@@ -113,14 +116,20 @@ jobs:
           fi
           failed=()
           for h in $harnesses; do
-            echo "::group::$h"
-            if ! cargo check --all-targets --manifest-path "$h/Cargo.toml"; then
-              echo "::error::$h does not build"
-              failed+=("$h")
-            fi
-            echo "::endgroup::"
+            manifest="$h/Cargo.toml"
+            features=$(cargo metadata --no-deps --format-version 1 --manifest-path "$manifest" \
+              | python3 -c 'import json, sys; m = json.load(sys.stdin); print(" ".join(f for p in m["packages"] for f in p["features"] if f != "default"))')
+            for f in "" $features; do
+              label="$h${f:+ --features $f}"
+              echo "::group::$label"
+              if ! cargo check --all-targets --manifest-path "$manifest" ${f:+--features "$f"}; then
+                echo "::error::$label does not build"
+                failed+=("$label")
+              fi
+              echo "::endgroup::"
+            done
           done
           if [ "${#failed[@]}" -gt 0 ]; then
-            echo "broken harnesses: ${failed[*]}"
+            printf 'broken: %s\n' "${failed[@]}"
             exit 1
           fi
