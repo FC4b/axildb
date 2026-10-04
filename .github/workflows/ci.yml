@@ -46,8 +46,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # Embedding / rerank integration tests download ONNX models at runtime;
-      # they run locally and nightly. PR CI covers the model-free storage
-      # engines, extensions, and adapters for fast, deterministic signal.
+      # they run locally only (no CI job runs them). PR CI covers the
+      # model-free storage engines, extensions, and adapters for fast,
+      # deterministic signal.
       # axil-vector default features pull in no ONNX/model deps (the HNSW
       # correctness oracle is model-free and deterministic), so it runs here on
       # the per-PR gate alongside the other model-free crates.
@@ -62,8 +63,8 @@ jobs:
           -p axil-scip
           -p axil-vector
       # The CLI's default features pull in ONNX (embed), so its full test run
-      # belongs to the nightly/local model job. But its pure-logic tests —
-      # the agent hook dialect parsers + golden fixtures, the install wizard,
+      # is local only. But its pure-logic tests — the agent hook dialect
+      # parsers + golden fixtures, the install wizard,
       # scip detection — are model-free and compile under `core` alone (the
       # `cargo check --features core` job above proves that set builds). Run
       # them here so a dialect field-mapping regression fails the per-PR gate.
