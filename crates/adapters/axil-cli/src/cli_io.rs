@@ -15,11 +15,11 @@
 //! of a closure. Output then appends to the context's buffers and stdin is
 //! served from its bytes.
 //!
-//! The context can also carry a database the host already has open. The hot
-//! commands get their handle through [`hot_db`], which returns that handle
-//! instead of opening the file again. [`RECALL_SLOTS`] bounds the recall
-//! workers a deadline leaves running, which a one-shot run never outlives but
-//! a long-lived host would accumulate.
+//! The context can also carry a database the host already has open, a
+//! [`WarmDb`]. The hot commands get their handle through [`hot_db`], which
+//! returns that handle instead of opening the file again. [`RECALL_SLOTS`]
+//! bounds the recall workers a deadline leaves running, which a one-shot run
+//! never outlives but a long-lived host would accumulate.
 
 use std::cell::RefCell;
 use std::fmt;
@@ -45,10 +45,8 @@ pub struct ReqCtx {
     /// Whether the command records slow queries in the database's log.
     pub slow_query_log: bool,
     /// An open database the command uses instead of opening its own, when
-    /// the command's database is the one at `db_canon`. See [`hot_db`].
-    pub warm: Option<Arc<Axil>>,
-    /// Canonical path of the database `warm` was opened from.
-    pub db_canon: PathBuf,
+    /// it is the command's database. See [`hot_db`].
+    pub warm: Option<WarmDb>,
 }
 
 impl Default for ReqCtx {
@@ -59,7 +57,6 @@ impl Default for ReqCtx {
             stdin: None,
             slow_query_log: true,
             warm: None,
-            db_canon: PathBuf::new(),
         }
     }
 }
@@ -260,16 +257,64 @@ pub fn slow_query_log_enabled() -> bool {
     REQ.with(|r| r.borrow().as_ref().is_none_or(|ctx| ctx.slow_query_log))
 }
 
-/// The installed request's open database, when `path` names the file it was
-/// opened from. `None` when no request is installed, it carries no handle, or
-/// `path` is another database (or can't be resolved).
-pub fn warm_db(path: &Path) -> Option<Arc<Axil>> {
-    let (warm, db_canon) = REQ.with(|r| {
-        let r = r.borrow();
-        let ctx = r.as_ref()?;
-        Some((ctx.warm.clone()?, ctx.db_canon.clone()))
+/// The identity of the database at `path`: its directory, canonicalized,
+/// joined with its file name as given.
+///
+/// The companion files (`.vec`, `.fts`, `.ts`, ...) are named after the path as
+/// given, so two paths are one database only when they agree on this, not
+/// merely when they resolve to the same core file: a symlink to the core file
+/// under another name has companions of its own.
+pub fn db_key(path: &Path) -> io::Result<PathBuf> {
+    let name = path.file_name().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{} names no database file", path.display()),
+        )
     })?;
-    (std::fs::canonicalize(path).ok()? == db_canon).then_some(warm)
+    let dir = match path.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir,
+        _ => Path::new("."),
+    };
+    Ok(std::fs::canonicalize(dir)?.join(name))
+}
+
+/// A database a long-lived host keeps open for the commands it runs
+/// in-process, installed through [`ReqCtx::warm`].
+///
+/// The only way to make one is [`WarmDb::open`], which opens it exactly as a
+/// hot command's own open finds the database: every engine whose store
+/// exists, no LLM provider, and the installed plugins registered as a
+/// one-shot `boot` registers them. A store that appears after the open is
+/// not attached.
+#[derive(Clone)]
+pub struct WarmDb {
+    db: Arc<Axil>,
+    key: PathBuf,
+}
+
+impl WarmDb {
+    /// Open the database at `path` for in-process commands.
+    #[cfg_attr(not(test), allow(dead_code))] // the in-process host is its first non-test caller
+    pub fn open(path: &Path) -> anyhow::Result<Self> {
+        let key = db_key(path)?;
+        let db = Arc::new(crate::open_with_all_detected(path)?);
+        crate::register_installed_plugins(&db, path);
+        Ok(Self { db, key })
+    }
+
+    /// The open handle.
+    #[cfg_attr(not(test), allow(dead_code))] // read by tests until a host uses it
+    pub fn db(&self) -> &Arc<Axil> {
+        &self.db
+    }
+}
+
+/// The installed request's open database, when `path` names that database
+/// (see [`db_key`]). `None` when no request is installed, it carries no
+/// handle, or `path` is another database (or can't be resolved).
+pub fn warm_db(path: &Path) -> Option<Arc<Axil>> {
+    let warm = REQ.with(|r| r.borrow().as_ref()?.warm.clone())?;
+    (db_key(path).ok()? == warm.key).then_some(warm.db)
 }
 
 /// The handle a command runs against: the request's open database when it is
@@ -481,26 +526,49 @@ mod tests {
     #[test]
     fn hot_db_serves_the_warm_handle_only_for_its_own_database() {
         let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("a.axil");
-        let open = |p: &Path| Axil::open(p).build().map_err(anyhow::Error::from);
-        let warm = Arc::new(open(&path).unwrap());
+        let dir = tmp.path().join("db");
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("a.axil");
+        let warm = WarmDb::open(&path).unwrap();
         let ctx = || ReqCtx {
             warm: Some(warm.clone()),
-            db_canon: std::fs::canonicalize(&path).unwrap(),
             ..ReqCtx::default()
         };
+        let warm_hit = |p: &Path| {
+            capture(ctx(), || {
+                hot_db(p, || panic!("opened a database the request holds"))
+            })
+            .2
+        };
+        let opens = |p: &Path| {
+            let (_, _, got) = capture(ctx(), || hot_db(p, || anyhow::bail!("cold open")));
+            got.is_err_and(|e| e.to_string() == "cold open")
+        };
 
-        // The same file under another spelling: no open.
-        let same = tmp.path().join(".").join("a.axil");
-        let (_, _, got) = capture(ctx(), || {
-            hot_db(&same, || panic!("opened a database the request holds"))
-        });
-        assert!(Arc::ptr_eq(&got.unwrap(), &warm));
+        // The same database under another spelling: no open.
+        let got = warm_hit(&dir.join(".").join("a.axil")).unwrap();
+        assert!(Arc::ptr_eq(&got, warm.db()));
+        drop(got);
 
-        // Another database, or no request: the command opens its own.
-        let other = tmp.path().join("b.axil");
-        let (_, _, got) = capture(ctx(), || hot_db(&other, || open(&other)));
-        assert!(!Arc::ptr_eq(&got.unwrap(), &warm));
+        // Another database: the command opens its own.
+        assert!(opens(&dir.join("b.axil")));
+
+        // A symlinked directory holds the same companion files, so it is the
+        // same database. A symlink to the core file under another name has
+        // companions of its own, so it is another database.
+        #[cfg(unix)]
+        {
+            let dir_link = tmp.path().join("db-link");
+            std::os::unix::fs::symlink(&dir, &dir_link).unwrap();
+            let got = warm_hit(&dir_link.join("a.axil")).unwrap();
+            assert!(Arc::ptr_eq(&got, warm.db()));
+            drop(got);
+            let file_link = dir.join("link.axil");
+            std::os::unix::fs::symlink(&path, &file_link).unwrap();
+            assert!(opens(&file_link));
+        }
+
+        // No request: always the command's own open.
         let mut opened = false;
         let got = hot_db(&path, || {
             opened = true;
@@ -508,7 +576,11 @@ mod tests {
         });
         assert!(opened && got.is_err());
         assert!(warm_db(&path).is_none());
-        assert_eq!(Arc::strong_count(&warm), 1, "a request's clone outlived it");
+        assert_eq!(
+            Arc::strong_count(warm.db()),
+            1,
+            "a request's clone outlived it"
+        );
     }
 
     #[test]
@@ -1257,17 +1329,11 @@ mod tests {
             }
         }
 
-        /// Open `db` the way a long-lived host keeps it open.
-        fn open_warm(db: &Path) -> Arc<Axil> {
-            Arc::new(crate::open_with_all_detected(db).unwrap())
-        }
-
-        /// A request that hands `warm`, opened from `db`, to its command.
-        fn warm_request(warm: &Arc<Axil>, db: &Path, stdin: Option<&[u8]>) -> ReqCtx {
+        /// A request that hands `warm` to its command.
+        fn warm_request(warm: &WarmDb, stdin: Option<&[u8]>) -> ReqCtx {
             ReqCtx {
                 stdin: Some(stdin.unwrap_or_default().to_vec()),
-                warm: Some(Arc::clone(warm)),
-                db_canon: std::fs::canonicalize(db).unwrap(),
+                warm: Some(warm.clone()),
                 ..ReqCtx::default()
             }
         }
@@ -1289,7 +1355,7 @@ mod tests {
             // it would say so on stderr, so the parity below can't pass that
             // way.
             copy_dir(&fixture, &proj);
-            let held = open_warm(&db_path);
+            let held = WarmDb::open(&db_path).unwrap();
             let (_, err, _) = in_process(&["--db", db, "boot"], None);
             let err = String::from_utf8_lossy(&err);
             assert!(err.contains("holds the writer lock"), "{err}");
@@ -1298,10 +1364,10 @@ mod tests {
             let mut cases = matrix(db, auth_rs);
             cases.retain(|c| !c.cold_only);
             check_parity(&fixture, &proj, &cases, |c, args| {
-                let warm = open_warm(&db_path);
-                let run = in_process_with(warm_request(&warm, &db_path, c.stdin), args);
+                let warm = WarmDb::open(&db_path).unwrap();
+                let run = in_process_with(warm_request(&warm, c.stdin), args);
                 assert_eq!(
-                    Arc::strong_count(&warm),
+                    Arc::strong_count(warm.db()),
                     1,
                     "{}: the command kept a reference to the warm handle",
                     c.name
@@ -1311,13 +1377,45 @@ mod tests {
                     let id = stored["id"].as_str().unwrap();
                     let id = axil_core::RecordId::from_string(id).unwrap();
                     assert!(
-                        warm.get(&id).unwrap().is_some(),
+                        warm.db().get(&id).unwrap().is_some(),
                         "{}: the record went somewhere other than the warm handle",
                         c.name
                     );
                 }
                 run
             });
+        }
+
+        /// `boot` on a warm handle shows an installed plugin's block, as the
+        /// one-shot `boot` does: opening the handle registered the plugin.
+        #[cfg(feature = "wasm-host")]
+        #[test]
+        fn warm_boot_shows_installed_plugins_like_one_shot() {
+            const HELLO: &[u8] =
+                include_bytes!("../../axil-runtime/tests/fixtures/hello-guest.component.wasm");
+            let tmp = tempfile::tempdir().unwrap();
+            let fixture = build_fixture(&tmp.path().join("fixture"));
+            std::fs::create_dir_all(fixture.join(".axil/plugins")).unwrap();
+            std::fs::write(fixture.join(".axil/plugins/hello.wasm"), HELLO).unwrap();
+            let proj = tmp.path().join("work/proj");
+            let db_path = proj.join(".axil/memory.axil");
+            let db = db_path.to_str().unwrap();
+
+            let cases = [
+                case("boot json", &["--db", db, "boot"]),
+                case(
+                    "boot narrative",
+                    &["--db", db, "boot", "--boot-format", "narrative"],
+                ),
+            ];
+            let results = check_parity(&fixture, &proj, &cases, |c, args| {
+                let warm = WarmDb::open(&db_path).unwrap();
+                in_process_with(warm_request(&warm, c.stdin), args)
+            });
+            for (name, (out, _, _)) in results {
+                let out = String::from_utf8_lossy(&out);
+                assert!(out.contains("hello plugin ready"), "{name}: {out}");
+            }
         }
 
         /// `recall --timeout-ms` on a long-lived handle. With every slot
@@ -1335,11 +1433,11 @@ mod tests {
             let proj = build_fixture(tmp.path());
             let db_path = proj.join(".axil/memory.axil");
             let db = db_path.to_str().unwrap();
-            let warm = open_warm(&db_path);
+            let warm = WarmDb::open(&db_path).unwrap();
             let recall = |timeout_ms: &str| {
                 let ctx = ReqCtx {
                     slow_query_log: false,
-                    ..warm_request(&warm, &db_path, None)
+                    ..warm_request(&warm, None)
                 };
                 let args = [
                     "--db",
@@ -1431,7 +1529,7 @@ mod tests {
             assert!(live_after <= RECALL_SLOTS.cap, "{live_after} workers left");
 
             let deadline = Instant::now() + Duration::from_secs(60);
-            while RECALL_SLOTS.live() > 0 || Arc::strong_count(&warm) > 1 {
+            while RECALL_SLOTS.live() > 0 || Arc::strong_count(warm.db()) > 1 {
                 assert!(
                     Instant::now() < deadline,
                     "a worker never gave its slot back"

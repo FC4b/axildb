@@ -13554,7 +13554,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
         } => {
             let db_path = require_db(&db_opt)?;
             let db = match cli_io::warm_db(&db_path) {
-                // Its host registered the installed plugins when it opened it.
+                // Opening it registered the installed plugins (`WarmDb::open`).
                 Some(db) => db,
                 None => {
                     let db = std::sync::Arc::new(open_read_command(&db_path)?);
