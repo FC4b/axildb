@@ -49,6 +49,12 @@ config entry. `axil install` and `axil sync` rewrite the entry without it; to
 keep the full set across them, export `AXIL_MCP_TOOLS=full` in the environment
 the agent starts from.
 
+On a fresh database, the core profile's `tools/list` response is about 1,486
+tokens against about 4,077 for the full set (and 4,178 before profiles), each
+estimated as bytes/4 of the response
+(`benchmarks/results/mcp-tools-tokens-2026-10-04.json`, measured with
+`scripts/mcp-tools-tokens.py`).
+
 ## Configuration
 
 For Claude Code, the one-liner registers the server in a single step (note the
