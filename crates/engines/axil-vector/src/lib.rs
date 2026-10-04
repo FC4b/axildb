@@ -288,7 +288,7 @@ impl VectorEngine {
         if !matches!(model, EmbeddingModel::Custom { .. })
             && !crate::download::is_model_available(&model)
         {
-            eprintln!(
+            axil_core::diagln!(
                 "Model {} not found locally — downloading ({})...",
                 model.name(),
                 model.approx_size(),
@@ -984,7 +984,7 @@ fn load_all_vectors(
 /// Tell the operator, once per open, about rows the load had to skip.
 fn warn_unloadable(skipped: usize, vec_path: &Path) {
     if skipped > 0 {
-        eprintln!(
+        axil_core::diagln!(
             "[axil vector] warning: skipped {skipped} unloadable entr{} in {} \
              (unparsable id, malformed bytes, wrong dimensions, non-finite or all-zero \
              values); `axil heal --reindex` clears them",

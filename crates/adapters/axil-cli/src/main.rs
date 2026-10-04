@@ -6950,6 +6950,7 @@ fn main() {
 
 /// Real entry point — runs on a large-stack worker thread (see `main`).
 fn real_main() -> i32 {
+    cli_io::install_diagnostic_sink();
     // The CLI is Axil's Tier-3 argv Adapter; drive it through that type. `main`
     // uses the inherent `dispatch` (which returns the process exit code) rather
     // than `Adapter::run` so exit-code fidelity is preserved.

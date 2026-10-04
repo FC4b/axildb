@@ -239,7 +239,7 @@ impl TimeSeriesEngine {
                 match TimeEntry::from_bytes(bytes) {
                     Ok(te) => idx.add(te),
                     Err(e) => {
-                        eprintln!("warning: removing corrupt time entry {key}: {e}");
+                        axil_core::diagln!("warning: removing corrupt time entry {key}: {e}");
                         corrupt_keys.push(key);
                     }
                 }

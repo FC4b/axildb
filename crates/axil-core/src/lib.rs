@@ -42,6 +42,7 @@ pub mod crypto;
 pub mod db;
 pub mod decide;
 pub mod detectors;
+pub mod diag;
 pub mod diagnostics;
 pub mod entity;
 pub mod error;

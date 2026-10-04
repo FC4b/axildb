@@ -140,6 +140,14 @@ pub fn err_fmt(args: fmt::Arguments<'_>, newline: bool) {
     }
 }
 
+/// Send the engines' diagnostic lines ([`axil_core::diagln!`]) through
+/// [`err_fmt`], so a command run in-process gets the warnings its engines
+/// print on its own stderr. Without a request they go to the process's
+/// stderr as before. Setting it again does nothing.
+pub fn install_diagnostic_sink() {
+    axil_core::diag::set_diagnostic_sink(|args| err_fmt(args, true));
+}
+
 /// `println!` through the capture layer.
 macro_rules! outln {
     () => {

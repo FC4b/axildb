@@ -400,7 +400,7 @@ pub fn scan_files(root: &Path, config: &IndexConfig) -> Vec<ScannedFile> {
             .collect();
         let more = skipped_large.len().saturating_sub(3);
         let more_note = if more > 0 { format!(", +{more} more") } else { String::new() };
-        eprintln!(
+        axil_core::diagln!(
             "[axil-index] skipped {} file(s) over max_file_size_kb = {} KB: {}{} — their symbols will NOT be searchable; raise [index].max_file_size_kb in axil.toml to include them",
             skipped_large.len(),
             config.max_file_size_kb,

@@ -630,7 +630,7 @@ impl AxilBuilder {
                     }
                 }
                 if reindex_errors > 0 {
-                    eprintln!(
+                    crate::diagln!(
                         "axil: FTS schema migration reindexed {reindex_count} records, {reindex_errors} errors. Run `axil heal --reindex` to retry."
                     );
                 }
@@ -661,7 +661,7 @@ fn warn_config_once(warnings: &[String]) {
     };
     for warning in warnings {
         if seen.insert(warning.clone()) {
-            eprintln!("axil: warning: {warning}");
+            crate::diagln!("axil: warning: {warning}");
         }
     }
 }
@@ -909,7 +909,10 @@ impl Axil {
                         match self.auto_supersede_with_vector(&record, &vec) {
                             Ok(n) => superseded_count = n,
                             Err(e) => {
-                                eprintln!("warning: auto-supersede failed for {}: {e}", record.id)
+                                crate::diagln!(
+                                    "warning: auto-supersede failed for {}: {e}",
+                                    record.id
+                                )
                             }
                         }
                     }
@@ -924,7 +927,7 @@ impl Axil {
         // Auto-link: if graph is available, extract entities and create edges.
         if !table.starts_with('_') && self.has_graph_index() {
             if let Err(e) = self.auto_link(&record.id, None) {
-                eprintln!("warning: auto-link failed for {}: {e}", record.id);
+                crate::diagln!("warning: auto-link failed for {}: {e}", record.id);
             }
         }
 
@@ -934,7 +937,7 @@ impl Axil {
         if let Err(e) =
             crate::code_refs::sync_for_record(self, &record, crate::code_refs::SyncMode::Insert)
         {
-            eprintln!(
+            crate::diagln!(
                 "warning: code_refs index sync failed for {}: {e}",
                 record.id
             );
@@ -1720,7 +1723,7 @@ impl Axil {
         if let Err(e) =
             crate::code_refs::sync_for_record(self, &record, crate::code_refs::SyncMode::Update)
         {
-            eprintln!(
+            crate::diagln!(
                 "warning: code_refs index sync failed for {}: {e}",
                 record.id
             );
