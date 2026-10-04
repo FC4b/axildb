@@ -4,7 +4,9 @@
 //! file paths, CamelCase/snake_case identifiers, backtick-wrapped code,
 //! quoted strings, and project names. Also handles code symbols
 //! (`fn foo`, `auth::login`, `class User`, …) with a language hint so
-//! cross-language collisions can be disambiguated downstream.
+//! cross-language collisions can be disambiguated downstream. Declaration
+//! keywords such as `trait` and `class` are English words too, so those
+//! patterns only read code: fenced blocks, inline code, and code-like lines.
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -97,40 +99,60 @@ pub fn extract_entities(text: &str) -> Vec<Entity> {
 }
 
 fn extract_backtick_entities(text: &str, entities: &mut Vec<Entity>, seen: &mut HashSet<String>) {
-    let mut start = 0;
-    while let Some(open) = text[start..].find('`') {
-        let open_pos = start + open + 1;
-        if open_pos >= text.len() {
-            break;
-        }
-        // Skip double/triple backticks (code blocks)
-        if text[open_pos..].starts_with('`') {
-            start = open_pos + 1;
+    // Inline code only: a fenced block is code to read, not a name.
+    for (line, fenced) in lines_with_fences(text) {
+        if fenced {
             continue;
         }
-        if let Some(close) = text[open_pos..].find('`') {
-            let content = &text[open_pos..open_pos + close];
-            let trimmed = content.trim();
-            if !trimmed.is_empty() && trimmed.len() <= 200 {
-                let key = trimmed.to_lowercase();
-                if seen.insert(key) {
-                    let entity_type = if looks_like_path(trimmed) {
-                        EntityType::File
-                    } else {
-                        EntityType::Code
-                    };
-                    entities.push(Entity {
-                        name: normalize_entity_name(trimmed),
-                        entity_type,
-                        source_text: trimmed.to_string(),
-                    });
-                }
+        for span in inline_code_spans(line) {
+            let trimmed = span.trim();
+            // Markdown syntax quoted in backticks (`- [ ]`, `**`) names nothing.
+            if trimmed.len() > 200 || !trimmed.chars().any(char::is_alphanumeric) {
+                continue;
             }
-            start = open_pos + close + 1;
-        } else {
-            break;
+            let key = trimmed.to_lowercase();
+            if seen.insert(key) {
+                let entity_type = if looks_like_path(trimmed) {
+                    EntityType::File
+                } else {
+                    EntityType::Code
+                };
+                entities.push(Entity {
+                    name: normalize_entity_name(trimmed),
+                    entity_type,
+                    source_text: trimmed.to_string(),
+                });
+            }
         }
     }
+}
+
+/// The lines of `text`, each paired with whether it sits inside a fenced
+/// code block (```` ``` ```` or `~~~`). The fence lines themselves are left out.
+fn lines_with_fences(text: &str) -> Vec<(&str, bool)> {
+    let mut lines = Vec::new();
+    let mut fence: Option<&str> = None;
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        let marker = ["```", "~~~"].into_iter().find(|m| trimmed.starts_with(m));
+        match (fence, marker) {
+            (None, Some(m)) => fence = Some(m),
+            (Some(open), Some(m)) if open == m => fence = None,
+            _ => lines.push((line, fence.is_some())),
+        }
+    }
+    lines
+}
+
+/// The closed inline code spans of one line: `` `a` and `b` `` gives `a`, `b`.
+/// An unclosed backtick opens nothing.
+fn inline_code_spans(line: &str) -> Vec<&str> {
+    let parts: Vec<&str> = line.split('`').collect();
+    (1..parts.len().saturating_sub(1))
+        .step_by(2)
+        .map(|i| parts[i])
+        .filter(|span| !span.is_empty())
+        .collect()
 }
 
 fn extract_file_paths(text: &str, entities: &mut Vec<Entity>, seen: &mut HashSet<String>) {
@@ -320,15 +342,18 @@ struct SymbolPattern {
     re: Regex,
 }
 
-static CODE_SYMBOL_PATTERNS: LazyLock<Vec<SymbolPattern>> = LazyLock::new(|| {
-    // Order matters: Rust-qualified paths must come before bare fn/struct so
-    // `auth::login` wins over `login` alone.
+/// Rust-qualified paths (`auth::login`, `Mod::Ty::method`). `::` does not
+/// occur in English, so this pattern reads all text.
+static QUALIFIED_PATH: LazyLock<SymbolPattern> = LazyLock::new(|| SymbolPattern {
+    lang: "rust",
+    re: Regex::new(r"\b([A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)+)\b").unwrap(),
+});
+
+/// Declaration patterns. Their keywords (`trait`, `class`, `function`,
+/// `public`, …) are also English words, so they only read code segments (see
+/// [`code_segments`]).
+static DECLARATION_PATTERNS: LazyLock<Vec<SymbolPattern>> = LazyLock::new(|| {
     vec![
-        // Rust: qualified path `auth::login`, `Mod::Ty::method`
-        SymbolPattern {
-            lang: "rust",
-            re: Regex::new(r"\b([A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)+)\b").unwrap(),
-        },
         // Rust: `fn name`, `struct Name`, `impl Name`, `trait Name`
         SymbolPattern {
             lang: "rust",
@@ -361,27 +386,139 @@ static CODE_SYMBOL_PATTERNS: LazyLock<Vec<SymbolPattern>> = LazyLock::new(|| {
     ]
 });
 
+/// A line that opens with a declaration: a keyword, then a name followed
+/// right away by code punctuation (`pub fn parse(`, `struct Pool<`,
+/// `class User:`, `trait Store: Send`, `struct Unit;`), or a Go method
+/// receiver (`func (s *Server)`).
+static DECLARATION_LINE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"^(?:(?:pub(?:\([^)]*\))?|export|default|async|unsafe|const|public|private|protected|internal|static|abstract|final|override)\s+)*(?:func\s*\(|(?:fn|struct|impl|trait|enum|def|class|function|func|interface)\s+[A-Za-z_$][A-Za-z0-9_$]*\s*(?:[(<{:=;]|->))",
+    )
+    .unwrap()
+});
+
+/// English words that follow a declaration keyword in prose ("a trait with
+/// …", "the class that …"). A match on a prose line that names one of these
+/// is prose, not a symbol; code (`fn with(self) -> Self`) keeps it.
+const PROSE_WORDS: &[&str] = &[
+    "a", "about", "after", "all", "also", "an", "and", "any", "are", "as", "at", "be", "because",
+    "been", "before", "but", "by", "can", "could", "did", "do", "does", "each", "every", "for",
+    "from", "had", "has", "have", "here", "how", "if", "in", "into", "is", "it", "its", "just",
+    "may", "might", "must", "no", "not", "now", "of", "on", "one", "only", "or", "our", "should",
+    "so", "some", "than", "that", "the", "their", "them", "then", "there", "these", "they", "this",
+    "those", "to", "was", "we", "were", "what", "when", "where", "which", "while", "who", "why",
+    "will", "with", "without", "would", "you", "your",
+];
+
+/// A stretch of text the declaration patterns may read.
+struct CodeSegment<'a> {
+    text: &'a str,
+    /// From a prose line: a match counts only when its name is shaped like
+    /// an identifier (`impl Decoder`, `fn parse_token`) or is called or
+    /// parameterized right away (`def login(u)`, `struct Pool<T>`), and is
+    /// not one of the [`PROSE_WORDS`]. See [`prose_declaration_counts`].
+    prose: bool,
+}
+
+/// Split `text` into the segments the declaration patterns read: lines in
+/// fenced blocks, code-like lines, inline code spans, and the remaining prose
+/// lines (whose matches must look like code, see [`CodeSegment::prose`]).
+fn code_segments(text: &str) -> Vec<CodeSegment<'_>> {
+    let mut segments = Vec::new();
+    for (line, fenced) in lines_with_fences(text) {
+        if fenced || is_code_like_line(line) {
+            segments.push(CodeSegment {
+                text: line,
+                prose: false,
+            });
+            continue;
+        }
+        for span in inline_code_spans(line) {
+            segments.push(CodeSegment {
+                text: span,
+                prose: false,
+            });
+        }
+        segments.push(CodeSegment {
+            text: line,
+            prose: true,
+        });
+    }
+    segments
+}
+
+/// Whether a line outside a fenced block reads as code: it opens with a
+/// declaration (see [`DECLARATION_LINE`]). Punctuation alone proves nothing;
+/// prose ends lines with `;` and `:` too.
+fn is_code_like_line(line: &str) -> bool {
+    DECLARATION_LINE.is_match(line.trim())
+}
+
 fn extract_code_symbols(text: &str, entities: &mut Vec<Entity>, seen: &mut HashSet<String>) {
-    for pattern in CODE_SYMBOL_PATTERNS.iter() {
-        for caps in pattern.re.captures_iter(text) {
-            let Some(m) = caps.get(1) else { continue };
-            let name = m.as_str();
-            if name.len() < 2 || name.len() > 200 {
-                continue;
-            }
-            // Collision key is scoped by language so `login` (Rust) and
-            // `login` (Python) don't silently merge.
-            let key = format!("sym:{}:{}", pattern.lang, name.to_lowercase());
-            if seen.insert(key) {
-                entities.push(Entity {
-                    name: name.to_string(),
-                    entity_type: EntityType::CodeSymbol {
-                        lang_hint: Some(pattern.lang.to_string()),
-                    },
-                    source_text: name.to_string(),
-                });
+    // Order matters: qualified paths come first so `auth::login` wins over
+    // `login` alone.
+    for caps in QUALIFIED_PATH.re.captures_iter(text) {
+        if let Some(m) = caps.get(1) {
+            push_code_symbol(QUALIFIED_PATH.lang, m.as_str(), entities, seen);
+        }
+    }
+    let segments = code_segments(text);
+    for pattern in DECLARATION_PATTERNS.iter() {
+        for segment in &segments {
+            for caps in pattern.re.captures_iter(segment.text) {
+                let Some(m) = caps.get(1) else { continue };
+                let name = m.as_str();
+                if segment.prose && !prose_declaration_counts(pattern, segment.text, m) {
+                    continue;
+                }
+                push_code_symbol(pattern.lang, name, entities, seen);
             }
         }
+    }
+}
+
+/// Whether a declaration match on a prose line names code. Prose puts plain
+/// words after `trait`, `class` and `function` ("a trait with …"), so the
+/// name must be called or parameterized right away (`def login(u)`,
+/// `struct Pool<T>`), or be shaped like an identifier: a capital, an
+/// underscore or a digit (`impl Decoder`, `fn parse_token`). Either way it
+/// must not be one of the [`PROSE_WORDS`] ("a trait with(…)"). The Java
+/// pattern spans several words before the name, so on prose it only takes
+/// the call shape.
+fn prose_declaration_counts(pattern: &SymbolPattern, line: &str, name: regex::Match<'_>) -> bool {
+    if PROSE_WORDS.contains(&name.as_str().to_ascii_lowercase().as_str()) {
+        return false;
+    }
+    if line[name.end()..].starts_with(['(', '<']) {
+        return true;
+    }
+    pattern.lang != "java"
+        && name
+            .as_str()
+            .chars()
+            .any(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit())
+}
+
+fn push_code_symbol(
+    lang: &'static str,
+    name: &str,
+    entities: &mut Vec<Entity>,
+    seen: &mut HashSet<String>,
+) {
+    if name.len() < 2 || name.len() > 200 {
+        return;
+    }
+    // Collision key is scoped by language so `login` (Rust) and
+    // `login` (Python) don't silently merge.
+    let key = format!("sym:{}:{}", lang, name.to_lowercase());
+    if seen.insert(key) {
+        entities.push(Entity {
+            name: name.to_string(),
+            entity_type: EntityType::CodeSymbol {
+                lang_hint: Some(lang.to_string()),
+            },
+            source_text: name.to_string(),
+        });
     }
 }
 
@@ -503,6 +640,127 @@ mod tests {
         assert!(syms.iter().any(|(n, _)| n == "parse_token"));
         assert!(syms.iter().any(|(n, _)| n == "TokenRing"));
         assert!(syms.iter().any(|(n, _)| n == "Decoder"));
+    }
+
+    #[test]
+    fn prose_mints_no_declaration_symbols() {
+        for text in [
+            "Made it a trait with a default method",
+            "the class that owns the pool is gone",
+            "a function returns early when the struct is empty",
+            "impl the fix in the enum handling, then def the plan",
+            "the public API and private helpers for doing (x)",
+            "the public API lives in Store (see the docs)",
+        ] {
+            let syms = code_syms(text);
+            assert!(syms.is_empty(), "{text:?} minted {syms:?}");
+        }
+    }
+
+    #[test]
+    fn punctuation_does_not_make_prose_code() {
+        for text in [
+            "The trait with a default method;",
+            "trait with a default method;",
+            "We kept the class that wins {",
+            "a function returns early }",
+            "enum with three cases: on, off, auto",
+        ] {
+            let syms = code_syms(text);
+            assert!(syms.is_empty(), "{text:?} minted {syms:?}");
+        }
+        // A declaration line is code, so its names count as written.
+        let syms = code_syms("struct Unit;\ntrait Store: Send + Sync\nfn is(self) -> bool;");
+        for name in ["Unit", "Store", "is"] {
+            assert!(syms.iter().any(|(n, _)| n == name), "{name}: {syms:?}");
+        }
+    }
+
+    #[test]
+    fn checklist_syntax_mints_nothing() {
+        let entities = extract_entities(
+            "- [ ] write tests\n- [x] ship it\nUse `- [ ]` for open items, `**` for bold",
+        );
+        assert!(entities.is_empty(), "minted {entities:?}");
+    }
+
+    #[test]
+    fn fenced_code_reads_every_declaration() {
+        let syms = code_syms(
+            "Builder:\n```rust\npub trait Store\nfn with(self) -> Self\n```\nThe trait with it.",
+        );
+        assert!(syms
+            .iter()
+            .any(|(n, l)| n == "Store" && l.as_deref() == Some("rust")));
+        // Real code may name a method `with`; only prose loses it.
+        assert!(syms.iter().any(|(n, _)| n == "with"));
+        assert_eq!(syms.len(), 2, "{syms:?}");
+    }
+
+    #[test]
+    fn fenced_block_is_not_a_backtick_entity() {
+        let entities =
+            extract_entities("Fix:\n```rust\nlet pool_size = 32;\n```\nThen `PoolConfig`.");
+        assert!(
+            entities.iter().all(|e| !e.name.contains('\n')),
+            "a fenced block became an entity: {entities:?}"
+        );
+        assert!(entities.iter().any(|e| e.name == "PoolConfig"));
+    }
+
+    #[test]
+    fn code_like_lines_read_outside_fences() {
+        let syms = code_syms(
+            "Signature now:\n    pub fn open(path: &Path) -> Result<Self> {\nclass Pool:",
+        );
+        assert!(syms
+            .iter()
+            .any(|(n, l)| n == "open" && l.as_deref() == Some("rust")));
+        assert!(syms
+            .iter()
+            .any(|(n, l)| n == "Pool" && l.as_deref() == Some("python")));
+    }
+
+    #[test]
+    fn prose_reads_declarations_that_look_like_code() {
+        let syms = code_syms(
+            "Call def login(u) first; the struct Pool<T> holds them; a trait with (care). \
+             Then impl Adapter for HttpAdapter and fn parse_v2 in the class that loads it.",
+        );
+        assert!(syms
+            .iter()
+            .any(|(n, l)| n == "login" && l.as_deref() == Some("python")));
+        assert!(syms
+            .iter()
+            .any(|(n, l)| n == "Pool" && l.as_deref() == Some("rust")));
+        assert!(syms
+            .iter()
+            .any(|(n, l)| n == "Adapter" && l.as_deref() == Some("rust")));
+        assert!(syms.iter().any(|(n, _)| n == "parse_v2"));
+        for word in ["with", "that"] {
+            assert!(!syms.iter().any(|(n, _)| n == word), "{word}: {syms:?}");
+        }
+    }
+
+    #[test]
+    fn code_outside_fences_keeps_names_that_are_english_words() {
+        // An unfenced signature, a code-like line and an inline span are code:
+        // a method named `with` or `is` is a real symbol there.
+        for text in [
+            "Builder method:\nfn with(self) -> Self",
+            "Builder method:\n    pub fn with(self, n: usize) -> Self {",
+            "Call `fn with(self)` last.",
+        ] {
+            let syms = code_syms(text);
+            assert!(
+                syms.iter()
+                    .any(|(n, l)| n == "with" && l.as_deref() == Some("rust")),
+                "{text:?} lost `with`: {syms:?}"
+            );
+        }
+        // On a prose line the same word stays prose, even in call shape.
+        let syms = code_syms("Then the builder takes a trait with(care) in mind");
+        assert!(!syms.iter().any(|(n, _)| n == "with"), "{syms:?}");
     }
 
     #[test]

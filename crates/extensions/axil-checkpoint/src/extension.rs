@@ -78,7 +78,7 @@ impl Extension for CheckpointExtension {
         Some(McpSurface::new(vec![
             McpTool::new(
                 "checkpoint",
-                "Write a structured session checkpoint so a fresh agent can resume. Fields: goal, state, next_steps[], open_questions[], references[], summary. All optional but at least one required.",
+                "Write a structured session checkpoint that the next boot replays, so a fresh agent can resume. Every field is optional; give at least one.",
                 json!({
                         "type": "object",
                         "properties": {

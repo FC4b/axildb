@@ -33,6 +33,7 @@ This creates:
 2. **Auto-capture**: Hooks detect file changes and store them automatically
 3. **Manual store**: The agent stores decisions, errors, and summaries via `axil store`
 4. **Recall**: `axil recall` retrieves relevant context using vector + graph + recency scoring
+5. **Injected context**: each prompt gets a `<context>` block of related memories, and a broad repo search or a file edit gets the memories about it. A record is injected once per session: later injections leave out the records already shown (every injected line carries its `id`, which `axil get` expands)
 
 ## Compaction
 
@@ -40,7 +41,9 @@ Claude Code sends `SessionStart` again after a compaction (source `compact`,
 auto or manual) and after `/clear`. Axil registers `SessionStart` with no
 matcher, so every source reaches the hook, which re-injects `axil boot`,
 including the latest checkpoint's "Resume Here" block, as
-`additionalContext`. `PostCompact` is not registered: Claude Code documents
+`additionalContext`. It also forgets which records, files and searches the
+session has injected, since the compacted or cleared context no longer holds
+them. `PostCompact` is not registered: Claude Code documents
 no `additionalContext` for it, so it has no way to put the boot in front of
 the model.
 
