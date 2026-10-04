@@ -12,25 +12,25 @@ The authoritative implementation lives in
 
 ## Why hybrid, not vector-only
 
-On LongMemEval-S, a conversational benchmark where every answer is a
-paraphrase of a past session, raw vector search and the full pipeline reach
-nearly the same aggregate recall (each misses 18 of the 500 questions,
-though not all the same ones):
+No committed run compares raw vector search with the full pipeline on the
+same build. The committed 500-question LongMemEval-S runs come from two
+builds, so read them as history, not as a head-to-head:
 
-| Path (500 questions, top-5) | avg recall | Source |
-|------|---------------------------|--------|
-| `vector` (raw vector only) | 0.936 | [`baseline-500.json`](../../../benchmarks/results/baseline-500.json) |
-| `recall-qtc` (full hybrid pipeline) | 0.935 | [`qtc-500.json`](../../../benchmarks/results/qtc-500.json) |
-| `recall` (fusion without query-time chunks) | 0.915 | [`fusion-500.json`](../../../benchmarks/results/fusion-500.json) |
+| Path (500 questions, top-5) | avg recall | Build | Source |
+|------|------|------|--------|
+| `vector` (raw vector only) | 0.936 | initial release | [`baseline-500.json`](../../../benchmarks/results/baseline-500.json) |
+| `recall-qtc` (full hybrid pipeline) | 0.935 | 2026-06-27 rerun | [`qtc-500.json`](../../../benchmarks/results/qtc-500.json) |
+| `recall` (fusion without query-time chunks) | 0.915 | 2026-06-27 rerun | [`fusion-500.json`](../../../benchmarks/results/fusion-500.json) |
 
 The harness is in-tree at [`benchmarks/longmemeval/`](../../../benchmarks/longmemeval/)
 and needs the dataset downloaded separately; see its README.
 
-The pipeline exists for what that benchmark does not exercise: exact
-identifiers and error strings that embeddings blur (FTS), newer facts
-outranking stale ones (recency), records connected to what the query names
-(graph), and what the agent actually used before (feedback). If you call
-the raw `QueryBuilder::similar_to` path you get none of those signals.
+What the pipeline adds over the raw `QueryBuilder::similar_to` path are
+signals a vector alone cannot carry: exact matches on identifiers and error
+strings (FTS), how recent a record is, records connected to what the query
+names (graph), and what the agent used before (feedback). Their effect on
+recall is measured per change with the dogfood eval and LongMemEval, not
+claimed here.
 
 ## Pipeline overview
 
@@ -201,7 +201,9 @@ order is replaced, not blended; at most the first 20 entries are scored).
 - **What is printed.** The whole reranked list in its new order, minus hits
   the `--recall-format` has nothing to show for (`compact`, `oneline` and
   `context-block` skip them; `context-block` also lists code hits before
-  memories). With `--budget`, only the prefix that fits is printed, so
+  memories). With `--budget`, only the prefix that fits is printed, except
+  that most formats print the first hit even when it alone is over the
+  budget (`context-block` may print just a code-section heading then), so
   the rerank can change which records appear.
 
 The implementation is
