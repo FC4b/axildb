@@ -28,7 +28,7 @@ use std::fmt;
 use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use axil_core::Axil;
 
@@ -309,6 +309,39 @@ impl WarmDb {
     pub fn db(&self) -> &Arc<Axil> {
         &self.db
     }
+
+    /// Close the database, so another process can open it, and return the
+    /// path to reopen it from with [`WarmDb::open`].
+    ///
+    /// The database closes when the last reference to the handle goes, so
+    /// this waits, up to `timeout`, for every other one: clones of this
+    /// `WarmDb` in requests still running, the handles their commands took
+    /// from [`hot_db`], and recall workers still searching past their
+    /// deadline. The host must have stopped installing it in new requests.
+    /// After `timeout` the handle comes back unchanged.
+    #[cfg_attr(not(test), allow(dead_code))] // the in-process host is its first non-test caller
+    pub fn release(self, timeout: Duration) -> Result<PathBuf, WarmDb> {
+        let deadline = Instant::now() + timeout;
+        let mut db = self.db;
+        loop {
+            match Arc::try_unwrap(db) {
+                Ok(db) => {
+                    drop(db);
+                    return Ok(self.key);
+                }
+                Err(shared) if Instant::now() >= deadline => {
+                    return Err(WarmDb {
+                        db: shared,
+                        key: self.key,
+                    })
+                }
+                Err(shared) => {
+                    db = shared;
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            }
+        }
+    }
 }
 
 /// The installed request's open database, when `path` names that database
@@ -360,7 +393,10 @@ impl Need {
 /// The request's open database can't serve a command: it lacks something
 /// the command's own open would have attached or created. Nothing has been
 /// written when a command returns this, so a host can run the command again
-/// in a process of its own, which opens the database the one-shot way.
+/// in a process of its own, which opens the database the one-shot way. That
+/// process can't open the database while the host holds it: the host first
+/// calls [`WarmDb::release`], then runs the command, then reopens with
+/// [`WarmDb::open`], which attaches what the command created.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WarmLacks(pub Need);
 
@@ -1558,6 +1594,54 @@ mod tests {
                     String::from_utf8_lossy(&err)
                 );
             }
+        }
+
+        /// The handoff a host performs for a refused command: release the
+        /// handle, let the one-shot process run the command, reopen. While the
+        /// host holds the handle the one-shot process can't open the database;
+        /// the release waits for a command still using the handle, and gives
+        /// the handle back if that takes longer than its timeout.
+        #[cfg(feature = "timeseries")]
+        #[test]
+        fn a_host_hands_a_refused_command_to_a_one_shot_run() {
+            let tmp = tempfile::tempdir().unwrap();
+            let proj = build_fixture(tmp.path());
+            let db_path = proj.join(".axil/memory.axil");
+            let db = db_path.to_str().unwrap();
+            let ts = axil_core::companion_path(&db_path, ".ts");
+            let _ = std::fs::remove_dir_all(&ts);
+            let _ = std::fs::remove_file(&ts);
+            let since = ["--db", db, "since", "1h"];
+
+            let warm = WarmDb::open(&db_path).unwrap();
+            let err = dispatch_warm(&warm, &since).unwrap_err();
+            assert_eq!(
+                err.downcast_ref::<WarmLacks>(),
+                Some(&WarmLacks(Need::TimeSeries))
+            );
+            let (_, err, _) = one_shot(&["--db", db, "boot"], None);
+            let err = String::from_utf8_lossy(&err);
+            assert!(err.contains("holds the writer lock"), "{err}");
+
+            // A command still running on the handle.
+            let in_use = Arc::clone(warm.db());
+            let command = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(300));
+                drop(in_use);
+            });
+            let Err(warm) = warm.release(Duration::from_millis(20)) else {
+                panic!("released a handle a command still holds");
+            };
+            let Ok(path) = warm.release(Duration::from_secs(30)) else {
+                panic!("the command's handle never went");
+            };
+            command.join().unwrap();
+
+            let (out, err, code) = one_shot(&since, None);
+            assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
+            let warm = WarmDb::open(&path).unwrap();
+            let (warm_out, _, warm_code) = in_process_with(warm_request(&warm, None), &since);
+            assert_eq!((warm_out, warm_code), (out, 0), "served once reopened");
         }
 
         /// `boot` on a warm handle shows an installed plugin's block, as the
