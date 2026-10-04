@@ -86,7 +86,7 @@ The full table — Axil vs Memvid / HelixDB / SurrealDB / Mem0 / Hindsight / Mem
 
 ### Adding a new competitor row
 
-1. Pull the relevant harness from the benchmark archive into `benchmarks/<name>/` (it's gitignored; that's intentional — these crates pin large datasets and competitor binaries).
+1. Add or reuse a harness under `benchmarks/<name>/`. Harness sources are tracked; they stay out of the workspace (the root `Cargo.toml` `exclude` list) and their `data/`, `target/` and `out/` directories are gitignored, so large datasets and competitor binaries never enter git.
 2. Run **on the same hardware and same day** as the in-tree Criterion suite for the version you're publishing — competitor delta is only meaningful when the Axil number is fresh.
 3. Append a row with: date, Axil version, headline metric for both engines, ratio/delta, and a one-line note on workload assumptions.
 4. If the competitor has a known asterisk (requires LLM, requires PostgreSQL, AGPL-licensed, etc.), call it out in the note column — the table is read by people deciding whether to adopt.

@@ -199,10 +199,11 @@ without Axil on Django and Flask), see **[Context Economics](./context-economics
 
 > **Provenance note.** The competitor/latency harnesses
 > (`vector-latency-bench`, `sqlite-compare-bench`, `longmemeval-bench`,
-> `locomo`) are kept **out of the workspace and gitignored**, so a plain
-> `cargo bench` only runs the in-tree Criterion suites (core / vector / graph
-> / fts). The numbers above reflect the last run on those archived harnesses;
-> pull the benchmark archive to regenerate them. See the
+> `locomo`) are tracked under `benchmarks/` but kept **out of the workspace**,
+> so a plain `cargo bench` only runs the in-tree Criterion suites (core /
+> vector / graph / fts). Run a harness with
+> `cargo run --release --manifest-path benchmarks/<name>/Cargo.toml`; the
+> dataset-driven ones need their dataset downloaded first. See the
 > [Evaluation Log](./eval-log.md) for the methodology and the full
 > reproducibility caveat. The token-savings A/B (Context Economics) **is**
 > reproducible in-tree via `scripts/context-ab-*.sh`.

@@ -12,22 +12,24 @@ The authoritative implementation lives in
 
 ## Why hybrid, not vector-only
 
-Axil's production recall is measurably better than naive vector search:
+On LongMemEval-S, a conversational benchmark where every answer is a
+paraphrase of a past session, raw vector search and the full pipeline find
+the same answers:
 
-| Path | recall@1 (LongMemEval-S)* |
-|------|---------------------------|
-| `query().similar_to(...)` (raw vector only) | 0.100 |
-| `db.recall(...)` (full hybrid pipeline) | 0.760 |
+| Path (500 questions, top-5) | avg recall | Source |
+|------|---------------------------|--------|
+| `vector` (raw vector only) | 0.936 | [`baseline-500.json`](../../../benchmarks/results/baseline-500.json) |
+| `recall-qtc` (full hybrid pipeline) | 0.935 | [`qtc-500.json`](../../../benchmarks/results/qtc-500.json) |
+| `recall` (fusion without query-time chunks) | 0.915 | [`fusion-500.json`](../../../benchmarks/results/fusion-500.json) |
 
-\* *Historical numbers from the Phase 15 verification run. The
-LongMemEval harness is not in-tree (see `.gitignore: /benchmarks/`),
-so CI cannot regenerate these. To re-verify, pull the harness from
-the project's benchmark archive and re-run. See the
-[Evaluation Log](./eval-log.md) for methodology and version history.*
+The harness is in-tree at [`benchmarks/longmemeval/`](../../../benchmarks/longmemeval/)
+and needs the dataset downloaded separately; see its README.
 
-The 7.6× gap is the difference made by FTS + RRF + multi-signal
-scoring + QTC. If you call the raw `QueryBuilder::similar_to` path you are
-leaving recall on the table.
+The pipeline exists for what that benchmark does not exercise: exact
+identifiers and error strings that embeddings blur (FTS), newer facts
+outranking stale ones (recency), records connected to what the query names
+(graph), and what the agent actually used before (feedback). If you call
+the raw `QueryBuilder::similar_to` path you get none of those signals.
 
 ## Pipeline overview
 
@@ -198,8 +200,9 @@ order is replaced, not blended; at most the first 20 entries are scored).
 - **What is printed.** The whole reranked list in its new order, minus hits
   the `--recall-format` has nothing to show for (`compact`, `oneline` and
   `context-block` skip them; `context-block` also lists code hits before
-  memories). With `--budget`, only the prefix that fits is printed, so
-  the rerank can change which records appear.
+  memories). With `--budget`, only the prefix that fits is printed (the
+  first hit is always printed, even when it alone exceeds the budget, as
+  with `--budget 0`), so the rerank can change which records appear.
 
 The implementation is
 [`crates/extensions/axil-indexer/src/rerank.rs`](../../../crates/extensions/axil-indexer/src/rerank.rs),
