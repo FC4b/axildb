@@ -9,6 +9,8 @@
 //!   record that recency pushed below it was never rescored.
 //! - Code-index rows, which code-search embeds into the same vector index,
 //!   take no place among recall's vector candidates.
+//! - Equal scores come back in record-id order, the same in every process,
+//!   from recall and from full-text search.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -304,4 +306,69 @@ fn code_index_vectors_take_no_place_among_memory_candidates() {
     // Code-search reads the same vectors through `similar_to`, unchanged.
     let similar = db.similar_to("connection pool timeout", 5).unwrap();
     assert!(similar.iter().all(|(r, _)| r.table == "_idx_code_proxies"));
+}
+
+#[test]
+fn equal_scores_come_back_in_record_id_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ties.axil");
+    let db = Axil::open(&path)
+        .with_vector_index(Box::new(VectorEngine::open(&path, DIMS).unwrap()))
+        .with_embedder(Box::new(SharedBag(Arc::default())))
+        .with_fts_index(Arc::new(axil_fts::FtsEngine::open(&path).unwrap()))
+        .build()
+        .unwrap();
+
+    // The same text at the same time, each in a table of its own so none
+    // supersedes another: every signal scores them alike.
+    let at = Utc::now() - Duration::days(1);
+    let mut expected: Vec<String> = (0..12)
+        .map(|i| {
+            db.insert_at(
+                &format!("notes{i}"),
+                json!({"summary": "connection pool timeout"}),
+                at,
+            )
+            .unwrap()
+            .id
+            .to_string()
+        })
+        .collect();
+    // Re-index half of them, so the full-text index holds them after the
+    // others and its own tie order is no longer the id order.
+    for id in &expected[..6] {
+        let id = axil_core::RecordId::from_string(id).unwrap();
+        let record = db.get(&id).unwrap().unwrap();
+        db.update(&id, record.data).unwrap();
+    }
+    expected.sort();
+
+    // Recall gathers candidates in hash maps, whose order changes with every
+    // map, so twenty runs would show any tie left to that order.
+    let query = "connection pool timeout";
+    for _ in 0..20 {
+        assert_eq!(ids(&db, query, 12, cli_config()), expected, "recall");
+        let fts: Vec<String> = db
+            .search_text(query, 12)
+            .unwrap()
+            .into_iter()
+            .map(|(r, _)| r.id.to_string())
+            .collect();
+        assert_eq!(fts, expected, "full-text search");
+    }
+    drop(db);
+
+    // Without vectors, recall's candidates come in the full-text index's
+    // order alone.
+    let db = Axil::open(&path)
+        .with_fts_index(Arc::new(axil_fts::FtsEngine::open(&path).unwrap()))
+        .build()
+        .unwrap();
+    for _ in 0..20 {
+        assert_eq!(
+            ids(&db, query, 12, cli_config()),
+            expected,
+            "recall over full-text search only"
+        );
+    }
 }

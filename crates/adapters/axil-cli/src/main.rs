@@ -14852,7 +14852,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
                 }
             }
 
-            // Sort: exact matches first, then by importance
+            // Sort: exact matches first, then by importance, then by id
             hits.sort_by(|a, b| {
                 let a_exact = a["match"].as_str() == Some("exact");
                 let b_exact = b["match"].as_str() == Some("exact");
@@ -14861,7 +14861,9 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
                 }
                 let ia = a["importance"].as_f64().unwrap_or(0.0);
                 let ib = b["importance"].as_f64().unwrap_or(0.0);
-                ib.partial_cmp(&ia).unwrap_or(std::cmp::Ordering::Equal)
+                ib.partial_cmp(&ia)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a["id"].as_str().cmp(&b["id"].as_str()))
             });
             // Pass 3: related files from index graph (imports, same module)
             #[cfg(feature = "indexer")]
@@ -18639,7 +18641,11 @@ fn generate_brief(
         .chain(context_records.iter())
         .map(|r| (r.clone(), axil_core::importance::get_importance(&r.data)))
         .collect();
-    important.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    important.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.0.id.cmp(&b.0.id))
+    });
     important.truncate(5);
 
     // Narrative string used as a record summary if saved.

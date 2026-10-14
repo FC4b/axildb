@@ -111,6 +111,14 @@ pub struct ScoreExplanation {
     /// serialization when absent so existing JSON output is unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub query_class: Option<String>,
+    /// The score without its recency term, summed the same way for every
+    /// record: two records that differ only in age get exactly the same
+    /// value. Taking recency back out of the final score instead left a
+    /// rounding residue that changed with the clock, so which of two such
+    /// records made the query-time chunk window changed from call to call.
+    /// `None` outside recall's scoring.
+    #[serde(skip)]
+    pub(crate) relevance: Option<f32>,
 }
 
 impl ScoreExplanation {
@@ -123,6 +131,7 @@ impl ScoreExplanation {
             signals,
             summary,
             query_class: None,
+            relevance: None,
         }
     }
 }
@@ -136,6 +145,20 @@ pub struct RecallResult {
     pub score: f32,
     /// Scoring breakdown showing each signal's contribution.
     pub explanation: ScoreExplanation,
+}
+
+impl RecallResult {
+    /// Recall's result order: highest score first, equal scores by record id.
+    ///
+    /// The order candidates are gathered in (hash-map iteration, the FTS
+    /// index's segment layout) differs between processes, so ties settled by
+    /// it came back in a different order on every run.
+    pub fn rank_order(a: &Self, b: &Self) -> std::cmp::Ordering {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.record.id.cmp(&b.record.id))
+    }
 }
 
 /// Configuration for the recall scoring engine.
@@ -418,6 +441,15 @@ pub fn fuse_signals(
         + w.activation * activation_score
         + w.importance * importance_score
         + w.rrf * signals.rrf;
+    let relevance = w.vector * signals.vector_similarity
+        + w.graph * signals.graph_proximity
+        + w.keyword * keyword_score
+        + w.feedback * signals.feedback_boost
+        + w.temporal * temporal
+        + w.preference * signals.preference_match
+        + w.activation * activation_score
+        + w.importance * importance_score
+        + w.rrf * signals.rrf;
 
     // Build explanation
     let mut signal_list = Vec::new();
@@ -482,6 +514,7 @@ pub fn fuse_signals(
         // Set by the caller (recall) once the query is classified; fuse_signals
         // itself is query-class agnostic.
         query_class: None,
+        relevance: Some(relevance),
     };
 
     (final_score, explanation)

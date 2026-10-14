@@ -5517,7 +5517,11 @@ impl Axil {
         let mut scored_results = Vec::new();
         let mut aggregated_candidates: Vec<(RecordId, RecallCandidate)> =
             candidates.into_iter().collect();
-        aggregated_candidates.sort_by(|a, b| a.1.first_rank.cmp(&b.1.first_rank));
+        aggregated_candidates.sort_by(|a, b| {
+            a.1.first_rank
+                .cmp(&b.1.first_rank)
+                .then_with(|| a.0.cmp(&b.0))
+        });
         for (rid, candidate) in aggregated_candidates {
             let record = candidate.record;
             // Scope filter — skip records outside requested scope(s).
@@ -5584,6 +5588,9 @@ impl Axil {
                     const RRF_K_FTS_IDENTIFIER: f32 = 10.0;
                     let tilt = 1.0 / (RRF_K_FTS_IDENTIFIER + fr as f32);
                     score += tilt;
+                    if let Some(relevance) = explanation.relevance.as_mut() {
+                        *relevance += tilt;
+                    }
                     explanation
                         .signals
                         .push(("fts_identifier_tilt".to_string(), tilt));
@@ -5600,11 +5607,7 @@ impl Axil {
         }
 
         // Sort by fused score descending
-        scored_results.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        scored_results.sort_by(crate::scoring::RecallResult::rank_order);
 
         // Query-Time Chunk reranking (optional). Blends the best chunk cosine
         // into the scores of the most relevant candidates, then resorts.
@@ -5619,11 +5622,7 @@ impl Axil {
                     qtc,
                     &cfg,
                 );
-                scored_results.sort_by(|a, b| {
-                    b.score
-                        .partial_cmp(&a.score)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                });
+                scored_results.sort_by(crate::scoring::RecallResult::rank_order);
             }
         }
 
@@ -7663,14 +7662,15 @@ impl Axil {
     /// `alpha * best_chunk + (1 - alpha) * fused`.
     ///
     /// The window is the `qtc.top_k` most relevant candidates: ranked by fused
-    /// score with the recency term taken out. Recency still counts in every
-    /// final score, but it no longer decides who gets the blend. When the
-    /// window followed the plain fused order, recency dominated it (a
-    /// fresh commit gained about 0.14), so an old record that matched the query
-    /// best could sit outside and never be rescored. Blending every candidate
-    /// instead removed the window but also its gate: records with a high cosine
-    /// and nothing else in their favour (file summaries, code proxies) then
-    /// outranked the answers, and dogfood hit@5 fell from 0.91 to 0.88.
+    /// score without the recency term, equal ones by record id. Recency still
+    /// counts in every final score, but it no longer decides who gets the
+    /// blend. When the window followed the plain fused order, recency
+    /// dominated it (a fresh commit gained about 0.14), so an old record that
+    /// matched the query best could sit outside and never be rescored.
+    /// Blending every candidate instead removed the window but also its gate:
+    /// records with a high cosine and nothing else in their favour (file
+    /// summaries, code proxies) then outranked the answers, and dogfood hit@5
+    /// fell from 0.91 to 0.88.
     ///
     /// Records long enough to be chunked at insert are scored from their
     /// chunks' stored vectors; shorter ones have their `searchable_text`
@@ -7700,12 +7700,14 @@ impl Axil {
         let relevance: Vec<f32> = results
             .iter()
             .map(|r| {
-                let recency = crate::scoring::recency_decay(
-                    &r.record.created_at,
-                    &cfg.now,
-                    cfg.recency_half_life_hours,
-                );
-                r.score - cfg.weights.recency * recency
+                r.explanation.relevance.unwrap_or_else(|| {
+                    let recency = crate::scoring::recency_decay(
+                        &r.record.created_at,
+                        &cfg.now,
+                        cfg.recency_half_life_hours,
+                    );
+                    r.score - cfg.weights.recency * recency
+                })
             })
             .collect();
         let mut window: Vec<usize> = (0..results.len()).collect();
@@ -7713,6 +7715,7 @@ impl Axil {
             relevance[*b]
                 .partial_cmp(&relevance[*a])
                 .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| results[*a].record.id.cmp(&results[*b].record.id))
         });
         window.truncate(qtc.top_k);
 
@@ -8406,6 +8409,7 @@ mod tests {
                 signals: vec![],
                 summary: String::new(),
                 query_class: None,
+                relevance: None,
             },
         }
     }
@@ -8892,6 +8896,7 @@ mod tests {
                     signals: Vec::new(),
                     summary: String::new(),
                     query_class: None,
+                    relevance: None,
                 },
             })
             .collect()
