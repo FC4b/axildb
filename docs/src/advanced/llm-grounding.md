@@ -23,9 +23,11 @@ With no provider configured, Axil uses pattern-based algorithms for the
 two steps an LLM would otherwise assist:
 
 - **Entity extraction** — regex-based extraction pulls code identifiers,
-  file paths, and structural tokens out of stored text. This is precise
-  on the things agents most need linked (symbols, paths) and needs no
-  model.
+  file paths, commands, flags, constants and branch names out of stored
+  text, and a gazetteer adds known names: well-known tools, languages and
+  services, and the crates, packages and direct dependencies of the
+  project the database belongs to. This is precise on the things agents
+  most need linked (symbols, paths, tools) and needs no model.
 - **Consolidation** — merging multiple facts about an entity uses a
   template: it surfaces the latest value and a count of prior facts
   (e.g. *"Uses JWT with 1h expiry (latest: 2026-06-01). 2 prior
@@ -47,7 +49,7 @@ it** — the LLM never fully replaces the baseline:
 
 | Step | Without LLM | With LLM |
 |------|-------------|----------|
-| Entity extraction | Regex: code identifiers, file paths | Regex baseline **plus** LLM-found people, concepts, and names; results merged (LLM wins on conflicts) |
+| Entity extraction | Regex: code identifiers, file paths, commands; gazetteer: known tool and dependency names | Regex baseline **plus** LLM-found people, concepts, and names; results merged (LLM wins on conflicts) |
 | Consolidation | Template: latest value + prior-fact count | Prose summary noting what changed and when |
 | Recall rerank | RRF fusion order (or cross-encoder) | `axil recall --rerank llm` re-scores the top candidates through the provider |
 

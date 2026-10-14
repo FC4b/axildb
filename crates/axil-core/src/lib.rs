@@ -51,6 +51,7 @@ pub mod error;
 pub mod event_log;
 pub mod extension;
 pub mod feedback;
+pub mod gazetteer;
 pub mod importance;
 pub mod inference;
 pub mod lineage;
@@ -162,8 +163,9 @@ pub use consolidation::{
     consolidate_facts, detect_conflict_confidence,
     ConfidenceScore, ConflictConfidence, ConflictResult, ConsolidatedFact,
 };
-pub use entity::{extract_entities, Entity, EntityType};
+pub use entity::{extract_entities, extract_entities_with, Entity, EntityType};
 pub use feedback::{FeedbackEntry, FeedbackStore};
+pub use gazetteer::Gazetteer;
 pub use inference::{InferenceEngine, InferenceRule, InferredFact};
 pub use prefetch::{MaterializedRecall, PrefetchEngine, QueryLogEntry, QueryPattern};
 pub use temporal::{parse_temporal, temporal_boost, TemporalTarget};
