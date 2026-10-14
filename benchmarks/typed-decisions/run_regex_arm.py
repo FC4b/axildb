@@ -12,6 +12,7 @@ Develop on train; score test once per finished pattern family:
   python run_regex_arm.py u5 --errors                   # train misses and wrong mentions
   python run_regex_arm.py u5 --project-dir ../..        # with the project gazetteer
   python run_regex_arm.py --split test --out <file>     # the once-per-family test score
+  python run_regex_arm.py u3 --min-confidence 0.7       # U3 at the CLI default instead of the hook's 0.8
 
 `--errors` is refused on test. Raw output goes to out/regex-arm/ (gitignored).
 """
@@ -107,13 +108,13 @@ def u3(args):
     raw = {r["id"]: r for r in run_arm("--capture", m.SET)}
     OUT.mkdir(parents=True, exist_ok=True)
     (OUT / f"u3-{args.split}.jsonl").write_text("".join(json.dumps(r) + "\n" for r in raw.values()))
-    pred, score, _ = m.production_view(raw, m.HOOK_MIN_CONFIDENCE)
+    pred, score, _ = m.production_view(raw, args.min_confidence)
     cuts = m.fit_cuts(score, gold_rows, train)
     bucket = {i: m.bucket_of(score[i], cuts["cuts"]) for i in score}
     cm = m.class_metrics(pred, gold, ids)
     result = {
         "split": args.split,
-        "min_confidence": m.HOOK_MIN_CONFIDENCE,
+        "min_confidence": args.min_confidence,
         **{k: cm[k] for k in ("items", "accuracy", "macro_f1", "false_capture_rate", "false_captures",
                               "gold_none", "wrong_table", "missed", "stored")},
         "per_class": cm["per_class"],
@@ -121,7 +122,7 @@ def u3(args):
         "importance_cuts": cuts,
         "importance_majority_baseline": m.importance_baseline(gold_rows, train, ids),
     }
-    print(f"u3 {args.split}: acc {cm['accuracy']} macro-F1 {cm['macro_f1']} FC {cm['false_capture_rate']} "
+    print(f"u3 {args.split} @{args.min_confidence}: acc {cm['accuracy']} macro-F1 {cm['macro_f1']} FC {cm['false_capture_rate']} "
           f"({cm['false_captures']}/{cm['gold_none']}) stored {cm['stored']} missed {cm['missed']} "
           f"wrong-table {cm['wrong_table']} importance acc {result['importance']['accuracy']}")
     for c in m.CLASSES:
@@ -145,6 +146,8 @@ def main():
     ap.add_argument("--build", action="store_true", help="cargo build regex-arm/ first")
     ap.add_argument("--errors", action="store_true", help="print train misses and wrong outputs")
     ap.add_argument("--project-dir", help="U5: extract with the gazetteer of this project directory")
+    ap.add_argument("--min-confidence", type=float, default=0.8,
+                    help="U3: store captures at or above this (0.8 is the hook's; the CLI default is 0.7)")
     ap.add_argument("--width", type=int, default=400, help="text characters shown by --errors")
     ap.add_argument("--out", help="write the metrics JSON here")
     args = ap.parse_args()
