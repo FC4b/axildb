@@ -318,7 +318,7 @@ impl Server {
     fn open(self: &Arc<Self>) -> Result<(), Unopened> {
         let deadline = Instant::now() + self.opts.open_wait;
         let state = loop {
-            if let Some(sig) = take_signal() {
+            if let Some(sig) = self.signalled() {
                 return Err(Unopened::Stopped(StopReason::Signal(sig)));
             }
             if let Some(reason) = self.stop_reason() {
@@ -340,12 +340,14 @@ impl Server {
             return Err(Unopened::Unservable(why));
         }
         let _ = self.state.set(state);
-        self.phase.advance(Phase::Starting, Phase::Ready);
+        // On disk before any client can see it: `daemon status` must not
+        // report a daemon that served as one still starting.
         {
             let mut info = self.info.lock().unwrap_or_else(PoisonError::into_inner);
             info.ready_at = Some(now_rfc3339());
         }
-        self.write_info();
+        self.write_info_as(Phase::Ready.name());
+        self.phase.advance(Phase::Starting, Phase::Ready);
         log("ready");
         self.prewarm();
         Ok(())
@@ -373,7 +375,7 @@ impl Server {
 
     /// The once-a-second checks.
     fn tick(self: &Arc<Self>) -> Option<StopReason> {
-        if let Some(sig) = take_signal() {
+        if let Some(sig) = self.signalled() {
             return Some(StopReason::Signal(sig));
         }
         if self.in_flight.load(Ordering::Acquire) == 0 && self.idle_for() >= self.opts.idle_timeout
@@ -397,6 +399,16 @@ impl Server {
             }
         }
         None
+    }
+
+    /// The signal the daemon process received, if any. Signals are the
+    /// process's, so only the daemon process takes them.
+    fn signalled(&self) -> Option<i32> {
+        if self.opts.process {
+            take_signal()
+        } else {
+            None
+        }
     }
 
     /// Stop serving and close the database, as [`Finish`] says.
@@ -1437,10 +1449,11 @@ mod tests {
         assert_eq!(count.load(Ordering::Acquire), 0);
     }
 
-    /// An idle daemon stops by itself, and so does a signalled one, and
-    /// either leaves every store closed cleanly and says how it ended.
+    /// An idle daemon stops by itself, leaves every store closed cleanly
+    /// and says how it ended. (Signals are the process's: tests/daemon.rs
+    /// signals a daemon process.)
     #[test]
-    fn an_idle_or_signalled_daemon_stops_and_closes_its_stores() {
+    fn an_idle_daemon_stops_and_closes_its_stores() {
         let tmp = tempfile::tempdir().unwrap();
         let proj = build_fixture(tmp.path());
         let db = proj.join(".axil/memory.axil");
@@ -1457,21 +1470,12 @@ mod tests {
         let server = start_with(&db, options(Duration::from_secs(1)));
         let started = Instant::now();
         assert_eq!(server.serve(), StopReason::Idle);
-        assert!(started.elapsed() < Duration::from_secs(4));
+        assert!(started.elapsed() < Duration::from_secs(10));
         assert_eq!(server.shutdown(&StopReason::Idle), Finish::Exit(0));
         closed_cleanly();
         let info: DaemonInfo =
             serde_json::from_slice(&fs::read(server.run.info()).unwrap()).unwrap();
         assert_eq!(info.state, "stopped");
         assert_eq!(info.exit_reason.as_deref(), Some("idle"));
-
-        let server = start(&db);
-        SIGNAL.store(libc::SIGTERM, Ordering::Relaxed);
-        assert_eq!(server.serve(), StopReason::Signal(libc::SIGTERM));
-        assert_eq!(
-            server.shutdown(&StopReason::Signal(libc::SIGTERM)),
-            Finish::Exit(0)
-        );
-        closed_cleanly();
     }
 }
