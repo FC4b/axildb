@@ -198,9 +198,18 @@ const MIN_SUMMARY_LEN: usize = 20;
 /// Minimum total-input length. Tiny strings get skipped entirely.
 const MIN_INPUT_LEN: usize = 30;
 
+/// The source the brain hook gives a failed shell command's output.
+///
+/// Command output is read for failures only. A decision phrase in it is text
+/// the command printed (a task file, a log, a commit list), not a choice the
+/// agent made.
+pub const COMMAND_OUTPUT_SOURCE: &str = "bash";
+
 /// Analyze text and extract capturable knowledge.
 ///
-/// Returns a list of captures with confidence scores.
+/// Returns a list of captures with confidence scores, the most specific
+/// class first (an error, then a decision). Text from
+/// [`COMMAND_OUTPUT_SOURCE`] only yields errors.
 /// Callers (e.g. `axil auto-capture`) should only auto-store captures with
 /// confidence >= 0.7.
 pub fn analyze(text: &str, source: &str) -> Vec<CapturedKnowledge> {
@@ -250,6 +259,10 @@ pub fn analyze(text: &str, source: &str) -> Vec<CapturedKnowledge> {
         });
         claimed_line = Some(idx);
         break;
+    }
+
+    if source == COMMAND_OUTPUT_SOURCE {
+        return captures;
     }
 
     // Detect decisions. Skip the line already claimed by the error capture
@@ -812,6 +825,18 @@ mod tests {
                     -        return Err(\"connection refused by peer\".into())\n\
                     +        warn!(\"retrying after connection refused\")";
         assert!(errors_in(text).is_empty());
+    }
+
+    #[test]
+    fn command_output_yields_failures_only() {
+        let text = "Exit code 1\n### Decision: we settled on redb for the core store\n\
+                    error: could not compile `axil-core` due to 2 previous errors";
+        let from_shell = analyze(text, COMMAND_OUTPUT_SOURCE);
+        assert_eq!(from_shell.len(), 1, "{from_shell:?}");
+        assert_eq!(from_shell[0].capture_type, CaptureType::Error);
+        let from_agent = analyze(text, "agent");
+        assert_eq!(from_agent.len(), 2, "{from_agent:?}");
+        assert_eq!(from_agent[1].capture_type, CaptureType::Decision);
     }
 
     #[test]
