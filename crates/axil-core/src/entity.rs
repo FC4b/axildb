@@ -1174,11 +1174,13 @@ fn is_camel_case(s: &str) -> bool {
     upper_count >= 2 && has_lower && s.chars().all(|c| c.is_alphanumeric())
 }
 
-/// Check if a string is snake_case.
+/// Check if a string is snake_case. One leading underscore is allowed, for
+/// system tables and private fields (`_entities`, `_scip_aliases`).
 fn is_snake_case(s: &str) -> bool {
-    s.chars()
+    let body = s.strip_prefix('_').unwrap_or(s);
+    body.chars()
         .all(|c| c.is_lowercase() || c.is_ascii_digit() || c == '_')
-        && !s.starts_with('_')
+        && body.starts_with(|c: char| c.is_lowercase())
         && !s.ends_with('_')
 }
 
@@ -1947,6 +1949,17 @@ mod tests {
         assert!(entities
             .iter()
             .any(|e| e.source_text == "fix/notes.md" && e.entity_type == EntityType::File));
+    }
+
+    #[test]
+    fn underscore_prefixed_tables_are_snake_case() {
+        let found = sources("auto_link writes _entities and _scip_aliases, not __init__ or _x_.");
+        for name in ["auto_link", "_entities", "_scip_aliases"] {
+            assert!(found.iter().any(|f| f == name), "{name}: {found:?}");
+        }
+        for word in ["__init__", "_x_"] {
+            assert!(!found.iter().any(|f| f == word), "{word}: {found:?}");
+        }
     }
 
     #[test]
