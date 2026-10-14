@@ -8,10 +8,12 @@
 //! keywords such as `trait` and `class` are English words too, so those
 //! patterns only read code: fenced blocks, inline code, and code-like lines.
 
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::ops::Range;
+use std::sync::LazyLock;
 
 /// Type of extracted entity.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -73,12 +75,15 @@ pub struct Entity {
 /// Patterns run in priority order, and a later pattern never mints a part of
 /// a name an earlier one took at the same spot (`host_linker` inside
 /// `WasmHost::host_linker`):
-/// 1. Backtick-wrapped code: `` `AuthModule` `` → exact entity
-/// 2. Qualified paths: `auth::login`, `axil-core::brain::MemoryType` → code symbol
-/// 3. File paths: `/src/auth/login.rs` → file entity
-/// 4. CamelCase identifiers: `AuthModule` → code entity
-/// 5. snake_case identifiers: `auth_module` → code entity
-/// 6. Declarations in code: `fn parse_token(` → code symbol
+/// 1. Backtick-wrapped code: `` `AuthModule` `` → exact entity. A span with
+///    spaces (a command line, an expression) is not one name; the patterns
+///    below read the names inside it.
+/// 2. Commands: `cargo test`, `axil recall`, `git worktree add` → code entity
+/// 3. Qualified paths: `auth::login`, `axil-core::brain::MemoryType` → code symbol
+/// 4. File paths: `/src/auth/login.rs` → file entity
+/// 5. CamelCase identifiers: `AuthModule` → code entity
+/// 6. snake_case identifiers: `auth_module` → code entity
+/// 7. Declarations in code: `fn parse_token(` → code symbol
 ///
 /// Quoted strings are not entities: a quoted phrase is an error message or an
 /// example, and linking notes on it joins notes that merely quote the same
@@ -86,6 +91,7 @@ pub struct Entity {
 pub fn extract_entities(text: &str) -> Vec<Entity> {
     let mut x = Extraction::new(text);
     extract_backtick_entities(&mut x);
+    extract_commands(&mut x);
     extract_qualified_paths(&mut x);
     extract_file_paths(&mut x);
     extract_camel_case(&mut x);
@@ -106,6 +112,9 @@ struct Extraction<'a> {
     /// identifier patterns skip them; the same word elsewhere in the text
     /// still counts.
     claimed: Vec<Range<usize>>,
+    /// Byte ranges that are code by their markup: inline code spans and the
+    /// lines of fenced blocks.
+    code: Vec<Range<usize>>,
 }
 
 impl<'a> Extraction<'a> {
@@ -115,7 +124,12 @@ impl<'a> Extraction<'a> {
             entities: Vec::new(),
             seen: HashSet::new(),
             claimed: Vec::new(),
+            code: Vec::new(),
         }
+    }
+
+    fn is_code(&self, at: usize) -> bool {
+        self.code.iter().any(|c| c.contains(&at))
     }
 
     /// The byte range of `part` within the text. `part` must be a slice of
@@ -146,34 +160,608 @@ impl<'a> Extraction<'a> {
 }
 
 fn extract_backtick_entities(x: &mut Extraction<'_>) {
-    // Inline code only: a fenced block is code to read, not a name.
     for (line, fenced) in lines_with_fences(x.text) {
+        // A fenced block is code to read, not a name; only the command
+        // pattern reads it.
         if fenced {
+            x.code.push(x.range_of(line));
             continue;
         }
         for span in inline_code_spans(line) {
+            x.code.push(x.range_of(span));
             let trimmed = span.trim();
-            // Markdown syntax quoted in backticks (`- [ ]`, `**`) names nothing.
-            if trimmed.len() > 200 || !trimmed.chars().any(char::is_alphanumeric) {
+            if trimmed.contains(char::is_whitespace) {
                 continue;
             }
-            if !trimmed.contains(char::is_whitespace) {
-                x.claim(x.range_of(trimmed));
+            let name = trim_code_name(trimmed);
+            // Markdown syntax quoted in backticks (`- [ ]`, `**`) names
+            // nothing, and neither does a keyword or a literal (`true`, `0`).
+            if name.len() > 200 || !name.chars().any(char::is_alphanumeric) || is_code_literal(name)
+            {
+                continue;
             }
-            let entity_type = if looks_like_path(trimmed) {
+            x.claim(x.range_of(trimmed));
+            let entity_type = if looks_like_path(name) {
                 EntityType::File
             } else {
                 EntityType::Code
             };
             x.push(
-                trimmed.to_lowercase(),
+                name.to_lowercase(),
                 Entity {
-                    name: normalize_entity_name(trimmed),
+                    name: normalize_entity_name(name),
                     entity_type,
-                    source_text: trimmed.to_string(),
+                    source_text: name.to_string(),
                 },
             );
         }
+    }
+}
+
+/// The name an inline code span holds: without a `$` sigil (`$HOME`), call
+/// arguments (`Axil::open(path)`) or a `:line` suffix (`db.rs:611`).
+fn trim_code_name(span: &str) -> &str {
+    let name = span.strip_prefix('$').unwrap_or(span);
+    let name = match name.find('(') {
+        Some(open) if open > 0 && name.ends_with(')') => &name[..open],
+        _ => name,
+    };
+    match LINE_SUFFIX.find(name) {
+        Some(m) if m.start() > 0 => &name[..m.start()],
+        _ => name,
+    }
+}
+
+/// A `:line` or `:line-line` suffix after a file name.
+static LINE_SUFFIX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r":\d+(?:-\d+)?$").unwrap());
+
+/// Keywords, basic types, literals and generic method names: code that
+/// names nothing a note would link on, even in backticks.
+const CODE_LITERALS: &[&str] = &[
+    "arc", "async", "await", "bool", "box", "build", "char", "class", "const", "def", "default",
+    "dyn", "enum", "err", "f32", "f64", "false", "fn", "func", "function", "get", "i128", "i16",
+    "i32", "i64", "i8", "impl", "isize", "let", "main", "mod", "mut", "new", "nil", "none", "null",
+    "ok", "open", "option", "parse", "pub", "rc", "result", "run", "self", "set", "some", "str",
+    "string", "struct", "trait", "true", "u128", "u16", "u32", "u64", "u8", "usize", "vec", "with",
+];
+
+fn is_code_literal(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    let digits = lower.replace('_', "");
+    CODE_LITERALS.binary_search(&lower.as_str()).is_ok()
+        || digits.parse::<f64>().is_ok()
+        || digits
+            .strip_prefix("0x")
+            .is_some_and(|hex| !hex.is_empty() && hex.chars().all(|c| c.is_ascii_hexdigit()))
+}
+
+// ── Commands ──────────────────────────────────────────────────
+
+/// A program whose command lines notes quote.
+struct Program {
+    name: &'static str,
+    /// Its subcommands, sorted. Outside code markup a word after the
+    /// program counts only if listed: "cargo resolves the lockfile" is
+    /// prose, "cargo test passes" names `cargo test`.
+    subcommands: &'static [&'static str],
+    /// Subcommands that take one more subcommand word (`git worktree add`),
+    /// sorted.
+    groups: &'static [&'static str],
+}
+
+/// Every top-level `axil` subcommand, sorted (a CLI test keeps it in step
+/// with the command tree).
+pub const AXIL_COMMANDS: &[&str] = &[
+    "about",
+    "activity",
+    "add-vector",
+    "agg",
+    "analytics",
+    "ask",
+    "auto-capture",
+    "auto-link",
+    "batch-insert",
+    "belief-history",
+    "beliefs",
+    "believe",
+    "bench",
+    "boot",
+    "brain",
+    "brain-banner",
+    "brain-eval",
+    "branch",
+    "bridge",
+    "brief",
+    "cache",
+    "capture",
+    "checkpoint",
+    "close-session",
+    "code-context",
+    "code-recall-bench",
+    "code-search",
+    "compact",
+    "config",
+    "connections",
+    "consent",
+    "consolidate",
+    "context",
+    "context-savings",
+    "contradictions",
+    "create",
+    "decay",
+    "delete",
+    "dep-docs",
+    "deps",
+    "detect",
+    "detect-conflicts",
+    "diff",
+    "doctor",
+    "doubt",
+    "edges",
+    "embed",
+    "entity-alias",
+    "entity-history",
+    "entity-merge",
+    "entity-merge-canonical",
+    "entity-resolve",
+    "entity-resolve-scoped",
+    "episodes",
+    "episodes-similar",
+    "explain",
+    "explain-code-hit",
+    "export",
+    "ext",
+    "extensions",
+    "extract-entities",
+    "fact-confirm",
+    "fact-reject",
+    "features",
+    "fts",
+    "fts-optimize",
+    "get",
+    "heal",
+    "health-report",
+    "history",
+    "hook",
+    "how",
+    "impact",
+    "import",
+    "importance",
+    "index",
+    "index-stats",
+    "index-text",
+    "infer",
+    "info",
+    "ingest",
+    "ingest-scip",
+    "init",
+    "insert",
+    "inspect-memory",
+    "install",
+    "know",
+    "know-about",
+    "know-list",
+    "learn",
+    "lineage",
+    "link",
+    "list",
+    "llm",
+    "log",
+    "maintain",
+    "mcp",
+    "memory-policy",
+    "memory-pressure",
+    "metrics-snapshot",
+    "migrate-provenance",
+    "model-add",
+    "model-bench",
+    "model-download",
+    "model-list",
+    "model-remove",
+    "neighbors",
+    "observe",
+    "patterns",
+    "pin",
+    "prefer",
+    "prefetch",
+    "profile",
+    "project-model",
+    "ql",
+    "query",
+    "recall",
+    "recall-across",
+    "recall-for-entity",
+    "recall-for-file",
+    "recall-index",
+    "redact",
+    "reembed",
+    "reflect",
+    "refresh",
+    "reindex",
+    "remember",
+    "report",
+    "resolve",
+    "retention",
+    "retro",
+    "revise-beliefs",
+    "rule",
+    "rules",
+    "schedule",
+    "scip",
+    "search",
+    "search-vector",
+    "self",
+    "serve",
+    "session",
+    "session-heal",
+    "similar",
+    "since",
+    "skill",
+    "slow-queries",
+    "snapshot",
+    "stats",
+    "store",
+    "sync",
+    "tables",
+    "timeline",
+    "trace-memory",
+    "trace-record",
+    "traverse",
+    "trends",
+    "ttl-clear",
+    "ttl-set",
+    "unlink",
+    "unpin",
+    "update",
+    "user-contract",
+    "verify",
+    "warm-up",
+    "why",
+    "why-fact",
+    "why-recalled",
+    "why-remembered",
+    "why-revised",
+    "worker",
+    "workspace",
+];
+
+/// The `axil` subcommands that take a subcommand of their own, sorted.
+pub const AXIL_COMMAND_GROUPS: &[&str] = &[
+    "brain",
+    "branch",
+    "bridge",
+    "cache",
+    "capture",
+    "config",
+    "consent",
+    "contradictions",
+    "deps",
+    "ext",
+    "extensions",
+    "hook",
+    "llm",
+    "mcp",
+    "project-model",
+    "report",
+    "retention",
+    "rule",
+    "rules",
+    "schedule",
+    "scip",
+    "self",
+    "session",
+    "skill",
+    "user-contract",
+    "worker",
+    "workspace",
+];
+
+static PROGRAMS: &[Program] = &[
+    Program {
+        name: "axil",
+        subcommands: AXIL_COMMANDS,
+        groups: AXIL_COMMAND_GROUPS,
+    },
+    Program {
+        name: "brew",
+        subcommands: &["info", "install", "list", "uninstall", "update", "upgrade"],
+        groups: &[],
+    },
+    Program {
+        name: "cargo",
+        subcommands: &[
+            "add",
+            "audit",
+            "bench",
+            "build",
+            "check",
+            "clean",
+            "clippy",
+            "component",
+            "deny",
+            "doc",
+            "expand",
+            "fetch",
+            "fix",
+            "fmt",
+            "generate-lockfile",
+            "init",
+            "install",
+            "llvm-cov",
+            "metadata",
+            "new",
+            "nextest",
+            "package",
+            "publish",
+            "remove",
+            "run",
+            "rustc",
+            "rustdoc",
+            "search",
+            "semver-checks",
+            "test",
+            "tree",
+            "uninstall",
+            "update",
+            "vendor",
+            "yank",
+        ],
+        groups: &[],
+    },
+    Program {
+        name: "codex",
+        subcommands: &["exec", "login", "review"],
+        groups: &[],
+    },
+    Program {
+        name: "docker",
+        subcommands: &[
+            "build", "compose", "exec", "images", "logs", "ps", "pull", "push", "rm", "run", "stop",
+        ],
+        groups: &["compose"],
+    },
+    Program {
+        name: "gh",
+        subcommands: &[
+            "api", "auth", "browse", "cache", "gist", "issue", "label", "pr", "release", "repo",
+            "run", "search", "secret", "workflow",
+        ],
+        groups: &[
+            "auth", "cache", "gist", "issue", "label", "pr", "release", "repo", "run", "secret",
+            "workflow",
+        ],
+    },
+    Program {
+        name: "git",
+        subcommands: &[
+            "add",
+            "am",
+            "apply",
+            "archive",
+            "bisect",
+            "blame",
+            "branch",
+            "checkout",
+            "cherry-pick",
+            "clean",
+            "clone",
+            "commit",
+            "config",
+            "describe",
+            "diff",
+            "fetch",
+            "format-patch",
+            "gc",
+            "grep",
+            "init",
+            "log",
+            "ls-files",
+            "merge",
+            "mv",
+            "notes",
+            "pull",
+            "push",
+            "rebase",
+            "reflog",
+            "remote",
+            "reset",
+            "restore",
+            "rev-parse",
+            "revert",
+            "rm",
+            "shortlog",
+            "show",
+            "stash",
+            "status",
+            "submodule",
+            "switch",
+            "tag",
+            "worktree",
+        ],
+        groups: &[
+            "bisect",
+            "notes",
+            "remote",
+            "stash",
+            "submodule",
+            "worktree",
+        ],
+    },
+    Program {
+        name: "go",
+        subcommands: &[
+            "build", "fmt", "generate", "get", "install", "mod", "run", "test", "vet", "work",
+        ],
+        groups: &["mod", "work"],
+    },
+    Program {
+        name: "npm",
+        subcommands: &[
+            "audit", "ci", "exec", "init", "install", "link", "pack", "publish", "run", "start",
+            "test", "update",
+        ],
+        groups: &["run"],
+    },
+    Program {
+        name: "opencode",
+        subcommands: &["run"],
+        groups: &[],
+    },
+    Program {
+        name: "pip",
+        subcommands: &[
+            "download",
+            "freeze",
+            "install",
+            "list",
+            "show",
+            "uninstall",
+            "wheel",
+        ],
+        groups: &[],
+    },
+    Program {
+        name: "pip3",
+        subcommands: &[
+            "download",
+            "freeze",
+            "install",
+            "list",
+            "show",
+            "uninstall",
+            "wheel",
+        ],
+        groups: &[],
+    },
+    Program {
+        name: "pnpm",
+        subcommands: &[
+            "add", "build", "exec", "install", "publish", "remove", "run", "test",
+        ],
+        groups: &["run"],
+    },
+    Program {
+        name: "python",
+        subcommands: &[],
+        groups: &[],
+    },
+    Program {
+        name: "python3",
+        subcommands: &[],
+        groups: &[],
+    },
+    Program {
+        name: "rg",
+        subcommands: &[],
+        groups: &[],
+    },
+    Program {
+        name: "rustfmt",
+        subcommands: &[],
+        groups: &[],
+    },
+    Program {
+        name: "rustup",
+        subcommands: &[
+            "component",
+            "default",
+            "install",
+            "override",
+            "show",
+            "target",
+            "toolchain",
+            "update",
+        ],
+        groups: &["component", "target", "toolchain"],
+    },
+    Program {
+        name: "uv",
+        subcommands: &[
+            "add", "build", "init", "lock", "pip", "publish", "python", "remove", "run", "sync",
+            "tool", "venv",
+        ],
+        groups: &["pip", "python", "tool"],
+    },
+    Program {
+        name: "yarn",
+        subcommands: &["add", "build", "install", "remove", "run", "test"],
+        groups: &["run"],
+    },
+];
+
+/// A program name at the start of a word, with what follows it on the line.
+static PROGRAM_WORD: LazyLock<Regex> = LazyLock::new(|| {
+    let names: Vec<&str> = PROGRAMS.iter().map(|p| p.name).collect();
+    let pattern = format!(
+        r#"(?m)(?:^|[\s`(\[{{"'])({})(?:[ \t]+|$|`)"#,
+        names.join("|")
+    );
+    Regex::new(&pattern).unwrap()
+});
+
+/// One subcommand word: lowercase, digits and inner hyphens, ended by
+/// whitespace, closing markup or sentence punctuation.
+static SUBCOMMAND_WORD: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*(?:$|[\s`)\],.;:!?])").unwrap());
+
+/// Commands: a program and its subcommand words, up to the first flag,
+/// argument or placeholder (`cargo test -p x` gives `cargo test`). In code
+/// markup any subcommand-shaped word counts and a program alone is a
+/// command (`python3 run.py`); in prose only listed subcommands count.
+fn extract_commands(x: &mut Extraction<'_>) {
+    let text = x.text;
+    for caps in PROGRAM_WORD.captures_iter(text) {
+        let Some(m) = caps.get(1) else { continue };
+        let Some(program) = PROGRAMS.iter().find(|p| p.name == m.as_str()) else {
+            continue;
+        };
+        let in_code = x.is_code(m.start());
+        let mut end = m.end();
+        let mut words = 0;
+        while words < 2 {
+            let rest = &text[end..];
+            let gap = rest.len() - rest.trim_start_matches([' ', '\t']).len();
+            let Some(found) = (gap > 0)
+                .then(|| SUBCOMMAND_WORD.find(&rest[gap..]))
+                .flatten()
+            else {
+                break;
+            };
+            let word = found
+                .as_str()
+                .trim_end_matches(|c: char| !c.is_ascii_alphanumeric());
+            let counts = if words == 0 {
+                !program.subcommands.is_empty()
+                    && (in_code || program.subcommands.binary_search(&word).is_ok())
+            } else {
+                !PROSE_WORDS.contains(&word)
+            };
+            if !counts {
+                break;
+            }
+            end += gap + word.len();
+            words += 1;
+            if program.groups.binary_search(&word).is_err() {
+                break;
+            }
+        }
+        if words == 0 && !in_code {
+            continue;
+        }
+        let command = &text[m.start()..end];
+        if x.is_claimed(&(m.start()..end)) {
+            continue;
+        }
+        x.claim(m.start()..end);
+        let name = command.split_whitespace().collect::<Vec<_>>().join(" ");
+        x.push(
+            name.to_lowercase(),
+            Entity {
+                name: name.clone(),
+                entity_type: EntityType::Code,
+                source_text: name,
+            },
+        );
     }
 }
 
@@ -347,9 +935,6 @@ fn normalize_file_path(s: &str) -> String {
 }
 
 // ── Language-aware code-symbol extraction ─────────────────────
-
-use regex::Regex;
-use std::sync::LazyLock;
 
 /// A single code-symbol pattern: language hint + compiled regex.
 /// Capture group 1 is the symbol name.
@@ -852,6 +1437,68 @@ mod tests {
                 !found.iter().any(|f| f == fragment),
                 "{fragment}: {found:?}"
             );
+        }
+    }
+
+    #[test]
+    fn word_lists_are_sorted_for_binary_search() {
+        let mut lists: Vec<(&str, &[&str])> = vec![
+            ("CODE_LITERALS", CODE_LITERALS),
+            ("AXIL_COMMANDS", AXIL_COMMANDS),
+            ("AXIL_COMMAND_GROUPS", AXIL_COMMAND_GROUPS),
+        ];
+        for p in PROGRAMS {
+            lists.push((p.name, p.subcommands));
+            lists.push((p.name, p.groups));
+            for group in p.groups {
+                assert!(p.subcommands.contains(group), "{}: {group}", p.name);
+            }
+        }
+        for (name, list) in lists {
+            assert!(list.windows(2).all(|w| w[0] < w[1]), "{name} is not sorted");
+        }
+    }
+
+    #[test]
+    fn backticked_command_lines_give_the_command_not_the_line() {
+        let found = sources(
+            "Build with `cargo build --release -p axildb`, then `axil since 1h` and \
+             `rustfmt --edition 2021 --emit stdout`; `git worktree add ../wt dev` too.",
+        );
+        for name in ["cargo build", "axil since", "rustfmt", "git worktree add"] {
+            assert!(found.iter().any(|f| f == name), "{name}: {found:?}");
+        }
+        assert!(
+            !found.iter().any(|f| f.contains(" -")),
+            "a whole command line: {found:?}"
+        );
+    }
+
+    #[test]
+    fn prose_commands_need_a_known_subcommand() {
+        let found = sources(
+            "Verified with cargo publish --dry-run, ran gh workflow run release.yml and \
+             axil heal --orphans; cargo resolves the lockfile and the axil binary stays.",
+        );
+        for name in ["cargo publish", "gh workflow run", "axil heal"] {
+            assert!(found.iter().any(|f| f == name), "{name}: {found:?}");
+        }
+        for prose in ["cargo resolves", "axil binary"] {
+            assert!(!found.iter().any(|f| f == prose), "{prose}: {found:?}");
+        }
+    }
+
+    #[test]
+    fn backtick_names_drop_calls_line_suffixes_and_literals() {
+        let found = sources(
+            "`code_segments()` and `Axil::open(path)` at `db.rs:611`; `$GOMODCACHE`; \
+             `true`, `0`, `with`, `mod` and `default` name nothing.",
+        );
+        for name in ["code_segments", "Axil::open", "db.rs", "GOMODCACHE"] {
+            assert!(found.iter().any(|f| f == name), "{name}: {found:?}");
+        }
+        for literal in ["true", "0", "with", "mod", "default"] {
+            assert!(!found.iter().any(|f| f == literal), "{literal}: {found:?}");
         }
     }
 

@@ -22737,6 +22737,41 @@ mod cli_tree_tests {
         on_big_stack(|| Cli::command().debug_assert());
     }
 
+    /// Entity extraction recognizes `axil <subcommand>` in notes from a list
+    /// in axil-core, which cannot see the command tree; every command here
+    /// must be on it, and every command with subcommands of its own on the
+    /// group list.
+    #[test]
+    fn entity_command_lists_cover_the_clap_tree() {
+        let (commands, groups) = on_big_stack(|| {
+            let cli = Cli::command();
+            let mut commands = Vec::new();
+            let mut groups = Vec::new();
+            for sub in cli.get_subcommands() {
+                let names: Vec<String> = std::iter::once(sub.get_name())
+                    .chain(sub.get_all_aliases())
+                    .map(str::to_string)
+                    .collect();
+                if sub.get_subcommands().any(|s| s.get_name() != "help") {
+                    groups.extend(names.iter().cloned());
+                }
+                commands.extend(names);
+            }
+            (commands, groups)
+        });
+        let missing: Vec<&String> = commands
+            .iter()
+            .filter(|n| n.as_str() != "help")
+            .filter(|n| !axil_core::entity::AXIL_COMMANDS.contains(&n.as_str()))
+            .collect();
+        assert!(missing.is_empty(), "missing from AXIL_COMMANDS: {missing:?}");
+        let missing: Vec<&String> = groups
+            .iter()
+            .filter(|n| !axil_core::entity::AXIL_COMMAND_GROUPS.contains(&n.as_str()))
+            .collect();
+        assert!(missing.is_empty(), "missing from AXIL_COMMAND_GROUPS: {missing:?}");
+    }
+
     /// The parse error clap reports for `args`, if any.
     fn parse_error(args: &'static [&'static str]) -> Option<clap::error::ErrorKind> {
         on_big_stack(move || Cli::try_parse_from(args).err().map(|e| e.kind()))
