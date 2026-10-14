@@ -29,8 +29,8 @@ fn main() {
     if args.first().map(String::as_str) == Some("--full-path") {
         let path = args
             .get(1)
-            .expect("usage: typed-decisions-heuristic --full-path <u1.jsonl>");
-        full_path(path);
+            .expect("usage: typed-decisions-heuristic --full-path <u1.jsonl> [--judge]");
+        full_path(path, args.iter().any(|a| a == "--judge"));
         return;
     }
     let path = args
@@ -78,7 +78,15 @@ fn main() {
 /// rules on each. Prints one JSON line per pair: whether the true
 /// predecessor was a candidate, whether the judge would supersede it, and
 /// how many *other* candidates the judge would supersede (the harm case).
-fn full_path(path: &str) {
+///
+/// With `judge`, the same new record also goes through the review pass's
+/// judgement, `Axil::judge_possible_contradictions` with the U1 model over
+/// the same top-5 candidates: whether it flags the true predecessor (and
+/// its score), and how many other candidates it flags. That path only
+/// flags; `superseded` counts records the database marked superseded at the
+/// end, all of them from insert-time near-duplicate handling of the old
+/// texts, since nothing on the judge path can supersede.
+fn full_path(path: &str, judge: bool) {
     use axil_core::Axil;
     use axil_vector::AxilBuilderVectorExt;
 
@@ -109,6 +117,13 @@ fn full_path(path: &str) {
         }
     }
 
+    let u1 = judge.then(|| {
+        use axil_decide::{Calibration, PairClassifier, NLI_DEBERTA_V3_XSMALL_QINT8 as U1};
+        let dir = U1.default_dir().expect("home directory");
+        U1.download(&dir).expect("U1 model");
+        PairClassifier::load(&U1, &dir, Calibration::u1()).expect("load U1")
+    });
+
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
     for row in &rows {
@@ -132,17 +147,32 @@ fn full_path(path: &str) {
                 }
             }
         }
-        writeln!(
-            out,
-            "{}",
-            json!({
-                "id": row["id"],
-                "candidates": candidates.len(),
-                "candidate": candidate,
-                "supersedes_true": supersedes_true,
-                "supersedes_other": supersedes_other,
-            })
-        )
-        .expect("write");
+        let mut line = json!({
+            "id": row["id"],
+            "candidates": candidates.len(),
+            "candidate": candidate,
+            "supersedes_true": supersedes_true,
+            "supersedes_other": supersedes_other,
+        });
+        if let Some(u1) = &u1 {
+            let pairs = db
+                .judge_possible_contradictions(&new, u1, 5)
+                .expect("judge");
+            let truth = pairs.iter().find(|p| &p.older == true_old);
+            line["flagged_true"] = json!(truth.is_some_and(|p| p.flagged));
+            line["p_true"] = json!(truth.map(|p| p.probability));
+            line["flagged_other"] =
+                json!(pairs.iter().filter(|p| p.flagged && &p.older != true_old).count());
+        }
+        writeln!(out, "{line}").expect("write");
+    }
+    if judge {
+        let superseded = db
+            .list("decisions")
+            .expect("list")
+            .iter()
+            .filter(|r| axil_core::is_superseded_record(r))
+            .count();
+        writeln!(out, "{}", json!({ "superseded": superseded })).expect("write");
     }
 }
