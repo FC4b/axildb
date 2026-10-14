@@ -97,6 +97,9 @@ const LOG_ROTATE_BYTES: u64 = 1024 * 1024;
 /// gives up on the database.
 const GRAPH_RELOADS: u32 = 1;
 
+/// The reload reason for a graph that failed to load.
+const GRAPH_FAILED: &str = "the graph failed to load";
+
 /// How a daemon runs.
 #[derive(Debug, Clone)]
 pub struct Options {
@@ -157,17 +160,17 @@ pub enum Finish {
     Poisoned,
 }
 
-/// One line in the daemon's log. Unit tests run daemons in the test
-/// process, whose stderr is not a log.
+/// One entry in the daemon's log, each of its lines stamped. Unit tests
+/// run daemons in the test process, whose stderr is not a log.
 fn log(message: impl std::fmt::Display) {
     if cfg!(test) {
         return;
     }
-    errln!(
-        "{} axil daemon[{}]: {message}",
-        chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ"),
-        std::process::id()
-    );
+    let stamp = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ");
+    let pid = std::process::id();
+    for line in message.to_string().lines() {
+        errln!("{stamp} axil daemon[{pid}]: {line}");
+    }
 }
 
 fn now_rfc3339() -> String {
@@ -710,7 +713,7 @@ impl Server {
     /// or the graph failed to load. The file check stands for 250 ms.
     fn stale(&self) -> Option<String> {
         if self.graph_failed() {
-            return Some("the graph failed to load".to_string());
+            return Some(GRAPH_FAILED.to_string());
         }
         let mut fresh = self.fresh.lock().unwrap_or_else(PoisonError::into_inner);
         let fresh = fresh.as_mut()?;
@@ -719,6 +722,15 @@ impl Server {
         }
         fresh.checked = Instant::now();
         fresh.baseline.changed(&FileFp::read(&self.key))
+    }
+
+    /// Whether the files behind the handle differ from those it opened,
+    /// read now.
+    fn files_changed(&self) -> bool {
+        let fresh = self.fresh.lock().unwrap_or_else(PoisonError::into_inner);
+        fresh
+            .as_ref()
+            .is_some_and(|f| f.baseline.changed(&FileFp::read(&self.key)).is_some())
     }
 
     fn graph_failed(&self) -> bool {
@@ -739,14 +751,22 @@ impl Server {
         let Some(state) = self.state.get() else {
             return;
         };
-        if why.starts_with("the graph") {
-            let tries = self.graph_reloads.fetch_add(1, Ordering::AcqRel);
-            if tries >= GRAPH_RELOADS {
-                self.stop_blocked(format!("{why} again after a reload"));
-                return;
-            }
-        }
         if !self.phase.advance(Phase::Ready, Phase::Reloading) {
+            return;
+        }
+        // Another caller may have reloaded since `why` was found.
+        let graph = why == GRAPH_FAILED;
+        let still = if graph {
+            self.graph_failed()
+        } else {
+            self.files_changed()
+        };
+        if !still {
+            self.phase.advance(Phase::Reloading, Phase::Ready);
+            return;
+        }
+        if graph && self.graph_reloads.fetch_add(1, Ordering::AcqRel) >= GRAPH_RELOADS {
+            self.stop_blocked(format!("{why} again after a reload"));
             return;
         }
         log(format!("reloading: {why}"));
