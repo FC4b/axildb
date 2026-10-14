@@ -248,26 +248,39 @@ and 4c each apply to one of them. The top `rerank_top_k_in` candidates
 (default 50) are re-scored and up to `rerank_top_k_out` (default 10) are
 kept.
 
-**Status: off by default.** Every committed rerank run lowered recall.
-On a 30-question LongMemEval-S subset, top-k 5
-([investigation](../../../benchmarks/results/lme-rerank-investigation.md)):
+**Status: off by default.** Measured on 2026-10-14 with
+`cross-encoder/ms-marco-MiniLM-L-6-v2`, each comparison on one corpus the
+same day:
 
-- Recall-QTC with the MS-MARCO cross-encoder: 0.933
-  ([`lme-baseline-30.json`](../../../benchmarks/results/lme-baseline-30.json))
-  → 0.667
-  ([`lme-qtc-rerank-30.json`](../../../benchmarks/results/lme-qtc-rerank-30.json)).
-- The `recall` (fusion) strategy: 0.900 without rerank
-  ([`lme-recall-no-rerank-30.json`](../../../benchmarks/results/lme-recall-no-rerank-30.json))
-  → 0.667 with MS-MARCO
-  ([`lme-rerank-30.json`](../../../benchmarks/results/lme-rerank-30.json))
-  and 0.733 with a BGE reranker
-  ([`lme-bge-rerank-30.json`](../../../benchmarks/results/lme-bge-rerank-30.json)).
+- **CLI path, dogfood eval** (57 questions about this repo's memory,
+  `--fetch 10`;
+  [`dogfood-recall-2026-10-14-rerank.json`](../../../benchmarks/results/dogfood-recall-2026-10-14-rerank.json)):
+  NDCG@10 is 0.812 without a rerank, 0.833 with the old CLI window (only the
+  printed `--top-k` reordered), 0.838 with the pool, and 0.859 with the pool
+  blended at `--rerank-weight 0.3`, the best weight of the sweep. At 0.3,
+  MRR@10 goes from 0.791 to 0.831 and hit@5 from 0.895 to 0.947, and the hook
+  block holds an answer for 0.930 of the questions instead of 0.895.
+- **LongMemEval-S, a 60-question stratified sample**, Recall-QTC, top-k 5,
+  every variant ordering the same candidates
+  ([`longmemeval-s60-rerank-2026-10-14.json`](../../../benchmarks/results/longmemeval-s60-rerank-2026-10-14.json)):
+  recall is 0.979 without a rerank, 0.983 with the cross-encoder's order
+  alone and 0.979 at weight 0.3; NDCG@10 is 0.946, 0.933 and 0.961.
 
-Those runs used the LongMemEval harness, which reranks the top 20 of 40
-fused candidates before keeping 5, a wider window than the CLI's. The
-CLI path itself has not been measured since a fix to the text it hands
-the cross-encoder. The infrastructure ships so users can attach
-domain-specific rerankers, but no model is enabled out of the box.
+So the blend at 0.3 ranks better on both and leaves LongMemEval recall where
+it was, while the cross-encoder's order alone costs LongMemEval ranking.
+The weight was picked on the dogfood eval; the LongMemEval run reports the
+same weight. Rerank still stays opt-in: it needs the `rerank` build and a
+model Axil does not download, and it adds a cross-encoder pass over the
+pool to every recall.
+
+Earlier runs on a 30-question subset reported the cross-encoder lowering
+Recall-QTC from 0.933 to 0.667
+([investigation](../../../benchmarks/results/lme-rerank-investigation.md)).
+Until this re-measurement the harness ranked sessions by score after a
+rerank, with cross-encoder logits on the reranked window and fused scores on
+the candidates below it, so a low candidate could outrank a reranked one
+with a negative logit. It now ranks by reranked position; the older numbers
+may not show the reranker's own effect.
 
 ## Step 4c — Query-Time Chunking (QTC)
 
@@ -361,7 +374,7 @@ hit-rate 0% → 20%, ~45% context-token reduction, p95 19ms → 15ms.
 | `recency_half_life_hours` | `RecallConfig` | 168 (1 week) | Longer for archival corpora, shorter for incident channels |
 | `qtc` | `RecallConfig` | `None` | Long documents where answers sit beyond the embedding window |
 | Embedding model | `axil.toml` `[index] embedding_model` | `bge-small-en-v1.5-int8` | `bge-base` for quality, `int8` for speed |
-| Cross-encoder rerank | `with_reranker(...)` | unattached | Only attach a domain-tuned reranker — the stock models hurt on LongMemEval |
+| Cross-encoder rerank | `with_reranker(...)` | unattached | Not measured on this path; for the CLI's cross-encoder results see Step 4b |
 | Fetch multiplier | `min_fetch = (limit + offset) * 4` | × 4 | Increase if top-K is very small and you want richer fusion input |
 
 ## See also

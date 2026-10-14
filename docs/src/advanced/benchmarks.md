@@ -108,7 +108,10 @@ MemPalace recall@5 96.6, Hindsight QA 94.6, Zep QA 63.8, Mem0 QA 49.0.
 2. **Cross-encoder rerank (MS-MARCO MiniLM-L-6-v2)** dropped hit_rate to 85.3%
    (CPU) / 44.0% (CUDA) — domain mismatch: the reranker rewards surface-level
    topic overlap, which is exactly *not* what picks out answer-bearing sessions
-   in this benchmark.
+   in this benchmark. (Until 2026-10-14 the harness ranked sessions after a
+   rerank by mixing cross-encoder logits with fused scores; the re-measurement
+   with that fixed is in Step 4b of the
+   [retrieval pipeline](retrieval-pipeline.md).)
 3. **Larger embedder (BGE-base, 768d)** moved recall +0.8 pp but cost hit_rate
    0.7 pp — net neutral.
 4. **Index-time chunking + adaptive weights** collapsed to 18% hit_rate: chunks
