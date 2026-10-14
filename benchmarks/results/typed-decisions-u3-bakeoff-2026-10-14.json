@@ -1,0 +1,3603 @@
+{
+ "date": "2026-10-14",
+ "decision": "U3: should auto-captured text become a memory record, in which table, at what importance",
+ "set": "benchmarks/typed-decisions/sets/u3_repo.jsonl",
+ "labels": "benchmarks/typed-decisions/validation/2026-10-14-u3-labels.json",
+ "texts": {
+  "train": 75,
+  "test": 125
+ },
+ "gold_test": {
+  "none": 87,
+  "context": 10,
+  "error": 22,
+  "rule": 3,
+  "decision": 3
+ },
+ "gold_test_by_source": {
+  "bash_failure": {
+   "none": 30,
+   "error": 6
+  },
+  "bash_output": {
+   "none": 17,
+   "error": 1
+  },
+  "agent_text": {
+   "context": 9,
+   "none": 19,
+   "error": 8
+  },
+  "agent_brief": {
+   "none": 6,
+   "rule": 3,
+   "error": 2,
+   "decision": 1
+  },
+  "commit_subject": {
+   "none": 15,
+   "error": 5,
+   "context": 1,
+   "decision": 2
+  }
+ },
+ "importance_majority_baseline": {
+  "bucket": "medium",
+  "accuracy": 0.5,
+  "items": 38
+ },
+ "metric": "single-label class over decision/error/context/rule/none on the test split. macro_f1 = mean F1 over the classes present in gold or predictions. false_capture_rate = gold none predicted as anything else / gold none (a junk record). wrong_table_rate = stored in the wrong table / (gold not none and stored). miss_rate = gold not none predicted none / gold not none. Importance accuracy is over gold not-none test items, whatever the arm's class.",
+ "control": "production at the hook's --min-confidence 0.8 (the only automatic caller); production@0.7 is the CLI default, for reference",
+ "selection": "see the script docstring; every model setting was chosen on train only",
+ "sampling_note": "half of each source's quota went to texts containing a production pattern, so the regex fires more often here than on all hook traffic; rates are for this set",
+ "weak_training_data": {
+  "rule": 2,
+  "decision": 115,
+  "context": 89,
+  "error": 65
+ },
+ "settings": {
+  "threads": 4,
+  "tau_grid": [
+   0.0,
+   0.05,
+   0.1,
+   0.15,
+   0.2,
+   0.25,
+   0.3,
+   0.35,
+   0.4,
+   0.45,
+   0.5,
+   0.55,
+   0.6,
+   0.65,
+   0.7,
+   0.75,
+   0.8,
+   0.85,
+   0.9,
+   0.95,
+   0.96,
+   0.97,
+   0.98,
+   0.99,
+   0.995,
+   0.999
+  ],
+  "tau_grid_note": "the first run's grid stopped at 0.95; no zero-shot setting met the train false-capture bar there, so the grid was extended toward 1 and the zero-shot arms re-selected on train from their saved scores (--reselect); each arm keeps its first_selection",
+  "c_grid": [
+   0.1,
+   0.3,
+   1.0,
+   3.0,
+   10.0,
+   30.0,
+   100.0
+  ],
+  "class_weightings": [
+   "None",
+   "balanced"
+  ],
+  "cv_folds": 5,
+  "phrasings": {
+   "short": {
+    "decision": "decision",
+    "error": "error or failure",
+    "context": "technical knowledge",
+    "rule": "rule or instruction",
+    "none": "chatter or routine output"
+   },
+   "descriptive": {
+    "decision": "a decision choosing one option over another",
+    "error": "a report of an error, bug or failure",
+    "context": "an explanation of how something works",
+    "rule": "a rule that must always be followed",
+    "none": "routine tool output, progress update or small talk"
+   }
+  },
+  "importance_labels": {
+   "low": "minor detail",
+   "medium": "useful project knowledge",
+   "high": "critical project knowledge"
+  },
+  "device": "cpu",
+  "fit_bars": {
+   "peak_rss_mb_max": 1500.0,
+   "p95_ms_max": 1000.0
+  }
+ },
+ "machine": {
+  "platform": "macOS-26.6-arm64-arm-64bit",
+  "machine": "arm64",
+  "python": "3.12.1",
+  "logical_cpus": 10,
+  "cpu": "Apple M1 Pro",
+  "memory_bytes": "17179869184"
+ },
+ "versions": {
+  "torch": "2.14.1",
+  "transformers": "5.19.0",
+  "tokenizers": "0.23.3",
+  "gliclass": "0.1.20",
+  "gliner2": "2.0.0",
+  "scikit-learn": "1.9.1",
+  "numpy": "2.5.4",
+  "huggingface_hub": "2.2.0"
+ },
+ "prepare": {
+  "weak_records": {
+   "rule": 2,
+   "decision": 115,
+   "context": 89,
+   "error": 65
+  },
+  "skipped": {
+   "fallback_capture": 5,
+   "superseded": 1,
+   "after_cutoff": 3
+  },
+  "cutoff": "2026-10-14T10:00:00Z",
+  "embed_weak": {
+   "peak_rss_mb": 334.4,
+   "peak_footprint_mb": 333.8,
+   "wall_ms": 78434.6,
+   "loadavg_1m_before": 168.59,
+   "loadavg_1m_after": 215.25,
+   "load_ms": 682.456584,
+   "rows": 271
+  },
+  "embed_u3": {
+   "peak_rss_mb": 296.4,
+   "peak_footprint_mb": 318.5,
+   "wall_ms": 43836.2,
+   "loadavg_1m_before": 215.25,
+   "loadavg_1m_after": 255.93,
+   "load_ms": 895.994333,
+   "rows": 200
+  }
+ },
+ "arms": {
+  "production": {
+   "what": "axil_core::auto_capture::analyze(text, \"bash\"), then capture_to_record and compute_importance on each capture, as `axil auto-capture` stores them",
+   "binary": "heuristic/target/release/typed-decisions-heuristic",
+   "latency_ms": {
+    "p50": 0.01,
+    "p95": 0.025,
+    "loadavg_1m_before": 190.04,
+    "loadavg_1m_after": 190.04,
+    "measured_in": "Rust, Instant around analyze() per test text"
+   },
+   "load_ms": 1.461,
+   "load_note": "first analyze call (the patterns are plain substring lists; nothing to load)",
+   "peak_rss_mb": 11.5,
+   "peak_footprint_mb": 4.7,
+   "rss_note": "whole heuristic process under /usr/bin/time -l (it links axil-core and axil-vector; no model is loaded in --capture mode)",
+   "params": 0,
+   "size_on_disk_bytes": 0,
+   "size_note": "no model: the patterns are compiled into axil-core",
+   "min_confidence": 0.8,
+   "texts_with_two_stored_captures": 0,
+   "importance_cuts": {
+    "cuts": [
+     0.05,
+     0.7
+    ],
+    "train_accuracy": 0.5789,
+    "train_items": 19
+   },
+   "train": {
+    "accuracy": 0.76,
+    "macro_f1": 0.2009,
+    "false_capture_rate": 0.0
+   },
+   "test": {
+    "items": 125,
+    "accuracy": 0.728,
+    "macro_f1": 0.2411,
+    "macro_f1_classes": [
+     "decision",
+     "error",
+     "context",
+     "rule",
+     "none"
+    ],
+    "per_class": {
+     "decision": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "tp": 0,
+      "pred": 1,
+      "gold": 3
+     },
+     "error": {
+      "precision": 1.0,
+      "recall": 0.2273,
+      "f1": 0.3704,
+      "tp": 5,
+      "pred": 5,
+      "gold": 22
+     },
+     "context": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "tp": 0,
+      "pred": 0,
+      "gold": 10
+     },
+     "rule": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "tp": 0,
+      "pred": 0,
+      "gold": 3
+     },
+     "none": {
+      "precision": 0.7227,
+      "recall": 0.9885,
+      "f1": 0.835,
+      "tp": 86,
+      "pred": 119,
+      "gold": 87
+     }
+    },
+    "false_capture_rate": 0.0115,
+    "false_captures": 1,
+    "gold_none": 87,
+    "wrong_table_rate": 0.0,
+    "wrong_table": 0,
+    "stored_and_should_be": 5,
+    "miss_rate": 0.8684,
+    "missed": 33,
+    "junk_share_of_stored": 0.1667,
+    "stored": 6,
+    "confusion": {
+     "decision": {
+      "none": 3
+     },
+     "error": {
+      "none": 17,
+      "error": 5
+     },
+     "context": {
+      "none": 10
+     },
+     "rule": {
+      "none": 3
+     },
+     "none": {
+      "none": 86,
+      "decision": 1
+     }
+    },
+    "importance": {
+     "items": 38,
+     "accuracy": 0.4737,
+     "within_one": 0.9737,
+     "mean_abs_bucket_error": 0.5526,
+     "confusion": {
+      "low": {
+       "medium": 7,
+       "high": 1
+      },
+      "medium": {
+       "high": 9,
+       "medium": 10
+      },
+      "high": {
+       "high": 8,
+       "medium": 3
+      }
+     }
+    },
+    "per_source": {
+     "bash_failure": {
+      "items": 36,
+      "accuracy": 0.9722,
+      "false_capture_rate": 0.0,
+      "false_captures": 0,
+      "gold_none": 30,
+      "miss_rate": 0.1667,
+      "missed": 1,
+      "wrong_table": 0
+     },
+     "bash_output": {
+      "items": 18,
+      "accuracy": 0.9444,
+      "false_capture_rate": 0.0,
+      "false_captures": 0,
+      "gold_none": 17,
+      "miss_rate": 1.0,
+      "missed": 1,
+      "wrong_table": 0
+     },
+     "agent_text": {
+      "items": 36,
+      "accuracy": 0.5,
+      "false_capture_rate": 0.0526,
+      "false_captures": 1,
+      "gold_none": 19,
+      "miss_rate": 1.0,
+      "missed": 17,
+      "wrong_table": 0
+     },
+     "agent_brief": {
+      "items": 12,
+      "accuracy": 0.5,
+      "false_capture_rate": 0.0,
+      "false_captures": 0,
+      "gold_none": 6,
+      "miss_rate": 1.0,
+      "missed": 6,
+      "wrong_table": 0
+     },
+     "commit_subject": {
+      "items": 23,
+      "accuracy": 0.6522,
+      "false_capture_rate": 0.0,
+      "false_captures": 0,
+      "gold_none": 15,
+      "miss_rate": 1.0,
+      "missed": 8,
+      "wrong_table": 0
+     }
+    }
+   },
+   "predictions_test": {
+    "u3-001": "none",
+    "u3-003": "none",
+    "u3-004": "none",
+    "u3-007": "none",
+    "u3-008": "none",
+    "u3-010": "none",
+    "u3-011": "none",
+    "u3-013": "none",
+    "u3-014": "none",
+    "u3-015": "none",
+    "u3-017": "none",
+    "u3-018": "none",
+    "u3-021": "none",
+    "u3-022": "none",
+    "u3-023": "none",
+    "u3-024": "none",
+    "u3-028": "none",
+    "u3-030": "none",
+    "u3-033": "none",
+    "u3-038": "none",
+    "u3-039": "none",
+    "u3-040": "none",
+    "u3-041": "none",
+    "u3-043": "none",
+    "u3-044": "none",
+    "u3-045": "none",
+    "u3-046": "none",
+    "u3-047": "none",
+    "u3-049": "none",
+    "u3-050": "none",
+    "u3-051": "none",
+    "u3-054": "none",
+    "u3-057": "none",
+    "u3-061": "none",
+    "u3-062": "none",
+    "u3-063": "none",
+    "u3-064": "none",
+    "u3-067": "none",
+    "u3-068": "none",
+    "u3-069": "none",
+    "u3-070": "none",
+    "u3-072": "none",
+    "u3-073": "none",
+    "u3-075": "none",
+    "u3-077": "none",
+    "u3-079": "none",
+    "u3-080": "none",
+    "u3-081": "none",
+    "u3-082": "none",
+    "u3-083": "none",
+    "u3-085": "none",
+    "u3-086": "none",
+    "u3-087": "none",
+    "u3-088": "none",
+    "u3-089": "none",
+    "u3-093": "none",
+    "u3-095": "none",
+    "u3-096": "none",
+    "u3-098": "none",
+    "u3-099": "none",
+    "u3-101": "none",
+    "u3-103": "error",
+    "u3-106": "none",
+    "u3-107": "none",
+    "u3-108": "none",
+    "u3-109": "none",
+    "u3-112": "none",
+    "u3-114": "none",
+    "u3-116": "error",
+    "u3-117": "none",
+    "u3-118": "none",
+    "u3-120": "none",
+    "u3-122": "none",
+    "u3-123": "none",
+    "u3-124": "none",
+    "u3-125": "none",
+    "u3-126": "none",
+    "u3-127": "none",
+    "u3-128": "none",
+    "u3-133": "none",
+    "u3-134": "none",
+    "u3-135": "none",
+    "u3-137": "none",
+    "u3-138": "none",
+    "u3-140": "none",
+    "u3-141": "none",
+    "u3-143": "none",
+    "u3-144": "none",
+    "u3-145": "none",
+    "u3-147": "none",
+    "u3-149": "none",
+    "u3-150": "none",
+    "u3-152": "none",
+    "u3-154": "none",
+    "u3-155": "none",
+    "u3-156": "none",
+    "u3-158": "error",
+    "u3-159": "none",
+    "u3-161": "none",
+    "u3-165": "error",
+    "u3-167": "error",
+    "u3-169": "none",
+    "u3-171": "none",
+    "u3-172": "none",
+    "u3-175": "none",
+    "u3-177": "none",
+    "u3-179": "none",
+    "u3-180": "none",
+    "u3-181": "none",
+    "u3-182": "none",
+    "u3-183": "none",
+    "u3-184": "none",
+    "u3-185": "none",
+    "u3-186": "none",
+    "u3-187": "none",
+    "u3-188": "none",
+    "u3-190": "none",
+    "u3-192": "none",
+    "u3-193": "decision",
+    "u3-194": "none",
+    "u3-195": "none",
+    "u3-196": "none",
+    "u3-197": "none",
+    "u3-199": "none",
+    "u3-200": "none"
+   }
+  },
+  "production@0.7": {
+   "what": "axil_core::auto_capture::analyze(text, \"bash\"), then capture_to_record and compute_importance on each capture, as `axil auto-capture` stores them",
+   "binary": "heuristic/target/release/typed-decisions-heuristic",
+   "latency_ms": {
+    "p50": 0.01,
+    "p95": 0.025,
+    "loadavg_1m_before": 190.04,
+    "loadavg_1m_after": 190.04,
+    "measured_in": "Rust, Instant around analyze() per test text"
+   },
+   "load_ms": 1.461,
+   "load_note": "first analyze call (the patterns are plain substring lists; nothing to load)",
+   "peak_rss_mb": 11.5,
+   "peak_footprint_mb": 4.7,
+   "rss_note": "whole heuristic process under /usr/bin/time -l (it links axil-core and axil-vector; no model is loaded in --capture mode)",
+   "params": 0,
+   "size_on_disk_bytes": 0,
+   "size_note": "no model: the patterns are compiled into axil-core",
+   "min_confidence": 0.7,
+   "texts_with_two_stored_captures": 0,
+   "importance_cuts": {
+    "cuts": [
+     0.05,
+     0.7
+    ],
+    "train_accuracy": 0.5789,
+    "train_items": 19
+   },
+   "train": {
+    "accuracy": 0.7067,
+    "macro_f1": 0.1873,
+    "false_capture_rate": 0.0714
+   },
+   "test": {
+    "items": 125,
+    "accuracy": 0.632,
+    "macro_f1": 0.2106,
+    "macro_f1_classes": [
+     "decision",
+     "error",
+     "context",
+     "rule",
+     "none"
+    ],
+    "per_class": {
+     "decision": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "tp": 0,
+      "pred": 1,
+      "gold": 3
+     },
+     "error": {
+      "precision": 0.3158,
+      "recall": 0.2727,
+      "f1": 0.2927,
+      "tp": 6,
+      "pred": 19,
+      "gold": 22
+     },
+     "context": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "tp": 0,
+      "pred": 0,
+      "gold": 10
+     },
+     "rule": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "tp": 0,
+      "pred": 0,
+      "gold": 3
+     },
+     "none": {
+      "precision": 0.6952,
+      "recall": 0.8391,
+      "f1": 0.7604,
+      "tp": 73,
+      "pred": 105,
+      "gold": 87
+     }
+    },
+    "false_capture_rate": 0.1609,
+    "false_captures": 14,
+    "gold_none": 87,
+    "wrong_table_rate": 0.0,
+    "wrong_table": 0,
+    "stored_and_should_be": 6,
+    "miss_rate": 0.8421,
+    "missed": 32,
+    "junk_share_of_stored": 0.7,
+    "stored": 20,
+    "confusion": {
+     "decision": {
+      "none": 3
+     },
+     "error": {
+      "none": 16,
+      "error": 6
+     },
+     "context": {
+      "none": 10
+     },
+     "rule": {
+      "none": 3
+     },
+     "none": {
+      "none": 73,
+      "error": 13,
+      "decision": 1
+     }
+    },
+    "importance": {
+     "items": 38,
+     "accuracy": 0.4737,
+     "within_one": 0.9737,
+     "mean_abs_bucket_error": 0.5526,
+     "confusion": {
+      "low": {
+       "medium": 7,
+       "high": 1
+      },
+      "medium": {
+       "high": 9,
+       "medium": 10
+      },
+      "high": {
+       "high": 8,
+       "medium": 3
+      }
+     }
+    },
+    "per_source": {
+     "bash_failure": {
+      "items": 36,
+      "accuracy": 0.6389,
+      "false_capture_rate": 0.4333,
+      "false_captures": 13,
+      "gold_none": 30,
+      "miss_rate": 0.0,
+      "missed": 0,
+      "wrong_table": 0
+     },
+     "bash_output": {
+      "items": 18,
+      "accuracy": 0.9444,
+      "false_capture_rate": 0.0,
+      "false_captures": 0,
+      "gold_none": 17,
+      "miss_rate": 1.0,
+      "missed": 1,
+      "wrong_table": 0
+     },
+     "agent_text": {
+      "items": 36,
+      "accuracy": 0.5,
+      "false_capture_rate": 0.0526,
+      "false_captures": 1,
+      "gold_none": 19,
+      "miss_rate": 1.0,
+      "missed": 17,
+      "wrong_table": 0
+     },
+     "agent_brief": {
+      "items": 12,
+      "accuracy": 0.5,
+      "false_capture_rate": 0.0,
+      "false_captures": 0,
+      "gold_none": 6,
+      "miss_rate": 1.0,
+      "missed": 6,
+      "wrong_table": 0
+     },
+     "commit_subject": {
+      "items": 23,
+      "accuracy": 0.6522,
+      "false_capture_rate": 0.0,
+      "false_captures": 0,
+      "gold_none": 15,
+      "miss_rate": 1.0,
+      "missed": 8,
+      "wrong_table": 0
+     }
+    }
+   },
+   "predictions_test": {
+    "u3-001": "none",
+    "u3-003": "none",
+    "u3-004": "none",
+    "u3-007": "none",
+    "u3-008": "none",
+    "u3-010": "none",
+    "u3-011": "none",
+    "u3-013": "none",
+    "u3-014": "none",
+    "u3-015": "none",
+    "u3-017": "none",
+    "u3-018": "none",
+    "u3-021": "none",
+    "u3-022": "none",
+    "u3-023": "none",
+    "u3-024": "none",
+    "u3-028": "none",
+    "u3-030": "none",
+    "u3-033": "none",
+    "u3-038": "none",
+    "u3-039": "none",
+    "u3-040": "none",
+    "u3-041": "none",
+    "u3-043": "none",
+    "u3-044": "none",
+    "u3-045": "none",
+    "u3-046": "none",
+    "u3-047": "none",
+    "u3-049": "none",
+    "u3-050": "none",
+    "u3-051": "none",
+    "u3-054": "none",
+    "u3-057": "none",
+    "u3-061": "none",
+    "u3-062": "none",
+    "u3-063": "none",
+    "u3-064": "none",
+    "u3-067": "none",
+    "u3-068": "none",
+    "u3-069": "none",
+    "u3-070": "error",
+    "u3-072": "none",
+    "u3-073": "none",
+    "u3-075": "none",
+    "u3-077": "none",
+    "u3-079": "none",
+    "u3-080": "none",
+    "u3-081": "error",
+    "u3-082": "none",
+    "u3-083": "none",
+    "u3-085": "none",
+    "u3-086": "none",
+    "u3-087": "none",
+    "u3-088": "none",
+    "u3-089": "none",
+    "u3-093": "error",
+    "u3-095": "none",
+    "u3-096": "none",
+    "u3-098": "none",
+    "u3-099": "error",
+    "u3-101": "none",
+    "u3-103": "error",
+    "u3-106": "none",
+    "u3-107": "none",
+    "u3-108": "none",
+    "u3-109": "error",
+    "u3-112": "error",
+    "u3-114": "none",
+    "u3-116": "error",
+    "u3-117": "error",
+    "u3-118": "none",
+    "u3-120": "none",
+    "u3-122": "none",
+    "u3-123": "error",
+    "u3-124": "error",
+    "u3-125": "none",
+    "u3-126": "none",
+    "u3-127": "none",
+    "u3-128": "none",
+    "u3-133": "none",
+    "u3-134": "none",
+    "u3-135": "none",
+    "u3-137": "none",
+    "u3-138": "none",
+    "u3-140": "none",
+    "u3-141": "none",
+    "u3-143": "none",
+    "u3-144": "none",
+    "u3-145": "none",
+    "u3-147": "none",
+    "u3-149": "none",
+    "u3-150": "none",
+    "u3-152": "none",
+    "u3-154": "none",
+    "u3-155": "none",
+    "u3-156": "error",
+    "u3-158": "error",
+    "u3-159": "none",
+    "u3-161": "none",
+    "u3-165": "error",
+    "u3-167": "error",
+    "u3-169": "error",
+    "u3-171": "none",
+    "u3-172": "error",
+    "u3-175": "error",
+    "u3-177": "none",
+    "u3-179": "none",
+    "u3-180": "error",
+    "u3-181": "none",
+    "u3-182": "none",
+    "u3-183": "none",
+    "u3-184": "none",
+    "u3-185": "none",
+    "u3-186": "none",
+    "u3-187": "none",
+    "u3-188": "none",
+    "u3-190": "none",
+    "u3-192": "none",
+    "u3-193": "decision",
+    "u3-194": "none",
+    "u3-195": "none",
+    "u3-196": "none",
+    "u3-197": "none",
+    "u3-199": "none",
+    "u3-200": "none"
+   }
+  },
+  "lr-weak": {
+   "what": "multinomial logistic regression on the bge-small passage vector (heuristic/ --embed: Embedder::embed of the text)",
+   "training": {
+    "weak_records": {
+     "rule": 2,
+     "decision": 115,
+     "context": 89,
+     "error": 65
+    },
+    "u3_train_items": 0,
+    "weak_label_source": "live DB tables decisions/errors/context/rules, records created before 2026-10-14T10:00:00Z, superseded and fallback-capture rows left out"
+   },
+   "control_train_false_capture": 0.0,
+   "selection": {
+    "chosen": {
+     "C": 30.0,
+     "class_weight": "balanced",
+     "tau": 0.95,
+     "train_macro_f1": 0.3097,
+     "train_false_capture": 0.0,
+     "false_capture_constraint_met_on_train": true
+    },
+    "max_f1_train": {
+     "C": 1.0,
+     "class_weight": null,
+     "tau": 0.5,
+     "train_macro_f1": 0.4122,
+     "train_false_capture": 0.4107
+    },
+    "method": "train macro-F1 on the u3 train split"
+   },
+   "latency_ms": {
+    "p50": 140.222,
+    "p95": 666.939,
+    "head_only_p50": 0.004,
+    "head_only_p95": 0.005,
+    "embed_loadavg_1m": [
+     215.25,
+     255.93
+    ],
+    "loadavg_1m_before": 186.28,
+    "loadavg_1m_after": 186.28,
+    "measured_in": "embed: Rust Instant around Embedder::embed per test text (heuristic --embed); head: numpy W v + b and softmax per test text"
+   },
+   "load_ms": 896.0,
+   "load_note": "bge-small load in the --embed process; Axil loads it anyway to store a record",
+   "rss_note": "the Rust --embed process (bge-small loaded) under /usr/bin/time -l; the head adds its weights only",
+   "params": 1540,
+   "head_bytes_f32": 6160,
+   "embedder": {
+    "repo": "BAAI/bge-small-en-v1.5",
+    "revision": "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a",
+    "files": {
+     "onnx/model.onnx": "828e1496d7fabb79cfa4dcd84fa38625c0d3d21da474a00f08db0f559940cf35",
+     "tokenizer.json": "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66"
+    },
+    "params": 33360000,
+    "size_on_disk_bytes": 133804886,
+    "note": "the embedder Axil already loads to store a record (axil-vector download.rs)"
+   },
+   "size_on_disk_bytes": 6160,
+   "size_note": "head only (f32); the bge-small files are already on disk for every Axil install that embeds",
+   "head_summary": {
+    "classes": [
+     "decision",
+     "error",
+     "context",
+     "rule"
+    ],
+    "tau": 0.95,
+    "weights_in": "typed-decisions-u3-heads-<date>.json"
+   },
+   "importance_head_summary": {
+    "train_items": 19,
+    "train_buckets": {
+     "high": 7,
+     "medium": 10,
+     "low": 2
+    },
+    "C": 0.1,
+    "curve": [
+     {
+      "C": 0.1,
+      "loo_accuracy": 0.5263
+     },
+     {
+      "C": 0.3,
+      "loo_accuracy": 0.5263
+     },
+     {
+      "C": 1.0,
+      "loo_accuracy": 0.5263
+     },
+     {
+      "C": 3.0,
+      "loo_accuracy": 0.5263
+     },
+     {
+      "C": 10.0,
+      "loo_accuracy": 0.5263
+     },
+     {
+      "C": 30.0,
+      "loo_accuracy": 0.5263
+     },
+     {
+      "C": 100.0,
+      "loo_accuracy": 0.5263
+     }
+    ]
+   },
+   "footprint_process": "the Rust --embed process (bge-small loaded); the Python training process is listed as python_process_*",
+   "python_process_peak_rss_mb": 130.8,
+   "python_process_peak_footprint_mb": 104.4,
+   "peak_rss_mb": 296.4,
+   "peak_footprint_mb": 318.5,
+   "train": {
+    "accuracy": 0.7867,
+    "macro_f1": 0.3097,
+    "false_capture_rate": 0.0
+   },
+   "test": {
+    "items": 125,
+    "accuracy": 0.648,
+    "macro_f1": 0.1573,
+    "macro_f1_classes": [
+     "decision",
+     "error",
+     "context",
+     "rule",
+     "none"
+    ],
+    "per_class": {
+     "decision": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "tp": 0,
+      "pred": 6,
+      "gold": 3
+     },
+     "error": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "tp": 0,
+      "pred": 0,
+      "gold": 22
+     },
+     "context": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "tp": 0,
+      "pred": 0,
+      "gold": 10
+     },
+     "rule": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "tp": 0,
+      "pred": 0,
+      "gold": 3
+     },
+     "none": {
+      "precision": 0.6807,
+      "recall": 0.931,
+      "f1": 0.7864,
+      "tp": 81,
+      "pred": 119,
+      "gold": 87
+     }
+    },
+    "false_capture_rate": 0.069,
+    "false_captures": 6,
+    "gold_none": 87,
+    "wrong_table_rate": null,
+    "wrong_table": 0,
+    "stored_and_should_be": 0,
+    "miss_rate": 1.0,
+    "missed": 38,
+    "junk_share_of_stored": 1.0,
+    "stored": 6,
+    "confusion": {
+     "decision": {
+      "none": 3
+     },
+     "error": {
+      "none": 22
+     },
+     "context": {
+      "none": 10
+     },
+     "rule": {
+      "none": 3
+     },
+     "none": {
+      "none": 81,
+      "decision": 6
+     }
+    },
+    "importance": {
+     "items": 38,
+     "accuracy": 0.5,
+     "within_one": 1.0,
+     "mean_abs_bucket_error": 0.5,
+     "confusion": {
+      "low": {
+       "medium": 8
+      },
+      "medium": {
+       "medium": 19
+      },
+      "high": {
+       "medium": 11
+      }
+     }
+    },
+    "per_source": {
+     "bash_failure": {
+      "items": 36,
+      "accuracy": 0.75,
+      "false_capture_rate": 0.1,
+      "false_captures": 3,
+      "gold_none": 30,
+      "miss_rate": 1.0,
+      "missed": 6,
+      "wrong_table": 0
+     },
+     "bash_output": {
+      "items": 18,
+      "accuracy": 0.8889,
+      "false_capture_rate": 0.0588,
+      "false_captures": 1,
+      "gold_none": 17,
+      "miss_rate": 1.0,
+      "missed": 1,
+      "wrong_table": 0
+     },
+     "agent_text": {
+      "items": 36,
+      "accuracy": 0.5278,
+      "false_capture_rate": 0.0,
+      "false_captures": 0,
+      "gold_none": 19,
+      "miss_rate": 1.0,
+      "missed": 17,
+      "wrong_table": 0
+     },
+     "agent_brief": {
+      "items": 12,
+      "accuracy": 0.5,
+      "false_capture_rate": 0.0,
+      "false_captures": 0,
+      "gold_none": 6,
+      "miss_rate": 1.0,
+      "missed": 6,
+      "wrong_table": 0
+     },
+     "commit_subject": {
+      "items": 23,
+      "accuracy": 0.5652,
+      "false_capture_rate": 0.1333,
+      "false_captures": 2,
+      "gold_none": 15,
+      "miss_rate": 1.0,
+      "missed": 8,
+      "wrong_table": 0
+     }
+    }
+   },
+   "test_at_max_f1_train_setting": {
+    "setting": {
+     "C": 1.0,
+     "class_weight": null,
+     "tau": 0.5,
+     "train_macro_f1": 0.4122,
+     "train_false_capture": 0.4107
+    },
+    "note": "the unconstrained best-train-macro-F1 setting; for reference only, the verdict uses the selected setting",
+    "accuracy": 0.408,
+    "macro_f1": 0.1584,
+    "false_capture_rate": 0.4598,
+    "wrong_table_rate": 0.6667,
+    "miss_rate": 0.6842
+   },
+   "predictions_test": {
+    "u3-001": "none",
+    "u3-003": "none",
+    "u3-004": "none",
+    "u3-007": "none",
+    "u3-008": "none",
+    "u3-010": "none",
+    "u3-011": "none",
+    "u3-013": "none",
+    "u3-014": "none",
+    "u3-015": "none",
+    "u3-017": "none",
+    "u3-018": "none",
+    "u3-021": "none",
+    "u3-022": "none",
+    "u3-023": "none",
+    "u3-024": "decision",
+    "u3-028": "none",
+    "u3-030": "none",
+    "u3-033": "decision",
+    "u3-038": "none",
+    "u3-039": "none",
+    "u3-040": "none",
+    "u3-041": "none",
+    "u3-043": "none",
+    "u3-044": "none",
+    "u3-045": "none",
+    "u3-046": "none",
+    "u3-047": "none",
+    "u3-049": "none",
+    "u3-050": "none",
+    "u3-051": "none",
+    "u3-054": "none",
+    "u3-057": "none",
+    "u3-061": "none",
+    "u3-062": "none",
+    "u3-063": "none",
+    "u3-064": "none",
+    "u3-067": "none",
+    "u3-068": "none",
+    "u3-069": "none",
+    "u3-070": "none",
+    "u3-072": "decision",
+    "u3-073": "none",
+    "u3-075": "none",
+    "u3-077": "none",
+    "u3-079": "none",
+    "u3-080": "none",
+    "u3-081": "none",
+    "u3-082": "none",
+    "u3-083": "none",
+    "u3-085": "none",
+    "u3-086": "none",
+    "u3-087": "none",
+    "u3-088": "none",
+    "u3-089": "none",
+    "u3-093": "none",
+    "u3-095": "none",
+    "u3-096": "none",
+    "u3-098": "none",
+    "u3-099": "none",
+    "u3-101": "none",
+    "u3-103": "none",
+    "u3-106": "none",
+    "u3-107": "none",
+    "u3-108": "none",
+    "u3-109": "none",
+    "u3-112": "none",
+    "u3-114": "none",
+    "u3-116": "none",
+    "u3-117": "none",
+    "u3-118": "none",
+    "u3-120": "none",
+    "u3-122": "none",
+    "u3-123": "none",
+    "u3-124": "none",
+    "u3-125": "none",
+    "u3-126": "none",
+    "u3-127": "none",
+    "u3-128": "none",
+    "u3-133": "none",
+    "u3-134": "none",
+    "u3-135": "none",
+    "u3-137": "decision",
+    "u3-138": "none",
+    "u3-140": "none",
+    "u3-141": "none",
+    "u3-143": "none",
+    "u3-144": "none",
+    "u3-145": "none",
+    "u3-147": "none",
+    "u3-149": "none",
+    "u3-150": "decision",
+    "u3-152": "none",
+    "u3-154": "none",
+    "u3-155": "none",
+    "u3-156": "none",
+    "u3-158": "none",
+    "u3-159": "none",
+    "u3-161": "none",
+    "u3-165": "none",
+    "u3-167": "none",
+    "u3-169": "none",
+    "u3-171": "none",
+    "u3-172": "none",
+    "u3-175": "none",
+    "u3-177": "none",
+    "u3-179": "none",
+    "u3-180": "none",
+    "u3-181": "none",
+    "u3-182": "none",
+    "u3-183": "none",
+    "u3-184": "none",
+    "u3-185": "none",
+    "u3-186": "none",
+    "u3-187": "none",
+    "u3-188": "decision",
+    "u3-190": "none",
+    "u3-192": "none",
+    "u3-193": "none",
+    "u3-194": "none",
+    "u3-195": "none",
+    "u3-196": "none",
+    "u3-197": "none",
+    "u3-199": "none",
+    "u3-200": "none"
+   }
+  },
+  "lr-weak+train": {
+   "what": "multinomial logistic regression on the bge-small passage vector (heuristic/ --embed: Embedder::embed of the text)",
+   "training": {
+    "weak_records": {
+     "rule": 2,
+     "decision": 115,
+     "context": 89,
+     "error": 65
+    },
+    "u3_train_items": 75,
+    "weak_label_source": "live DB tables decisions/errors/context/rules, records created before 2026-10-14T10:00:00Z, superseded and fallback-capture rows left out"
+   },
+   "control_train_false_capture": 0.0,
+   "selection": {
+    "chosen": {
+     "C": 30.0,
+     "class_weight": null,
+     "tau": 0.95,
+     "train_macro_f1": 0.3022,
+     "train_false_capture": 0.0,
+     "false_capture_constraint_met_on_train": true
+    },
+    "max_f1_train": {
+     "C": 10.0,
+     "class_weight": "balanced",
+     "tau": 0.5,
+     "train_macro_f1": 0.4903,
+     "train_false_capture": 0.1071
+    },
+    "method": "5-fold stratified cross-validation inside the u3 train split (weak records in every fold's training data)"
+   },
+   "latency_ms": {
+    "p50": 140.222,
+    "p95": 666.94,
+    "head_only_p50": 0.005,
+    "head_only_p95": 0.01,
+    "embed_loadavg_1m": [
+     215.25,
+     255.93
+    ],
+    "loadavg_1m_before": 188.58,
+    "loadavg_1m_after": 188.58,
+    "measured_in": "embed: Rust Instant around Embedder::embed per test text (heuristic --embed); head: numpy W v + b and softmax per test text"
+   },
+   "load_ms": 896.0,
+   "load_note": "bge-small load in the --embed process; Axil loads it anyway to store a record",
+   "rss_note": "the Rust --embed process (bge-small loaded) under /usr/bin/time -l; the head adds its weights only",
+   "params": 1925,
+   "head_bytes_f32": 7700,
+   "embedder": {
+    "repo": "BAAI/bge-small-en-v1.5",
+    "revision": "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a",
+    "files": {
+     "onnx/model.onnx": "828e1496d7fabb79cfa4dcd84fa38625c0d3d21da474a00f08db0f559940cf35",
+     "tokenizer.json": "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66"
+    },
+    "params": 33360000,
+    "size_on_disk_bytes": 133804886,
+    "note": "the embedder Axil already loads to store a record (axil-vector download.rs)"
+   },
+   "size_on_disk_bytes": 7700,
+   "size_note": "head only (f32); the bge-small files are already on disk for every Axil install that embeds",
+   "head_summary": {
+    "classes": [
+     "decision",
+     "error",
+     "context",
+     "rule",
+     "none"
+    ],
+    "tau": 0.95,
+    "weights_in": "typed-decisions-u3-heads-<date>.json"
+   },
+   "importance_head_summary": {
+    "train_items": 19,
+    "train_buckets": {
+     "high": 7,
+     "medium": 10,
+     "low": 2
+    },
+    "C": 0.1,
+    "curve": [
+     {
+      "C": 0.1,
+      "loo_accuracy": 0.5263
+     },
+     {
+      "C": 0.3,
+      "loo_accuracy": 0.5263
+     },
+     {
+      "C": 1.0,
+      "loo_accuracy": 0.5263
+     },
+     {
+      "C": 3.0,
+      "loo_accuracy": 0.5263
+     },
+     {
+      "C": 10.0,
+      "loo_accuracy": 0.5263
+     },
+     {
+      "C": 30.0,
+      "loo_accuracy": 0.5263
+     },
+     {
+      "C": 100.0,
+      "loo_accuracy": 0.5263
+     }
+    ]
+   },
+   "footprint_process": "the Rust --embed process (bge-small loaded); the Python training process is listed as python_process_*",
+   "python_process_peak_rss_mb": 149.6,
+   "python_process_peak_footprint_mb": 110.7,
+   "peak_rss_mb": 296.4,
+   "peak_footprint_mb": 318.5,
+   "train": {
+    "accuracy": 0.7733,
+    "macro_f1": 0.3022,
+    "false_capture_rate": 0.0
+   },
+   "test": {
+    "items": 125,
+    "accuracy": 0.696,
+    "macro_f1": 0.1642,
+    "macro_f1_classes": [
+     "decision",
+     "error",
+     "context",
+     "rule",
+     "none"
+    ],
+    "per_class": {
+     "decision": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "tp": 0,
+      "pred": 0,
+      "gold": 3
+     },
+     "error": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "tp": 0,
+      "pred": 0,
+      "gold": 22
+     },
+     "context": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "tp": 0,
+      "pred": 0,
+      "gold": 10
+     },
+     "rule": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "tp": 0,
+      "pred": 0,
+      "gold": 3
+     },
+     "none": {
+      "precision": 0.696,
+      "recall": 1.0,
+      "f1": 0.8208,
+      "tp": 87,
+      "pred": 125,
+      "gold": 87
+     }
+    },
+    "false_capture_rate": 0.0,
+    "false_captures": 0,
+    "gold_none": 87,
+    "wrong_table_rate": null,
+    "wrong_table": 0,
+    "stored_and_should_be": 0,
+    "miss_rate": 1.0,
+    "missed": 38,
+    "junk_share_of_stored": null,
+    "stored": 0,
+    "confusion": {
+     "decision": {
+      "none": 3
+     },
+     "error": {
+      "none": 22
+     },
+     "context": {
+      "none": 10
+     },
+     "rule": {
+      "none": 3
+     },
+     "none": {
+      "none": 87
+     }
+    },
+    "importance": {
+     "items": 38,
+     "accuracy": 0.5,
+     "within_one": 1.0,
+     "mean_abs_bucket_error": 0.5,
+     "confusion": {
+      "low": {
+       "medium": 8
+      },
+      "medium": {
+       "medium": 19
+      },
+      "high": {
+       "medium": 11
+      }
+     }
+    },
+    "per_source": {
+     "bash_failure": {
+      "items": 36,
+      "accuracy": 0.8333,
+      "false_capture_rate": 0.0,
+      "false_captures": 0,
+      "gold_none": 30,
+      "miss_rate": 1.0,
+      "missed": 6,
+      "wrong_table": 0
+     },
+     "bash_output": {
+      "items": 18,
+      "accuracy": 0.9444,
+      "false_capture_rate": 0.0,
+      "false_captures": 0,
+      "gold_none": 17,
+      "miss_rate": 1.0,
+      "missed": 1,
+      "wrong_table": 0
+     },
+     "agent_text": {
+      "items": 36,
+      "accuracy": 0.5278,
+      "false_capture_rate": 0.0,
+      "false_captures": 0,
+      "gold_none": 19,
+      "miss_rate": 1.0,
+      "missed": 17,
+      "wrong_table": 0
+     },
+     "agent_brief": {
+      "items": 12,
+      "accuracy": 0.5,
+      "false_capture_rate": 0.0,
+      "false_captures": 0,
+      "gold_none": 6,
+      "miss_rate": 1.0,
+      "missed": 6,
+      "wrong_table": 0
+     },
+     "commit_subject": {
+      "items": 23,
+      "accuracy": 0.6522,
+      "false_capture_rate": 0.0,
+      "false_captures": 0,
+      "gold_none": 15,
+      "miss_rate": 1.0,
+      "missed": 8,
+      "wrong_table": 0
+     }
+    }
+   },
+   "test_at_max_f1_train_setting": {
+    "setting": {
+     "C": 10.0,
+     "class_weight": "balanced",
+     "tau": 0.5,
+     "train_macro_f1": 0.4903,
+     "train_false_capture": 0.1071
+    },
+    "note": "the unconstrained best-train-macro-F1 setting; for reference only, the verdict uses the selected setting",
+    "accuracy": 0.648,
+    "macro_f1": 0.312,
+    "false_capture_rate": 0.1609,
+    "wrong_table_rate": 0.5,
+    "miss_rate": 0.5789
+   },
+   "predictions_test": {
+    "u3-001": "none",
+    "u3-003": "none",
+    "u3-004": "none",
+    "u3-007": "none",
+    "u3-008": "none",
+    "u3-010": "none",
+    "u3-011": "none",
+    "u3-013": "none",
+    "u3-014": "none",
+    "u3-015": "none",
+    "u3-017": "none",
+    "u3-018": "none",
+    "u3-021": "none",
+    "u3-022": "none",
+    "u3-023": "none",
+    "u3-024": "none",
+    "u3-028": "none",
+    "u3-030": "none",
+    "u3-033": "none",
+    "u3-038": "none",
+    "u3-039": "none",
+    "u3-040": "none",
+    "u3-041": "none",
+    "u3-043": "none",
+    "u3-044": "none",
+    "u3-045": "none",
+    "u3-046": "none",
+    "u3-047": "none",
+    "u3-049": "none",
+    "u3-050": "none",
+    "u3-051": "none",
+    "u3-054": "none",
+    "u3-057": "none",
+    "u3-061": "none",
+    "u3-062": "none",
+    "u3-063": "none",
+    "u3-064": "none",
+    "u3-067": "none",
+    "u3-068": "none",
+    "u3-069": "none",
+    "u3-070": "none",
+    "u3-072": "none",
+    "u3-073": "none",
+    "u3-075": "none",
+    "u3-077": "none",
+    "u3-079": "none",
+    "u3-080": "none",
+    "u3-081": "none",
+    "u3-082": "none",
+    "u3-083": "none",
+    "u3-085": "none",
+    "u3-086": "none",
+    "u3-087": "none",
+    "u3-088": "none",
+    "u3-089": "none",
+    "u3-093": "none",
+    "u3-095": "none",
+    "u3-096": "none",
+    "u3-098": "none",
+    "u3-099": "none",
+    "u3-101": "none",
+    "u3-103": "none",
+    "u3-106": "none",
+    "u3-107": "none",
+    "u3-108": "none",
+    "u3-109": "none",
+    "u3-112": "none",
+    "u3-114": "none",
+    "u3-116": "none",
+    "u3-117": "none",
+    "u3-118": "none",
+    "u3-120": "none",
+    "u3-122": "none",
+    "u3-123": "none",
+    "u3-124": "none",
+    "u3-125": "none",
+    "u3-126": "none",
+    "u3-127": "none",
+    "u3-128": "none",
+    "u3-133": "none",
+    "u3-134": "none",
+    "u3-135": "none",
+    "u3-137": "none",
+    "u3-138": "none",
+    "u3-140": "none",
+    "u3-141": "none",
+    "u3-143": "none",
+    "u3-144": "none",
+    "u3-145": "none",
+    "u3-147": "none",
+    "u3-149": "none",
+    "u3-150": "none",
+    "u3-152": "none",
+    "u3-154": "none",
+    "u3-155": "none",
+    "u3-156": "none",
+    "u3-158": "none",
+    "u3-159": "none",
+    "u3-161": "none",
+    "u3-165": "none",
+    "u3-167": "none",
+    "u3-169": "none",
+    "u3-171": "none",
+    "u3-172": "none",
+    "u3-175": "none",
+    "u3-177": "none",
+    "u3-179": "none",
+    "u3-180": "none",
+    "u3-181": "none",
+    "u3-182": "none",
+    "u3-183": "none",
+    "u3-184": "none",
+    "u3-185": "none",
+    "u3-186": "none",
+    "u3-187": "none",
+    "u3-188": "none",
+    "u3-190": "none",
+    "u3-192": "none",
+    "u3-193": "none",
+    "u3-194": "none",
+    "u3-195": "none",
+    "u3-196": "none",
+    "u3-197": "none",
+    "u3-199": "none",
+    "u3-200": "none"
+   }
+  },
+  "gliclass-edge": {
+   "repo": "knowledgator/gliclass-edge-v3.0",
+   "revision": "df03993a2ed98e5e4a0d2dd7efbbd105abe874cf",
+   "library": "gliclass",
+   "files": [
+    "config.json",
+    "model.safetensors",
+    "special_tokens_map.json",
+    "tokenizer.json",
+    "tokenizer_config.json"
+   ],
+   "params": 32705154,
+   "size_on_disk_bytes": 134438755,
+   "load_ms": 8770.3,
+   "load_loadavg_1m": [
+    187.73,
+    183.12
+   ],
+   "threads": 4,
+   "control_train_false_capture": 0.0,
+   "selection": {
+    "chosen": {
+     "phrasing": "short",
+     "tau": 0.999,
+     "train_macro_f1": 0.171,
+     "train_false_capture": 0.0,
+     "false_capture_constraint_met_on_train": true
+    },
+    "max_f1_train": {
+     "phrasing": "descriptive",
+     "tau": 0.99,
+     "train_macro_f1": 0.2218,
+     "train_false_capture": 0.0893
+    }
+   },
+   "labels": {
+    "decision": "decision",
+    "error": "error or failure",
+    "context": "technical knowledge",
+    "rule": "rule or instruction",
+    "none": "chatter or routine output"
+   },
+   "importance_labels": {
+    "low": "minor detail",
+    "medium": "useful project knowledge",
+    "high": "critical project knowledge"
+   },
+   "sweep_mismatch_texts": 0,
+   "latency_ms": {
+    "p50": 155.695,
+    "p95": 338.988,
+    "mean": 166.81,
+    "with_importance_pass_p50": 258.129,
+    "with_importance_pass_p95": 574.017,
+    "loadavg_1m_before": 154.18,
+    "loadavg_1m_after": 155.2,
+    "measured_in": "Python, perf_counter around one classification call per test text, batch 1, model loaded and warmed",
+    "phrasing_timed": "descriptive"
+   },
+   "first_selection": {
+    "tau_max": 0.95,
+    "chosen": {
+     "phrasing": "descriptive",
+     "tau": 0.95,
+     "train_macro_f1": 0.2055,
+     "train_false_capture": 0.4464,
+     "false_capture_constraint_met_on_train": false
+    },
+    "max_f1_train": {
+     "phrasing": "descriptive",
+     "tau": 0.95,
+     "train_macro_f1": 0.2055,
+     "train_false_capture": 0.4464
+    }
+   },
+   "peak_rss_mb": 401.5,
+   "peak_footprint_mb": 373.1,
+   "footprint_process": "the whole arm process under /usr/bin/time -l",
+   "train": {
+    "accuracy": 0.7467,
+    "macro_f1": 0.171,
+    "false_capture_rate": 0.0
+   },
+   "test": {
+    "items": 125,
+    "accuracy": 0.696,
+    "macro_f1": 0.1642,
+    "macro_f1_classes": [
+     "decision",
+     "error",
+     "context",
+     "rule",
+     "none"
+    ],
+    "per_class": {
+     "decision": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "tp": 0,
+      "pred": 0,
+      "gold": 3
+     },
+     "error": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "tp": 0,
+      "pred": 0,
+      "gold": 22
+     },
+     "context": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "tp": 0,
+      "pred": 0,
+      "gold": 10
+     },
+     "rule": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "tp": 0,
+      "pred": 0,
+      "gold": 3
+     },
+     "none": {
+      "precision": 0.696,
+      "recall": 1.0,
+      "f1": 0.8208,
+      "tp": 87,
+      "pred": 125,
+      "gold": 87
+     }
+    },
+    "false_capture_rate": 0.0,
+    "false_captures": 0,
+    "gold_none": 87,
+    "wrong_table_rate": null,
+    "wrong_table": 0,
+    "stored_and_should_be": 0,
+    "miss_rate": 1.0,
+    "missed": 38,
+    "junk_share_of_stored": null,
+    "stored": 0,
+    "confusion": {
+     "decision": {
+      "none": 3
+     },
+     "error": {
+      "none": 22
+     },
+     "context": {
+      "none": 10
+     },
+     "rule": {
+      "none": 3
+     },
+     "none": {
+      "none": 87
+     }
+    },
+    "importance": {
+     "items": 38,
+     "accuracy": 0.4211,
+     "within_one": 0.7632,
+     "mean_abs_bucket_error": 0.8158,
+     "confusion": {
+      "low": {
+       "low": 1,
+       "high": 7
+      },
+      "medium": {
+       "medium": 6,
+       "high": 12,
+       "low": 1
+      },
+      "high": {
+       "low": 2,
+       "high": 9
+      }
+     }
+    },
+    "per_source": {
+     "bash_failure": {
+      "items": 36,
+      "accuracy": 0.8333,
+      "false_capture_rate": 0.0,
+      "false_captures": 0,
+      "gold_none": 30,
+      "miss_rate": 1.0,
+      "missed": 6,
+      "wrong_table": 0
+     },
+     "bash_output": {
+      "items": 18,
+      "accuracy": 0.9444,
+      "false_capture_rate": 0.0,
+      "false_captures": 0,
+      "gold_none": 17,
+      "miss_rate": 1.0,
+      "missed": 1,
+      "wrong_table": 0
+     },
+     "agent_text": {
+      "items": 36,
+      "accuracy": 0.5278,
+      "false_capture_rate": 0.0,
+      "false_captures": 0,
+      "gold_none": 19,
+      "miss_rate": 1.0,
+      "missed": 17,
+      "wrong_table": 0
+     },
+     "agent_brief": {
+      "items": 12,
+      "accuracy": 0.5,
+      "false_capture_rate": 0.0,
+      "false_captures": 0,
+      "gold_none": 6,
+      "miss_rate": 1.0,
+      "missed": 6,
+      "wrong_table": 0
+     },
+     "commit_subject": {
+      "items": 23,
+      "accuracy": 0.6522,
+      "false_capture_rate": 0.0,
+      "false_captures": 0,
+      "gold_none": 15,
+      "miss_rate": 1.0,
+      "missed": 8,
+      "wrong_table": 0
+     }
+    }
+   },
+   "test_at_max_f1_train_setting": {
+    "setting": {
+     "phrasing": "descriptive",
+     "tau": 0.99,
+     "train_macro_f1": 0.2218,
+     "train_false_capture": 0.0893
+    },
+    "note": "the unconstrained best-train-macro-F1 setting; for reference only, the verdict uses the selected setting",
+    "accuracy": 0.656,
+    "macro_f1": 0.202,
+    "false_capture_rate": 0.1034,
+    "wrong_table_rate": 0.2,
+    "miss_rate": 0.8684
+   },
+   "predictions_test": {
+    "u3-001": "none",
+    "u3-003": "none",
+    "u3-004": "none",
+    "u3-007": "none",
+    "u3-008": "none",
+    "u3-010": "none",
+    "u3-011": "none",
+    "u3-013": "none",
+    "u3-014": "none",
+    "u3-015": "none",
+    "u3-017": "none",
+    "u3-018": "none",
+    "u3-021": "none",
+    "u3-022": "none",
+    "u3-023": "none",
+    "u3-024": "none",
+    "u3-028": "none",
+    "u3-030": "none",
+    "u3-033": "none",
+    "u3-038": "none",
+    "u3-039": "none",
+    "u3-040": "none",
+    "u3-041": "none",
+    "u3-043": "none",
+    "u3-044": "none",
+    "u3-045": "none",
+    "u3-046": "none",
+    "u3-047": "none",
+    "u3-049": "none",
+    "u3-050": "none",
+    "u3-051": "none",
+    "u3-054": "none",
+    "u3-057": "none",
+    "u3-061": "none",
+    "u3-062": "none",
+    "u3-063": "none",
+    "u3-064": "none",
+    "u3-067": "none",
+    "u3-068": "none",
+    "u3-069": "none",
+    "u3-070": "none",
+    "u3-072": "none",
+    "u3-073": "none",
+    "u3-075": "none",
+    "u3-077": "none",
+    "u3-079": "none",
+    "u3-080": "none",
+    "u3-081": "none",
+    "u3-082": "none",
+    "u3-083": "none",
+    "u3-085": "none",
+    "u3-086": "none",
+    "u3-087": "none",
+    "u3-088": "none",
+    "u3-089": "none",
+    "u3-093": "none",
+    "u3-095": "none",
+    "u3-096": "none",
+    "u3-098": "none",
+    "u3-099": "none",
+    "u3-101": "none",
+    "u3-103": "none",
+    "u3-106": "none",
+    "u3-107": "none",
+    "u3-108": "none",
+    "u3-109": "none",
+    "u3-112": "none",
+    "u3-114": "none",
+    "u3-116": "none",
+    "u3-117": "none",
+    "u3-118": "none",
+    "u3-120": "none",
+    "u3-122": "none",
+    "u3-123": "none",
+    "u3-124": "none",
+    "u3-125": "none",
+    "u3-126": "none",
+    "u3-127": "none",
+    "u3-128": "none",
+    "u3-133": "none",
+    "u3-134": "none",
+    "u3-135": "none",
+    "u3-137": "none",
+    "u3-138": "none",
+    "u3-140": "none",
+    "u3-141": "none",
+    "u3-143": "none",
+    "u3-144": "none",
+    "u3-145": "none",
+    "u3-147": "none",
+    "u3-149": "none",
+    "u3-150": "none",
+    "u3-152": "none",
+    "u3-154": "none",
+    "u3-155": "none",
+    "u3-156": "none",
+    "u3-158": "none",
+    "u3-159": "none",
+    "u3-161": "none",
+    "u3-165": "none",
+    "u3-167": "none",
+    "u3-169": "none",
+    "u3-171": "none",
+    "u3-172": "none",
+    "u3-175": "none",
+    "u3-177": "none",
+    "u3-179": "none",
+    "u3-180": "none",
+    "u3-181": "none",
+    "u3-182": "none",
+    "u3-183": "none",
+    "u3-184": "none",
+    "u3-185": "none",
+    "u3-186": "none",
+    "u3-187": "none",
+    "u3-188": "none",
+    "u3-190": "none",
+    "u3-192": "none",
+    "u3-193": "none",
+    "u3-194": "none",
+    "u3-195": "none",
+    "u3-196": "none",
+    "u3-197": "none",
+    "u3-199": "none",
+    "u3-200": "none"
+   }
+  },
+  "gliclass-base": {
+   "repo": "knowledgator/gliclass-base-v3.0",
+   "revision": "77a70e6cd52e602ed18184ef37d18bdd3741e3d5",
+   "library": "gliclass",
+   "files": [
+    "added_tokens.json",
+    "config.json",
+    "model.safetensors",
+    "special_tokens_map.json",
+    "spm.model",
+    "tokenizer.json",
+    "tokenizer_config.json"
+   ],
+   "params": 186545922,
+   "size_on_disk_bytes": 757331872,
+   "load_ms": 14570.7,
+   "load_loadavg_1m": [
+    187.73,
+    179.58
+   ],
+   "threads": 4,
+   "control_train_false_capture": 0.0,
+   "selection": {
+    "chosen": {
+     "phrasing": "descriptive",
+     "tau": 0.75,
+     "train_macro_f1": 0.5027,
+     "train_false_capture": 0.4107,
+     "false_capture_constraint_met_on_train": false
+    },
+    "max_f1_train": {
+     "phrasing": "descriptive",
+     "tau": 0.75,
+     "train_macro_f1": 0.5027,
+     "train_false_capture": 0.4107
+    }
+   },
+   "labels": {
+    "decision": "a decision choosing one option over another",
+    "error": "a report of an error, bug or failure",
+    "context": "an explanation of how something works",
+    "rule": "a rule that must always be followed",
+    "none": "routine tool output, progress update or small talk"
+   },
+   "importance_labels": {
+    "low": "minor detail",
+    "medium": "useful project knowledge",
+    "high": "critical project knowledge"
+   },
+   "sweep_mismatch_texts": 0,
+   "latency_ms": {
+    "p50": 1187.84,
+    "p95": 2299.158,
+    "mean": 1299.861,
+    "with_importance_pass_p50": 2284.495,
+    "with_importance_pass_p95": 3859.411,
+    "loadavg_1m_before": 206.02,
+    "loadavg_1m_after": 137.87,
+    "measured_in": "Python, perf_counter around one classification call per test text, batch 1, model loaded and warmed",
+    "phrasing_timed": "descriptive"
+   },
+   "first_selection": {
+    "tau_max": 0.95,
+    "chosen": {
+     "phrasing": "descriptive",
+     "tau": 0.75,
+     "train_macro_f1": 0.5027,
+     "train_false_capture": 0.4107,
+     "false_capture_constraint_met_on_train": false
+    },
+    "max_f1_train": {
+     "phrasing": "descriptive",
+     "tau": 0.75,
+     "train_macro_f1": 0.5027,
+     "train_false_capture": 0.4107
+    }
+   },
+   "peak_rss_mb": 720.8,
+   "peak_footprint_mb": 508.0,
+   "footprint_process": "the whole arm process under /usr/bin/time -l",
+   "train": {
+    "accuracy": 0.6,
+    "macro_f1": 0.5027,
+    "false_capture_rate": 0.4107
+   },
+   "test": {
+    "items": 125,
+    "accuracy": 0.632,
+    "macro_f1": 0.5332,
+    "macro_f1_classes": [
+     "decision",
+     "error",
+     "context",
+     "rule",
+     "none"
+    ],
+    "per_class": {
+     "decision": {
+      "precision": 0.1667,
+      "recall": 0.3333,
+      "f1": 0.2222,
+      "tp": 1,
+      "pred": 6,
+      "gold": 3
+     },
+     "error": {
+      "precision": 0.3889,
+      "recall": 0.6364,
+      "f1": 0.4828,
+      "tp": 14,
+      "pred": 36,
+      "gold": 22
+     },
+     "context": {
+      "precision": 0.3333,
+      "recall": 0.4,
+      "f1": 0.3636,
+      "tp": 4,
+      "pred": 12,
+      "gold": 10
+     },
+     "rule": {
+      "precision": 0.75,
+      "recall": 1.0,
+      "f1": 0.8571,
+      "tp": 3,
+      "pred": 4,
+      "gold": 3
+     },
+     "none": {
+      "precision": 0.8507,
+      "recall": 0.6552,
+      "f1": 0.7403,
+      "tp": 57,
+      "pred": 67,
+      "gold": 87
+     }
+    },
+    "false_capture_rate": 0.3448,
+    "false_captures": 30,
+    "gold_none": 87,
+    "wrong_table_rate": 0.2143,
+    "wrong_table": 6,
+    "stored_and_should_be": 28,
+    "miss_rate": 0.2632,
+    "missed": 10,
+    "junk_share_of_stored": 0.5172,
+    "stored": 58,
+    "confusion": {
+     "decision": {
+      "decision": 1,
+      "none": 2
+     },
+     "error": {
+      "none": 5,
+      "error": 14,
+      "context": 1,
+      "rule": 1,
+      "decision": 1
+     },
+     "context": {
+      "none": 3,
+      "context": 4,
+      "error": 3
+     },
+     "rule": {
+      "rule": 3
+     },
+     "none": {
+      "none": 57,
+      "error": 19,
+      "context": 7,
+      "decision": 4
+     }
+    },
+    "importance": {
+     "items": 38,
+     "accuracy": 0.2895,
+     "within_one": 0.8158,
+     "mean_abs_bucket_error": 0.8947,
+     "confusion": {
+      "low": {
+       "high": 2,
+       "low": 4,
+       "medium": 2
+      },
+      "medium": {
+       "high": 8,
+       "low": 6,
+       "medium": 5
+      },
+      "high": {
+       "low": 5,
+       "medium": 4,
+       "high": 2
+      }
+     }
+    },
+    "per_source": {
+     "bash_failure": {
+      "items": 36,
+      "accuracy": 0.6667,
+      "false_capture_rate": 0.4,
+      "false_captures": 12,
+      "gold_none": 30,
+      "miss_rate": 0.0,
+      "missed": 0,
+      "wrong_table": 0
+     },
+     "bash_output": {
+      "items": 18,
+      "accuracy": 0.6111,
+      "false_capture_rate": 0.4118,
+      "false_captures": 7,
+      "gold_none": 17,
+      "miss_rate": 0.0,
+      "missed": 0,
+      "wrong_table": 0
+     },
+     "agent_text": {
+      "items": 36,
+      "accuracy": 0.5833,
+      "false_capture_rate": 0.3158,
+      "false_captures": 6,
+      "gold_none": 19,
+      "miss_rate": 0.2941,
+      "missed": 5,
+      "wrong_table": 4
+     },
+     "agent_brief": {
+      "items": 12,
+      "accuracy": 0.75,
+      "false_capture_rate": 0.3333,
+      "false_captures": 2,
+      "gold_none": 6,
+      "miss_rate": 0.0,
+      "missed": 0,
+      "wrong_table": 1
+     },
+     "commit_subject": {
+      "items": 23,
+      "accuracy": 0.6087,
+      "false_capture_rate": 0.2,
+      "false_captures": 3,
+      "gold_none": 15,
+      "miss_rate": 0.625,
+      "missed": 5,
+      "wrong_table": 1
+     }
+    }
+   },
+   "test_at_max_f1_train_setting": {
+    "setting": {
+     "phrasing": "descriptive",
+     "tau": 0.75,
+     "train_macro_f1": 0.5027,
+     "train_false_capture": 0.4107
+    },
+    "note": "the unconstrained best-train-macro-F1 setting; for reference only, the verdict uses the selected setting",
+    "accuracy": 0.632,
+    "macro_f1": 0.5332,
+    "false_capture_rate": 0.3448,
+    "wrong_table_rate": 0.2143,
+    "miss_rate": 0.2632
+   },
+   "predictions_test": {
+    "u3-001": "none",
+    "u3-003": "none",
+    "u3-004": "none",
+    "u3-007": "none",
+    "u3-008": "none",
+    "u3-010": "none",
+    "u3-011": "error",
+    "u3-013": "none",
+    "u3-014": "none",
+    "u3-015": "none",
+    "u3-017": "none",
+    "u3-018": "error",
+    "u3-021": "error",
+    "u3-022": "none",
+    "u3-023": "error",
+    "u3-024": "context",
+    "u3-028": "context",
+    "u3-030": "context",
+    "u3-033": "none",
+    "u3-038": "none",
+    "u3-039": "none",
+    "u3-040": "none",
+    "u3-041": "none",
+    "u3-043": "none",
+    "u3-044": "decision",
+    "u3-045": "none",
+    "u3-046": "none",
+    "u3-047": "error",
+    "u3-049": "error",
+    "u3-050": "none",
+    "u3-051": "none",
+    "u3-054": "none",
+    "u3-057": "none",
+    "u3-061": "none",
+    "u3-062": "none",
+    "u3-063": "none",
+    "u3-064": "context",
+    "u3-067": "decision",
+    "u3-068": "none",
+    "u3-069": "error",
+    "u3-070": "none",
+    "u3-072": "none",
+    "u3-073": "none",
+    "u3-075": "rule",
+    "u3-077": "error",
+    "u3-079": "error",
+    "u3-080": "none",
+    "u3-081": "error",
+    "u3-082": "error",
+    "u3-083": "context",
+    "u3-085": "none",
+    "u3-086": "none",
+    "u3-087": "none",
+    "u3-088": "error",
+    "u3-089": "none",
+    "u3-093": "error",
+    "u3-095": "none",
+    "u3-096": "rule",
+    "u3-098": "decision",
+    "u3-099": "none",
+    "u3-101": "error",
+    "u3-103": "error",
+    "u3-106": "error",
+    "u3-107": "none",
+    "u3-108": "none",
+    "u3-109": "context",
+    "u3-112": "error",
+    "u3-114": "none",
+    "u3-116": "error",
+    "u3-117": "error",
+    "u3-118": "context",
+    "u3-120": "none",
+    "u3-122": "error",
+    "u3-123": "none",
+    "u3-124": "error",
+    "u3-125": "none",
+    "u3-126": "none",
+    "u3-127": "none",
+    "u3-128": "error",
+    "u3-133": "none",
+    "u3-134": "none",
+    "u3-135": "rule",
+    "u3-137": "none",
+    "u3-138": "rule",
+    "u3-140": "context",
+    "u3-141": "context",
+    "u3-143": "none",
+    "u3-144": "error",
+    "u3-145": "none",
+    "u3-147": "none",
+    "u3-149": "none",
+    "u3-150": "context",
+    "u3-152": "error",
+    "u3-154": "none",
+    "u3-155": "decision",
+    "u3-156": "error",
+    "u3-158": "error",
+    "u3-159": "none",
+    "u3-161": "none",
+    "u3-165": "error",
+    "u3-167": "error",
+    "u3-169": "error",
+    "u3-171": "none",
+    "u3-172": "none",
+    "u3-175": "none",
+    "u3-177": "none",
+    "u3-179": "none",
+    "u3-180": "none",
+    "u3-181": "none",
+    "u3-182": "error",
+    "u3-183": "none",
+    "u3-184": "error",
+    "u3-185": "error",
+    "u3-186": "none",
+    "u3-187": "none",
+    "u3-188": "context",
+    "u3-190": "error",
+    "u3-192": "error",
+    "u3-193": "decision",
+    "u3-194": "context",
+    "u3-195": "error",
+    "u3-196": "none",
+    "u3-197": "error",
+    "u3-199": "decision",
+    "u3-200": "none"
+   }
+  },
+  "gliner2.5-small": {
+   "repo": "fastino/gliner2.5-small-v1",
+   "revision": "df5910e44bc4ffdb0d95399a83b0ca4516349aa5",
+   "library": "gliner2",
+   "files": [
+    "config.json",
+    "encoder_config/config.json",
+    "model.safetensors",
+    "tokenizer.json",
+    "tokenizer_config.json"
+   ],
+   "params": 73881879,
+   "size_on_disk_bytes": 303915018,
+   "load_ms": 15625.1,
+   "load_loadavg_1m": [
+    139.64,
+    139.9
+   ],
+   "threads": 4,
+   "control_train_false_capture": 0.0,
+   "selection": {
+    "chosen": {
+     "phrasing": "short",
+     "tau": 0.999,
+     "train_macro_f1": 0.171,
+     "train_false_capture": 0.0,
+     "false_capture_constraint_met_on_train": true
+    },
+    "max_f1_train": {
+     "phrasing": "short",
+     "tau": 0.5,
+     "train_macro_f1": 0.3703,
+     "train_false_capture": 0.3571
+    }
+   },
+   "labels": {
+    "decision": "decision",
+    "error": "error or failure",
+    "context": "technical knowledge",
+    "rule": "rule or instruction",
+    "none": "chatter or routine output"
+   },
+   "importance_labels": {
+    "low": "minor detail",
+    "medium": "useful project knowledge",
+    "high": "critical project knowledge"
+   },
+   "sweep_mismatch_texts": 0,
+   "latency_ms": {
+    "p50": 572.207,
+    "p95": 1263.733,
+    "mean": 653.139,
+    "with_importance_pass_p50": 1144.103,
+    "with_importance_pass_p95": 2204.209,
+    "loadavg_1m_before": 212.85,
+    "loadavg_1m_after": 176.34,
+    "measured_in": "Python, perf_counter around one classification call per test text, batch 1, model loaded and warmed",
+    "phrasing_timed": "short"
+   },
+   "first_selection": {
+    "tau_max": 0.95,
+    "chosen": {
+     "phrasing": "short",
+     "tau": 0.5,
+     "train_macro_f1": 0.3703,
+     "train_false_capture": 0.3571,
+     "false_capture_constraint_met_on_train": false
+    },
+    "max_f1_train": {
+     "phrasing": "short",
+     "tau": 0.5,
+     "train_macro_f1": 0.3703,
+     "train_false_capture": 0.3571
+    }
+   },
+   "peak_rss_mb": 883.2,
+   "peak_footprint_mb": 787.3,
+   "footprint_process": "the whole arm process under /usr/bin/time -l",
+   "train": {
+    "accuracy": 0.7467,
+    "macro_f1": 0.171,
+    "false_capture_rate": 0.0
+   },
+   "test": {
+    "items": 125,
+    "accuracy": 0.704,
+    "macro_f1": 0.1823,
+    "macro_f1_classes": [
+     "decision",
+     "error",
+     "context",
+     "rule",
+     "none"
+    ],
+    "per_class": {
+     "decision": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "tp": 0,
+      "pred": 0,
+      "gold": 3
+     },
+     "error": {
+      "precision": 1.0,
+      "recall": 0.0455,
+      "f1": 0.087,
+      "tp": 1,
+      "pred": 1,
+      "gold": 22
+     },
+     "context": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "tp": 0,
+      "pred": 0,
+      "gold": 10
+     },
+     "rule": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "tp": 0,
+      "pred": 0,
+      "gold": 3
+     },
+     "none": {
+      "precision": 0.7016,
+      "recall": 1.0,
+      "f1": 0.8246,
+      "tp": 87,
+      "pred": 124,
+      "gold": 87
+     }
+    },
+    "false_capture_rate": 0.0,
+    "false_captures": 0,
+    "gold_none": 87,
+    "wrong_table_rate": 0.0,
+    "wrong_table": 0,
+    "stored_and_should_be": 1,
+    "miss_rate": 0.9737,
+    "missed": 37,
+    "junk_share_of_stored": 0.0,
+    "stored": 1,
+    "confusion": {
+     "decision": {
+      "none": 3
+     },
+     "error": {
+      "none": 21,
+      "error": 1
+     },
+     "context": {
+      "none": 10
+     },
+     "rule": {
+      "none": 3
+     },
+     "none": {
+      "none": 87
+     }
+    },
+    "importance": {
+     "items": 38,
+     "accuracy": 0.3947,
+     "within_one": 0.8684,
+     "mean_abs_bucket_error": 0.7368,
+     "confusion": {
+      "low": {
+       "low": 5,
+       "high": 3
+      },
+      "medium": {
+       "high": 12,
+       "low": 5,
+       "medium": 2
+      },
+      "high": {
+       "high": 8,
+       "medium": 1,
+       "low": 2
+      }
+     }
+    },
+    "per_source": {
+     "bash_failure": {
+      "items": 36,
+      "accuracy": 0.8333,
+      "false_capture_rate": 0.0,
+      "false_captures": 0,
+      "gold_none": 30,
+      "miss_rate": 1.0,
+      "missed": 6,
+      "wrong_table": 0
+     },
+     "bash_output": {
+      "items": 18,
+      "accuracy": 0.9444,
+      "false_capture_rate": 0.0,
+      "false_captures": 0,
+      "gold_none": 17,
+      "miss_rate": 1.0,
+      "missed": 1,
+      "wrong_table": 0
+     },
+     "agent_text": {
+      "items": 36,
+      "accuracy": 0.5556,
+      "false_capture_rate": 0.0,
+      "false_captures": 0,
+      "gold_none": 19,
+      "miss_rate": 0.9412,
+      "missed": 16,
+      "wrong_table": 0
+     },
+     "agent_brief": {
+      "items": 12,
+      "accuracy": 0.5,
+      "false_capture_rate": 0.0,
+      "false_captures": 0,
+      "gold_none": 6,
+      "miss_rate": 1.0,
+      "missed": 6,
+      "wrong_table": 0
+     },
+     "commit_subject": {
+      "items": 23,
+      "accuracy": 0.6522,
+      "false_capture_rate": 0.0,
+      "false_captures": 0,
+      "gold_none": 15,
+      "miss_rate": 1.0,
+      "missed": 8,
+      "wrong_table": 0
+     }
+    }
+   },
+   "test_at_max_f1_train_setting": {
+    "setting": {
+     "phrasing": "short",
+     "tau": 0.5,
+     "train_macro_f1": 0.3703,
+     "train_false_capture": 0.3571
+    },
+    "note": "the unconstrained best-train-macro-F1 setting; for reference only, the verdict uses the selected setting",
+    "accuracy": 0.544,
+    "macro_f1": 0.3425,
+    "false_capture_rate": 0.4138,
+    "wrong_table_rate": 0.2917,
+    "miss_rate": 0.3684
+   },
+   "predictions_test": {
+    "u3-001": "none",
+    "u3-003": "none",
+    "u3-004": "none",
+    "u3-007": "none",
+    "u3-008": "none",
+    "u3-010": "none",
+    "u3-011": "none",
+    "u3-013": "none",
+    "u3-014": "none",
+    "u3-015": "none",
+    "u3-017": "none",
+    "u3-018": "none",
+    "u3-021": "none",
+    "u3-022": "none",
+    "u3-023": "none",
+    "u3-024": "none",
+    "u3-028": "none",
+    "u3-030": "none",
+    "u3-033": "none",
+    "u3-038": "none",
+    "u3-039": "none",
+    "u3-040": "none",
+    "u3-041": "none",
+    "u3-043": "none",
+    "u3-044": "none",
+    "u3-045": "none",
+    "u3-046": "none",
+    "u3-047": "none",
+    "u3-049": "none",
+    "u3-050": "none",
+    "u3-051": "none",
+    "u3-054": "none",
+    "u3-057": "none",
+    "u3-061": "none",
+    "u3-062": "none",
+    "u3-063": "none",
+    "u3-064": "none",
+    "u3-067": "none",
+    "u3-068": "none",
+    "u3-069": "none",
+    "u3-070": "none",
+    "u3-072": "none",
+    "u3-073": "none",
+    "u3-075": "none",
+    "u3-077": "none",
+    "u3-079": "none",
+    "u3-080": "none",
+    "u3-081": "none",
+    "u3-082": "none",
+    "u3-083": "none",
+    "u3-085": "none",
+    "u3-086": "none",
+    "u3-087": "none",
+    "u3-088": "none",
+    "u3-089": "none",
+    "u3-093": "none",
+    "u3-095": "none",
+    "u3-096": "none",
+    "u3-098": "none",
+    "u3-099": "none",
+    "u3-101": "none",
+    "u3-103": "none",
+    "u3-106": "none",
+    "u3-107": "none",
+    "u3-108": "none",
+    "u3-109": "none",
+    "u3-112": "none",
+    "u3-114": "none",
+    "u3-116": "none",
+    "u3-117": "none",
+    "u3-118": "none",
+    "u3-120": "none",
+    "u3-122": "none",
+    "u3-123": "none",
+    "u3-124": "none",
+    "u3-125": "none",
+    "u3-126": "none",
+    "u3-127": "none",
+    "u3-128": "none",
+    "u3-133": "none",
+    "u3-134": "none",
+    "u3-135": "none",
+    "u3-137": "none",
+    "u3-138": "none",
+    "u3-140": "none",
+    "u3-141": "none",
+    "u3-143": "none",
+    "u3-144": "none",
+    "u3-145": "none",
+    "u3-147": "none",
+    "u3-149": "none",
+    "u3-150": "none",
+    "u3-152": "none",
+    "u3-154": "none",
+    "u3-155": "none",
+    "u3-156": "none",
+    "u3-158": "none",
+    "u3-159": "none",
+    "u3-161": "none",
+    "u3-165": "none",
+    "u3-167": "none",
+    "u3-169": "none",
+    "u3-171": "none",
+    "u3-172": "none",
+    "u3-175": "none",
+    "u3-177": "none",
+    "u3-179": "none",
+    "u3-180": "none",
+    "u3-181": "none",
+    "u3-182": "none",
+    "u3-183": "none",
+    "u3-184": "none",
+    "u3-185": "none",
+    "u3-186": "none",
+    "u3-187": "none",
+    "u3-188": "none",
+    "u3-190": "none",
+    "u3-192": "error",
+    "u3-193": "none",
+    "u3-194": "none",
+    "u3-195": "none",
+    "u3-196": "none",
+    "u3-197": "none",
+    "u3-199": "none",
+    "u3-200": "none"
+   }
+  },
+  "gliner2.5-base": {
+   "repo": "fastino/gliner2.5-base-v1",
+   "revision": "54785d51df8d86a0d8f2eb212fec15871aad2c4d",
+   "library": "gliner2",
+   "files": [
+    "config.json",
+    "encoder_config/config.json",
+    "model.safetensors",
+    "tokenizer.json",
+    "tokenizer_config.json"
+   ],
+   "params": 193581591,
+   "size_on_disk_bytes": 782713882,
+   "load_ms": 30470.0,
+   "load_loadavg_1m": [
+    147.19,
+    155.25
+   ],
+   "threads": 4,
+   "control_train_false_capture": 0.0,
+   "selection": {
+    "chosen": {
+     "phrasing": "descriptive",
+     "tau": 0.85,
+     "train_macro_f1": 0.2036,
+     "train_false_capture": 0.0,
+     "false_capture_constraint_met_on_train": true
+    },
+    "max_f1_train": {
+     "phrasing": "descriptive",
+     "tau": 0.5,
+     "train_macro_f1": 0.3667,
+     "train_false_capture": 0.2321
+    }
+   },
+   "labels": {
+    "decision": "a decision choosing one option over another",
+    "error": "a report of an error, bug or failure",
+    "context": "an explanation of how something works",
+    "rule": "a rule that must always be followed",
+    "none": "routine tool output, progress update or small talk"
+   },
+   "importance_labels": {
+    "low": "minor detail",
+    "medium": "useful project knowledge",
+    "high": "critical project knowledge"
+   },
+   "sweep_mismatch_texts": 0,
+   "latency_ms": {
+    "p50": 983.099,
+    "p95": 1758.124,
+    "mean": 1044.229,
+    "with_importance_pass_p50": 1794.997,
+    "with_importance_pass_p95": 3403.854,
+    "loadavg_1m_before": 170.43,
+    "loadavg_1m_after": 144.16,
+    "measured_in": "Python, perf_counter around one classification call per test text, batch 1, model loaded and warmed",
+    "phrasing_timed": "descriptive"
+   },
+   "first_selection": {
+    "tau_max": 0.95,
+    "chosen": {
+     "phrasing": "descriptive",
+     "tau": 0.85,
+     "train_macro_f1": 0.2036,
+     "train_false_capture": 0.0,
+     "false_capture_constraint_met_on_train": true
+    },
+    "max_f1_train": {
+     "phrasing": "descriptive",
+     "tau": 0.5,
+     "train_macro_f1": 0.3667,
+     "train_false_capture": 0.2321
+    }
+   },
+   "peak_rss_mb": 1425.4,
+   "peak_footprint_mb": 1267.6,
+   "footprint_process": "the whole arm process under /usr/bin/time -l",
+   "train": {
+    "accuracy": 0.76,
+    "macro_f1": 0.2036,
+    "false_capture_rate": 0.0
+   },
+   "test": {
+    "items": 125,
+    "accuracy": 0.72,
+    "macro_f1": 0.3586,
+    "macro_f1_classes": [
+     "decision",
+     "error",
+     "context",
+     "rule",
+     "none"
+    ],
+    "per_class": {
+     "decision": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "tp": 0,
+      "pred": 1,
+      "gold": 3
+     },
+     "error": {
+      "precision": 0.5,
+      "recall": 0.0909,
+      "f1": 0.1538,
+      "tp": 2,
+      "pred": 4,
+      "gold": 22
+     },
+     "context": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "tp": 0,
+      "pred": 0,
+      "gold": 10
+     },
+     "rule": {
+      "precision": 1.0,
+      "recall": 0.6667,
+      "f1": 0.8,
+      "tp": 2,
+      "pred": 2,
+      "gold": 3
+     },
+     "none": {
+      "precision": 0.7288,
+      "recall": 0.9885,
+      "f1": 0.839,
+      "tp": 86,
+      "pred": 118,
+      "gold": 87
+     }
+    },
+    "false_capture_rate": 0.0115,
+    "false_captures": 1,
+    "gold_none": 87,
+    "wrong_table_rate": 0.3333,
+    "wrong_table": 2,
+    "stored_and_should_be": 6,
+    "miss_rate": 0.8421,
+    "missed": 32,
+    "junk_share_of_stored": 0.1429,
+    "stored": 7,
+    "confusion": {
+     "decision": {
+      "none": 3
+     },
+     "error": {
+      "none": 19,
+      "error": 2,
+      "decision": 1
+     },
+     "context": {
+      "none": 9,
+      "error": 1
+     },
+     "rule": {
+      "none": 1,
+      "rule": 2
+     },
+     "none": {
+      "none": 86,
+      "error": 1
+     }
+    },
+    "importance": {
+     "items": 38,
+     "accuracy": 0.3421,
+     "within_one": 0.8684,
+     "mean_abs_bucket_error": 0.7895,
+     "confusion": {
+      "low": {
+       "high": 4,
+       "medium": 4
+      },
+      "medium": {
+       "medium": 9,
+       "low": 3,
+       "high": 7
+      },
+      "high": {
+       "medium": 6,
+       "high": 4,
+       "low": 1
+      }
+     }
+    },
+    "per_source": {
+     "bash_failure": {
+      "items": 36,
+      "accuracy": 0.8333,
+      "false_capture_rate": 0.0,
+      "false_captures": 0,
+      "gold_none": 30,
+      "miss_rate": 1.0,
+      "missed": 6,
+      "wrong_table": 0
+     },
+     "bash_output": {
+      "items": 18,
+      "accuracy": 0.9444,
+      "false_capture_rate": 0.0,
+      "false_captures": 0,
+      "gold_none": 17,
+      "miss_rate": 1.0,
+      "missed": 1,
+      "wrong_table": 0
+     },
+     "agent_text": {
+      "items": 36,
+      "accuracy": 0.5556,
+      "false_capture_rate": 0.0526,
+      "false_captures": 1,
+      "gold_none": 19,
+      "miss_rate": 0.8235,
+      "missed": 14,
+      "wrong_table": 1
+     },
+     "agent_brief": {
+      "items": 12,
+      "accuracy": 0.6667,
+      "false_capture_rate": 0.0,
+      "false_captures": 0,
+      "gold_none": 6,
+      "miss_rate": 0.6667,
+      "missed": 4,
+      "wrong_table": 0
+     },
+     "commit_subject": {
+      "items": 23,
+      "accuracy": 0.6522,
+      "false_capture_rate": 0.0,
+      "false_captures": 0,
+      "gold_none": 15,
+      "miss_rate": 0.875,
+      "missed": 7,
+      "wrong_table": 1
+     }
+    }
+   },
+   "test_at_max_f1_train_setting": {
+    "setting": {
+     "phrasing": "descriptive",
+     "tau": 0.5,
+     "train_macro_f1": 0.3667,
+     "train_false_capture": 0.2321
+    },
+    "note": "the unconstrained best-train-macro-F1 setting; for reference only, the verdict uses the selected setting",
+    "accuracy": 0.592,
+    "macro_f1": 0.2763,
+    "false_capture_rate": 0.1954,
+    "wrong_table_rate": 0.5556,
+    "miss_rate": 0.7632
+   },
+   "predictions_test": {
+    "u3-001": "none",
+    "u3-003": "none",
+    "u3-004": "none",
+    "u3-007": "none",
+    "u3-008": "none",
+    "u3-010": "none",
+    "u3-011": "none",
+    "u3-013": "none",
+    "u3-014": "none",
+    "u3-015": "none",
+    "u3-017": "none",
+    "u3-018": "none",
+    "u3-021": "none",
+    "u3-022": "none",
+    "u3-023": "none",
+    "u3-024": "none",
+    "u3-028": "none",
+    "u3-030": "none",
+    "u3-033": "none",
+    "u3-038": "none",
+    "u3-039": "none",
+    "u3-040": "none",
+    "u3-041": "none",
+    "u3-043": "none",
+    "u3-044": "none",
+    "u3-045": "none",
+    "u3-046": "none",
+    "u3-047": "none",
+    "u3-049": "none",
+    "u3-050": "none",
+    "u3-051": "none",
+    "u3-054": "none",
+    "u3-057": "none",
+    "u3-061": "none",
+    "u3-062": "none",
+    "u3-063": "none",
+    "u3-064": "none",
+    "u3-067": "none",
+    "u3-068": "none",
+    "u3-069": "none",
+    "u3-070": "none",
+    "u3-072": "none",
+    "u3-073": "none",
+    "u3-075": "none",
+    "u3-077": "none",
+    "u3-079": "error",
+    "u3-080": "none",
+    "u3-081": "none",
+    "u3-082": "error",
+    "u3-083": "none",
+    "u3-085": "none",
+    "u3-086": "none",
+    "u3-087": "none",
+    "u3-088": "none",
+    "u3-089": "none",
+    "u3-093": "none",
+    "u3-095": "none",
+    "u3-096": "rule",
+    "u3-098": "none",
+    "u3-099": "none",
+    "u3-101": "decision",
+    "u3-103": "none",
+    "u3-106": "none",
+    "u3-107": "none",
+    "u3-108": "none",
+    "u3-109": "none",
+    "u3-112": "none",
+    "u3-114": "none",
+    "u3-116": "none",
+    "u3-117": "none",
+    "u3-118": "none",
+    "u3-120": "none",
+    "u3-122": "none",
+    "u3-123": "none",
+    "u3-124": "none",
+    "u3-125": "none",
+    "u3-126": "none",
+    "u3-127": "none",
+    "u3-128": "error",
+    "u3-133": "none",
+    "u3-134": "none",
+    "u3-135": "rule",
+    "u3-137": "none",
+    "u3-138": "none",
+    "u3-140": "none",
+    "u3-141": "none",
+    "u3-143": "none",
+    "u3-144": "none",
+    "u3-145": "none",
+    "u3-147": "none",
+    "u3-149": "none",
+    "u3-150": "none",
+    "u3-152": "none",
+    "u3-154": "none",
+    "u3-155": "none",
+    "u3-156": "none",
+    "u3-158": "none",
+    "u3-159": "none",
+    "u3-161": "none",
+    "u3-165": "none",
+    "u3-167": "none",
+    "u3-169": "none",
+    "u3-171": "none",
+    "u3-172": "none",
+    "u3-175": "none",
+    "u3-177": "none",
+    "u3-179": "none",
+    "u3-180": "none",
+    "u3-181": "none",
+    "u3-182": "none",
+    "u3-183": "none",
+    "u3-184": "none",
+    "u3-185": "none",
+    "u3-186": "none",
+    "u3-187": "none",
+    "u3-188": "none",
+    "u3-190": "none",
+    "u3-192": "none",
+    "u3-193": "none",
+    "u3-194": "none",
+    "u3-195": "none",
+    "u3-196": "none",
+    "u3-197": "error",
+    "u3-199": "none",
+    "u3-200": "none"
+   }
+  }
+ },
+ "verdict": {
+  "verdict": "NO-GO",
+  "rule": "a model wins only if (1) it beats the control's test macro-F1 at an equal or lower test false-capture rate, (2) it fits a CPU call site off the hook (FIT_BARS), and (3) it is the smallest model within 1 macro-F1 point of the best model that meets (1)'s false-capture condition; params count only what the arm adds (the LR heads reuse the bge-small vector Axil already computes)",
+  "control": {
+   "macro_f1": 0.2411,
+   "accuracy": 0.728,
+   "false_capture_rate": 0.0115,
+   "wrong_table_rate": 0.0,
+   "miss_rate": 0.8684
+  },
+  "control_at_cli_default_0.7": {
+   "macro_f1": 0.2106,
+   "accuracy": 0.632,
+   "false_capture_rate": 0.1609,
+   "wrong_table_rate": 0.0,
+   "miss_rate": 0.8421
+  },
+  "best_model_macro_f1": 0.3586,
+  "best_model_macro_f1_any_false_capture": 0.5332,
+  "arms": {
+   "lr-weak": {
+    "macro_f1": 0.1573,
+    "accuracy": 0.648,
+    "false_capture_rate": 0.069,
+    "params": 1540,
+    "beats_control_macro_f1": false,
+    "false_capture_at_most_control": false,
+    "fits_cpu_call_site": true,
+    "fit_detail": {
+     "peak_rss_mb": {
+      "value": 296.4,
+      "ok": true
+     },
+     "p95_ms": {
+      "value": 666.939,
+      "ok": true
+     },
+     "load_s": {
+      "value": 0.9,
+      "ok": null,
+      "note": "reported, not gated: paid once per worker or daemon process, but per job if the model ran inside the queued `axil auto-capture` call"
+     }
+    },
+    "call_site": "the queued `axil auto-capture` job (never the hook): one bge-small embed of the candidate, which the store path computes anyway, plus a 5x384 dot product",
+    "within_1_point_of_best": false,
+    "smallest_within_1_point": false,
+    "wins": false
+   },
+   "lr-weak+train": {
+    "macro_f1": 0.1642,
+    "accuracy": 0.696,
+    "false_capture_rate": 0.0,
+    "params": 1925,
+    "beats_control_macro_f1": false,
+    "false_capture_at_most_control": true,
+    "fits_cpu_call_site": true,
+    "fit_detail": {
+     "peak_rss_mb": {
+      "value": 296.4,
+      "ok": true
+     },
+     "p95_ms": {
+      "value": 666.94,
+      "ok": true
+     },
+     "load_s": {
+      "value": 0.9,
+      "ok": null,
+      "note": "reported, not gated: paid once per worker or daemon process, but per job if the model ran inside the queued `axil auto-capture` call"
+     }
+    },
+    "call_site": "the queued `axil auto-capture` job (never the hook): one bge-small embed of the candidate, which the store path computes anyway, plus a 5x384 dot product",
+    "within_1_point_of_best": false,
+    "smallest_within_1_point": false,
+    "wins": false
+   },
+   "gliclass-edge": {
+    "macro_f1": 0.1642,
+    "accuracy": 0.696,
+    "false_capture_rate": 0.0,
+    "params": 32705154,
+    "beats_control_macro_f1": false,
+    "false_capture_at_most_control": true,
+    "fits_cpu_call_site": true,
+    "fit_detail": {
+     "peak_rss_mb": {
+      "value": 401.5,
+      "ok": true
+     },
+     "p95_ms": {
+      "value": 338.988,
+      "ok": true
+     },
+     "load_s": {
+      "value": 8.77,
+      "ok": null,
+      "note": "reported, not gated: paid once per worker or daemon process, but per job if the model ran inside the queued `axil auto-capture` call"
+     }
+    },
+    "call_site": "the worker or the daemon only (never the hook): loading it per queued `axil auto-capture` job would add 8.8 s to each failed command's capture",
+    "within_1_point_of_best": false,
+    "smallest_within_1_point": false,
+    "wins": false
+   },
+   "gliclass-base": {
+    "macro_f1": 0.5332,
+    "accuracy": 0.632,
+    "false_capture_rate": 0.3448,
+    "params": 186545922,
+    "beats_control_macro_f1": true,
+    "false_capture_at_most_control": false,
+    "fits_cpu_call_site": false,
+    "fit_detail": {
+     "peak_rss_mb": {
+      "value": 720.8,
+      "ok": true
+     },
+     "p95_ms": {
+      "value": 2299.158,
+      "ok": false
+     },
+     "load_s": {
+      "value": 14.57,
+      "ok": null,
+      "note": "reported, not gated: paid once per worker or daemon process, but per job if the model ran inside the queued `axil auto-capture` call"
+     }
+    },
+    "call_site": "the worker or the daemon only (never the hook): loading it per queued `axil auto-capture` job would add 14.6 s to each failed command's capture",
+    "within_1_point_of_best": false,
+    "smallest_within_1_point": false,
+    "wins": false
+   },
+   "gliner2.5-small": {
+    "macro_f1": 0.1823,
+    "accuracy": 0.704,
+    "false_capture_rate": 0.0,
+    "params": 73881879,
+    "beats_control_macro_f1": false,
+    "false_capture_at_most_control": true,
+    "fits_cpu_call_site": false,
+    "fit_detail": {
+     "peak_rss_mb": {
+      "value": 883.2,
+      "ok": true
+     },
+     "p95_ms": {
+      "value": 1263.733,
+      "ok": false
+     },
+     "load_s": {
+      "value": 15.63,
+      "ok": null,
+      "note": "reported, not gated: paid once per worker or daemon process, but per job if the model ran inside the queued `axil auto-capture` call"
+     }
+    },
+    "call_site": "the worker or the daemon only (never the hook): loading it per queued `axil auto-capture` job would add 15.6 s to each failed command's capture",
+    "within_1_point_of_best": false,
+    "smallest_within_1_point": false,
+    "wins": false
+   },
+   "gliner2.5-base": {
+    "macro_f1": 0.3586,
+    "accuracy": 0.72,
+    "false_capture_rate": 0.0115,
+    "params": 193581591,
+    "beats_control_macro_f1": true,
+    "false_capture_at_most_control": true,
+    "fits_cpu_call_site": false,
+    "fit_detail": {
+     "peak_rss_mb": {
+      "value": 1425.4,
+      "ok": true
+     },
+     "p95_ms": {
+      "value": 1758.124,
+      "ok": false
+     },
+     "load_s": {
+      "value": 30.47,
+      "ok": null,
+      "note": "reported, not gated: paid once per worker or daemon process, but per job if the model ran inside the queued `axil auto-capture` call"
+     }
+    },
+    "call_site": "the worker or the daemon only (never the hook): loading it per queued `axil auto-capture` job would add 30.5 s to each failed command's capture",
+    "within_1_point_of_best": true,
+    "smallest_within_1_point": true,
+    "wins": false
+   }
+  },
+  "caveat": "Test has 125 texts but few of some classes (decision 3, rule 3, context 10), so a macro-F1 gap of a few points can rest on one or two texts; latency was measured at a 1-minute load average of about 140-210 on a 10-core machine.",
+  "control_errors_test": {
+   "missed_by_gold_class_and_source": [
+    {
+     "gold": "context",
+     "source": "agent_text",
+     "count": 9
+    },
+    {
+     "gold": "error",
+     "source": "agent_text",
+     "count": 8
+    },
+    {
+     "gold": "error",
+     "source": "commit_subject",
+     "count": 5
+    },
+    {
+     "gold": "rule",
+     "source": "agent_brief",
+     "count": 3
+    },
+    {
+     "gold": "error",
+     "source": "agent_brief",
+     "count": 2
+    },
+    {
+     "gold": "decision",
+     "source": "commit_subject",
+     "count": 2
+    },
+    {
+     "gold": "error",
+     "source": "bash_output",
+     "count": 1
+    },
+    {
+     "gold": "decision",
+     "source": "agent_brief",
+     "count": 1
+    },
+    {
+     "gold": "error",
+     "source": "bash_failure",
+     "count": 1
+    },
+    {
+     "gold": "context",
+     "source": "commit_subject",
+     "count": 1
+    }
+   ],
+   "missed_but_fired_below_threshold": {
+    "error": 6,
+    "context": 5
+   },
+   "false_captures": [
+    {
+     "id": "u3-193",
+     "source": "agent_text",
+     "stored_as": "decision",
+     "summary": "2. **Prompts decision:** bring you k=10, k=25 and LongMemEval side by side. At k=10 it's even so far, 5 questions better"
+    }
+   ],
+   "false_captures_below_threshold": [
+    {
+     "id": "u3-021",
+     "source": "bash_output",
+     "would_store_as": "error",
+     "confidence": 0.6000000238418579,
+     "summary": "Err(redb::TableError::TableDoesNotExist(_))"
+    },
+    {
+     "id": "u3-028",
+     "source": "bash_output",
+     "would_store_as": "error",
+     "confidence": 0.6000000238418579,
+     "summary": ".ok_or_else(|| AxilError::plugin(\"no embedder configure"
+    },
+    {
+     "id": "u3-046",
+     "source": "bash_output",
+     "would_store_as": "error",
+     "confidence": 0.6000000238418579,
+     "summary": ".map_err(|_| AxilError::plugin(\"vector space cac"
+    },
+    {
+     "id": "u3-049",
+     "source": "bash_output",
+     "would_store_as": "error",
+     "confidence": 0.6000000238418579,
+     "summary": "AxilError::Plugin(Box::new(std::io::Error::other(format!("
+    },
+    {
+     "id": "u3-070",
+     "source": "bash_failure",
+     "would_store_as": "error",
+     "confidence": 0.7000000476837158,
+     "summary": "(eval):1: === not found"
+    },
+    {
+     "id": "u3-081",
+     "source": "bash_failure",
+     "would_store_as": "error",
+     "confidence": 0.7000000476837158,
+     "summary": "fatal: 'feat/phase-28-graph-adjacency' is already checked out at '~/Documents/GitHub/axil-project/axildb/.claude/worktre"
+    },
+    {
+     "id": "u3-093",
+     "source": "bash_failure",
+     "would_store_as": "error",
+     "confidence": 0.7000000476837158,
+     "summary": "rg: regex parse error:"
+    },
+    {
+     "id": "u3-099",
+     "source": "bash_failure",
+     "would_store_as": "error",
+     "confidence": 0.7000000476837158,
+     "summary": "(eval):1: === not found"
+    },
+    {
+     "id": "u3-109",
+     "source": "bash_failure",
+     "would_store_as": "error",
+     "confidence": 0.7000000476837158,
+     "summary": "(eval):1: ==CACHE not found"
+    },
+    {
+     "id": "u3-112",
+     "source": "bash_failure",
+     "would_store_as": "error",
+     "confidence": 0.7000000476837158,
+     "summary": "rg: regex parse error:"
+    },
+    {
+     "id": "u3-114",
+     "source": "agent_text",
+     "would_store_as": "decision",
+     "confidence": 0.6000000238418579,
+     "summary": "The script stashes the working tree while it builds the \"before\" binary, which would clash with edits I make meanwhile. "
+    },
+    {
+     "id": "u3-123",
+     "source": "bash_failure",
+     "would_store_as": "error",
+     "confidence": 0.7000000476837158,
+     "summary": "(eval):1: === not found"
+    },
+    {
+     "id": "u3-124",
+     "source": "bash_failure",
+     "would_store_as": "error",
+     "confidence": 0.7000000476837158,
+     "summary": "329-        .map_err(|e| AxilError::plugin(format!(\"failed to write export line: {e}\")))"
+    },
+    {
+     "id": "u3-156",
+     "source": "bash_failure",
+     "would_store_as": "error",
+     "confidence": 0.7000000476837158,
+     "summary": "rg: regex parse error:"
+    },
+    {
+     "id": "u3-169",
+     "source": "bash_failure",
+     "would_store_as": "error",
+     "confidence": 0.7000000476837158,
+     "summary": "rg: regex parse error:"
+    },
+    {
+     "id": "u3-172",
+     "source": "bash_failure",
+     "would_store_as": "error",
+     "confidence": 0.7000000476837158,
+     "summary": "(eval):1: ===== not found"
+    },
+    {
+     "id": "u3-175",
+     "source": "bash_failure",
+     "would_store_as": "error",
+     "confidence": 0.7000000476837158,
+     "summary": "(eval):1: ==== not found"
+    },
+    {
+     "id": "u3-180",
+     "source": "bash_failure",
+     "would_store_as": "error",
+     "confidence": 0.7000000476837158,
+     "summary": "error: the following required arguments were not provided:"
+    },
+    {
+     "id": "u3-184",
+     "source": "agent_text",
+     "would_store_as": "error",
+     "confidence": 0.6000000238418579,
+     "summary": "That replacement failed and wrote nothing: the checkpoint snippet also appears in the cache command. Retrying with the c"
+    },
+    {
+     "id": "u3-185",
+     "source": "agent_text",
+     "would_store_as": "error",
+     "confidence": 0.6000000238418579,
+     "summary": "The secret was updated today (2026-09-25 01:27 UTC), and `main` is still at `b0a8221`, the same commit as the latest fai"
+    },
+    {
+     "id": "u3-197",
+     "source": "agent_text",
+     "would_store_as": "error",
+     "confidence": 0.6000000238418579,
+     "summary": "ERROR: \"Backlog features merged to main but not published; crates.io still at 1.1.1.\""
+    }
+   ],
+   "wrong_table": [],
+   "classes_the_regex_cannot_emit": [
+    "context",
+    "rule"
+   ]
+  },
+  "regex_refinement_needs": [
+   "Context and rule records: 10 context and 3 rule test texts missed; analyze() has no pattern for either (CaptureType::Context exists but is never emitted, and there is no rule type), so the regex can only ever store errors and decisions.",
+   "Errors: 17 of 22 error test texts missed (by source: {'agent_text': 8, 'commit_subject': 5, 'agent_brief': 2, 'bash_output': 1, 'bash_failure': 1}), 6 of them matched a pattern below the hook's 0.8 bar. In raw output only rustc error codes, panics and tracebacks reach 0.8 (0.6 base, +0.1 for the 'exit code' line every hook text starts with, +0.1 or +0.2 for the specific format); an agent's prose report of what broke carries none of the output-shaped patterns.",
+   "Decisions: 3 decision test texts missed: commit subjects and agent prose state the choice directly (\"X stays\", \"scan exactly instead of ...\") without the decision phrases. The one decision the hook bar stores is a false capture: a \"decision:\" list header inside a conditional plan, so the marker needs a guard for headers and conditionals (if, I'd).",
+   "Junk before the bar can move: at the CLI default 0.7, 13 gold-none test texts would also be stored as errors ({'zsh `=...` or glob error': 6, 'git refusing the command': 1, \"regex parse error from the agent's own search\": 4, 'a source line printed by a search': 1, 'usage error (missing argument)': 1}): command-line mistakes (guideline N4) and printed code (N2) that reach 0.7 only through the 'exit code' bonus. A guard list for these shapes, and for a non-zero exit that is the command's answer (grep found nothing, diff, test), has to come before any lower threshold.",
+   "Importance: compute_importance ignores the class and the failure's severity; on gold not-none test texts its bucket accuracy is 0.4737 with cut points fit on train, against the always-the-most-common-bucket baseline in importance_majority_baseline."
+  ]
+ },
+ "numbers_policy": "Candidate measurements for a feature that is not built; not for README, docs or CLI output. Latency was measured on a shared, heavily loaded machine; read it with the load average recorded next to it."
+}

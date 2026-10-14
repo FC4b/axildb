@@ -11,3 +11,6 @@ sentencepiece
 psutil
 # optional, hosted Jev arm only:
 # typesafe-sdk==0.7.2
+# U3 capture arm (run_u3_bakeoff.py):
+scikit-learn==1.9.1
+gliclass==0.1.20
