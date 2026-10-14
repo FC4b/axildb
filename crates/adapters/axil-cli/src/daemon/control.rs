@@ -1,6 +1,7 @@
 //! `axil daemon {start, stop, status, logs}`: running a database's daemon by
 //! hand. Nothing forwards commands to it on its own yet; `daemon send` sends
-//! one command line, to try it.
+//! one command line, to try it. Every other command leases the database from
+//! it (see [`super::lease`]).
 //!
 //! `AXIL_DAEMON` is the kill switch: `off` keeps `daemon start` from
 //! starting one. Unset, it is `on`: a daemon runs only when started by hand.
@@ -185,7 +186,9 @@ fn start(db: &Path, idle_timeout: Duration, wait: Duration, out: &Output) -> Res
     let mut blocked: Option<String> = None;
     loop {
         if let Some(hello) = hello_for(&key, &run, Duration::from_secs(1))? {
-            if hello.state == "ready" {
+            // One that let go of the database for a lease serves again
+            // once the lease ends.
+            if hello.state == "ready" || hello.state == "leased" {
                 out.print(&json!({
                     "started": child.as_ref().is_some_and(|c| c.id() == hello.pid),
                     "running": true,
@@ -483,6 +486,20 @@ fn describe(report: &Value) -> Vec<String> {
         "idle: {}s, stops after {}s more",
         live["idle_secs"], live["idle_left_secs"]
     ));
+    if let Some(holders) = live["lease_holders"].as_array().filter(|h| !h.is_empty()) {
+        let pids: Vec<String> = holders
+            .iter()
+            .map(|h| {
+                let waiting = if h["granted"] == true {
+                    ""
+                } else {
+                    ", waiting"
+                };
+                format!("pid {} for {}s{waiting}", h["pid"], h["secs"])
+            })
+            .collect();
+        lines.push(format!("leased to: {}", pids.join("; ")));
+    }
     lines.push(format!(
         "in flight: {}, abandoned recalls: {}, panics: {}, reloads: {}{}",
         live["in_flight"],

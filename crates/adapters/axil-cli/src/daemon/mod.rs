@@ -3,6 +3,8 @@
 //! database nor loads its engines on each call.
 //!
 //! - [`exec`] runs one request against the open database.
+//! - [`lease`] asks a database's daemon to let go of it, for a process
+//!   about to open it.
 //! - [`paths`] names the files a database's daemon keeps in `run/`.
 //! - [`proto`] is the wire format and the identities a client and a daemon
 //!   compare.
@@ -16,6 +18,7 @@
 
 pub mod control;
 pub mod exec;
+pub mod lease;
 pub mod paths;
 pub mod proto;
 pub mod server;

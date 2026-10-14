@@ -7102,6 +7102,9 @@ fn main() {
 /// Real entry point — runs on a large-stack worker thread (see `main`).
 fn real_main() -> i32 {
     cli_io::install_diagnostic_sink();
+    // Every open asks the database's daemon, if one runs, to let go of it.
+    #[cfg(unix)]
+    daemon::lease::install();
     // The CLI is Axil's Tier-3 argv Adapter; drive it through that type. `main`
     // uses the inherent `dispatch` (which returns the process exit code) rather
     // than `Adapter::run` so exit-code fidelity is preserved.
@@ -15866,6 +15869,10 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
             let profile: axil_mcp::ToolProfile =
                 tools.parse().map_err(|e: String| anyhow::anyhow!(e))?;
             let db_path = require_db(&db_opt)?;
+            // The server keeps the database open for its whole life, so it
+            // holds the daemon's lease on it as long.
+            #[cfg(unix)]
+            daemon::lease::hold(&db_path);
             // Use embedder so recall/similar_to works over MCP.
             #[cfg(feature = "embed")]
             let db = open_with_best_effort(&db_path)?;
@@ -16031,6 +16038,9 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
         #[cfg(feature = "http")]
         Command::Serve { host, port } => {
             let db_path = require_db(&db_opt)?;
+            // As `mcp`: held for the server's whole life.
+            #[cfg(unix)]
+            daemon::lease::hold(&db_path);
             #[cfg(feature = "embed")]
             let db = open_with_best_effort(&db_path)?;
             #[cfg(not(feature = "embed"))]

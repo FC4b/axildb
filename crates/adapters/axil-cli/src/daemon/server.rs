@@ -44,6 +44,16 @@
 //! counts a sleep), when it was signalled, or when its executable changed
 //! on disk, or the path it was started by now leads to another.
 //!
+//! A process about to open the database leases it first (see
+//! [`super::lease`]). The daemon answers new requests `leased`, waits for
+//! the ones running and for the warm-up, closes the database and grants the
+//! lease; one it can't close in the time the process waits is refused
+//! (`lease_timeout`), and the daemon serves on. While any process holds a
+//! lease the database stays closed. Once the last one ends, by closing its
+//! connection or by exiting, however it exits, the daemon waits 250 ms,
+//! opens the database again and warms it up, unless another lease was asked
+//! for meanwhile.
+//!
 //! Shutting down records `stopping`, unlinks the socket, so new clients fall
 //! back at once, answers queued connections `stopping`, waits for running
 //! requests and for the warm-up or a reload still running, and closes the
@@ -55,7 +65,7 @@
 //! repairs the files, as after a one-shot command that was killed.
 
 use std::fs::{self, File, OpenOptions};
-use std::io;
+use std::io::{self, Read};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -72,8 +82,8 @@ use serde_json::{json, Value};
 use super::exec::{self, NotServed, ReopenError, WarmState};
 use super::paths::{self, write_atomic, RunDir};
 use super::proto::{
-    self, read_frame, read_json, write_frame, write_json, Ack, ExeId, Hello, Identity, Op,
-    RunHeader, RunReply, DAEMON_PROTO, MAX_FRAME, STRIPPED_ENV, VERSION,
+    self, read_frame, read_json, write_frame, write_json, Ack, ExeId, Hello, Identity, LeaseReply,
+    Op, RunHeader, RunReply, DAEMON_PROTO, MAX_FRAME, STRIPPED_ENV, VERSION,
 };
 use super::state::{op_label, Change, DaemonInfo, FileFp, Phase, PhaseCell, Stats};
 use crate::cli_io::{self, ReqCtx};
@@ -112,6 +122,14 @@ const RELEASE_WAIT: Duration = Duration::from_secs(3);
 /// it says it is stopping: that one waits up to 10 s for its requests and
 /// 3 s for the last references to the handle.
 const STOPPING_WAIT: Duration = Duration::from_secs(30);
+
+/// How long the daemon waits after the last lease ends before it opens the
+/// database again: a process that exited may hold its locks a moment longer,
+/// and another often follows it.
+const UNLEASE_DELAY: Duration = Duration::from_millis(250);
+
+/// The longest a lease request may have the daemon wait for its requests.
+const MAX_LEASE_WAIT: Duration = Duration::from_secs(60);
 
 /// How often the tick runs.
 const TICK: Duration = Duration::from_secs(1);
@@ -237,6 +255,26 @@ fn expired(deadline_ms: Option<u64>) -> bool {
     deadline_ms.is_some_and(|deadline| epoch_ms() >= deadline)
 }
 
+/// The processes that asked for a lease and have not let it go.
+#[derive(Default)]
+struct Leases {
+    holders: Vec<Holder>,
+    next_id: u64,
+    /// Moves on at each request, so a reopen meant for after the last lease
+    /// ended is called off when another is asked for meanwhile.
+    generation: u64,
+    /// Leases granted since the daemon started.
+    granted: u64,
+}
+
+/// A process that asked for a lease.
+struct Holder {
+    id: u64,
+    pid: u32,
+    since: Instant,
+    granted: bool,
+}
+
 /// The open handle's view of when its files last matched it.
 struct Freshness {
     /// The files as the handle left them.
@@ -272,6 +310,7 @@ pub struct Server {
     /// [`Instant`] does not advance while the machine sleeps.
     last_active: Mutex<(Instant, SystemTime)>,
     fresh: Mutex<Freshness>,
+    leases: Mutex<Leases>,
     graph_reloads: AtomicU32,
     fail_graph: AtomicBool,
     accept: Mutex<Option<JoinHandle<()>>>,
@@ -378,6 +417,7 @@ impl Server {
                 busy: 0,
                 settled: false,
             }),
+            leases: Mutex::new(Leases::default()),
             graph_reloads: AtomicU32::new(0),
             fail_graph: AtomicBool::new(false),
             accept: Mutex::new(None),
@@ -800,6 +840,7 @@ impl Server {
                 let _ = match op {
                     Op::Hello => write_json(&mut stream, &self.hello()),
                     Op::Shutdown { reason } => self.acknowledge_shutdown(&mut stream, reason),
+                    Op::Lease { .. } => write_json(&mut stream, &LeaseReply::refused("overloaded")),
                     _ => write_json(&mut stream, &RunReply::Overloaded),
                 };
             }
@@ -841,6 +882,7 @@ impl Server {
             Op::Hello => write_json(&mut stream, &self.hello()),
             Op::Shutdown { reason } => self.acknowledge_shutdown(&mut stream, reason),
             Op::Status => write_json(&mut stream, &self.status()),
+            Op::Lease { db, wait_ms, pid } => self.handle_lease(&mut stream, &db, wait_ms, pid),
             Op::Run(header) => {
                 self.handle_run(&mut stream, header);
                 Ok(())
@@ -869,6 +911,212 @@ impl Server {
                 write_json(&mut stream, &ack)
             }
         };
+    }
+
+    /// Answer `lease` for process `pid`, which is about to open the database
+    /// `db`, and hold the lease until the connection closes.
+    fn handle_lease(
+        self: &Arc<Self>,
+        stream: &mut UnixStream,
+        db: &str,
+        wait_ms: u64,
+        pid: u32,
+    ) -> io::Result<()> {
+        if !db.is_empty() && Path::new(db) != self.key {
+            return write_json(stream, &LeaseReply::refused("wrong_db"));
+        }
+        let wait = Duration::from_millis(wait_ms).min(MAX_LEASE_WAIT);
+        let id = self.ask_lease(pid);
+        let result = self.let_go(wait);
+        let sent = match result {
+            Ok(()) => {
+                self.grant_lease(id);
+                log(format!("leased the database to pid {pid}"));
+                write_json(stream, &LeaseReply::granted())
+            }
+            Err(reason) => {
+                log(format!("did not lease the database to pid {pid}: {reason}"));
+                write_json(stream, &LeaseReply::refused(reason))
+            }
+        };
+        if result.is_ok() && sent.is_ok() {
+            // The lease lasts until the holder's end closes, as it does
+            // when the holder exits, however it exits.
+            let _ = stream.set_read_timeout(None);
+            let mut buf = [0u8; 64];
+            loop {
+                match stream.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(_) => {}
+                    Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                    Err(_) => break,
+                }
+            }
+            log(format!("pid {pid} let go of its lease"));
+        }
+        self.end_lease(id);
+        sent
+    }
+
+    /// Count process `pid` in as asking for a lease; see [`Server::end_lease`].
+    fn ask_lease(&self, pid: u32) -> u64 {
+        let mut leases = self.leases.lock().unwrap_or_else(PoisonError::into_inner);
+        leases.next_id += 1;
+        leases.generation += 1;
+        let id = leases.next_id;
+        leases.holders.push(Holder {
+            id,
+            pid,
+            since: Instant::now(),
+            granted: false,
+        });
+        id
+    }
+
+    fn grant_lease(&self, id: u64) {
+        let mut leases = self.leases.lock().unwrap_or_else(PoisonError::into_inner);
+        leases.granted += 1;
+        if let Some(holder) = leases.holders.iter_mut().find(|h| h.id == id) {
+            holder.granted = true;
+        }
+    }
+
+    /// Whether any process holds a lease or waits for one.
+    fn lease_asked(&self) -> bool {
+        !self
+            .leases
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .holders
+            .is_empty()
+    }
+
+    /// Count the lease `id` out. When it was the last, the database is
+    /// opened again, after [`UNLEASE_DELAY`], unless another lease is asked
+    /// for by then.
+    fn end_lease(self: &Arc<Self>, id: u64) {
+        let generation = {
+            let mut leases = self.leases.lock().unwrap_or_else(PoisonError::into_inner);
+            leases.holders.retain(|h| h.id != id);
+            if !leases.holders.is_empty() {
+                return;
+            }
+            leases.generation
+        };
+        if self.phase.get() == Phase::Leased {
+            self.spawn_background("axil-unlease", move |server| server.unlease(generation));
+        }
+    }
+
+    /// Close the database for a lease, within `wait`: stop serving it, and
+    /// wait for the requests and the warm-up running on it. When the time
+    /// runs out first, serve on and return `lease_timeout`. With the
+    /// database closed for another lease already, return at once.
+    fn let_go(&self, wait: Duration) -> Result<(), &'static str> {
+        let deadline = Instant::now() + wait;
+        // One caller at a time moves the daemon out of ready; another
+        // waits for what that one gets to.
+        loop {
+            match self.phase.get() {
+                Phase::Leased => return Ok(()),
+                Phase::Stopping => return Err("stopping"),
+                Phase::Ready => {
+                    if self.phase.advance(Phase::Ready, Phase::Leasing) {
+                        break;
+                    }
+                    continue;
+                }
+                // Opening, reopening, or letting go for another lease.
+                Phase::Starting | Phase::Reloading | Phase::Leasing => {}
+            }
+            if Instant::now() >= deadline {
+                return Err("lease_timeout");
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        let Some(state) = self.state.get() else {
+            self.phase.advance(Phase::Leasing, Phase::Ready);
+            return Err("lease_timeout");
+        };
+        log("letting go of the database for a lease");
+        let left = deadline.saturating_duration_since(Instant::now());
+        match state.release(left) {
+            Ok(()) => {
+                // A shutdown that began meanwhile finds the database closed.
+                if self.phase.advance(Phase::Leasing, Phase::Leased) {
+                    self.write_info();
+                }
+                Ok(())
+            }
+            // A request panicked on the handle, which is never closed: the
+            // daemon is stopping, and its exit lets the database go.
+            Err(ReopenError::Poisoned) => Err("stopping"),
+            Err(_) => {
+                self.phase.advance(Phase::Leasing, Phase::Ready);
+                Err("lease_timeout")
+            }
+        }
+    }
+
+    /// Open the database again once the last lease has ended, unless one
+    /// is asked for again by the time it opens: the leases of `generation`
+    /// were the last.
+    fn unlease(self: &Arc<Self>, generation: u64) {
+        thread::sleep(UNLEASE_DELAY);
+        let last = || {
+            let leases = self.leases.lock().unwrap_or_else(PoisonError::into_inner);
+            leases.generation == generation && leases.holders.is_empty()
+        };
+        if !last() || !self.phase.advance(Phase::Leased, Phase::Reloading) {
+            return;
+        }
+        let Some(state) = self.state.get() else {
+            return;
+        };
+        log("the last lease ended: opening the database again");
+        let deadline = Instant::now() + self.opts.open_wait;
+        let opened = loop {
+            if self.phase.get() == Phase::Stopping {
+                return;
+            }
+            if !last() {
+                // Closed it stays, for the lease just asked for.
+                self.phase.advance(Phase::Reloading, Phase::Leased);
+                return;
+            }
+            let before = FileFp::read(&self.key);
+            match state.reopen(self.opts.reopen_wait) {
+                Ok(()) => break Ok(before),
+                // A request panicked; the daemon is stopping.
+                Err(ReopenError::Poisoned) => return,
+                Err(ReopenError::Open(e))
+                    if crate::is_lock_contention(&e) && Instant::now() < deadline =>
+                {
+                    thread::sleep(Duration::from_millis(100));
+                }
+                Err(ReopenError::Open(e)) => break Err(format!("{e:#}")),
+                Err(e) => break Err(e.to_string()),
+            }
+        };
+        match opened {
+            Ok(_) if self.phase.get() == Phase::Stopping => {}
+            Ok(before) => {
+                if let Some(why) = unservable(state) {
+                    self.stop_blocked(why);
+                    return;
+                }
+                self.set_fresh(before);
+                self.fail_graph.store(false, Ordering::Release);
+                // Idle from now, not from before the lease.
+                self.touch();
+                // On disk before a client can see it, as at the first open.
+                self.write_info_as(Phase::Ready.name());
+                self.phase.advance(Phase::Reloading, Phase::Ready);
+                log("opened the database again");
+                self.prewarm_on(state);
+            }
+            Err(failed) => self.stop_blocked(format!("reopening after a lease: {failed}")),
+        }
     }
 
     /// Answer `shutdown`, then begin it.
@@ -924,6 +1172,7 @@ impl Server {
         match self.phase.get() {
             Phase::Starting => return refused(RunReply::Starting),
             Phase::Stopping => return refused(RunReply::Stopping),
+            Phase::Leasing | Phase::Leased => return refused(RunReply::Leased),
             Phase::Ready | Phase::Reloading => {}
         }
         if let Some(reason) = self.identity.mismatch(&header) {
@@ -997,6 +1246,11 @@ impl Server {
     fn gate(&self, deadline_ms: Option<u64>, writes: bool) -> Result<(), NotServed> {
         if expired(deadline_ms) {
             return Err(NotServed::Expired);
+        }
+        // A write that waited for the writer lock while the database was
+        // let go of.
+        if matches!(self.phase.get(), Phase::Leasing | Phase::Leased) {
+            return Err(NotServed::Leased);
         }
         let fresh_for = if writes { Duration::ZERO } else { FRESH_FOR };
         match self.check(fresh_for, 1) {
@@ -1175,7 +1429,13 @@ impl Server {
     /// The graph's backend may write its adjacency tables. A panic there
     /// can unwind through a write transaction, so it leaves the handle as a
     /// request that panicked does ([`WarmState::poisoned`]).
+    ///
+    /// A process waiting for a lease would only wait longer for it, so then
+    /// nothing is warmed up: the reopen after its lease does it.
     fn prewarm_on(self: &Arc<Self>, state: &WarmState) {
+        if self.lease_asked() {
+            return;
+        }
         let Some(warm) = state.handle() else {
             return;
         };
@@ -1286,6 +1546,21 @@ impl Server {
             .unwrap_or_else(PoisonError::into_inner)
             .stale
             .clone();
+        let (leases, leases_granted) = {
+            let leases = self.leases.lock().unwrap_or_else(PoisonError::into_inner);
+            let holders: Vec<Value> = leases
+                .holders
+                .iter()
+                .map(|h| {
+                    json!({
+                        "pid": h.pid,
+                        "granted": h.granted,
+                        "secs": h.since.elapsed().as_secs(),
+                    })
+                })
+                .collect();
+            (holders, leases.granted)
+        };
         json!({
             "op": "status",
             "state": self.phase.get().name(),
@@ -1308,7 +1583,8 @@ impl Server {
             },
             "in_flight": self.in_flight.load(Ordering::SeqCst),
             "stale": stale,
-            "lease_holder": Value::Null,
+            "lease_holders": leases,
+            "leases_granted": leases_granted,
             "abandoned_recalls": cli_io::RECALL_SLOTS.live(),
             "panics": u64::from(self.state.get().is_some_and(WarmState::poisoned)),
             "reloads": self.stats.reloads.load(Ordering::Acquire),
@@ -1467,6 +1743,8 @@ pub fn run_daemon(
 ) -> anyhow::Result<i32> {
     let key = cli_io::db_key(db)?;
     anyhow::ensure!(key.is_file(), "no database at {}", key.display());
+    // From here on, the database is this process's to open, not to lease.
+    super::lease::serve_as_daemon(&key);
     let run = RunDir::of(&key);
     run.create()?;
     let Some(lock) = elect(&run)? else {
@@ -1514,6 +1792,7 @@ mod tests {
     use crate::cli_io::tests::parity::{
         self, build_fixture, check_parity_with, matrix, one_shot_at, Case, Run,
     };
+    use crate::daemon::lease::{self, Lease};
     use crate::daemon::proto::RunOutcome;
 
     fn options(idle_timeout: Duration) -> Options {
@@ -2111,5 +2390,143 @@ mod tests {
         *server.last_active.lock().unwrap() = (Instant::now(), hours_ago);
         assert_eq!(server.tick(), Some(StopReason::Idle));
         stop(server);
+    }
+
+    /// Ask `server` for a lease with `db` and `wait_ms`, and return its
+    /// answer with the connection that holds the lease.
+    fn ask(server: &Server, db: &Path, wait_ms: u64) -> (LeaseReply, UnixStream) {
+        let mut stream = proto::connect(server.run.socket(), Duration::from_secs(30)).unwrap();
+        let op = Op::Lease {
+            db: db.display().to_string(),
+            wait_ms,
+            pid: std::process::id(),
+        };
+        write_json(&mut stream, &op).unwrap();
+        (read_json(&mut stream).unwrap(), stream)
+    }
+
+    fn wait_for_phase(server: &Server, phase: Phase) {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while server.phase.get() != phase {
+            assert!(
+                Instant::now() < deadline,
+                "still {:?}, not {phase:?}",
+                server.phase.get()
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn holders(server: &Server) -> usize {
+        server.status()["lease_holders"].as_array().unwrap().len()
+    }
+
+    /// A lease closes the database, so another process can open it, and
+    /// keeps it closed until the last holder lets go; then the daemon opens
+    /// it again and serves.
+    #[test]
+    fn a_lease_closes_the_database_until_the_last_holder_lets_go() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = build_fixture(tmp.path());
+        let db = proj.join(".axil/memory.axil");
+        let server = start(&db);
+        quiet(&server);
+
+        let Lease::Held(first) = lease::lease(&server.key, Duration::from_secs(10)) else {
+            panic!("not granted");
+        };
+        assert_eq!(server.phase.get(), Phase::Leased);
+        assert!(server.state.get().unwrap().handle().is_none());
+        assert_eq!(info_of(&server).state, "leased");
+        assert_eq!(server.hello().state, "leased");
+        // The holder can open it, as no process could while the daemon
+        // had it open.
+        drop(axil_core::Axil::open(&db).build().unwrap());
+        let outcome = send(&server, &["boot"], &proj, None);
+        assert_eq!(outcome.reply, RunReply::Leased);
+
+        // A second holder is granted at once.
+        let (reply, second) = ask(&server, &server.key, 1);
+        assert_eq!(reply, LeaseReply::granted());
+        assert_eq!(holders(&server), 2);
+        drop(second);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while holders(&server) > 1 {
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(10));
+        }
+        thread::sleep(UNLEASE_DELAY * 3);
+        assert_eq!(server.phase.get(), Phase::Leased, "reopened under a lease");
+
+        // A lease asked for while the reopen waits calls it off.
+        drop(first);
+        let (reply, third) = ask(&server, &server.key, 10_000);
+        assert_eq!(reply, LeaseReply::granted());
+        thread::sleep(UNLEASE_DELAY * 3);
+        assert_eq!(server.phase.get(), Phase::Leased, "reopened under a lease");
+
+        drop(third);
+        wait_for_phase(&server, Phase::Ready);
+        assert_eq!(info_of(&server).state, "ready");
+        served(send(&server, &["boot"], &proj, None));
+        let status = server.status();
+        assert_eq!(status["leases_granted"], 3);
+        assert_eq!(status["reloads"], 0);
+        stop(server);
+    }
+
+    /// A lease the requests running on the database outlast is refused,
+    /// and the daemon serves on; one that waits long enough gets it.
+    #[test]
+    fn a_lease_waits_for_the_running_requests_or_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = build_fixture(tmp.path());
+        let db = proj.join(".axil/memory.axil");
+        let server = start(&db);
+        quiet(&server);
+        let hold = |server: &Arc<Server>, ms: u64| {
+            server.spawn_background("test-hold", move |server| {
+                let _busy = server.busy();
+                let held = server.state.get().and_then(WarmState::handle);
+                thread::sleep(Duration::from_millis(ms));
+                drop(held);
+            });
+        };
+
+        hold(&server, 1500);
+        let (reply, refused) = ask(&server, &server.key, 200);
+        assert_eq!(reply, LeaseReply::refused("lease_timeout"));
+        drop(refused);
+        assert_eq!(server.phase.get(), Phase::Ready);
+        quiet(&server);
+        served(send(&server, &["boot"], &proj, None));
+
+        hold(&server, 500);
+        let started = Instant::now();
+        let (reply, held) = ask(&server, &server.key, 10_000);
+        assert_eq!(reply, LeaseReply::granted());
+        assert!(started.elapsed() >= Duration::from_millis(300));
+        drop(held);
+        wait_for_phase(&server, Phase::Ready);
+
+        // Another database's lease is not this daemon's to grant.
+        let (reply, _) = ask(&server, &proj.join("other.axil"), 10_000);
+        assert_eq!(reply, LeaseReply::refused("wrong_db"));
+        assert_eq!(server.phase.get(), Phase::Ready);
+        stop(server);
+    }
+
+    /// A daemon shut down while leased has nothing left to close.
+    #[test]
+    fn a_daemon_stopped_while_leased_exits_clean() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = build_fixture(tmp.path());
+        let server = start(&proj.join(".axil/memory.axil"));
+        quiet(&server);
+        let (reply, held) = ask(&server, &server.key, 10_000);
+        assert_eq!(reply, LeaseReply::granted());
+        stop(server.clone());
+        assert_eq!(info_of(&server).closed_cleanly, Some(true));
+        drop(held);
     }
 }

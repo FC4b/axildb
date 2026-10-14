@@ -137,6 +137,8 @@ pub enum NotServed {
     Unavailable,
     /// The request's deadline passed before the command could start.
     Expired,
+    /// The host let go of the database for a process that leased it.
+    Leased,
 }
 
 impl fmt::Display for NotServed {
@@ -149,6 +151,7 @@ impl fmt::Display for NotServed {
             NotServed::Terminal => f.write_str("the command reads stdin from a terminal"),
             NotServed::Unavailable => f.write_str("the database is not open"),
             NotServed::Expired => f.write_str("the request's deadline passed before it ran"),
+            NotServed::Leased => f.write_str("the database is leased to another process"),
         }
     }
 }
@@ -198,9 +201,15 @@ impl std::error::Error for OpenPrinted {}
 /// and said so on the host's own stderr. The open would repair it too and
 /// print that it did, which would keep the database from being served for
 /// a line a one-shot run prints once, in the first command after the crash.
+///
+/// The host's own open skips the open guard ([`axil_core::without_open_guard`]):
+/// the guard asks the host to let go, or, in the daemon, checks that nothing
+/// but this opens the database.
 fn open_warm(path: &Path) -> anyhow::Result<WarmDb> {
-    repair_vector_store(path);
-    let (stdout, stderr, warm) = cli_io::capture(ReqCtx::default(), || WarmDb::open(path));
+    let (stdout, stderr, warm) = axil_core::without_open_guard(|| {
+        repair_vector_store(path);
+        cli_io::capture(ReqCtx::default(), || WarmDb::open(path))
+    });
     let warm = warm?;
     if stdout.is_empty() && stderr.is_empty() {
         return Ok(warm);
