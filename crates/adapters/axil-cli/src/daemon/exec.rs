@@ -19,8 +19,8 @@
 //!   and by the recall workers a `--timeout-ms` deadline leaves running go
 //!   to the host's stderr: those threads carry no request.
 //! - A command that panics exits 1 with one `axil: the command panicked`
-//!   line on stderr, not the panic hook's message, and the host reopens the
-//!   database before the next request.
+//!   line on stderr, not the panic hook's message. The host then serves
+//!   nothing more and must exit; see [`WarmState::poisoned`].
 //! - Help and usage errors render as for a pipe, without color. They are
 //!   served only to a client whose `AXIL_DB` matches the host's (unset, once
 //!   the host has removed its own), since clap prints them differently with
@@ -50,9 +50,6 @@ use crate::{Cli, Command, Output};
 /// The stack a request runs on: `main`'s. In debug builds clap's parser for
 /// the whole command set overflows a default thread stack.
 const REQUEST_STACK: usize = 32 * 1024 * 1024;
-
-/// How long a reopen waits for the requests still using the old handle.
-const REOPEN_WAIT: Duration = Duration::from_secs(3);
 
 /// One command line, as the client's process was asked to run it.
 pub struct Request {
@@ -98,8 +95,9 @@ pub enum NotServed {
     /// The open handle lacks what the command needs: the command's own open
     /// would attach or create it.
     Lacks(Need),
-    /// The host has no open handle: a reopen failed, or it couldn't start the
-    /// request's thread.
+    /// The host has no handle to run it on: a reopen is running or failed,
+    /// a request panicked ([`WarmState::poisoned`]), or the request's thread
+    /// couldn't start.
     Unavailable,
 }
 
@@ -119,18 +117,50 @@ impl std::error::Error for NotServed {}
 
 /// The database a host keeps open, shared by every request it runs.
 pub struct WarmState {
-    /// The open handle. `None` after a reopen that failed to open again.
+    /// The open handle. `None` while a reopen waits for the old one to be
+    /// released, and after a reopen that failed to open again.
     warm: RwLock<Option<WarmDb>>,
     /// Where the handle reopens from.
     path: PathBuf,
     /// Held by a request that writes, so writes run one at a time.
     writer: Mutex<()>,
-    /// Set by a request that panicked: the handle is reopened before the
-    /// next request runs on it.
-    reopen: AtomicBool,
+    /// Set for good by a request that panicked; see [`WarmState::poisoned`].
+    poisoned: AtomicBool,
+    /// Held by the one [`WarmState::reopen`] running.
+    reopening: AtomicBool,
     #[cfg(test)]
     panic_next: AtomicBool,
 }
+
+/// Why [`WarmState::reopen`] did not reopen the database.
+#[derive(Debug)]
+pub enum ReopenError {
+    /// A request panicked on the handle: it can't be reopened in this
+    /// process (see [`WarmState::poisoned`]).
+    Poisoned,
+    /// Another reopen is running. Requests get [`NotServed::Unavailable`]
+    /// until it is done.
+    Running,
+    /// Requests still held the old handle when the timeout ran out. The
+    /// old handle is kept and serves on.
+    InUse,
+    /// The database did not open again. No handle is left, and requests get
+    /// [`NotServed::Unavailable`] until a later reopen succeeds.
+    Open(anyhow::Error),
+}
+
+impl fmt::Display for ReopenError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ReopenError::Poisoned => f.write_str("a request panicked on the open database"),
+            ReopenError::Running => f.write_str("another reopen is running"),
+            ReopenError::InUse => f.write_str("the database was still in use"),
+            ReopenError::Open(e) => write!(f, "the database did not open again: {e:#}"),
+        }
+    }
+}
+
+impl std::error::Error for ReopenError {}
 
 impl WarmState {
     /// Open the database at `path` (see [`WarmDb::open`]) to serve requests.
@@ -141,7 +171,8 @@ impl WarmState {
             path: warm.key().to_path_buf(),
             warm: RwLock::new(Some(warm)),
             writer: Mutex::new(()),
-            reopen: AtomicBool::new(false),
+            poisoned: AtomicBool::new(false),
+            reopening: AtomicBool::new(false),
             #[cfg(test)]
             panic_next: AtomicBool::new(false),
         })
@@ -149,42 +180,91 @@ impl WarmState {
 
     /// The open handle, if there is one.
     pub fn handle(&self) -> Option<WarmDb> {
-        self.warm
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+        self.slot_read().clone()
     }
 
-    /// Whether a request panicked since the handle was last opened.
-    pub fn needs_reopen(&self) -> bool {
-        self.reopen.load(Ordering::Acquire)
+    /// Whether a request panicked on the handle. Nothing is served after
+    /// that, and the host must exit the process with
+    /// [`std::process::exit`].
+    ///
+    /// A panic can unwind through an open redb write transaction, and redb
+    /// skips rolling one back on a panicking thread. The handle then counts
+    /// pages as allocated that no table references, and the next commit on
+    /// it, or the clean shutdown that closing it runs, would record them so
+    /// for good. So the handle is never used or closed again: it is leaked,
+    /// and its files stay open and locked, which also means this process
+    /// can't open the database again. When the process exits without
+    /// closing it, the next open finds the database not closed cleanly and
+    /// repairs it, as after a one-shot run that panicked.
+    ///
+    /// A request already running on another thread when the panic came is
+    /// not stopped, and may still commit.
+    pub fn poisoned(&self) -> bool {
+        self.poisoned.load(Ordering::Acquire)
     }
 
-    /// Close the handle and open the database again. New requests wait for
-    /// the reopen; it waits up to `timeout` for the requests still using the
-    /// old handle (see [`WarmDb::release`]) and keeps that handle if they
-    /// don't finish. If the open fails, no handle is left and requests are
-    /// [`NotServed::Unavailable`] until a later reopen succeeds.
-    pub fn reopen(&self, timeout: Duration) -> anyhow::Result<()> {
-        let mut slot = self.warm.write().unwrap_or_else(PoisonError::into_inner);
-        if let Some(warm) = slot.take() {
-            if let Err(warm) = warm.release(timeout) {
-                *slot = Some(warm);
-                anyhow::bail!("the database was still in use after {timeout:?}");
+    /// Close the handle and open the database again, for a host that found
+    /// the open handle stale.
+    ///
+    /// Only one reopen runs at a time; another caller gets
+    /// [`ReopenError::Running`] at once. While it runs, requests are
+    /// [`NotServed::Unavailable`] rather than queued behind it. It waits up
+    /// to `timeout` for the requests still using the old handle (see
+    /// [`WarmDb::release`]) and keeps that handle if they don't finish.
+    pub fn reopen(&self, timeout: Duration) -> Result<(), ReopenError> {
+        if self.poisoned() {
+            return Err(ReopenError::Poisoned);
+        }
+        if self
+            .reopening
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Err(ReopenError::Running);
+        }
+        struct Claim<'a>(&'a AtomicBool);
+        impl Drop for Claim<'_> {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::Release);
             }
         }
-        *slot = Some(WarmDb::open(&self.path)?);
-        self.reopen.store(false, Ordering::Release);
+        let _claim = Claim(&self.reopening);
+
+        // The lock is held only to take the handle out and to put one back,
+        // never across the wait or the open.
+        let old = self.slot_write().take();
+        if let Some(old) = old {
+            if let Err(old) = old.release(timeout) {
+                *self.slot_write() = Some(old);
+                return Err(ReopenError::InUse);
+            }
+        }
+        let warm = WarmDb::open(&self.path).map_err(ReopenError::Open)?;
+        *self.slot_write() = Some(warm);
         Ok(())
     }
 
-    /// The handle a request runs on, reopened first after a panic.
+    /// The handle a request runs on.
     fn current(&self) -> Result<WarmDb, NotServed> {
-        if self.needs_reopen() {
-            // A failure keeps the old handle, or leaves none (Unavailable).
-            let _ = self.reopen(REOPEN_WAIT);
+        if self.poisoned() {
+            return Err(NotServed::Unavailable);
         }
         self.handle().ok_or(NotServed::Unavailable)
+    }
+
+    /// Record that a request panicked on `warm`, and leak it so the
+    /// database is never closed cleanly (see [`WarmState::poisoned`]).
+    fn poison(&self, warm: WarmDb) {
+        self.poisoned.store(true, Ordering::Release);
+        std::mem::forget(warm);
+    }
+
+    fn slot_read(&self) -> std::sync::RwLockReadGuard<'_, Option<WarmDb>> {
+        self.warm.read().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn slot_write(&self) -> std::sync::RwLockWriteGuard<'_, Option<WarmDb>> {
+        self.warm.write().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
@@ -196,7 +276,7 @@ impl WarmState {
 ///
 /// The command runs on a thread of its own with `main`'s stack. An error
 /// prints as the one-shot binary prints it and exits 1. A panic exits 1 too,
-/// and the database is reopened before the next request.
+/// and poisons `state` ([`WarmState::poisoned`]).
 pub fn execute_captured(req: Request, state: &WarmState) -> Result<Response, NotServed> {
     std::thread::scope(|scope| {
         let request = std::thread::Builder::new()
@@ -229,6 +309,11 @@ fn execute(req: Request, state: &WarmState) -> Result<Response, NotServed> {
 
     let _writing =
         writes(&cli.command).then(|| state.writer.lock().unwrap_or_else(PoisonError::into_inner));
+    // A write that waited on the lock behind one that panicked.
+    if state.poisoned() {
+        return Err(NotServed::Unavailable);
+    }
+    let held = warm.clone();
     let ctx = ReqCtx {
         stdin: req.stdin,
         slow_query_log: req.slow_query_log,
@@ -248,7 +333,7 @@ fn execute(req: Request, state: &WarmState) -> Result<Response, NotServed> {
     match result {
         Ok(result) => finish(result, stdout, stderr),
         Err(payload) => {
-            state.reopen.store(true, Ordering::Release);
+            state.poison(held);
             Ok(panicked(stdout, stderr, &*payload))
         }
     }
@@ -441,6 +526,7 @@ mod tests {
     };
     use std::ffi::OsStr;
     use std::sync::Arc;
+    use std::time::Instant;
 
     /// A request from a client working in `cwd`. Its stdin is piped and
     /// holds `stdin`, empty by default, like the one-shot children's.
@@ -787,43 +873,108 @@ mod tests {
         );
     }
 
-    /// A request that panics is answered with exit 1, the host serves the
-    /// next one, and that one runs on a reopened handle. A write that
-    /// panicked doesn't leave the writer lock poisoned.
+    /// A request that panics is answered, and poisons the state: the
+    /// requests after it, however many arrive at once, are refused at once,
+    /// nothing reopens, and the handle is never closed, so its files stay
+    /// locked until the process exits.
     #[test]
-    fn a_panicking_request_is_answered_and_the_handle_reopened() {
+    fn a_panicking_request_is_answered_and_poisons_the_state() {
         let tmp = tempfile::tempdir().unwrap();
         let proj = build_fixture(tmp.path());
-        let state = WarmState::open(&proj.join(".axil/memory.axil")).unwrap();
+        let db = proj.join(".axil/memory.axil");
+        let state = WarmState::open(&db).unwrap();
         let boot = || request(&["boot"], &proj, None, None);
-        let store = || {
-            let data = r#"{"summary":"after a panic"}"#;
-            request(&["store", "decisions", data], &proj, None, None)
-        };
 
-        let first = Arc::downgrade(state.handle().unwrap().db());
+        // A reference held elsewhere, as by a recall worker left running
+        // past its deadline, must not make the refusals wait for it.
+        let held = state.handle().unwrap();
         state.panic_next.store(true, Ordering::Release);
-        let r = execute_captured(boot(), &state).unwrap();
+        let data = r#"{"summary":"a store that panics"}"#;
+        let store = request(&["store", "decisions", data], &proj, None, None);
+        let r = execute_captured(store, &state).unwrap();
         assert_eq!(r.exit, 1);
         let err = String::from_utf8_lossy(&r.stderr);
         assert!(
             err.ends_with("axil: the command panicked: a request panicked on purpose\n"),
             "{err}"
         );
-        assert!(state.needs_reopen());
+        assert!(state.poisoned());
 
-        let r = execute_captured(boot(), &state).unwrap();
-        assert_eq!(r.exit, 0, "{}", String::from_utf8_lossy(&r.stderr));
-        assert!(!state.needs_reopen());
+        let started = Instant::now();
+        std::thread::scope(|s| {
+            for _ in 0..8 {
+                s.spawn(|| {
+                    assert_eq!(
+                        execute_captured(boot(), &state),
+                        Err(NotServed::Unavailable)
+                    )
+                });
+            }
+        });
         assert!(
-            first.upgrade().is_none(),
-            "the next request ran on the old handle"
+            started.elapsed() < Duration::from_secs(1),
+            "{:?}",
+            started.elapsed()
         );
+        assert!(matches!(
+            state.reopen(Duration::from_secs(1)),
+            Err(ReopenError::Poisoned)
+        ));
 
-        state.panic_next.store(true, Ordering::Release);
-        assert_eq!(execute_captured(store(), &state).unwrap().exit, 1);
-        let r = execute_captured(store(), &state).unwrap();
-        assert_eq!(r.exit, 0, "{}", String::from_utf8_lossy(&r.stderr));
+        // Every other reference gone, the database is still open and locked.
+        let weak = Arc::downgrade(held.db());
+        drop(held);
+        drop(state);
+        assert!(weak.upgrade().is_some());
+        assert!(WarmDb::open(&db).is_err());
+    }
+
+    /// One reopen runs at a time, and while it waits for the old handle the
+    /// requests are refused rather than queued behind it. A reopen that
+    /// times out keeps the old handle serving.
+    #[test]
+    fn a_reopen_runs_once_and_never_holds_up_requests() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = build_fixture(tmp.path());
+        let state = WarmState::open(&proj.join(".axil/memory.axil")).unwrap();
+        let boot = || request(&["boot"], &proj, None, None);
+        assert_eq!(execute_captured(boot(), &state).unwrap().exit, 0);
+
+        let held = state.handle().unwrap();
+        let first = Arc::downgrade(held.db());
+        assert!(matches!(
+            state.reopen(Duration::from_millis(50)),
+            Err(ReopenError::InUse)
+        ));
+        assert_eq!(execute_captured(boot(), &state).unwrap().exit, 0);
+
+        std::thread::scope(|s| {
+            let reopen = s.spawn(|| state.reopen(Duration::from_secs(30)));
+            // The reopen has taken the handle out and waits on `held`.
+            while state.handle().is_some() {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            let started = Instant::now();
+            for _ in 0..4 {
+                assert!(matches!(
+                    state.reopen(Duration::from_secs(30)),
+                    Err(ReopenError::Running)
+                ));
+                assert_eq!(
+                    execute_captured(boot(), &state),
+                    Err(NotServed::Unavailable)
+                );
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(1),
+                "{:?}",
+                started.elapsed()
+            );
+            drop(held);
+            reopen.join().unwrap().unwrap();
+        });
+        assert!(first.upgrade().is_none(), "the old handle is still open");
+        assert_eq!(execute_captured(boot(), &state).unwrap().exit, 0);
     }
 
     /// The host relies on catching a request's panic, so no build may abort
