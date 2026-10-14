@@ -82,9 +82,10 @@ pub struct Entity {
 /// 3. Long flags: `--dry-run`, `--top-k` (without a value) → code entity
 /// 4. Qualified paths: `auth::login`, `axil-core::brain::MemoryType` → code symbol
 /// 5. File paths: `/src/auth/login.rs` → file entity
-/// 6. CamelCase identifiers: `AuthModule` → code entity
-/// 7. snake_case identifiers: `auth_module` → code entity
-/// 8. Declarations in code: `fn parse_token(` → code symbol
+/// 6. Hyphenated names: `recall-for-file`, `bge-m3`, `cargo-component` → code entity
+/// 7. CamelCase identifiers: `AuthModule` → code entity
+/// 8. snake_case identifiers: `auth_module` → code entity
+/// 9. Declarations in code: `fn parse_token(` → code symbol
 ///
 /// Quoted strings are not entities: a quoted phrase is an error message or an
 /// example, and linking notes on it joins notes that merely quote the same
@@ -96,6 +97,7 @@ pub fn extract_entities(text: &str) -> Vec<Entity> {
     extract_long_flags(&mut x);
     extract_qualified_paths(&mut x);
     extract_file_paths(&mut x);
+    extract_hyphenated_names(&mut x);
     extract_camel_case(&mut x);
     extract_snake_case(&mut x);
     extract_declarations(&mut x);
@@ -954,6 +956,51 @@ fn is_companion_file(s: &str, next_word: &str) -> bool {
     COMPANION_SUFFIXES.contains(&s) || s == ".ts" && matches!(next_word, "store" | "file")
 }
 
+/// A hyphenated word: letters first, then `-`-joined segments that may hold
+/// digits, dots and underscores (`nli-deberta-v3-xsmall`, `glm-5.3-flash`,
+/// `x86_64-apple-darwin`).
+static HYPHENATED_WORD: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?:^|[\s`(\[{"',])([A-Za-z][A-Za-z0-9_.]*(?:-[A-Za-z0-9_.]+)+)"#).unwrap()
+});
+
+/// A word and a number or version (`Tier-1`, `BUG-10`, `utf-8`, `top-5`,
+/// `post-1.2.0`): a plan label, a measurement or a release, not a name.
+static WORD_NUMBER: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[A-Za-z]+(?:-v?\d+(?:\.\d+)*[a-z]?)+$").unwrap());
+
+/// Hyphenated names. Most hyphenated words are English compounds
+/// (`free-form`, `one-shot`), so only three shapes count: an `axil`
+/// subcommand (`recall-for-file`), a name with a version or size in it
+/// (`bge-m3`, `gpt-4o-mini`, `axildb-v1.2.0`), and a `cargo-` or `scip-`
+/// tool (`cargo-component`, `scip-go`).
+fn extract_hyphenated_names(x: &mut Extraction<'_>) {
+    let text = x.text;
+    for caps in HYPHENATED_WORD.captures_iter(text) {
+        let Some(m) = caps.get(1) else { continue };
+        let word = m.as_str().trim_end_matches(['.', '_']);
+        let range = m.start()..m.start() + word.len();
+        // A range of labels (`BUG-1..8`) is bookkeeping.
+        if x.is_claimed(&range) || text[range.end..].starts_with("::") || word.contains("..") {
+            continue;
+        }
+        let versioned = word.contains(|c: char| c.is_ascii_digit()) && !WORD_NUMBER.is_match(word);
+        let tool = word.starts_with("cargo-") || word.starts_with("scip-");
+        let subcommand = AXIL_COMMANDS.binary_search(&word).is_ok();
+        if !(versioned || tool || subcommand) {
+            continue;
+        }
+        x.claim(range);
+        x.push(
+            word.to_lowercase(),
+            Entity {
+                name: word.to_string(),
+                entity_type: EntityType::Code,
+                source_text: word.to_string(),
+            },
+        );
+    }
+}
+
 fn extract_camel_case(x: &mut Extraction<'_>) {
     for word in split_into_identifiers(x.text) {
         if is_camel_case(word) && word.len() >= 4 && !x.is_claimed(&x.range_of(word)) {
@@ -1744,6 +1791,38 @@ mod tests {
                 .collect();
             assert!(files.is_empty(), "{prose:?} minted {files:?}");
         }
+    }
+
+    #[test]
+    fn hyphenated_names_but_not_english_compounds() {
+        let found = sources(
+            "recall-for-file uses nli-deberta-v3-xsmall and glm-5.3-flash on \
+             x86_64-apple-darwin; cargo-component builds it. A one-shot, free-form, \
+             8192-token pass for Tier-1 (BUG-10, BUG-1..8) at top-5 over utf-8 text, post-1.2.0.",
+        );
+        for name in [
+            "recall-for-file",
+            "nli-deberta-v3-xsmall",
+            "glm-5.3-flash",
+            "x86_64-apple-darwin",
+            "cargo-component",
+        ] {
+            assert!(found.iter().any(|f| f == name), "{name}: {found:?}");
+        }
+        for word in [
+            "one-shot",
+            "free-form",
+            "8192-token",
+            "Tier-1",
+            "BUG-10",
+            "BUG-1..8",
+            "top-5",
+            "utf-8",
+            "post-1.2.0",
+        ] {
+            assert!(!found.iter().any(|f| f == word), "{word}: {found:?}");
+        }
+        assert!(!found.iter().any(|f| f == "x86_64"), "{found:?}");
     }
 
     #[test]
