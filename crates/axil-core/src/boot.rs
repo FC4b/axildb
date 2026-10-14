@@ -205,10 +205,14 @@ impl Axil {
         // `axil.toml` from disk; a single load here yields identical per-table
         // half-lives (a missing/unreadable config maps to an empty
         // `DecayConfig`, whose `half_life_for` returns the default for every
-        // table — the same fallback the old per-call path took).
-        let decay = std::env::current_dir()
-            .ok()
-            .and_then(|cwd| crate::config::load_config_from(&cwd).ok())
+        // table — the same fallback the old per-call path took). The file is
+        // the one nearest the database, which the open reads too: the
+        // process's working directory need not be in the database's project.
+        let config_dir = self
+            .path()
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."));
+        let decay = crate::config::load_config_from(config_dir)
             .map(|c| c.decay)
             .unwrap_or_default();
 
@@ -1830,6 +1834,35 @@ mod tests {
             .map(|r| r.data["summary"].as_str().unwrap())
             .collect();
         assert_eq!(order, ["pinned", "recent", "old"]);
+    }
+
+    /// The decay half-lives come from the `axil.toml` beside the database,
+    /// whatever the process's working directory is.
+    #[test]
+    fn boot_decays_with_the_config_beside_the_database() {
+        let (db, dir) = temp_db();
+        let mut old = Record::new("decisions", json!({ "summary": "old", "_importance": 1.0 }));
+        old.created_at = Utc::now() - chrono::Duration::days(30);
+        db.insert_preserving(old).unwrap();
+        let recent = Record::new(
+            "decisions",
+            json!({ "summary": "recent", "_importance": 0.6 }),
+        );
+        db.insert_preserving(recent).unwrap();
+        let first = || {
+            let ctx = db.boot(BootOptions::default()).unwrap();
+            let row = rows(&ctx, "recent_decisions")[0].as_str().unwrap();
+            row.rsplit(" · ").next().unwrap().to_string()
+        };
+
+        // The default half-life keeps the old decision ahead.
+        assert_eq!(first(), "old");
+        std::fs::write(
+            dir.path().join("axil.toml"),
+            "[decay]\ntables.decisions = 1\n",
+        )
+        .unwrap();
+        assert_eq!(first(), "recent");
     }
 
     #[test]

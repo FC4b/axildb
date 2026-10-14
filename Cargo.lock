@@ -551,6 +551,7 @@ dependencies = [
  "clap",
  "http-body-util",
  "indicatif",
+ "redb",
  "rustyline",
  "serde",
  "serde_json",

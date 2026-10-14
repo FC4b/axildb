@@ -103,7 +103,7 @@ impl Runtime {
             .map_err(|e| format!("failed to set truncation: {e}"))?;
 
         if files.pool_size > 1 {
-            eprintln!("[axil-vector] session pool size = {}", files.pool_size);
+            axil_core::diagln!("[axil-vector] session pool size = {}", files.pool_size);
         }
 
         Ok(Self {
@@ -781,7 +781,7 @@ fn build_session(
         };
         if let Ok(gpu_builder) = attach(builder) {
             if log_ep {
-                eprintln!("[axil-vector] {label} execution provider enabled");
+                axil_core::diagln!("[axil-vector] {label} execution provider enabled");
             }
             return gpu_builder
                 .commit_from_file(model_file)
@@ -791,9 +791,9 @@ fn build_session(
 
     if log_ep {
         if attempts.is_empty() {
-            eprintln!("[axil-vector] CPU execution provider (no GPU feature compiled in)");
+            axil_core::diagln!("[axil-vector] CPU execution provider (no GPU feature compiled in)");
         } else {
-            eprintln!("[axil-vector] CPU execution provider (GPU EPs attempted but did not register — check driver/runtime libs)");
+            axil_core::diagln!("[axil-vector] CPU execution provider (GPU EPs attempted but did not register — check driver/runtime libs)");
         }
     }
     fresh_builder()?

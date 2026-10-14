@@ -285,13 +285,13 @@ where
     let dest = dir.join(file.local);
     match check(&dest, file) {
         Ok(()) => {
-            eprintln!("  [ok] {} (matches the pinned sha256)", file.local);
+            axil_core::diagln!("  [ok] {} (matches the pinned sha256)", file.local);
             return Ok(());
         }
-        Err(e) if dest.exists() => eprintln!("  [replace] {e}"),
+        Err(e) if dest.exists() => axil_core::diagln!("  [replace] {e}"),
         Err(_) => {}
     }
-    eprintln!("  [download] {url} → {}", dest.display());
+    axil_core::diagln!("  [download] {url} → {}", dest.display());
     let mut last = String::new();
     for attempt in 1..=ATTEMPTS {
         let tmp = temp_path(dir, file.local);
@@ -300,7 +300,7 @@ where
             last = e;
             if attempt < ATTEMPTS {
                 let wait = 2u64.pow(attempt);
-                eprintln!(
+                axil_core::diagln!(
                     "  [retry] attempt {attempt}/{ATTEMPTS} failed: {last} — retrying in {wait}s"
                 );
                 std::thread::sleep(Duration::from_secs(wait));
@@ -318,7 +318,7 @@ where
         return match fs::rename(&tmp, &dest) {
             Ok(()) => {
                 let size_mb = file.size as f64 / (1024.0 * 1024.0);
-                eprintln!(
+                axil_core::diagln!(
                     "  [done] {} ({size_mb:.1} MB, sha256 verified)",
                     dest.display()
                 );

@@ -373,7 +373,7 @@ fn decode_edge(edge_id: &str, bytes: &[u8], corrupt: &mut Vec<String>) -> Option
     match Edge::from_bytes(bytes) {
         Ok(edge) => Some(edge),
         Err(e) => {
-            eprintln!("warning: removing corrupt edge {edge_id}: {e}");
+            axil_core::diagln!("warning: removing corrupt edge {edge_id}: {e}");
             corrupt.push(edge_id.to_string());
             None
         }
@@ -1015,7 +1015,7 @@ impl GraphEngine {
             .get_or_init(|| {
                 self.prepare().map_err(|e| {
                     let msg = format!("graph store unavailable: {e}");
-                    eprintln!("axil: {msg}");
+                    axil_core::diagln!("axil: {msg}");
                     msg
                 })
             })
@@ -1073,7 +1073,7 @@ impl GraphEngine {
                 Ok(Store::Disk)
             }
             Err(e) => {
-                eprintln!("axil: graph adjacency tables unavailable ({e}); loading every edge into memory");
+                axil_core::diagln!("axil: graph adjacency tables unavailable ({e}); loading every edge into memory");
                 Ok(Store::Memory(RwLock::new(self.load_index()?)))
             }
         }
@@ -1230,7 +1230,7 @@ impl GraphEngine {
             Ok(())
         };
         if let Err(e) = purge() {
-            eprintln!("warning: failed to remove corrupt edges: {e}");
+            axil_core::diagln!("warning: failed to remove corrupt edges: {e}");
         }
     }
 

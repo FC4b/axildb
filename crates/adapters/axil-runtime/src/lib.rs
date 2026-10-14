@@ -623,11 +623,11 @@ mod shim {
             }) {
                 Ok(Ok(block)) => block,
                 Ok(Err(e)) => {
-                    eprintln!("[plugin {}] boot_block error: {e:?}", self.id);
+                    axil_core::diagln!("[plugin {}] boot_block error: {e:?}", self.id);
                     None
                 }
                 Err(e) => {
-                    eprintln!("[plugin {}] boot_block failed: {e}", self.id);
+                    axil_core::diagln!("[plugin {}] boot_block failed: {e}", self.id);
                     None
                 }
             }
@@ -1207,7 +1207,7 @@ mod abi {
                 wit::LogLevel::Warn => "WARN",
                 wit::LogLevel::Error => "ERROR",
             };
-            eprintln!("[plugin {lvl}] {message}");
+            axil_core::diagln!("[plugin {lvl}] {message}");
         }
     }
 

@@ -177,7 +177,7 @@ pub fn verbose_logging_enabled() -> bool {
 pub fn log_once_if_verbose(once: &std::sync::Once, msg: &str) {
     once.call_once(|| {
         if verbose_logging_enabled() {
-            eprintln!("{msg}");
+            crate::diagln!("{msg}");
         }
     });
 }
