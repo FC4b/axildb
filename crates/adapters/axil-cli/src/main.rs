@@ -1656,6 +1656,12 @@ enum Command {
         /// the others (memory recall passes over code-index vectors).
         #[arg(long)]
         embed_internal: bool,
+        /// Split long records into recall units again with this version's
+        /// splitter (one per dialog turn or fact), replacing the units and
+        /// vectors written when they were stored. Re-embeds every long
+        /// record's units; a ranking change, so opt-in.
+        #[arg(long)]
+        rechunk: bool,
         /// Show what would be fixed without doing it.
         #[arg(long)]
         dry_run: bool,
@@ -10705,6 +10711,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
             reindex,
             orphans,
             embed_internal,
+            rechunk,
             dry_run,
         } => {
             let db_path = require_db(&db_opt)?;
@@ -10721,7 +10728,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
 
             let mut exit = EXIT_OK;
             // If specific flags are given, run only those actions
-            if compact || reindex || orphans || embed_internal {
+            if compact || reindex || orphans || embed_internal || rechunk {
                 let mut actions = Vec::new();
 
                 if dry_run {
@@ -10865,6 +10872,16 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
                         }
                     }
 
+                    if rechunk {
+                        let n = db
+                            .rebuild_recall_units()
+                            .context("rebuilding recall units failed")?;
+                        actions.push(json!({
+                            "action": "rebuild_recall_units",
+                            "result": format!("re-split {n} records into recall units"),
+                        }));
+                    }
+
                     if embed_internal {
                         let (embedded, failed) = db
                             .reembed_missing_internal()
@@ -10924,6 +10941,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
                 && !reindex
                 && !orphans
                 && !embed_internal
+                && !rechunk
                 && db.has_timeseries_index()
                 && config.timeseries.auto_downsample
             {

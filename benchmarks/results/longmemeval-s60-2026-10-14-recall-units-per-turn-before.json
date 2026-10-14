@@ -1,0 +1,139 @@
+{
+  "provenance": {
+    "measured": "2026-10-15",
+    "build": "commit \"feat(recall): a time span the query names filters the candidates\" (built from WIP commit c0bb459, the same code before the branch was squashed), release",
+    "snapshot": "LongMemEval s, 60-question sample (.claude/worktrees/_agent/lme/data60), recall-qtc, top-5, --jobs 3",
+    "note": "baseline for the -after file. Built from the time-span commit; the four commits between it and the recall-unit commit (event_time, graph gate / degree norm / fixed seeds) cannot change this harness's ranking: it writes no event_time and attaches no graph engine. Insert timing (in the run's log, not here) was taken at load average 80-290 and is not comparable between runs."
+  },
+  "benchmark": "LongMemEval",
+  "variant": "s",
+  "strategy": "recall-qtc",
+  "model": "bge-small",
+  "rerank": "off",
+  "top_k": 5,
+  "total_questions": 60,
+  "overall": {
+    "hit_rate": 0.9833333333333333,
+    "avg_recall": 0.9791666666666666,
+    "avg_precision": 0.30666666666666614,
+    "recall_all": 0.9666666666666667,
+    "ndcg_at_10": 0.946240479314924,
+    "turn_recall_compact": 0.058333333333333334,
+    "turn_recall_full": 0.9791666666666666,
+    "tokens_compact": 249.99583333333334,
+    "tokens_full": 16355.033333333333,
+    "evidence_per_1k_tokens_compact": 0.2333372222870381,
+    "evidence_per_1k_tokens_full": 0.059869438766047556
+  },
+  "by_category": {
+    "single-session-assistant": {
+      "total": 10,
+      "hits": 10,
+      "hit_rate": 1.0,
+      "avg_recall": 1.0,
+      "avg_precision": 0.19999999999999998,
+      "recall_all": 1.0,
+      "ndcg_at_10": 1.0,
+      "turn_recall_compact": 0.0,
+      "turn_recall_full": 1.0,
+      "tokens_compact": 250.0,
+      "tokens_full": 12981.4,
+      "evidence_per_1k_tokens_compact": 0.0,
+      "evidence_per_1k_tokens_full": 0.07703329378957585
+    },
+    "single-session-preference": {
+      "total": 10,
+      "hits": 10,
+      "hit_rate": 1.0,
+      "avg_recall": 1.0,
+      "avg_precision": 0.19999999999999998,
+      "recall_all": 1.0,
+      "ndcg_at_10": 0.9630929753571458,
+      "turn_recall_compact": 0.2,
+      "turn_recall_full": 1.0,
+      "tokens_compact": 250.0,
+      "tokens_full": 17965.95,
+      "evidence_per_1k_tokens_compact": 0.8,
+      "evidence_per_1k_tokens_full": 0.055660847325078824
+    },
+    "multi-session": {
+      "total": 10,
+      "hits": 10,
+      "hit_rate": 1.0,
+      "avg_recall": 0.975,
+      "avg_precision": 0.5200000000000001,
+      "recall_all": 0.9,
+      "ndcg_at_10": 0.9647138925110136,
+      "turn_recall_compact": 0.1,
+      "turn_recall_full": 0.975,
+      "tokens_compact": 250.0,
+      "tokens_full": 17238.55,
+      "evidence_per_1k_tokens_compact": 0.4,
+      "evidence_per_1k_tokens_full": 0.05655928137807414
+    },
+    "single-session-user": {
+      "total": 10,
+      "hits": 9,
+      "hit_rate": 0.9,
+      "avg_recall": 0.9,
+      "avg_precision": 0.18,
+      "recall_all": 0.9,
+      "ndcg_at_10": 0.85,
+      "turn_recall_compact": 0.0,
+      "turn_recall_full": 0.9,
+      "tokens_compact": 249.975,
+      "tokens_full": 15956.3,
+      "evidence_per_1k_tokens_compact": 0.0,
+      "evidence_per_1k_tokens_full": 0.056404053571316656
+    },
+    "temporal-reasoning": {
+      "total": 10,
+      "hits": 10,
+      "hit_rate": 1.0,
+      "avg_recall": 1.0,
+      "avg_precision": 0.33999999999999997,
+      "recall_all": 1.0,
+      "ndcg_at_10": 0.9452588771061834,
+      "turn_recall_compact": 0.05,
+      "turn_recall_full": 1.0,
+      "tokens_compact": 250.0,
+      "tokens_full": 16943.825,
+      "evidence_per_1k_tokens_compact": 0.2,
+      "evidence_per_1k_tokens_full": 0.05901855100604497
+    },
+    "knowledge-update": {
+      "total": 10,
+      "hits": 10,
+      "hit_rate": 1.0,
+      "avg_recall": 1.0,
+      "avg_precision": 0.39999999999999997,
+      "recall_all": 1.0,
+      "ndcg_at_10": 0.9543771309152025,
+      "turn_recall_compact": 0.0,
+      "turn_recall_full": 1.0,
+      "tokens_compact": 250.0,
+      "tokens_full": 17044.175,
+      "evidence_per_1k_tokens_compact": 0.0,
+      "evidence_per_1k_tokens_full": 0.05867107090838953
+    }
+  },
+  "misses": [
+    {
+      "question_id": "726462e0",
+      "question_type": "single-session-user",
+      "question_date": "2023/05/30 (Tue) 23:15",
+      "recall": 0.0,
+      "precision": 0.0,
+      "retrieved_sessions": [
+        "session_41",
+        "session_43",
+        "session_20",
+        "session_31",
+        "session_14"
+      ],
+      "answer_sessions": [
+        "session_11"
+      ]
+    }
+  ]
+}

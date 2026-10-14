@@ -1,7 +1,7 @@
 //! A bare `axil heal` downsamples: records past `full_retention_days` are
 //! summarized and the originals purged. That purge is automatic deletion, so
 //! `[healing] auto_compact = false` — "only an explicit compact deletes" —
-//! must turn it off.
+//! must turn it off, and a heal asked for one repair runs only that repair.
 
 #![cfg(feature = "timeseries")]
 
@@ -12,10 +12,15 @@ use axil_core::{Axil, RecordId};
 use axil_timeseries::AxilBuilderTimeSeriesExt;
 
 fn heal(db: &Path) {
+    heal_with(db, &[]);
+}
+
+fn heal_with(db: &Path, flags: &[&str]) {
     let output = Command::new(env!("CARGO_BIN_EXE_axil"))
         .arg("--db")
         .arg(db)
         .arg("heal")
+        .args(flags)
         .env_remove("AXIL_DB")
         .current_dir(db.parent().unwrap())
         .output()
@@ -86,4 +91,21 @@ fn bare_heal_downsamples_aged_records_by_default() {
         0,
         "default heal should downsample aged records"
     );
+}
+
+#[test]
+fn a_heal_asked_for_one_repair_does_not_downsample() {
+    for flag in ["--rechunk", "--embed-internal"] {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("memory.axil");
+        let ids = seed_aged_records(&db);
+
+        heal_with(&db, &[flag]);
+
+        assert_eq!(
+            surviving(&db, &ids),
+            ids.len(),
+            "`heal {flag}` must not purge aged records"
+        );
+    }
 }

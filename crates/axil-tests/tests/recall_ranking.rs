@@ -13,6 +13,8 @@
 //!   from recall and from full-text search.
 //! - Graph proximity counts only for a query that names an entity, and only
 //!   for the candidates linked to it.
+//! - A long record gets a vector per dialog turn or fact, and a database
+//!   written with older pieces can be re-split.
 //! - A query that names a span of time keeps the candidates inside it, and
 //!   ranks on relevance alone when none are. A record's `event_time`, when
 //!   it has one, says where in time it falls.
@@ -514,4 +516,38 @@ fn graph_proximity_needs_an_entity_the_query_names() {
     let mut expected: Vec<String> = named.iter().map(ToString::to_string).collect();
     expected.sort();
     assert_eq!(lifted("AuthService connection pool timeout"), expected);
+}
+
+#[test]
+fn a_long_record_gets_a_vector_per_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("turns.axil");
+    let db = open(&path, Arc::default(), false);
+    let mut turns: Vec<String> = (0..6)
+        .map(|i| format!("user: tell me about topic{i} {}", "and more words ".repeat(30)))
+        .collect();
+    turns.insert(3, format!("assistant: {}", "the connection pool timeout is thirty seconds ".repeat(12)));
+    let text = turns.join("\n");
+    let session = db.insert("sessions", json!({ "full_text": text })).unwrap();
+
+    let unit_count = |db: &Axil| -> usize {
+        db.get(&session.id)
+            .unwrap()
+            .unwrap()
+            .metadata
+            .and_then(|m| m.get("_recall_chunk_ids").cloned())
+            .and_then(|ids| ids.as_array().map(Vec::len))
+            .unwrap_or(0)
+    };
+    let units = axil_core::util::recall_units(&text);
+    assert_eq!(units.len(), turns.len(), "one unit per turn: {units:#?}");
+    assert_eq!(unit_count(&db), units.len());
+
+    // Re-splitting replaces the units rather than adding to them.
+    assert_eq!(db.rebuild_recall_units().unwrap(), 1);
+    assert_eq!(unit_count(&db), units.len());
+    let hits = db
+        .recall("connection pool timeout", 1, Some(cli_config()))
+        .unwrap();
+    assert_eq!(hits[0].record.id, session.id);
 }

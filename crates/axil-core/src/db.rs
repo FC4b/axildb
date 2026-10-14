@@ -17,7 +17,6 @@ use crate::plugin::{
 };
 use crate::record::{Record, RecordId};
 use crate::storage::Storage;
-use crate::util::{RECALL_CHUNK_MAX_BYTES, RECALL_CHUNK_OVERLAP_BYTES};
 
 /// Scoped-alias table. Distinct from axil-memory's
 /// `_entity_aliases` (which uses the `{entity, alias}` schema for
@@ -1397,6 +1396,41 @@ impl Axil {
             );
         }
         Ok((embedded, failed))
+    }
+
+    /// Split every record's text into recall units again, with the current
+    /// [`crate::util::recall_units`], replacing the units (and their
+    /// vectors and FTS documents) written when it was stored. Returns how
+    /// many records were re-split.
+    ///
+    /// Insert splits a record once, so a database written before the
+    /// splitter changed keeps the old units until this runs. Records with no
+    /// units before or after are left untouched. A no-op without a vector
+    /// or FTS index.
+    pub fn rebuild_recall_units(&self) -> Result<usize> {
+        if !self.has_vector_index() && !self.has_fts_index() {
+            return Ok(0);
+        }
+        let records: Vec<Record> = self
+            .storage
+            .scan_all_records()?
+            .into_iter()
+            .filter(|r| !r.table.starts_with('_'))
+            .filter(|r| {
+                !recall_chunk_ids(r).is_empty()
+                    || crate::util::recall_units(&crate::util::searchable_text(&r.data)).len() > 1
+            })
+            .collect();
+        for batch in records.chunks(REEMBED_BATCH) {
+            self.batch_sync_recall_chunks(batch)?;
+        }
+        if !records.is_empty() {
+            self.audit_heal_action(
+                "rebuild_recall_units",
+                &format!("re-split {} records into recall units", records.len()),
+            );
+        }
+        Ok(records.len())
     }
 
     /// Insert a new record into the given table.
@@ -7455,11 +7489,7 @@ impl Axil {
             self.delete_recall_chunks_for_source(record)?;
 
             let text = crate::util::searchable_text(&record.data);
-            let chunks = crate::util::overlapping_chunks(
-                &text,
-                RECALL_CHUNK_MAX_BYTES,
-                RECALL_CHUNK_OVERLAP_BYTES,
-            );
+            let chunks = crate::util::recall_units(&text);
             if chunks.len() <= 1 {
                 self.persist_recall_chunk_ids(record, &[])?;
                 continue;
@@ -7584,11 +7614,7 @@ impl Axil {
         self.delete_recall_chunks_for_source(record)?;
 
         let text = crate::util::searchable_text(&record.data);
-        let chunks = crate::util::overlapping_chunks(
-            &text,
-            RECALL_CHUNK_MAX_BYTES,
-            RECALL_CHUNK_OVERLAP_BYTES,
-        );
+        let chunks = crate::util::recall_units(&text);
         if chunks.len() <= 1 {
             self.persist_recall_chunk_ids(record, &[])?;
             return Ok(());
