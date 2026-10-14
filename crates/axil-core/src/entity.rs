@@ -796,20 +796,162 @@ fn inline_code_spans(line: &str) -> Vec<&str> {
 }
 
 fn extract_file_paths(x: &mut Extraction<'_>) {
-    for word in x.text.split_whitespace() {
+    let text = x.text;
+    for word in text.split_whitespace() {
         let trimmed = trim_path_word(word);
-        if looks_like_path(trimmed) {
-            x.claim(x.range_of(trimmed));
-            x.push(
-                trimmed.to_lowercase(),
-                Entity {
-                    name: normalize_file_path(trimmed),
-                    entity_type: EntityType::File,
-                    source_text: trimmed.to_string(),
-                },
-            );
+        let trimmed = match LINE_SUFFIX.find(trimmed) {
+            Some(m) if m.start() > 0 => &trimmed[..m.start()],
+            _ => trimmed,
+        };
+        // A slash list of file names (`lib.rs/main.rs`) names each file.
+        let parts: Vec<&str> = trimmed.split('/').collect();
+        if parts.len() > 1 && parts.iter().all(|p| is_file_name(p)) {
+            for part in parts {
+                push_file(x, part);
+            }
+            continue;
+        }
+        let range = x.range_of(trimmed);
+        let next_word = text[range.end..]
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .trim_end_matches(|c: char| !c.is_alphanumeric());
+        if looks_like_path(trimmed)
+            || is_file_name(trimmed)
+            || is_directory(trimmed)
+            || is_companion_file(trimmed, next_word)
+        {
+            push_file(x, trimmed);
         }
     }
+}
+
+fn push_file(x: &mut Extraction<'_>, path: &str) {
+    x.claim(x.range_of(path));
+    x.push(
+        path.to_lowercase(),
+        Entity {
+            name: normalize_file_path(path),
+            entity_type: EntityType::File,
+            source_text: path.to_string(),
+        },
+    );
+}
+
+/// Extensions of files a project keeps, sorted. A name with one of these
+/// is a file without a slash (`db.rs`, `axil.toml`, `memory.axil.ts`);
+/// any other dotted word (`crates.io`, `e.g`, `v1.2`) is not.
+const FILE_EXTENSIONS: &[&str] = &[
+    "axil", "bash", "bin", "c", "cc", "cfg", "cjs", "conf", "cpp", "css", "csv", "db", "dll",
+    "dylib", "exe", "fts", "gif", "go", "graph", "gz", "h", "hpp", "html", "ini", "ipynb", "java",
+    "jpg", "js", "json", "jsonl", "jsx", "kt", "lock", "log", "md", "mjs", "mv2", "onnx",
+    "parquet", "pdf", "php", "png", "proto", "py", "rb", "rs", "scip", "scss", "sh", "so", "sql",
+    "svelte", "svg", "swift", "tar", "toml", "ts", "tsv", "tsx", "txt", "vec", "vue", "wasm",
+    "wit", "xml", "yaml", "yml", "zip", "zsh",
+];
+
+/// Dot-files named without a stem, sorted.
+const DOT_FILES: &[&str] = &[
+    ".dockerignore",
+    ".editorconfig",
+    ".env",
+    ".gitattributes",
+    ".gitignore",
+    ".gitmodules",
+    ".npmrc",
+];
+
+/// The companion files of an Axil database, named by suffix alone ("the
+/// .vec store"). `.ts` is also TypeScript's extension, so it counts only
+/// before "store" or "file".
+const COMPANION_SUFFIXES: &[&str] = &[".axil", ".fts", ".graph", ".vec"];
+
+/// Directories that open a project-relative path, sorted. A slash path
+/// without an extension is a file path only when it starts with one of
+/// these, a dot-directory or `~` (`crates/adapters/axil-cli`), since
+/// `decisions/errors/context` and `Linux/Windows` are lists of words.
+const PROJECT_DIRS: &[&str] = &[
+    "apps",
+    "assets",
+    "benches",
+    "benchmarks",
+    "bin",
+    "build",
+    "config",
+    "crates",
+    "dist",
+    "doc",
+    "docs",
+    "examples",
+    "lib",
+    "node_modules",
+    "packages",
+    "scripts",
+    "src",
+    "target",
+    "tasks",
+    "test",
+    "tests",
+    "tmp",
+    "tools",
+    "vendor",
+];
+
+/// Characters a file or directory name is made of; `*` and `<…>` keep a
+/// glob or a path template (`hubness-<date>.json`) whole.
+fn is_path_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '*' | '<' | '>' | '~')
+}
+
+/// A file name without a directory: a stem with a letter, then a known
+/// extension (`db.rs`, `.axil.vec`, `memory_*.rs`), or a known dot-file.
+fn is_file_name(s: &str) -> bool {
+    if DOT_FILES.contains(&s) {
+        return true;
+    }
+    let Some(dot) = s.rfind('.') else {
+        return false;
+    };
+    let (stem, ext) = (&s[..dot], &s[dot + 1..]);
+    FILE_EXTENSIONS.binary_search(&ext).is_ok()
+        && stem.chars().any(|c| c.is_ascii_alphabetic())
+        && !stem.starts_with('-')
+        && stem.chars().all(is_path_char)
+}
+
+/// A directory: a path ending in `/` (`target/`, `benchmarks/results/`), or
+/// a slash path without an extension that starts at a project directory, a
+/// dot-directory or `~`.
+fn is_directory(s: &str) -> bool {
+    let segments: Vec<&str> = s.trim_end_matches('/').split('/').collect();
+    let first = segments[0];
+    let well_formed = segments
+        .iter()
+        .all(|seg| !seg.is_empty() && seg.chars().all(is_path_char))
+        && first.chars().filter(|c| c.is_ascii_alphabetic()).count() >= 2;
+    if !well_formed {
+        return false;
+    }
+    if s.ends_with('/') {
+        return true;
+    }
+    // `build/test` and `docs/CI` are word lists even though each word can
+    // name a directory, so a project directory needs a third segment or a
+    // segment no plain word has.
+    let name_like = segments.len() > 2
+        || segments[1..]
+            .iter()
+            .any(|seg| seg.contains(|c: char| !c.is_ascii_alphabetic()));
+    segments.len() > 1
+        && (first.starts_with('.')
+            || first.starts_with('~')
+            || PROJECT_DIRS.binary_search(&first).is_ok() && name_like)
+}
+
+/// An Axil companion file named by its suffix (`.vec`, `.axil.graph`).
+fn is_companion_file(s: &str, next_word: &str) -> bool {
+    COMPANION_SUFFIXES.contains(&s) || s == ".ts" && matches!(next_word, "store" | "file")
 }
 
 fn extract_camel_case(x: &mut Extraction<'_>) {
@@ -850,7 +992,14 @@ fn extract_snake_case(x: &mut Extraction<'_>) {
 /// sentence, but a leading one names a dot-directory or dot-file
 /// (`.claude/CLAUDE.md`, `./src`), so only an ellipsis is stripped there.
 fn trim_path_word(word: &str) -> &str {
-    let wrapper = |c: char| matches!(c, ',' | ';' | ':' | ')' | '(' | '"' | '\'');
+    let wrapper = |c: char| {
+        matches!(
+            c,
+            ',' | ';' | ':' | ')' | '(' | '"' | '\'' | '`' | '[' | ']'
+        )
+    };
+    // `**` is bold markup; a lone `*` belongs to a glob (`docs/*`).
+    let word = word.trim_start_matches("**").trim_end_matches("**");
     let start = word.trim_start_matches(wrapper);
     let start = if start.starts_with("...") {
         start.trim_start_matches('.')
@@ -866,16 +1015,25 @@ fn looks_like_path(s: &str) -> bool {
         return false;
     }
     // Must start with / or ./ or ../ or contain /
-    let has_path_prefix = s.starts_with('/') || s.starts_with("./") || s.starts_with("../");
+    let has_path_prefix =
+        s.starts_with('/') || s.starts_with("./") || s.starts_with("../") || s.starts_with("~/");
     let has_extension = s
         .rfind('.')
         .map(|dot| {
             let ext = &s[dot + 1..];
-            !ext.is_empty() && ext.len() <= 10 && ext.chars().all(|c| c.is_alphanumeric())
+            !ext.is_empty()
+                && ext.len() <= 10
+                && ext.chars().all(|c| c.is_alphanumeric())
+                && ext.chars().any(|c| c.is_alphabetic())
         })
         .unwrap_or(false);
+    // A query string or an assignment is not a path (`/recall?q=x`).
+    if s.contains(['?', '&', '=']) {
+        return false;
+    }
 
-    // Path-like if it has a path prefix, or has both slashes and an extension
+    // Path-like if it has a path prefix, or has both slashes and an
+    // extension; numbers with slashes (`3.1/3.2`) have no extension.
     has_path_prefix || (s.contains('/') && has_extension)
 }
 
@@ -1474,6 +1632,8 @@ mod tests {
             ("CODE_LITERALS", CODE_LITERALS),
             ("AXIL_COMMANDS", AXIL_COMMANDS),
             ("AXIL_COMMAND_GROUPS", AXIL_COMMAND_GROUPS),
+            ("FILE_EXTENSIONS", FILE_EXTENSIONS),
+            ("PROJECT_DIRS", PROJECT_DIRS),
         ];
         for p in PROGRAMS {
             lists.push((p.name, p.subcommands));
@@ -1549,6 +1709,41 @@ mod tests {
             !found.iter().any(|f| f == "--" || f == "---" || f == "--c"),
             "{found:?}"
         );
+    }
+
+    #[test]
+    fn file_names_without_a_directory() {
+        let found = sources(
+            "See db.rs:611 and calibrate_u1.py, then the .vec store, memory.axil.ts, a .ts store, \
+             .axil.vec, target/ and crates/adapters/axil-cli; lib.rs/main.rs too.",
+        );
+        for file in [
+            "db.rs",
+            "calibrate_u1.py",
+            ".vec",
+            "memory.axil.ts",
+            ".ts",
+            ".axil.vec",
+            "target/",
+            "crates/adapters/axil-cli",
+            "lib.rs",
+            "main.rs",
+        ] {
+            assert!(found.iter().any(|f| f == file), "{file}: {found:?}");
+        }
+        // The stem of a file name is not a second entity.
+        assert!(!found.iter().any(|f| f == "calibrate_u1"), "{found:?}");
+        for prose in [
+            "crates.io stays, e.g. v1.2 and decisions/errors/context or Linux/Windows",
+            "all .ts files",
+            "plan items 28.25/28.26 over http/1.1, GET /recall?q=x&k=5, build/test and docs/CI",
+        ] {
+            let files: Vec<Entity> = extract_entities(prose)
+                .into_iter()
+                .filter(|e| e.entity_type == EntityType::File)
+                .collect();
+            assert!(files.is_empty(), "{prose:?} minted {files:?}");
+        }
     }
 
     #[test]
