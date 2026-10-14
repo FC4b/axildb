@@ -715,6 +715,8 @@ fn a_backup_copied_over_the_database_is_kept() {
         "{info}"
     );
     assert_eq!(info["closed_cleanly"], false);
+    let human = text(&fx.axil(&["daemon", "status"]).stdout);
+    assert!(human.contains("for the next open to repair"), "{human}");
     assert!(
         std::fs::read(&fx.db).unwrap() == backup,
         "the copy was written over"

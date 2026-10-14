@@ -151,8 +151,10 @@ fn hello_for(key: &Path, run: &RunDir, timeout: Duration) -> Result<Option<Hello
     let Ok(hello) = proto::hello(run.socket(), timeout) else {
         return Ok(None);
     };
+    // One that does not say is taken to be this database's: the socket is
+    // in its run directory.
     anyhow::ensure!(
-        Path::new(&hello.db) == key,
+        hello.db.is_empty() || Path::new(&hello.db) == key,
         "{} is answered by the daemon of another database, {}",
         run.socket().display(),
         hello.db
@@ -180,6 +182,7 @@ fn start(db: &Path, idle_timeout: Duration, wait: Duration, out: &Output) -> Res
     };
 
     let deadline = Instant::now() + wait;
+    let mut blocked: Option<String> = None;
     loop {
         if let Some(hello) = hello_for(&key, &run, Duration::from_secs(1))? {
             if hello.state == "ready" {
@@ -204,12 +207,18 @@ fn start(db: &Path, idle_timeout: Duration, wait: Duration, out: &Output) -> Res
         // A daemon that would not serve says why, and stops: the one this
         // spawned, or the one it lost the election to. A reason recorded
         // before this started is an earlier daemon's.
-        let blocked = read_json_file::<Value>(&run.blocked())
-            .filter(|b| b["at_ms"].as_u64().is_some_and(|at| at >= started_ms));
-        if let Some(blocked) = blocked {
-            let reason = blocked["reason"].as_str().unwrap_or("unknown").to_string();
-            out.print(&json!({"started": false, "running": false, "blocked": reason}));
-            return Ok(EXIT_ERROR);
+        if blocked.is_none() {
+            blocked = read_json_file::<Value>(&run.blocked())
+                .filter(|b| b["at_ms"].as_u64().is_some_and(|at| at >= started_ms))
+                .map(|b| b["reason"].as_str().unwrap_or("unknown").to_string());
+        }
+        // Reported once that daemon has let the lock go and the one this
+        // spawned has exited, so none is left behind.
+        if let Some(reason) = &blocked {
+            if (child.is_none() && !server::lock_held(&run)) || Instant::now() >= deadline {
+                out.print(&json!({"started": false, "running": false, "blocked": reason}));
+                return Ok(EXIT_ERROR);
+            }
         }
         if Instant::now() >= deadline {
             anyhow::bail!(
@@ -428,8 +437,13 @@ fn describe(report: &Value) -> Vec<String> {
     } else if last.is_object() {
         let how = match (last["state"].as_str(), last["exit_reason"].as_str()) {
             (Some("stopped"), Some(reason)) => format!(
-                "stopped at {} ({reason})",
-                last["stopped_at"].as_str().unwrap_or("?")
+                "stopped at {} ({reason}){}",
+                last["stopped_at"].as_str().unwrap_or("?"),
+                if last["closed_cleanly"] == false {
+                    ", leaving the database for the next open to repair"
+                } else {
+                    ""
+                }
             ),
             (Some(state), _) => format!(
                 "gone without stopping: it was {state} (pid {})",
