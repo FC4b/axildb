@@ -1,0 +1,884 @@
+{
+ "benchmark": "typed-decisions U5: entity mention extraction (production pattern extractor), sets/u5_repo.jsonl",
+ "date": "2026-10-14",
+ "branch": "feat/entity-recall (from dev 2681031)",
+ "scorer": "benchmarks/typed-decisions/run_regex_arm.py, which scores with run_u5_bakeoff.py's own code (mention-level span P/R/F1 over normalized forms; junk rate from u5_junk_words.txt)",
+ "protocol": "Patterns developed on the train split only (train misses via run_regex_arm.py --errors). Test scored once per finished pattern family (exception noted on the files family), never used for tuning.",
+ "control_before": {
+  "commit": "d4bced1 (= dev 2681031 extractor)",
+  "test": {
+   "span": {
+    "precision": 0.6733,
+    "recall": 0.3435,
+    "f1": 0.4549,
+    "tp": 237,
+    "pred": 352,
+    "gold": 690
+   },
+   "span_and_type": {
+    "precision": 0.6193,
+    "recall": 0.3159,
+    "f1": 0.4184,
+    "tp": 218,
+    "pred": 352,
+    "gold": 690
+   },
+   "junk_rate": 0.0114,
+   "junk_mentions": 4
+  },
+  "train": {
+   "span": {
+    "precision": 0.6557,
+    "recall": 0.3571,
+    "f1": 0.4624,
+    "tp": 160,
+    "pred": 244,
+    "gold": 448
+   },
+   "span_and_type": {
+    "precision": 0.6148,
+    "recall": 0.3348,
+    "f1": 0.4335,
+    "tp": 150,
+    "pred": 244,
+    "gold": 448
+   },
+   "junk_rate": 0.0123,
+   "junk_mentions": 3
+  },
+  "note": "reproduces the U5 bake-off production arm (typed-decisions-u5-bakeoff-2026-10-14.json) exactly"
+ },
+ "after": {
+  "production_with_project_gazetteer": {
+   "commit": "867788b",
+   "test": {
+    "span": {
+     "precision": 0.9306,
+     "recall": 0.8159,
+     "f1": 0.8695,
+     "tp": 563,
+     "pred": 605,
+     "gold": 690
+    },
+    "span_and_type": {
+     "precision": 0.8975,
+     "recall": 0.787,
+     "f1": 0.8386,
+     "tp": 543,
+     "pred": 605,
+     "gold": 690
+    },
+    "per_type": {
+     "file": {
+      "precision": 0.9545,
+      "recall": 0.8485,
+      "f1": 0.8984,
+      "tp": 84,
+      "pred": 88,
+      "gold": 99
+     },
+     "code": {
+      "precision": 0.8786,
+      "recall": 0.843,
+      "f1": 0.8605,
+      "tp": 333,
+      "pred": 379,
+      "gold": 395
+     },
+     "project": {
+      "precision": 0.9111,
+      "recall": 0.7151,
+      "f1": 0.8013,
+      "tp": 123,
+      "pred": 135,
+      "gold": 172
+     },
+     "concept": {
+      "precision": 1.0,
+      "recall": 0.125,
+      "f1": 0.2222,
+      "tp": 3,
+      "pred": 3,
+      "gold": 24
+     }
+    },
+    "junk": {
+     "junk_mentions": 0,
+     "wrong_mentions": 42,
+     "predicted_mentions": 605,
+     "junk_rate": 0.0
+    }
+   },
+   "what": "auto_link / extract_entities_enhanced on a DB inside a project (.axil/ under the repo root): patterns + gazetteer"
+  },
+  "patterns_only": {
+   "commit": "748ccba",
+   "test": {
+    "span": {
+     "precision": 0.9258,
+     "recall": 0.6145,
+     "f1": 0.7387,
+     "tp": 424,
+     "pred": 458,
+     "gold": 690
+    },
+    "span_and_type": {
+     "precision": 0.8559,
+     "recall": 0.5681,
+     "f1": 0.6829,
+     "tp": 392,
+     "pred": 458,
+     "gold": 690
+    },
+    "per_type": {
+     "file": {
+      "precision": 0.9545,
+      "recall": 0.8485,
+      "f1": 0.8984,
+      "tp": 84,
+      "pred": 88,
+      "gold": 99
+     },
+     "code": {
+      "precision": 0.8324,
+      "recall": 0.7797,
+      "f1": 0.8052,
+      "tp": 308,
+      "pred": 370,
+      "gold": 395
+     },
+     "project": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "tp": 0,
+      "pred": 0,
+      "gold": 172
+     },
+     "concept": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "tp": 0,
+      "pred": 0,
+      "gold": 24
+     }
+    },
+    "junk_rate": 0.0
+   },
+   "what": "extract_entities (no gazetteer): what importance, consolidation, brain, query expansion and `axil extract-entities` see"
+  }
+ },
+ "test_delta_production": {
+  "precision": 0.2573,
+  "recall": 0.4724,
+  "f1": 0.4146
+ },
+ "precision_floor": {
+  "required": "test P >= 0.673",
+  "met": true
+ },
+ "families": [
+  {
+   "family": "quoted",
+   "commit": "6edc592",
+   "subject": "fix(core): stop minting entities from quoted phrases",
+   "train": {
+    "span": {
+     "precision": 0.678,
+     "recall": 0.3571,
+     "f1": 0.4678,
+     "tp": 160,
+     "pred": 236,
+     "gold": 448
+    },
+    "span_and_type": {
+     "precision": 0.6356,
+     "recall": 0.3348,
+     "f1": 0.4386,
+     "tp": 150,
+     "pred": 236,
+     "gold": 448
+    },
+    "junk_rate": 0.0085,
+    "junk_mentions": 2
+   },
+   "train_delta": {
+    "precision": 0.0223,
+    "recall": 0.0,
+    "f1": 0.0054
+   },
+   "test": {
+    "span": {
+     "precision": 0.7221,
+     "recall": 0.3464,
+     "f1": 0.4682,
+     "tp": 239,
+     "pred": 331,
+     "gold": 690
+    },
+    "span_and_type": {
+     "precision": 0.6647,
+     "recall": 0.3188,
+     "f1": 0.431,
+     "tp": 220,
+     "pred": 331,
+     "gold": 690
+    },
+    "junk_rate": 0.003,
+    "junk_mentions": 1
+   }
+  },
+  {
+   "family": "fragments",
+   "commit": "cef5902",
+   "subject": "fix(core): no entity for a part of a name found at the same spot",
+   "train": {
+    "span": {
+     "precision": 0.7826,
+     "recall": 0.3616,
+     "f1": 0.4947,
+     "tp": 162,
+     "pred": 207,
+     "gold": 448
+    },
+    "span_and_type": {
+     "precision": 0.7343,
+     "recall": 0.3393,
+     "f1": 0.4641,
+     "tp": 152,
+     "pred": 207,
+     "gold": 448
+    },
+    "junk_rate": 0.0097,
+    "junk_mentions": 2
+   },
+   "train_delta": {
+    "precision": 0.1046,
+    "recall": 0.0045,
+    "f1": 0.0269
+   },
+   "test": {
+    "span": {
+     "precision": 0.8299,
+     "recall": 0.3464,
+     "f1": 0.4888,
+     "tp": 239,
+     "pred": 288,
+     "gold": 690
+    },
+    "span_and_type": {
+     "precision": 0.7639,
+     "recall": 0.3188,
+     "f1": 0.4499,
+     "tp": 220,
+     "pred": 288,
+     "gold": 690
+    },
+    "junk_rate": 0.0035,
+    "junk_mentions": 1
+   }
+  },
+  {
+   "family": "commands",
+   "commit": "6b2377e",
+   "subject": "feat(core): extract commands, and no entity for a whole command line",
+   "train": {
+    "span": {
+     "precision": 0.8592,
+     "recall": 0.4085,
+     "f1": 0.5537,
+     "tp": 183,
+     "pred": 213,
+     "gold": 448
+    },
+    "span_and_type": {
+     "precision": 0.8075,
+     "recall": 0.3839,
+     "f1": 0.5204,
+     "tp": 172,
+     "pred": 213,
+     "gold": 448
+    },
+    "junk_rate": 0.0,
+    "junk_mentions": 0
+   },
+   "train_delta": {
+    "precision": 0.0766,
+    "recall": 0.0469,
+    "f1": 0.059
+   },
+   "test": {
+    "span": {
+     "precision": 0.8893,
+     "recall": 0.3841,
+     "f1": 0.5364,
+     "tp": 265,
+     "pred": 298,
+     "gold": 690
+    },
+    "span_and_type": {
+     "precision": 0.8255,
+     "recall": 0.3565,
+     "f1": 0.498,
+     "tp": 246,
+     "pred": 298,
+     "gold": 690
+    },
+    "junk_rate": 0.0,
+    "junk_mentions": 0
+   }
+  },
+  {
+   "family": "flags",
+   "commit": "9357271",
+   "subject": "feat(core): extract long flags",
+   "train": {
+    "span": {
+     "precision": 0.8723,
+     "recall": 0.4576,
+     "f1": 0.6003,
+     "tp": 205,
+     "pred": 235,
+     "gold": 448
+    },
+    "span_and_type": {
+     "precision": 0.8255,
+     "recall": 0.433,
+     "f1": 0.5681,
+     "tp": 194,
+     "pred": 235,
+     "gold": 448
+    },
+    "junk_rate": 0.0,
+    "junk_mentions": 0
+   },
+   "train_delta": {
+    "precision": 0.0131,
+    "recall": 0.0491,
+    "f1": 0.0466
+   },
+   "test": {
+    "span": {
+     "precision": 0.906,
+     "recall": 0.4609,
+     "f1": 0.611,
+     "tp": 318,
+     "pred": 351,
+     "gold": 690
+    },
+    "span_and_type": {
+     "precision": 0.8519,
+     "recall": 0.4333,
+     "f1": 0.5744,
+     "tp": 299,
+     "pred": 351,
+     "gold": 690
+    },
+    "junk_rate": 0.0,
+    "junk_mentions": 0
+   }
+  },
+  {
+   "family": "files",
+   "commit": "e073c1a",
+   "subject": "feat(core): extract file names without a directory, and directories",
+   "train": {
+    "span": {
+     "precision": 0.9206,
+     "recall": 0.5692,
+     "f1": 0.7034,
+     "tp": 255,
+     "pred": 277,
+     "gold": 448
+    },
+    "span_and_type": {
+     "precision": 0.8809,
+     "recall": 0.5446,
+     "f1": 0.6731,
+     "tp": 244,
+     "pred": 277,
+     "gold": 448
+    },
+    "junk_rate": 0.0,
+    "junk_mentions": 0
+   },
+   "train_delta": {
+    "precision": 0.0483,
+    "recall": 0.1116,
+    "f1": 0.1031
+   },
+   "test": {
+    "span": {
+     "precision": 0.9227,
+     "recall": 0.5536,
+     "f1": 0.692,
+     "tp": 382,
+     "pred": 414,
+     "gold": 690
+    },
+    "span_and_type": {
+     "precision": 0.8768,
+     "recall": 0.5261,
+     "f1": 0.6576,
+     "tp": 363,
+     "pred": 414,
+     "gold": 690
+    },
+    "junk_rate": 0.0,
+    "junk_mentions": 0
+   },
+   "test_note": "test was scored twice for this family: once before a train-driven revision of the family, once after; the number here is the final one"
+  },
+  {
+   "family": "hyphen",
+   "commit": "ab2a543",
+   "subject": "feat(core): extract hyphenated names that are not English compounds",
+   "train": {
+    "span": {
+     "precision": 0.9236,
+     "recall": 0.5938,
+     "f1": 0.7228,
+     "tp": 266,
+     "pred": 288,
+     "gold": 448
+    },
+    "span_and_type": {
+     "precision": 0.8681,
+     "recall": 0.558,
+     "f1": 0.6793,
+     "tp": 250,
+     "pred": 288,
+     "gold": 448
+    },
+    "junk_rate": 0.0,
+    "junk_mentions": 0
+   },
+   "train_delta": {
+    "precision": 0.003,
+    "recall": 0.0246,
+    "f1": 0.0194
+   },
+   "test": {
+    "span": {
+     "precision": 0.9258,
+     "recall": 0.5783,
+     "f1": 0.7119,
+     "tp": 399,
+     "pred": 431,
+     "gold": 690
+    },
+    "span_and_type": {
+     "precision": 0.8515,
+     "recall": 0.5319,
+     "f1": 0.6548,
+     "tp": 367,
+     "pred": 431,
+     "gold": 690
+    },
+    "junk_rate": 0.0,
+    "junk_mentions": 0
+   }
+  },
+  {
+   "family": "caps",
+   "commit": "fb5b518",
+   "subject": "feat(core): extract ALL_CAPS constants and environment variables",
+   "train": {
+    "span": {
+     "precision": 0.9247,
+     "recall": 0.6027,
+     "f1": 0.7297,
+     "tp": 270,
+     "pred": 292,
+     "gold": 448
+    },
+    "span_and_type": {
+     "precision": 0.8699,
+     "recall": 0.567,
+     "f1": 0.6865,
+     "tp": 254,
+     "pred": 292,
+     "gold": 448
+    },
+    "junk_rate": 0.0,
+    "junk_mentions": 0
+   },
+   "train_delta": {
+    "precision": 0.0011,
+    "recall": 0.0089,
+    "f1": 0.0069
+   },
+   "test": {
+    "span": {
+     "precision": 0.9278,
+     "recall": 0.5957,
+     "f1": 0.7255,
+     "tp": 411,
+     "pred": 443,
+     "gold": 690
+    },
+    "span_and_type": {
+     "precision": 0.8555,
+     "recall": 0.5493,
+     "f1": 0.669,
+     "tp": 379,
+     "pred": 443,
+     "gold": 690
+    },
+    "junk_rate": 0.0,
+    "junk_mentions": 0
+   }
+  },
+  {
+   "family": "branch",
+   "commit": "de8b05e",
+   "subject": "feat(core): extract git branch names",
+   "train": {
+    "span": {
+     "precision": 0.9274,
+     "recall": 0.6272,
+     "f1": 0.7483,
+     "tp": 281,
+     "pred": 303,
+     "gold": 448
+    },
+    "span_and_type": {
+     "precision": 0.8746,
+     "recall": 0.5915,
+     "f1": 0.7057,
+     "tp": 265,
+     "pred": 303,
+     "gold": 448
+    },
+    "junk_rate": 0.0,
+    "junk_mentions": 0
+   },
+   "train_delta": {
+    "precision": 0.0027,
+    "recall": 0.0245,
+    "f1": 0.0186
+   },
+   "test": {
+    "span": {
+     "precision": 0.9292,
+     "recall": 0.6087,
+     "f1": 0.7356,
+     "tp": 420,
+     "pred": 452,
+     "gold": 690
+    },
+    "span_and_type": {
+     "precision": 0.8584,
+     "recall": 0.5623,
+     "f1": 0.6795,
+     "tp": 388,
+     "pred": 452,
+     "gold": 690
+    },
+    "junk_rate": 0.0,
+    "junk_mentions": 0
+   }
+  },
+  {
+   "family": "tables",
+   "commit": "748ccba",
+   "subject": "feat(core): extract underscore-prefixed table and field names",
+   "train": {
+    "span": {
+     "precision": 0.9283,
+     "recall": 0.6362,
+     "f1": 0.755,
+     "tp": 285,
+     "pred": 307,
+     "gold": 448
+    },
+    "span_and_type": {
+     "precision": 0.8762,
+     "recall": 0.6004,
+     "f1": 0.7126,
+     "tp": 269,
+     "pred": 307,
+     "gold": 448
+    },
+    "junk_rate": 0.0,
+    "junk_mentions": 0
+   },
+   "train_delta": {
+    "precision": 0.0009,
+    "recall": 0.009,
+    "f1": 0.0067
+   },
+   "test": {
+    "span": {
+     "precision": 0.9258,
+     "recall": 0.6145,
+     "f1": 0.7387,
+     "tp": 424,
+     "pred": 458,
+     "gold": 690
+    },
+    "span_and_type": {
+     "precision": 0.8559,
+     "recall": 0.5681,
+     "f1": 0.6829,
+     "tp": 392,
+     "pred": 458,
+     "gold": 690
+    },
+    "junk_rate": 0.0,
+    "junk_mentions": 0
+   }
+  },
+  {
+   "family": "filetype",
+   "commit": "522952b",
+   "subject": "fix(core): type a backticked file name as a file",
+   "train": {
+    "span": {
+     "precision": 0.9283,
+     "recall": 0.6362,
+     "f1": 0.755,
+     "tp": 285,
+     "pred": 307,
+     "gold": 448
+    },
+    "span_and_type": {
+     "precision": 0.8762,
+     "recall": 0.6004,
+     "f1": 0.7126,
+     "tp": 269,
+     "pred": 307,
+     "gold": 448
+    },
+    "junk_rate": 0.0,
+    "junk_mentions": 0
+   },
+   "train_delta": {
+    "precision": 0.0,
+    "recall": 0.0,
+    "f1": 0.0
+   },
+   "test": null,
+   "test_note": "not scored on test: the change only retypes a mention (backticked file name typed file, not code); no span or typed metric moved on train"
+  },
+  {
+   "family": "gazetteer",
+   "commit": "867788b",
+   "subject": "feat(core): find known product, tool and dependency names on insert",
+   "train": {
+    "span": {
+     "precision": 0.9337,
+     "recall": 0.8482,
+     "f1": 0.8889,
+     "tp": 380,
+     "pred": 407,
+     "gold": 448
+    },
+    "span_and_type": {
+     "precision": 0.9115,
+     "recall": 0.8281,
+     "f1": 0.8678,
+     "tp": 371,
+     "pred": 407,
+     "gold": 448
+    },
+    "junk_rate": 0.0,
+    "junk_mentions": 0
+   },
+   "train_delta": {
+    "precision": 0.0054,
+    "recall": 0.212,
+    "f1": 0.1339
+   },
+   "test": {
+    "span": {
+     "precision": 0.9306,
+     "recall": 0.8159,
+     "f1": 0.8695,
+     "tp": 563,
+     "pred": 605,
+     "gold": 690
+    },
+    "span_and_type": {
+     "precision": 0.8975,
+     "recall": 0.787,
+     "f1": 0.8386,
+     "tp": 543,
+     "pred": 605,
+     "gold": 690
+    },
+    "junk_rate": 0.0,
+    "junk_mentions": 0
+   },
+   "config": "run_regex_arm.py u5 --project-dir ../.. (Gazetteer::for_project_dir on this repository: built-in names + Cargo workspace manifests, 265 names); production also adds the DB's _deps rows, which this arm does not"
+  }
+ ],
+ "recall_effect": {
+  "same_snapshot_dogfood": {
+   "cmd": "python3 benchmarks/dogfood-recall/run.py --axil <release axil> --snapshot benchmarks/dogfood-recall/data/snap-prefix --fetch 10",
+   "base": {
+    "axil": "axil 2.3.1 (axildb-v2.3.1-203-gd4bced1)",
+    "overall": {
+     "hit@1": 0.6842105263157895,
+     "hit@5": 0.8947368421052632,
+     "hit@10": 0.9298245614035088,
+     "mrr@10": 0.7912280701754386,
+     "recall_all@10": 0.9122807017543859,
+     "ndcg@10": 0.8116991086830022,
+     "hook_hit": 0.8947368421052632,
+     "hook_tokens": 302.8640350877193,
+     "hook_hits_per_1k_tokens": 2.9542525306648515,
+     "n": 57
+    }
+   },
+   "after": {
+    "axil": "axil 2.3.1 (axildb-v2.3.1-216-g20c27c7)",
+    "overall": {
+     "hit@1": 0.6842105263157895,
+     "hit@5": 0.8947368421052632,
+     "hit@10": 0.9298245614035088,
+     "mrr@10": 0.7912280701754386,
+     "recall_all@10": 0.9122807017543859,
+     "ndcg@10": 0.8116991086830022,
+     "hook_hit": 0.8947368421052632,
+     "hook_tokens": 302.8640350877193,
+     "hook_hits_per_1k_tokens": 2.9542525306648515,
+     "n": 57
+    }
+   },
+   "per_question_differences": 0,
+   "note": "identical by construction: entity extraction runs at insert, and the eval copies the snapshot, so a same-snapshot run cannot see write-time effects"
+  },
+  "reingest_dogfood": {
+   "what": "the snapshot's 232 user records exported, _importance/_effective_importance stripped, imported into a fresh `axil init` DB by each binary (inside a .axil/ dir with this repo's manifests copied beside it, so the gazetteer applies), then dogfood-recall --db <that DB> --fetch 10",
+   "base": {
+    "axil": "axil 2.3.1 (axildb-v2.3.1-203-gd4bced1)",
+    "overall": {
+     "hit@1": 0.6842105263157895,
+     "hit@5": 0.9122807017543859,
+     "hit@10": 0.9473684210526315,
+     "mrr@10": 0.8019493177387914,
+     "recall_all@10": 0.9298245614035088,
+     "ndcg@10": 0.8240970440461403,
+     "hook_hit": 0.9122807017543859,
+     "hook_tokens": 306.69736842105266,
+     "hook_hits_per_1k_tokens": 2.9745305818925445,
+     "n": 57
+    }
+   },
+   "after": {
+    "axil": "axil 2.3.1 (axildb-v2.3.1-216-g20c27c7)",
+    "overall": {
+     "hit@1": 0.6842105263157895,
+     "hit@5": 0.9122807017543859,
+     "hit@10": 0.9473684210526315,
+     "mrr@10": 0.8019493177387914,
+     "recall_all@10": 0.9298245614035088,
+     "ndcg@10": 0.8240970440461403,
+     "hook_hit": 0.9122807017543859,
+     "hook_tokens": 306.69736842105266,
+     "hook_hits_per_1k_tokens": 2.9745305818925445,
+     "n": 57
+    }
+   },
+   "per_question_differences": 0,
+   "by_kind_identical": true,
+   "entities_rows": {
+    "base": 814,
+    "after": 1033
+   },
+   "stored_importance_mean": {
+    "base": 0.858,
+    "after": 0.875,
+    "records_changed": 71,
+    "records": 232
+   },
+   "boot_output_identical": true,
+   "note": "ranking did not move: recall weights importance at 0.0 by default; boot output (default budget and --budget 4000) was byte-identical between the two re-ingested DBs"
+  },
+  "importance_shift": {
+   "records": 232,
+   "importance_mean_base": 0.858,
+   "importance_mean_new": 0.875,
+   "importance_mean_delta": 0.017,
+   "importance_changed": 71,
+   "importance_delta_histogram": {
+    "-0.15": 1,
+    "-0.1": 5,
+    "-0.05": 6,
+    "0.0": 161,
+    "0.05": 29,
+    "0.1": 23,
+    "0.15": 5,
+    "0.2": 2
+   },
+   "importance_text_entities_mean_base": 5.69,
+   "importance_text_entities_mean_new": 6.82,
+   "auto_link_entities_mean_base": 5.69,
+   "auto_link_entities_mean_new_patterns": 6.82,
+   "auto_link_entities_mean_new_with_gazetteer": 9.55,
+   "at_entity_bonus_cap_base": 127,
+   "at_entity_bonus_cap_new": 149,
+   "per_table_mean_delta": {
+    "commits": 0.004,
+    "context": 0.03,
+    "decisions": 0.0198,
+    "errors": 0.0407,
+    "rules": 0.0
+   },
+   "crossing": {
+    "0.7": {
+     "up": 6,
+     "down": 1
+    },
+    "0.8": {
+     "up": 19,
+     "down": 4
+    },
+    "0.9": {
+     "up": 13,
+     "down": 3
+    }
+   },
+   "how": "typed-decisions-regex-arm --records on the snapshot export for each build, compared with compare_importance.py; compute_importance adds 0.05 per extracted entity up to 0.2. Affects boot top_n_by_importance and archive tiering of newly inserted records only; stored records keep their _importance"
+  }
+ },
+ "gates": {
+  "needle_gate": {
+   "binary": "release 20c27c7",
+   "recall_at_5": "31/31",
+   "retention": "31/31"
+  }
+ },
+ "tests": {
+  "commit": "20c27c7",
+  "axil-core": {
+   "passed": 523,
+   "failed": 0,
+   "ignored": 1
+  },
+  "axil-tests (--no-fail-fast)": {
+   "passed": 620,
+   "failed": 0,
+   "ignored": 12
+  },
+  "axildb (cli)": {
+   "passed": 196,
+   "failed": 1,
+   "ignored": 1,
+   "failed_test": "daemon::exec::tests::an_engine_warning_reaches_the_requests_stderr (FTS FileDoesNotExist under load; passed 3/3 alone; unrelated to this change)"
+  },
+  "entity integration": {
+   "entity_gazetteer": 2,
+   "entity_key_index": 4,
+   "entity_extraction": 10,
+   "all_passed": true
+  }
+ },
+ "machine": {
+  "platform": "macOS-26.6-arm64-arm-64bit-Mach-O",
+  "note": "heavily loaded shared machine (load average 150-300); no latency figure is reported"
+ },
+ "numbers_policy": "Internal development measurements on a 97-text test split; not for README/docs without the per-type caveats (concept recall stays 0.125)."
+}
