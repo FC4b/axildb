@@ -88,8 +88,75 @@ candidates down to cosine 0.65 (`Axil::supersede_candidates`; the true
 predecessor is among the top 5 for 75–87% of labeled update pairs) and a
 rule judge decides — shared entities plus a negation on one side only. The
 rule never retired a still-valid record in those sets, but it catches only
-1–10% of real updates, so treat supersession as near-duplicate collapse
-until a model judge ships (Phase 29).
+1–10% of real updates, so treat supersession as near-duplicate collapse.
+The opt-in model judge below flags more of them, for review only.
+
+## Possible contradictions (opt-in)
+
+A build with the `decide` feature (`cargo install axildb --features decide`)
+adds a second judge that only suggests. `nli-deberta-v3-xsmall-qint8`, a
+small local NLI cross-encoder, reads each new `decisions`, `context` or
+`rules` record against the same supersede candidates, as (older, newer), and
+scores how likely the newer one replaces, updates or contradicts the older.
+At or above its calibrated threshold it writes a `possibly_contradicts` edge
+(newer → older) carrying the score, threshold, model and calibration, and
+every judged pair, flagged or not, is logged in `_contradiction_reviews`. It
+never supersedes, hides or edits a record.
+
+Turn it on per project. The model is a 96 MB download, pinned by Hugging
+Face revision and sha256, that never happens on its own:
+
+```bash
+axil contradictions model --download
+```
+
+```toml
+# axil.toml
+[decide]
+review = true
+```
+
+The keys and their defaults are in
+[Configuration](../getting-started/configuration.md#possible-contradiction-review-optional).
+
+**Where it runs.** Loading the model is too slow and too heavy for a
+foreground command. On a quiet M1 Pro a fresh process took 0.74–1.27 s to
+load it (median 0.80 s) and peaked near 430 MB of memory footprint; once
+loaded, a pair takes about 19 ms (p50) and 26–31 ms (p95)
+(`benchmarks/results/typed-decisions-u1-where-it-runs-2026-10-14.json`; under
+heavy load from other jobs the same load took 2.3–4.8 s). So it never loads
+in a hook (hooks run under kill timeouts) or in `axil store`. The pass runs in
+`axil worker run`, which the hook drainer starts in its own detached process
+when a session closes: it judges the records from the last 7 days that were
+not judged yet, newest first, up to 20 a pass, and loads the model only when
+one is due. `axil contradictions run` runs the same pass on demand. A pass
+over 40 new records took about 10 s and peaked near 555 MB of footprint with
+the embedder it also loads for candidates, where the worker without review
+took 0.2 s and 20 MB (those two runs shared the machine with other jobs,
+at a load average of 21–36 on 10 cores). A
+long-lived host would pay the load once but keep the model resident, which a
+once-per-session pass does not need.
+
+**What an agent sees.** While flags are open, `axil boot` shows one line
+under `## Review` with the count. `axil contradictions` lists each pair with
+both texts and the score; `accept <newer> <older>` marks the older one
+superseded through the normal supersede rules (pins and `supersede = false`
+still hold), `dismiss <newer> <older>` closes a flag where both hold, and
+`log` shows every judged pair. A flag also closes when the older record is
+superseded some other way.
+
+**What to expect.** On the held-out U1 pairs the shipped threshold flags 2.1%
+of the pairs that still both hold (2 of 94) and 18.9% of the real updates
+(10 of 53), so most updates go unflagged
+(`benchmarks/results/typed-decisions-u1-calibration-2026-10-04.json`).
+Through the full candidate path it flagged 9 of 20 repo-style updates
+against the rule judge's 2, one of 20 still-valid pairs, and about one other
+candidate for every two new records; it flagged 1 of 69 LongMemEval
+conversation-turn updates
+(`benchmarks/results/typed-decisions-u1-review-edge-full-path-2026-10-14.json`).
+Read a flag as a prompt to compare two records, not a verdict. Like every
+edge, a `possibly_contradicts` edge also counts toward recall's
+graph-proximity signal when both records are recall candidates.
 
 ## Append-only tables — `[lifecycle.tables.<t>]`
 
