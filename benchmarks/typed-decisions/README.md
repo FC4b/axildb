@@ -9,6 +9,7 @@ today?
 | **U1** | Does NEW replace, update or contradict OLD? | `check_conflict` (bge-small cosine ≥ 0.92, then entity + negation rules) |
 | **U2** | Does LATER show that ERROR is actually fixed? | Nothing: errors have no resolved status |
 | **U5** | Which strings in a stored note are entities worth linking? | `extract_entities` (backticks, paths, CamelCase/snake_case, quoted strings, code-symbol patterns), run by `auto_link` on every insert |
+| **U3** | Should text from an agent's actions become a memory record, in which table (decision / error / context / rule) and at what importance? | `auto_capture::analyze` (substring patterns for errors and decisions, each with a confidence; the brain hook stores captures at 0.8 or more from a failed shell command's output), then `compute_importance` on insert |
 
 For U1 and U2 there are three arms:
 - the **production heuristic** (`heuristic/`, a Rust crate that calls the real `axil_core::check_conflict`);
@@ -22,6 +23,12 @@ U5 has two (`run_u5_bakeoff.py`):
 - the **production extractor**, through the same Rust crate (`heuristic/ --entities`);
 - **zero-shot GLiNER span models** on CPU: Fastino GLiNER2.5-small (74M) and -base (194M), and `urchade/gliner_small-v2.1`, each pinned by revision.
 
+U3 has four kinds (`run_u3_bakeoff.py`):
+- the **production classifier**, through the same Rust crate (`heuristic/ --capture`), at the hook's `--min-confidence 0.8` (the control) and the CLI default 0.7;
+- a **logistic-regression head on the bge-small vector** Axil already computes (`heuristic/ --embed`), trained on the live DB's own records with their table as a weak label, and a variant that also trains on the U3 train split;
+- **zero-shot GLiClass** (Knowledgator `gliclass-edge-v3.0`, `gliclass-base-v3.0`);
+- **GLiNER2.5 classification** (Fastino `gliner2.5-small-v1`, `gliner2.5-base-v1`), each pinned by revision.
+
 The plan and the go/no-go rules are in `tasks/phase-29-typed-decisions-laya.md`. That file is local-only.
 
 ## Sets (`sets/`, tracked)
@@ -33,6 +40,7 @@ The plan and the go/no-go rules are in `tasks/phase-29-typed-decisions-laya.md`.
 | `u2_repo.jsonl` | 31 | Same (`repo_sets.py`) | Same. The negatives are deliberate traps: still broken, only planned, merged but not published, a fix for something else |
 | `u2_github.jsonl` | 170 | Bug issues + PR titles from redb, tantivy, ort, ripgrep, uv and tokio (`build_u2_github.py`; needs `gh`) | From GitHub links: **fixed** = the merged PR that closed the issue (94). The 76 negatives are three kinds: **other_fix** = the closing PR of a different bug in the same repo, picked for word overlap; **mentioned_not_fix** = a merged same-repo PR that references the issue but didn't close it; **downstream_workaround** = a merged PR in another repo that references it. Issue numbers, URLs and closing keywords are stripped from the titles. 9 pairs were dropped after validation (`validation/u2_github_drops.json`) |
 | `u5_repo.jsonl` | 160 texts, 1,138 entity mentions | This repo's own `.axil` decisions, errors, context, rules, checkpoints and commits, shortened (`repo_sets_u5.py`, which writes the unlabeled `u5_texts.jsonl`). Five strata: code_heavy 44, mixed 38, junk_trap 33 (prose that pattern extractors turn into junk), markdown 24, prose 21 | Entity spans typed `file` / `code` / `project` / `concept` per `validation/u5-guidelines.md`. Written by Claude, then blind-labeled by two other models; gold is the 2-of-3 majority (`adjudicate_u5.py`, see below) |
+| `u3_repo.jsonl` | 200 texts | What auto-capture is shown, rebuilt from this repo's Claude Code session transcripts and its `.axil` (`repo_sets_u3.py`, which writes the unlabeled `u3_texts.jsonl`). Five sources: bash_failure 56 (the output of a shell command that exited non-zero, exactly what the brain hook pipes to `axil auto-capture`), bash_output 30 (successful output and status lines), agent_text 56 (the agent's own paragraphs), agent_brief 22 (paragraphs of briefs written for subagents), commit_subject 36. Half of each source's quota went to texts containing a production pattern where there were enough (72 in all; agent_brief had 1 and commit_subject none, so the rest of their quota is plain text) | One class (decision / error / context / rule / none) and, unless none, an importance (low / medium / high) per `validation/u3-guidelines.md`. Written by Claude, then blind-labeled by two other models; gold is the 2-of-3 majority (`adjudicate_u3.py`, see below): none 143, error 35, context 11, decision 6, rule 5 |
 
 ### Label validation (`validation/2026-09-27-labels.json`)
 
@@ -76,7 +84,22 @@ Gold is every form at least two of the three listed (1,051 unanimous, 84 two-vot
 
 Remaining caveat: the annotators are models, not people.
 
-Each pair's `split` is 40% `train` / 60% `test`, derived from sha256 of its id. The train split is used only to fit the decision threshold and the Platt calibration; every reported metric is on test. U5 texts use the same rule (63 train, 97 test); there, train only picks each model's label phrasing and span threshold.
+**U3 capture classes** (`validation/2026-10-14-u3-labels.json`). Claude labeled all 200 texts from the guidelines. Two models then labeled them **blind** (`relabel_u3.py`): neutral ids in their own shuffled order, batches of 20, the guidelines and the item text only, a strict JSON answer parsed defensively, every attempt kept under `validation/u3/`:
+- GLM `zai-coding-plan/glm-5.3` via OpenCode;
+- `gpt-oss-120b-medium` via `agy`. It stands in for Gemini `gemini-3.8-flash-high`, whose Antigravity quota ran out after 39 items (every later call returned `RESOURCE_EXHAUSTED`, resetting in about 162 hours); those 39 Gemini labels are reported for agreement, not counted as a vote.
+
+The Codex relabel is pending here too (Codex is paused).
+
+| Pair | Class agreement | Class κ | Store-or-not κ | Importance (both stored) | Importance κ (linear-weighted) | Lowest source (class κ) |
+|---|---|---|---|---|---|---|
+| Claude vs GLM | 182/200 | 0.81 | 0.80 | 42/53 | 0.67 (0.73) | bash_failure 0.69 |
+| Claude vs gpt-oss | 163/200 | 0.63 | 0.66 | 31/48 | 0.44 (0.47) | bash_output 0.24 |
+| GLM vs gpt-oss | 159/200 | 0.61 | 0.66 | 34/54 | 0.40 (0.47) | bash_output 0.32 |
+| Gemini vs Claude / GLM / gpt-oss (39 items) | 36 / 35 / 34 | 0.83 / 0.80 / 0.74 | 0.82 / 0.77 / 0.71 | 6/10, 9/11, 8/10 | | |
+
+gpt-oss labels more texts `context` (28 against Claude's 9 and GLM's 14), most often for shell output that prints source code, a stored record or a document (none by rule N2), and for status reports. Gold is the 2-of-3 majority: 154 unanimous, 42 split 2-1, and 4 three-way splits broken by a named guideline rule. One majority was overridden by rule N2 (a stored record printed as JSON is ordinary output, and so are the printed commit messages that decided two of the three-way splits). Importance takes the majority bucket of the voters who stored the item, low against high is medium, and 3 adjacent ties were broken by a named rule. Every case is logged with its reason, along with all 63 disputed items; none was dropped. Importance is the least reliable label (κ 0.40–0.67).
+
+Each pair's `split` is 40% `train` / 60% `test`, derived from sha256 of its id. The train split is used only to fit the decision threshold and the Platt calibration; every reported metric is on test. U5 texts use the same rule (63 train, 97 test); there, train only picks each model's label phrasing and span threshold. U3 texts too (75 train, 125 test): train picks each model's setting, and the LR variant and the importance head also learn from it. By chance only 1 of the 11 context items fell in train.
 
 ## Run
 
@@ -138,6 +161,36 @@ average is recorded next to every latency, because other jobs share the
 machine. It writes `benchmarks/results/typed-decisions-u5-bakeoff-<date>.json`;
 `--write-junk-list` regenerates `u5_junk_words.txt`.
 
+```bash
+# U3 capture-classification set and bake-off. The model arms also need
+# scikit-learn and gliclass (requirements.txt); the control and the LR heads
+# need the heuristic binary; --prepare reads the live DB with `axil export` only.
+python repo_sets_u3.py --db .axil/memory.axil --save-pool out/u3_pool.jsonl   # optional: rebuild sets/u3_texts.jsonl
+python relabel_u3.py --annotator glm --lanes 2       # optional: blind relabels (raw output kept)
+python relabel_u3.py --annotator gptoss --lanes 2
+python adjudicate_u3.py                              # optional: rebuild sets/u3_repo.jsonl and the validation JSON
+cargo build --release --manifest-path heuristic/Cargo.toml
+python run_u3_bakeoff.py --prepare --db .axil/memory.axil   # weak-label records + bge-small vectors
+python run_u3_bakeoff.py --arm all --parallel 2      # every arm in its own process, then the summary
+python run_u3_bakeoff.py --summarize                 # re-score the saved arm outputs only
+```
+
+`repo_sets_u3.py` reads the Claude Code transcripts under
+`~/.claude/projects/<this repo>/` and the DB's `commits`, both up to a fixed
+cutoff, so a rerun picks the same pool; Claude Code deletes old transcripts,
+so `--save-pool` keeps the candidates and `--pool` rebuilds from them.
+`run_u3_bakeoff.py` trains the LR heads in Python on vectors the Rust embedder
+wrote, so they see exactly the vector Axil stores. Every model setting (label
+phrasing and none threshold; C, class weighting and threshold) is chosen on
+`train`: the best train macro-F1 whose train false-capture rate is at most the
+control's. Zero-shot scores are computed once per phrasing and swept offline;
+the chosen setting then runs for real on `test` (batch 1, 4 threads). Each arm
+runs in its own process under `/usr/bin/time -l`, at most two at once, with
+the load average next to every latency. It writes
+`benchmarks/results/typed-decisions-u3-bakeoff-<date>.json` and, for the head
+the classifier step would load, `typed-decisions-u3-heads-<date>.json`
+(weights, bias, decision rule and parity fixtures).
+
 Raw outputs go to `out/`, which is gitignored. The committed summary is `benchmarks/results/typed-decisions-bakeoff-<date>.json`.
 
 ## Metrics
@@ -154,6 +207,13 @@ For U5:
 - **Entities per text**, against the gold mean.
 - **CPU latency** p50/p95 per text, batch 1, model loaded, with the load average. Load time, peak RSS and size on disk are reported per arm.
 
+For U3:
+- **Accuracy and macro-F1** over the five classes on test, and **per-class precision / recall**.
+- **False-capture rate:** gold `none` stored as anything else, over gold `none`. It is the governing error: a junk error is shown as open at the start of every session until someone resolves it. The verdict compares models with the control at an equal or lower rate.
+- **Wrong-table rate:** stored in the wrong table, over items that should be stored and were. **Miss rate:** gold not-none predicted none.
+- **Importance-bucket accuracy** over gold not-none test items, next to the accuracy of always answering train's most common bucket.
+- **CPU latency** p50/p95 per text with the model loaded, the load average, load time, peak RSS and peak memory footprint (`/usr/bin/time -l`), and size on disk. For the heads, latency includes the bge-small embed of the text.
+
 ## Numbers policy
 
-U2 now has 201 validated pairs. Still, none of these numbers go into README, docs or CLI output: they measure a candidate for a feature that isn't built yet. The same holds for the U5 bake-off results; the U5 latencies were also measured on a shared, heavily loaded machine, so read them with the load average recorded next to each. Once a winner is wired into Axil, its end-to-end numbers get their own committed result. The labels are model-validated (blind agreement between models); a human spot-check of the disputed items listed in the validation files is still recommended before publishing anything.
+U2 now has 201 validated pairs. Still, none of these numbers go into README, docs or CLI output: they measure a candidate for a feature that isn't built yet. The same holds for the U5 and U3 bake-off results; their latencies were also measured on a shared, heavily loaded machine, so read them with the load average recorded next to each. Once a winner is wired into Axil, its end-to-end numbers get their own committed result. The labels are model-validated (blind agreement between models); a human spot-check of the disputed items listed in the validation files is still recommended before publishing anything.

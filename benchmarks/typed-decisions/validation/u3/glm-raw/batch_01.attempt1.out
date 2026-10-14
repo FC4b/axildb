@@ -1,0 +1,27 @@
+[
+  {"id": "b-001", "class": "none", "importance": null, "rule": "C2"},
+  {"id": "b-002", "class": "none", "importance": null, "rule": "N2"},
+  {"id": "b-003", "class": "none", "importance": null, "rule": "N8"},
+  {"id": "b-004", "class": "none", "importance": null, "rule": "N7"},
+  {"id": "b-005", "class": "context", "importance": "high", "rule": "C1"},
+  {"id": "b-006", "class": "none", "importance": null, "rule": "N3"},
+  {"id": "b-007", "class": "none", "importance": null, "rule": "N2"},
+  {"id": "b-008", "class": "none", "importance": null, "rule": "N2"},
+  {"id": "b-009", "class": "none", "importance": null, "rule": "N5"},
+  {"id": "b-010", "class": "none", "importance": null, "rule": "N4"},
+  {"id": "b-011", "class": "error", "importance": "medium", "rule": "E2"},
+  {"id": "b-012", "class": "context", "importance": "high", "rule": "C1"},
+  {"id": "b-013", "class": "error", "importance": "medium", "rule": "E2"},
+  {"id": "b-014", "class": "none", "importance": null, "rule": "C2"},
+  {"id": "b-015", "class": "context", "importance": "medium", "rule": "C1"},
+  {"id": "b-016", "class": "none", "importance": null, "rule": "C2"},
+  {"id": "b-017", "class": "none", "importance": null, "rule": "N2"},
+  {"id": "b-018", "class": "none", "importance": null, "rule": "C2"},
+  {"id": "b-019", "class": "none", "importance": null, "rule": "N2"},
+  {"id": "b-020", "class": "error", "importance": "low", "rule": "E1"}
+]
+
+[stderr]
+[0m
+> build · glm-5.3
+[0m

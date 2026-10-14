@@ -1,0 +1,62 @@
+{
+ "annotator": "gptoss",
+ "model": "gpt-oss-120b-medium",
+ "items": 200,
+ "items_labeled": 200,
+ "failures": [],
+ "by_class": {
+  "none": 129,
+  "decision": 5,
+  "error": 34,
+  "context": 28,
+  "rule": 4
+ },
+ "by_importance": {
+  "medium": 26,
+  "high": 22,
+  "low": 23
+ },
+ "batches": {
+  "01": {
+   "attempts": 1,
+   "used_attempt": 1
+  },
+  "02": {
+   "attempts": 1,
+   "used_attempt": 1
+  },
+  "03": {
+   "attempts": 1,
+   "used_attempt": 1
+  },
+  "04": {
+   "attempts": 1,
+   "used_attempt": 1
+  },
+  "05": {
+   "attempts": 1,
+   "used_attempt": 1
+  },
+  "06": {
+   "attempts": 1,
+   "used_attempt": 1
+  },
+  "07": {
+   "attempts": 1,
+   "used_attempt": 1
+  },
+  "08": {
+   "attempts": 1,
+   "used_attempt": 1
+  },
+  "09": {
+   "attempts": 1,
+   "used_attempt": 1
+  },
+  "10": {
+   "attempts": 1,
+   "used_attempt": 1
+  }
+ },
+ "parse_problems_seen": {}
+}

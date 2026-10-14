@@ -1,0 +1,31 @@
+2026-10-14T10:41:50Z batch 02 attempt 1: start
+2026-10-14T10:41:50Z batch 01 attempt 1: start
+2026-10-14T10:42:26Z batch 02 attempt 1: rc=0 36.0s ok_ids=20/20 problems=[]
+2026-10-14T10:42:26Z batch 02 done after 1 attempt(s)
+2026-10-14T10:42:26Z batch 03 attempt 1: start
+2026-10-14T10:43:03Z batch 03 attempt 1: rc=0 37.2s ok_ids=20/20 problems=[]
+2026-10-14T10:43:03Z batch 03 done after 1 attempt(s)
+2026-10-14T10:43:03Z batch 04 attempt 1: start
+2026-10-14T10:44:28Z batch 01 attempt 1: rc=0 158.7s ok_ids=20/20 problems=[]
+2026-10-14T10:44:28Z batch 01 done after 1 attempt(s)
+2026-10-14T10:44:28Z batch 05 attempt 1: start
+2026-10-14T10:45:28Z batch 04 attempt 1: rc=0 145.5s ok_ids=20/20 problems=[]
+2026-10-14T10:45:28Z batch 04 done after 1 attempt(s)
+2026-10-14T10:45:29Z batch 06 attempt 1: start
+2026-10-14T10:45:41Z batch 05 attempt 1: rc=0 72.2s ok_ids=20/20 problems=[]
+2026-10-14T10:45:41Z batch 05 done after 1 attempt(s)
+2026-10-14T10:45:41Z batch 07 attempt 1: start
+2026-10-14T10:47:57Z batch 06 attempt 1: rc=0 148.5s ok_ids=20/20 problems=[]
+2026-10-14T10:47:57Z batch 06 done after 1 attempt(s)
+2026-10-14T10:47:57Z batch 08 attempt 1: start
+2026-10-14T10:48:02Z batch 07 attempt 1: rc=0 141.6s ok_ids=20/20 problems=[]
+2026-10-14T10:48:02Z batch 07 done after 1 attempt(s)
+2026-10-14T10:48:02Z batch 09 attempt 1: start
+2026-10-14T10:48:32Z batch 08 attempt 1: rc=0 35.1s ok_ids=20/20 problems=[]
+2026-10-14T10:48:32Z batch 08 done after 1 attempt(s)
+2026-10-14T10:48:32Z batch 10 attempt 1: start
+2026-10-14T10:48:37Z batch 09 attempt 1: rc=0 34.1s ok_ids=20/20 problems=[]
+2026-10-14T10:48:37Z batch 09 done after 1 attempt(s)
+2026-10-14T10:49:43Z batch 10 attempt 1: rc=0 70.5s ok_ids=20/20 problems=[]
+2026-10-14T10:49:43Z batch 10 done after 1 attempt(s)
+2026-10-14T10:49:43Z DONE

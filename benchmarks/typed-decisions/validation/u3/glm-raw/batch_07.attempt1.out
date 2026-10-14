@@ -1,0 +1,29 @@
+```json
+[
+  {"id": "b-121", "class": "none", "importance": null, "rule": "N2"},
+  {"id": "b-122", "class": "error", "importance": "medium", "rule": "E2"},
+  {"id": "b-123", "class": "none", "importance": null, "rule": "N1"},
+  {"id": "b-124", "class": "none", "importance": null, "rule": "N5"},
+  {"id": "b-125", "class": "error", "importance": "medium", "rule": "E2"},
+  {"id": "b-126", "class": "none", "importance": null, "rule": "N4"},
+  {"id": "b-127", "class": "none", "importance": null, "rule": "N2"},
+  {"id": "b-128", "class": "none", "importance": null, "rule": "N1"},
+  {"id": "b-129", "class": "none", "importance": null, "rule": "N2"},
+  {"id": "b-130", "class": "error", "importance": "high", "rule": "E2"},
+  {"id": "b-131", "class": "decision", "importance": "medium", "rule": "D2"},
+  {"id": "b-132", "class": "none", "importance": null, "rule": "N2"},
+  {"id": "b-133", "class": "none", "importance": null, "rule": "N4"},
+  {"id": "b-134", "class": "none", "importance": null, "rule": "N4"},
+  {"id": "b-135", "class": "none", "importance": null, "rule": "N6"},
+  {"id": "b-136", "class": "none", "importance": null, "rule": "N2"},
+  {"id": "b-137", "class": "none", "importance": null, "rule": "N1"},
+  {"id": "b-138", "class": "decision", "importance": "medium", "rule": "D2"},
+  {"id": "b-139", "class": "none", "importance": null, "rule": "N5"},
+  {"id": "b-140", "class": "none", "importance": null, "rule": "N2"}
+]
+```
+
+[stderr]
+[0m
+> build · glm-5.3
+[0m

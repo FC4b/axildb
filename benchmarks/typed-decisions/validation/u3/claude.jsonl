@@ -1,0 +1,200 @@
+{"id": "u3-001", "class": "none", "importance": null, "rule": "N2", "note": "passing test run"}
+{"id": "u3-002", "class": "none", "importance": null, "rule": "N1", "note": "narration"}
+{"id": "u3-003", "class": "none", "importance": null, "rule": "N2", "note": "search hits"}
+{"id": "u3-004", "class": "none", "importance": null, "rule": "N2", "note": "build progress"}
+{"id": "u3-005", "class": "none", "importance": null, "rule": "N2", "note": "JSON rows"}
+{"id": "u3-006", "class": "none", "importance": null, "rule": "N2", "note": "background-job notice"}
+{"id": "u3-007", "class": "context", "importance": "medium", "rule": "C1", "note": "before/after latency table per command"}
+{"id": "u3-008", "class": "none", "importance": null, "rule": "N2", "note": "dead-code warning, tests pass"}
+{"id": "u3-009", "class": "none", "importance": null, "rule": "N2", "note": "eval rows"}
+{"id": "u3-010", "class": "none", "importance": null, "rule": "N1", "note": "narration"}
+{"id": "u3-011", "class": "none", "importance": null, "rule": "N2", "note": "source code"}
+{"id": "u3-012", "class": "none", "importance": null, "rule": "N2", "note": "diff"}
+{"id": "u3-013", "class": "none", "importance": null, "rule": "N2", "note": "ok lines"}
+{"id": "u3-014", "class": "none", "importance": null, "rule": "N2", "note": "search hits and code"}
+{"id": "u3-015", "class": "none", "importance": null, "rule": "N2", "note": "boot output"}
+{"id": "u3-016", "class": "none", "importance": null, "rule": "N2", "note": "probe output (which sccache)"}
+{"id": "u3-017", "class": "none", "importance": null, "rule": "N2", "note": "background-job notice"}
+{"id": "u3-018", "class": "none", "importance": null, "rule": "N2", "note": "search hits"}
+{"id": "u3-019", "class": "none", "importance": null, "rule": "N2", "note": "code, warnings, compiling"}
+{"id": "u3-020", "class": "none", "importance": null, "rule": "N2", "note": "tests ok, model revisions"}
+{"id": "u3-021", "class": "none", "importance": null, "rule": "N2", "note": "source code"}
+{"id": "u3-022", "class": "none", "importance": null, "rule": "N2", "note": "du output"}
+{"id": "u3-023", "class": "none", "importance": null, "rule": "N4", "note": "query typed wrong (unquoted FIND text)"}
+{"id": "u3-024", "class": "none", "importance": null, "rule": "N2", "note": "source code"}
+{"id": "u3-025", "class": "none", "importance": null, "rule": "N2", "note": "tests ok"}
+{"id": "u3-026", "class": "error", "importance": "high", "rule": "E2", "note": "validate_vector lets huge vectors through; persisted before graph insert, panics on every later open"}
+{"id": "u3-027", "class": "none", "importance": null, "rule": "N1", "note": "narration"}
+{"id": "u3-028", "class": "none", "importance": null, "rule": "N2", "note": "source code"}
+{"id": "u3-029", "class": "none", "importance": null, "rule": "N4", "note": "cat illegal option; SIGPIPE from head; tests ok"}
+{"id": "u3-030", "class": "context", "importance": "medium", "rule": "C1", "note": "Laya copies Jev's interface; TypeSafe publishes no model size"}
+{"id": "u3-031", "class": "none", "importance": null, "rule": "N2", "note": "source code"}
+{"id": "u3-032", "class": "none", "importance": null, "rule": "N5", "note": "code fence holding only a command line"}
+{"id": "u3-033", "class": "none", "importance": null, "rule": "N3", "note": "diff found differences"}
+{"id": "u3-034", "class": "none", "importance": null, "rule": "N1", "note": "narration"}
+{"id": "u3-035", "class": "none", "importance": null, "rule": "N6", "note": "research brief questions"}
+{"id": "u3-036", "class": "none", "importance": null, "rule": "N6", "note": "final-check commands"}
+{"id": "u3-037", "class": "none", "importance": null, "rule": "N1", "note": "progress of agents"}
+{"id": "u3-038", "class": "error", "importance": "high", "rule": "E2", "note": "release still blocked on the crates.io token"}
+{"id": "u3-039", "class": "none", "importance": null, "rule": "N1", "note": "narration"}
+{"id": "u3-040", "class": "none", "importance": null, "rule": "N6", "note": "final-check commands"}
+{"id": "u3-041", "class": "none", "importance": null, "rule": "N1", "note": "narration"}
+{"id": "u3-042", "class": "error", "importance": "medium", "rule": "E2", "note": "two queued bugs: batch embed OOM with 8k models; init ignores model in axil.toml"}
+{"id": "u3-043", "class": "none", "importance": null, "rule": "N1", "note": "narration"}
+{"id": "u3-044", "class": "none", "importance": null, "rule": "N6", "note": "roadmap/task list"}
+{"id": "u3-045", "class": "none", "importance": null, "rule": "N1", "note": "verification progress, waiting on user OK"}
+{"id": "u3-046", "class": "none", "importance": null, "rule": "N2", "note": "source code"}
+{"id": "u3-047", "class": "error", "importance": "medium", "rule": "E2", "note": "review finding: wrong denominator, wrong conclusion saved to memory"}
+{"id": "u3-048", "class": "none", "importance": null, "rule": "N2", "note": "search hits"}
+{"id": "u3-049", "class": "none", "importance": null, "rule": "N2", "note": "source code"}
+{"id": "u3-050", "class": "none", "importance": null, "rule": "N8", "note": "usage limit notice"}
+{"id": "u3-051", "class": "none", "importance": null, "rule": "C2", "note": "bare feature commit"}
+{"id": "u3-052", "class": "none", "importance": null, "rule": "N1", "note": "narration"}
+{"id": "u3-053", "class": "error", "importance": "low", "rule": "E1", "note": "two failing axil-core tests, no diagnosis"}
+{"id": "u3-054", "class": "none", "importance": null, "rule": "N1", "note": "progress"}
+{"id": "u3-055", "class": "decision", "importance": "medium", "rule": "D1", "note": "run the relabel blind, without the reference answers"}
+{"id": "u3-056", "class": "none", "importance": null, "rule": "N6", "note": "report format"}
+{"id": "u3-057", "class": "none", "importance": null, "rule": "N1", "note": "reason attached to a next step"}
+{"id": "u3-058", "class": "error", "importance": "high", "rule": "E2", "note": "vector store dead since June while tools report healthy"}
+{"id": "u3-059", "class": "none", "importance": null, "rule": "N6", "note": "report format"}
+{"id": "u3-060", "class": "none", "importance": null, "rule": "N1", "note": "narration"}
+{"id": "u3-061", "class": "none", "importance": null, "rule": "N8", "note": "usage limit notice"}
+{"id": "u3-062", "class": "none", "importance": null, "rule": "N1", "note": "narration"}
+{"id": "u3-063", "class": "none", "importance": null, "rule": "N6", "note": "handoff notes bound to the task"}
+{"id": "u3-064", "class": "context", "importance": "medium", "rule": "C1", "note": "graph built per process above exact-search threshold, rebuilt per CLI call"}
+{"id": "u3-065", "class": "none", "importance": null, "rule": "N1", "note": "narration"}
+{"id": "u3-066", "class": "none", "importance": null, "rule": "N1", "note": "progress"}
+{"id": "u3-067", "class": "none", "importance": null, "rule": "N1", "note": "narration"}
+{"id": "u3-068", "class": "none", "importance": null, "rule": "N2", "note": "all test runs pass"}
+{"id": "u3-069", "class": "none", "importance": null, "rule": "N6", "note": "report format"}
+{"id": "u3-070", "class": "none", "importance": null, "rule": "N4", "note": "zsh === not found"}
+{"id": "u3-071", "class": "decision", "importance": "medium", "rule": "D2", "note": "nomic stays unprompted"}
+{"id": "u3-072", "class": "none", "importance": null, "rule": "C2", "note": "bare feature commit"}
+{"id": "u3-073", "class": "none", "importance": null, "rule": "N2", "note": "search hits, no failure shown"}
+{"id": "u3-074", "class": "none", "importance": null, "rule": "C2", "note": "bare feature commit"}
+{"id": "u3-075", "class": "rule", "importance": "high", "rule": "R1", "note": "never git stash; long commands in background; give the suite a 2-hour timeout"}
+{"id": "u3-076", "class": "none", "importance": null, "rule": "C2", "note": "docs commit"}
+{"id": "u3-077", "class": "none", "importance": null, "rule": "N6", "note": "task classification scheme"}
+{"id": "u3-078", "class": "error", "importance": "high", "rule": "E2", "note": "root cause of the broken vector store"}
+{"id": "u3-079", "class": "error", "importance": "high", "rule": "E2", "note": "release failed: crates.io token rejected (403)"}
+{"id": "u3-080", "class": "error", "importance": "medium", "rule": "E2", "note": "nomic 8k batches run out of memory"}
+{"id": "u3-081", "class": "none", "importance": null, "rule": "N4", "note": "branch already checked out in another worktree"}
+{"id": "u3-082", "class": "error", "importance": "low", "rule": "E2", "note": "stores failed: unescaped quotes broke the JSON"}
+{"id": "u3-083", "class": "error", "importance": "medium", "rule": "E2", "note": "sync selection uses undecayed importance"}
+{"id": "u3-084", "class": "error", "importance": "medium", "rule": "E3", "note": "HNSW ef did not hold recall@10 at scale"}
+{"id": "u3-085", "class": "none", "importance": null, "rule": "N2", "note": "file contents, no failure shown"}
+{"id": "u3-086", "class": "none", "importance": null, "rule": "N6", "note": "brief opener"}
+{"id": "u3-087", "class": "error", "importance": "medium", "rule": "E3", "note": "multi-byte escape could panic"}
+{"id": "u3-088", "class": "none", "importance": null, "rule": "N4", "note": "zsh no matches found"}
+{"id": "u3-089", "class": "none", "importance": null, "rule": "N3", "note": "tests ok, exit status only"}
+{"id": "u3-090", "class": "rule", "importance": "high", "rule": "R1", "note": "conventions: doc comments, no phase tags, never cargo fmt whole crates"}
+{"id": "u3-091", "class": "none", "importance": null, "rule": "N3", "note": "ls probe of a missing path"}
+{"id": "u3-092", "class": "context", "importance": "medium", "rule": "C1", "note": "release state: 2.3.1 published with all downloads; pipeline runs itself"}
+{"id": "u3-093", "class": "none", "importance": null, "rule": "N4", "note": "regex that does not parse"}
+{"id": "u3-094", "class": "none", "importance": null, "rule": "N4", "note": "unexpanded glob path"}
+{"id": "u3-095", "class": "none", "importance": null, "rule": "N6", "note": "task setup"}
+{"id": "u3-096", "class": "rule", "importance": "high", "rule": "R1", "note": "never use git stash"}
+{"id": "u3-097", "class": "none", "importance": null, "rule": "C2", "note": "bare feature commit"}
+{"id": "u3-098", "class": "decision", "importance": "high", "rule": "D1", "note": "decide crate behind a non-default feature; models pinned by revision"}
+{"id": "u3-099", "class": "none", "importance": null, "rule": "N4", "note": "zsh === not found"}
+{"id": "u3-100", "class": "rule", "importance": "high", "rule": "R1", "note": "ranking changes need same-day same-snapshot measurements and user review"}
+{"id": "u3-101", "class": "error", "importance": "medium", "rule": "E3", "note": "open errors crowded decisions out of the hook budget"}
+{"id": "u3-102", "class": "error", "importance": "low", "rule": "E1", "note": "traceback from a one-liner"}
+{"id": "u3-103", "class": "error", "importance": "medium", "rule": "E1", "note": "axil panics on a broken pipe"}
+{"id": "u3-104", "class": "none", "importance": null, "rule": "N3", "note": "grep -c with zero counts"}
+{"id": "u3-105", "class": "error", "importance": "low", "rule": "E2", "note": "flaky vector-index test under parallel runs"}
+{"id": "u3-106", "class": "none", "importance": null, "rule": "N3", "note": "grep found nothing"}
+{"id": "u3-107", "class": "none", "importance": null, "rule": "C2", "note": "bare feature commit"}
+{"id": "u3-108", "class": "none", "importance": null, "rule": "C2", "note": "bare feature commit"}
+{"id": "u3-109", "class": "none", "importance": null, "rule": "N4", "note": "zsh ==CACHE not found"}
+{"id": "u3-110", "class": "error", "importance": "high", "rule": "E2", "note": "lifecycle config parse error fails open, disables protections"}
+{"id": "u3-111", "class": "none", "importance": null, "rule": "N6", "note": "report format"}
+{"id": "u3-112", "class": "none", "importance": null, "rule": "N4", "note": "regex that does not parse"}
+{"id": "u3-113", "class": "error", "importance": "medium", "rule": "E2", "note": "boot drops decisions at the hook budget"}
+{"id": "u3-114", "class": "none", "importance": null, "rule": "N1", "note": "reason attached to a next step"}
+{"id": "u3-115", "class": "none", "importance": null, "rule": "N2", "note": "printed record"}
+{"id": "u3-116", "class": "error", "importance": "low", "rule": "E1", "note": "traceback from a one-liner"}
+{"id": "u3-117", "class": "error", "importance": "low", "rule": "E1", "note": "failing test, no diagnosis"}
+{"id": "u3-118", "class": "context", "importance": "low", "rule": "C2", "note": "recall_delta resumes from next_cursor"}
+{"id": "u3-119", "class": "none", "importance": null, "rule": "C2", "note": "dead crate removed"}
+{"id": "u3-120", "class": "none", "importance": null, "rule": "C2", "note": "bare feature commit"}
+{"id": "u3-121", "class": "none", "importance": null, "rule": "N2", "note": "listing and build output"}
+{"id": "u3-122", "class": "error", "importance": "medium", "rule": "E2", "note": "rerun-if-changed on a missing file rebuilds axildb every build"}
+{"id": "u3-123", "class": "none", "importance": null, "rule": "N4", "note": "zsh === not found"}
+{"id": "u3-124", "class": "none", "importance": null, "rule": "N2", "note": "source code"}
+{"id": "u3-125", "class": "none", "importance": null, "rule": "C2", "note": "style commit"}
+{"id": "u3-126", "class": "none", "importance": null, "rule": "N3", "note": "all checks ok, exit status only"}
+{"id": "u3-127", "class": "none", "importance": null, "rule": "N2", "note": "source code"}
+{"id": "u3-128", "class": "context", "importance": "high", "rule": "C1", "note": "nomic OOM resolved: all 48 runs completed"}
+{"id": "u3-129", "class": "decision", "importance": "high", "rule": "D2", "note": "scan exactly instead of building the graph per process"}
+{"id": "u3-130", "class": "none", "importance": null, "rule": "N5", "note": "fix commit naming no defect"}
+{"id": "u3-131", "class": "none", "importance": null, "rule": "N5", "note": "fix commit naming no defect"}
+{"id": "u3-132", "class": "none", "importance": null, "rule": "N2", "note": "source code"}
+{"id": "u3-133", "class": "none", "importance": null, "rule": "C2", "note": "redundant wrapper removed"}
+{"id": "u3-134", "class": "none", "importance": null, "rule": "N6", "note": "task setup"}
+{"id": "u3-135", "class": "rule", "importance": "high", "rule": "R1", "note": "CARGO_BUILD_JOBS=3, never push/merge, no axil store on main DB"}
+{"id": "u3-136", "class": "none", "importance": null, "rule": "N3", "note": "grep exit status"}
+{"id": "u3-137", "class": "none", "importance": null, "rule": "N2", "note": "source code"}
+{"id": "u3-138", "class": "error", "importance": "medium", "rule": "E3", "note": "ordered query paged unsorted candidates"}
+{"id": "u3-139", "class": "none", "importance": null, "rule": "N4", "note": "ls of a guessed path"}
+{"id": "u3-140", "class": "none", "importance": null, "rule": "N3", "note": "grep found nothing"}
+{"id": "u3-141", "class": "none", "importance": null, "rule": "C2", "note": "ci commit"}
+{"id": "u3-142", "class": "none", "importance": null, "rule": "N4", "note": "regex that does not parse"}
+{"id": "u3-143", "class": "none", "importance": null, "rule": "C2", "note": "version bump"}
+{"id": "u3-144", "class": "context", "importance": "high", "rule": "C1", "note": "LongMemEval: no OOM in 48 runs; prompts on worse"}
+{"id": "u3-145", "class": "error", "importance": "medium", "rule": "E3", "note": "Traverse shape broken; KNOWN AT ignored on table seeds"}
+{"id": "u3-146", "class": "error", "importance": "high", "rule": "E3", "note": "broken vector store went silent"}
+{"id": "u3-147", "class": "none", "importance": null, "rule": "C2", "note": "version bump"}
+{"id": "u3-148", "class": "none", "importance": null, "rule": "C2", "note": "bare feature commit"}
+{"id": "u3-149", "class": "none", "importance": null, "rule": "N4", "note": "wrong path"}
+{"id": "u3-150", "class": "none", "importance": null, "rule": "N3", "note": "formatter check diff"}
+{"id": "u3-151", "class": "error", "importance": "medium", "rule": "E2", "note": "axil store gives up when a hook holds the writer lock"}
+{"id": "u3-152", "class": "error", "importance": "high", "rule": "E2", "note": "hook bugs: error capture dead, boot text never seen"}
+{"id": "u3-153", "class": "none", "importance": null, "rule": "N4", "note": "zsh ====daemon-overview not found"}
+{"id": "u3-154", "class": "none", "importance": null, "rule": "N3", "note": "diff found differences"}
+{"id": "u3-155", "class": "none", "importance": null, "rule": "C2", "note": "dead variant removed"}
+{"id": "u3-156", "class": "none", "importance": null, "rule": "N4", "note": "regex that does not parse"}
+{"id": "u3-157", "class": "none", "importance": null, "rule": "N4", "note": "printed commit message; zsh === not found"}
+{"id": "u3-158", "class": "error", "importance": "low", "rule": "E1", "note": "traceback from a one-liner"}
+{"id": "u3-159", "class": "decision", "importance": "medium", "rule": "D2", "note": "batch embeddings under a memory budget"}
+{"id": "u3-160", "class": "none", "importance": null, "rule": "N4", "note": "zsh no matches found"}
+{"id": "u3-161", "class": "none", "importance": null, "rule": "N2", "note": "source code"}
+{"id": "u3-162", "class": "error", "importance": "low", "rule": "E3", "note": "benchmark harnesses did not build"}
+{"id": "u3-163", "class": "none", "importance": null, "rule": "N4", "note": "diff output; zsh === not found"}
+{"id": "u3-164", "class": "none", "importance": null, "rule": "N4", "note": "zsh no matches found"}
+{"id": "u3-165", "class": "error", "importance": "low", "rule": "E1", "note": "OverflowError in calibrate_u1.py"}
+{"id": "u3-166", "class": "none", "importance": null, "rule": "N4", "note": "wrong path, glob no match"}
+{"id": "u3-167", "class": "error", "importance": "low", "rule": "E1", "note": "ValueError in a stdin script"}
+{"id": "u3-168", "class": "none", "importance": null, "rule": "N1", "note": "narration"}
+{"id": "u3-169", "class": "none", "importance": null, "rule": "N4", "note": "regex that does not parse"}
+{"id": "u3-170", "class": "none", "importance": null, "rule": "N3", "note": "formatter check diff"}
+{"id": "u3-171", "class": "decision", "importance": "low", "rule": "D2", "note": "route code-graph hint through extension_blocks"}
+{"id": "u3-172", "class": "none", "importance": null, "rule": "N4", "note": "printed commit; zsh ===== not found"}
+{"id": "u3-173", "class": "none", "importance": null, "rule": "N2", "note": "source code"}
+{"id": "u3-174", "class": "none", "importance": null, "rule": "C2", "note": "bare feature commit"}
+{"id": "u3-175", "class": "none", "importance": null, "rule": "N4", "note": "printed README; zsh ==== not found"}
+{"id": "u3-176", "class": "none", "importance": null, "rule": "N2", "note": "source code"}
+{"id": "u3-177", "class": "none", "importance": null, "rule": "N2", "note": "search hits, rustc version"}
+{"id": "u3-178", "class": "none", "importance": null, "rule": "N2", "note": "source code"}
+{"id": "u3-179", "class": "none", "importance": null, "rule": "C2", "note": "merge commit"}
+{"id": "u3-180", "class": "none", "importance": null, "rule": "N4", "note": "missing required argument"}
+{"id": "u3-181", "class": "none", "importance": null, "rule": "N2", "note": "file listing"}
+{"id": "u3-182", "class": "none", "importance": null, "rule": "N2", "note": "search hits"}
+{"id": "u3-183", "class": "none", "importance": null, "rule": "C2", "note": "bare feature commit"}
+{"id": "u3-184", "class": "none", "importance": null, "rule": "N4", "note": "edit tool replacement not unique"}
+{"id": "u3-185", "class": "none", "importance": null, "rule": "N1", "note": "narration with release state"}
+{"id": "u3-186", "class": "none", "importance": null, "rule": "C2", "note": "bare feature commit"}
+{"id": "u3-187", "class": "error", "importance": "medium", "rule": "E3", "note": "boot missed newest sessions; blank recall hits; rerank read wrong text"}
+{"id": "u3-188", "class": "none", "importance": null, "rule": "C2", "note": "docs commit"}
+{"id": "u3-189", "class": "none", "importance": null, "rule": "N6", "note": "task tracker update"}
+{"id": "u3-190", "class": "error", "importance": "high", "rule": "E2", "note": "publishing failed again with 403"}
+{"id": "u3-191", "class": "none", "importance": null, "rule": "N1", "note": "progress"}
+{"id": "u3-192", "class": "error", "importance": "medium", "rule": "E2", "note": "exit 137: killed, likely out of memory"}
+{"id": "u3-193", "class": "none", "importance": null, "rule": "N7", "note": "conditional plans"}
+{"id": "u3-194", "class": "context", "importance": "medium", "rule": "C1", "note": "recall_all and NDCG differences; no OOM in 24 runs"}
+{"id": "u3-195", "class": "context", "importance": "high", "rule": "C1", "note": "RC-1 hit@1 0.684 to 0.719; review edge flags 9/20 vs 2/20"}
+{"id": "u3-196", "class": "none", "importance": null, "rule": "N2", "note": "health check status, all passing"}
+{"id": "u3-197", "class": "none", "importance": null, "rule": "N5", "note": "label example in a code fence"}
+{"id": "u3-198", "class": "none", "importance": null, "rule": "N2", "note": "all suites pass"}
+{"id": "u3-199", "class": "error", "importance": "medium", "rule": "E2", "note": "root cause: old rescoring window pushed right answers out"}
+{"id": "u3-200", "class": "none", "importance": null, "rule": "N1", "note": "progress"}

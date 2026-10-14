@@ -1,0 +1,271 @@
+{
+ "annotator": "gemini",
+ "model": "gemini-3.8-flash-high",
+ "items": 200,
+ "items_labeled": 39,
+ "failures": [
+  {
+   "batch": "01",
+   "blind_id": "b-020",
+   "id": "u3-086"
+  },
+  {
+   "batch": "03",
+   "blind_id": "b-041",
+   "id": "u3-089"
+  },
+  {
+   "batch": "03",
+   "blind_id": "b-042",
+   "id": "u3-069"
+  },
+  {
+   "batch": "03",
+   "blind_id": "b-043",
+   "id": "u3-140"
+  },
+  {
+   "batch": "03",
+   "blind_id": "b-044",
+   "id": "u3-100"
+  },
+  {
+   "batch": "03",
+   "blind_id": "b-045",
+   "id": "u3-149"
+  },
+  {
+   "batch": "03",
+   "blind_id": "b-046",
+   "id": "u3-082"
+  },
+  {
+   "batch": "03",
+   "blind_id": "b-047",
+   "id": "u3-071"
+  },
+  {
+   "batch": "03",
+   "blind_id": "b-048",
+   "id": "u3-063"
+  },
+  {
+   "batch": "03",
+   "blind_id": "b-049",
+   "id": "u3-068"
+  },
+  {
+   "batch": "03",
+   "blind_id": "b-050",
+   "id": "u3-158"
+  },
+  {
+   "batch": "03",
+   "blind_id": "b-051",
+   "id": "u3-022"
+  },
+  {
+   "batch": "03",
+   "blind_id": "b-052",
+   "id": "u3-077"
+  },
+  {
+   "batch": "03",
+   "blind_id": "b-053",
+   "id": "u3-041"
+  },
+  {
+   "batch": "03",
+   "blind_id": "b-054",
+   "id": "u3-112"
+  },
+  {
+   "batch": "03",
+   "blind_id": "b-055",
+   "id": "u3-193"
+  },
+  {
+   "batch": "03",
+   "blind_id": "b-056",
+   "id": "u3-031"
+  },
+  {
+   "batch": "03",
+   "blind_id": "b-057",
+   "id": "u3-166"
+  },
+  {
+   "batch": "03",
+   "blind_id": "b-058",
+   "id": "u3-037"
+  },
+  {
+   "batch": "03",
+   "blind_id": "b-059",
+   "id": "u3-021"
+  },
+  {
+   "batch": "03",
+   "blind_id": "b-060",
+   "id": "u3-146"
+  },
+  {
+   "batch": "04",
+   "blind_id": "b-061",
+   "id": "u3-076"
+  },
+  {
+   "batch": "04",
+   "blind_id": "b-062",
+   "id": "u3-136"
+  },
+  {
+   "batch": "04",
+   "blind_id": "b-063",
+   "id": "u3-148"
+  },
+  {
+   "batch": "04",
+   "blind_id": "b-064",
+   "id": "u3-040"
+  },
+  {
+   "batch": "04",
+   "blind_id": "b-065",
+   "id": "u3-033"
+  },
+  {
+   "batch": "04",
+   "blind_id": "b-066",
+   "id": "u3-094"
+  },
+  {
+   "batch": "04",
+   "blind_id": "b-067",
+   "id": "u3-197"
+  },
+  {
+   "batch": "04",
+   "blind_id": "b-068",
+   "id": "u3-019"
+  },
+  {
+   "batch": "04",
+   "blind_id": "b-069",
+   "id": "u3-195"
+  },
+  {
+   "batch": "04",
+   "blind_id": "b-070",
+   "id": "u3-088"
+  },
+  {
+   "batch": "04",
+   "blind_id": "b-071",
+   "id": "u3-042"
+  },
+  {
+   "batch": "04",
+   "blind_id": "b-072",
+   "id": "u3-179"
+  },
+  {
+   "batch": "04",
+   "blind_id": "b-073",
+   "id": "u3-119"
+  },
+  {
+   "batch": "04",
+   "blind_id": "b-074",
+   "id": "u3-023"
+  },
+  {
+   "batch": "04",
+   "blind_id": "b-075",
+   "id": "u3-065"
+  },
+  {
+   "batch": "04",
+   "blind_id": "b-076",
+   "id": "u3-073"
+  },
+  {
+   "batch": "04",
+   "blind_id": "b-077",
+   "id": "u3-189"
+  },
+  {
+   "batch": "04",
+   "blind_id": "b-078",
+   "id": "u3-196"
+  },
+  {
+   "batch": "04",
+   "blind_id": "b-079",
+   "id": "u3-156"
+  },
+  {
+   "batch": "04",
+   "blind_id": "b-080",
+   "id": "u3-103"
+  },
+  {
+   "batch": "05",
+   "reason": "never run"
+  },
+  {
+   "batch": "06",
+   "reason": "never run"
+  },
+  {
+   "batch": "07",
+   "reason": "never run"
+  },
+  {
+   "batch": "08",
+   "reason": "never run"
+  },
+  {
+   "batch": "09",
+   "reason": "never run"
+  },
+  {
+   "batch": "10",
+   "reason": "never run"
+  }
+ ],
+ "by_class": {
+  "context": 3,
+  "none": 28,
+  "error": 6,
+  "decision": 2
+ },
+ "by_importance": {
+  "medium": 7,
+  "high": 3,
+  "low": 1
+ },
+ "batches": {
+  "01": {
+   "attempts": 3,
+   "used_attempt": 1
+  },
+  "02": {
+   "attempts": 1,
+   "used_attempt": 1
+  },
+  "03": {
+   "attempts": 1,
+   "used_attempt": null
+  },
+  "04": {
+   "attempts": 2,
+   "used_attempt": null
+  }
+ },
+ "parse_problems_seen": {
+  "array did not parse; recovered objects one by one": 1,
+  "missing 1": 1,
+  "no JSON array found": 5
+ }
+}

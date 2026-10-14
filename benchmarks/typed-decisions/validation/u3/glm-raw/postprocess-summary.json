@@ -1,0 +1,62 @@
+{
+ "annotator": "glm",
+ "model": "zai-coding-plan/glm-5.3",
+ "items": 200,
+ "items_labeled": 200,
+ "failures": [],
+ "by_class": {
+  "none": 132,
+  "context": 14,
+  "error": 40,
+  "rule": 5,
+  "decision": 9
+ },
+ "by_importance": {
+  "high": 20,
+  "medium": 37,
+  "low": 11
+ },
+ "batches": {
+  "01": {
+   "attempts": 1,
+   "used_attempt": 1
+  },
+  "02": {
+   "attempts": 1,
+   "used_attempt": 1
+  },
+  "03": {
+   "attempts": 1,
+   "used_attempt": 1
+  },
+  "04": {
+   "attempts": 1,
+   "used_attempt": 1
+  },
+  "05": {
+   "attempts": 1,
+   "used_attempt": 1
+  },
+  "06": {
+   "attempts": 1,
+   "used_attempt": 1
+  },
+  "07": {
+   "attempts": 1,
+   "used_attempt": 1
+  },
+  "08": {
+   "attempts": 1,
+   "used_attempt": 1
+  },
+  "09": {
+   "attempts": 1,
+   "used_attempt": 1
+  },
+  "10": {
+   "attempts": 1,
+   "used_attempt": 1
+  }
+ },
+ "parse_problems_seen": {}
+}

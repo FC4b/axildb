@@ -1,0 +1,23 @@
+[
+  {"id": "b-001", "class": "context", "importance": "medium", "rule": "C2"},
+  {"id": "b-002", "class": "none", "importance": null, "rule": "N4"},
+  {"id": "b-003", "class": "error", "importance": "medium", "rule": "E3"},
+  {"id": "b-004", "class": "context", "importance": "high", "rule": "C1"},
+  {"id": "b-005", "class": "none", "importance": null, "rule": "N1"},
+  {"id": "b-006", "class": "none", "importance": null, "rule": "N6"},
+  {"id": "b-007", "class": "error", "importance": "low", "rule": "E1"},
+  {"id": "b-008", "class": "error", "importance": "medium", "rule": "E2"},
+  {"id": "b-009", "class": "none", "importance": null, "rule": "N5"},
+  {"id": "b-010", "class": "none", "importance": null, "rule": "N6"},
+  {"id": "b-011", "class": "decision", "importance": "medium", "rule": "D2"},
+  {"id": "b-012", "class": "none", "importance": null, "rule": "N2"},
+  {"id": "b-013", "class": "none", "importance": null, "rule": "N4"},
+  {"id": "b-014", "class": "none", "importance": null, "rule": "N3"},
+  {"id": "b-015", "class": "context", "importance": "high", "rule": "C1"},
+  {"id": "b-016", "class": "none", "importance": null, "rule": "N4"},
+  {"id": "b-017", "class": "none", "importance": null, "rule": "N1"},
+  {"id": "b-018", "class": "none", "importance": null, "rule": "N2"},
+  {"id": "b-019", "class": "none", "importance": null, "rule": "N2"},
+  {"id": "b-020", "class": "n
+[stderr]
+[agy] print timeout after 5m0s with turn in progress; returning partial output

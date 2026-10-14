@@ -9,10 +9,16 @@
 //! * `--full-path` runs the supersession path end to end in a real database.
 //! * `--entities` (U5 texts) runs the entity extraction `Axil::auto_link`
 //!   performs on every insert.
+//! * `--capture` (U3 texts) runs `auto_capture::analyze`, what
+//!   `axil auto-capture` stores, and the importance each stored record gets.
+//! * `--embed` writes the bge-small vector Axil stores for each text or
+//!   record, the input of the U3 classifier head.
 
 use std::io::{BufRead, BufReader, Write};
 use std::time::Instant;
 
+use axil_core::auto_capture::{analyze, capture_to_record};
+use axil_core::importance::compute_importance;
 use axil_core::{
     check_conflict, extract_entities, judge_conflict, ConflictResult, EntityType, Record,
 };
@@ -48,6 +54,20 @@ fn main() {
             .get(1)
             .expect("usage: typed-decisions-heuristic --entities <u5.jsonl>");
         entities(path);
+        return;
+    }
+    if args.first().map(String::as_str) == Some("--capture") {
+        let path = args
+            .get(1)
+            .expect("usage: typed-decisions-heuristic --capture <u3.jsonl>");
+        capture(path);
+        return;
+    }
+    if args.first().map(String::as_str) == Some("--embed") {
+        let path = args
+            .get(1)
+            .expect("usage: typed-decisions-heuristic --embed <rows.jsonl>");
+        embed_rows(path);
         return;
     }
     let path = args
@@ -254,4 +274,106 @@ fn entities(path: &str) {
         "{}",
         json!({ "first_call_us": first_call_us, "texts": rows.len() })
     );
+}
+
+/// Read a JSONL file into rows, skipping blank lines.
+fn read_rows(path: &str) -> Vec<Value> {
+    BufReader::new(std::fs::File::open(path).expect("open set"))
+        .lines()
+        .map(|l| l.expect("read line"))
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(&l).expect("parse row"))
+        .collect()
+}
+
+/// `auto_capture::analyze` on the U3 texts, as `axil auto-capture` runs it.
+///
+/// Prints one JSON line per text: every capture `analyze` returns (type,
+/// confidence, summary), the table and `_importance` of the record
+/// `capture_to_record` would store for it (what `Axil::insert` computes), and
+/// `plain_importance`, the importance a plain `{summary: text}` record of the
+/// whole text gets. Which captures are stored is the caller's
+/// `--min-confidence` (the hook passes 0.8, the CLI default is 0.7), so the
+/// threshold is applied offline. `analyze_us` times `analyze` alone; the
+/// first call is timed separately and reported on stderr.
+fn capture(path: &str) {
+    let rows = read_rows(path);
+    let t = Instant::now();
+    let _ = analyze(
+        "Exit code 101\nerror[E0308]: mismatched types in src/lib.rs",
+        "bash",
+    );
+    let first_call_us = t.elapsed().as_secs_f64() * 1e6;
+
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    for row in &rows {
+        let text = row["text"].as_str().unwrap_or_default();
+        let t = Instant::now();
+        let captures = analyze(text, "bash");
+        let analyze_us = t.elapsed().as_secs_f64() * 1e6;
+        let captures: Vec<Value> = captures
+            .iter()
+            .map(|c| {
+                let (table, data) = capture_to_record(c);
+                json!({
+                    "type": c.capture_type,
+                    "confidence": c.confidence,
+                    "summary": c.summary,
+                    "table": table,
+                    "importance": compute_importance(&data),
+                })
+            })
+            .collect();
+        writeln!(
+            out,
+            "{}",
+            json!({
+                "id": row["id"],
+                "captures": captures,
+                "plain_importance": compute_importance(&json!({ "summary": text })),
+                "analyze_us": analyze_us,
+            })
+        )
+        .expect("write");
+    }
+    eprintln!(
+        "{}",
+        json!({ "first_call_us": first_call_us, "texts": rows.len() })
+    );
+}
+
+/// The bge-small vector Axil stores for each row, one JSON line per row.
+///
+/// A row with `text` is embedded as given; a row with `data` (an `axil
+/// export` record) is embedded the way insert embeds a record: its
+/// `util::searchable_text`. Both go through `Embedder::embed`, the passage
+/// embedding stored records get. `embed_us` times one embed call; the model
+/// load is reported on stderr, timed through the first embed because the
+/// ONNX session is created lazily.
+fn embed_rows(path: &str) {
+    let rows = read_rows(path);
+    let t = Instant::now();
+    let embedder = Embedder::new(EmbeddingModel::BgeSmall).expect("load bge-small");
+    let _ = embedder.embed("warm up the session").expect("embed");
+    let load_ms = t.elapsed().as_secs_f64() * 1e3;
+
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    for row in &rows {
+        let text = match row.get("data") {
+            Some(data) => axil_core::util::searchable_text(data),
+            None => row["text"].as_str().unwrap_or_default().to_string(),
+        };
+        let t = Instant::now();
+        let vector = embedder.embed(&text).expect("embed");
+        let embed_us = t.elapsed().as_secs_f64() * 1e6;
+        writeln!(
+            out,
+            "{}",
+            json!({ "id": row["id"], "vector": vector, "embed_us": embed_us })
+        )
+        .expect("write");
+    }
+    eprintln!("{}", json!({ "load_ms": load_ms, "rows": rows.len() }));
 }
