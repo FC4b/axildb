@@ -1,0 +1,31 @@
+{
+  "provenance": {
+    "measured": "2026-10-15",
+    "snapshot": "snap-prefix copy with only the _entities key index built",
+    "method": "axil recall <dogfood question> --top-k 10 --recall-format full --explain on one snapshot copy; a hit counts when its signals include graph_proximity",
+    "note": "release builds of each commit, rebuilt from the commit; the first run of this probe used stale builds for three of the four entries"
+  },
+  "benchmark": "graph-signal-probe",
+  "by_build": {
+    "commit \"feat(recall): a record's event_time says where it falls in time\" (WIP 5669341; before the gate)": {
+      "questions_with_graph_signal": 27,
+      "questions": 57,
+      "top10_hits_with_graph_signal": 57
+    },
+    "commit \"fix(recall): graph proximity needs an entity the query names\" (WIP 28e664c; gate)": {
+      "questions_with_graph_signal": 1,
+      "questions": 57,
+      "top10_hits_with_graph_signal": 1
+    },
+    "commit \"fix(recall): normalize graph proximity by the candidate's degree\" (WIP d5897b1; gate + degree norm)": {
+      "questions_with_graph_signal": 1,
+      "questions": 57,
+      "top10_hits_with_graph_signal": 1
+    },
+    "commit \"fix(recall): measure graph proximity against a fixed seed set\" (WIP b172275; gate + degree norm + fixed seeds)": {
+      "questions_with_graph_signal": 0,
+      "questions": 57,
+      "top10_hits_with_graph_signal": 0
+    }
+  }
+}

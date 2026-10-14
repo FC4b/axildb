@@ -5494,12 +5494,16 @@ impl Axil {
             .map(|(rid, candidate)| (rid.clone(), candidate.vector_score))
             .collect();
 
-        // Step 3: Compute graph proximity for candidates
+        // Step 3: Compute graph proximity for the candidates linked to an
+        // entity the query names. Without that evidence the signal only said
+        // how well connected a record is, which lifted hubs over answers.
         let graph_scores: std::collections::HashMap<String, f32> =
-            if let Some(ref gi) = self.graph_index {
-                compute_graph_proximity(gi.as_ref(), &candidate_vector_results)
-            } else {
-                std::collections::HashMap::new()
+            match self.graph_index.as_ref() {
+                Some(gi) => {
+                    let named = self.query_entity_ids(&effective_query);
+                    compute_graph_proximity(gi.as_ref(), &candidate_vector_results, &named)
+                }
+                None => std::collections::HashMap::new(),
             };
 
         // Step 4: Compute feedback boosts from provided store
@@ -7123,13 +7127,14 @@ pub struct WarmUpReport {
     pub vector_rebuilt: bool,
 }
 
-/// Compute graph proximity scores for a set of candidate records.
-///
-/// For each candidate, checks how many other candidates are reachable
-/// within 2 hops. More connections = higher graph proximity.
+/// Graph proximity of each candidate: its 1-hop links to the other
+/// candidates, over the pool size. Only a candidate that is itself linked
+/// to an entity in `named` (the entities the query names) gets one; with
+/// none named, nobody does.
 fn compute_graph_proximity(
     gi: &dyn GraphIndex,
     candidates: &[(RecordId, f32)],
+    named: &std::collections::HashSet<String>,
 ) -> std::collections::HashMap<String, f32> {
     let mut scores = std::collections::HashMap::new();
     let ids: std::collections::HashSet<String> = candidates
@@ -7137,7 +7142,7 @@ fn compute_graph_proximity(
         .map(|(rid, _)| rid.as_str().to_string())
         .collect();
 
-    if ids.len() <= 1 {
+    if ids.len() <= 1 || named.is_empty() {
         return scores;
     }
 
@@ -7146,6 +7151,9 @@ fn compute_graph_proximity(
         let neighbors = gi
             .neighbors(rid.clone(), None, Direction::Both)
             .unwrap_or_default();
+        if !neighbors.iter().any(|nid| named.contains(nid.as_str())) {
+            continue;
+        }
 
         let connected = neighbors
             .iter()
@@ -7856,6 +7864,28 @@ impl Axil {
             return Ok(None);
         };
         Ok(Some((source_id, source_record)))
+    }
+
+    /// Ids of the `_entities` rows the query names, found through the entity
+    /// key index. Empty when the query names none, or when the index cannot
+    /// answer (not built, or left stale by another writer): recall then has
+    /// no evidence for graph proximity and leaves it out.
+    fn query_entity_ids(&self, query: &str) -> std::collections::HashSet<String> {
+        let entities = crate::entity::extract_entities(query);
+        if entities.is_empty() {
+            return std::collections::HashSet::new();
+        }
+        let keys: Vec<String> = entities
+            .iter()
+            .map(|e| entity_canonical_id(e, None))
+            .collect();
+        let key_refs: Vec<&str> = keys.iter().map(String::as_str).collect();
+        match self.storage.lookup_entity_keys(&key_refs) {
+            Ok(crate::storage::EntityKeyLookup::Found(found)) => {
+                found.into_values().map(|id| id.to_string()).collect()
+            }
+            _ => std::collections::HashSet::new(),
+        }
     }
 
     /// Recall's vector candidates: the `want` nearest hits in the default

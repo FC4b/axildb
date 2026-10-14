@@ -11,6 +11,8 @@
 //!   take no place among recall's vector candidates.
 //! - Equal scores come back in record-id order, the same in every process,
 //!   from recall and from full-text search.
+//! - Graph proximity counts only for a query that names an entity, and only
+//!   for the candidates linked to it.
 //! - A query that names a span of time keeps the candidates inside it, and
 //!   ranks on relevance alone when none are. A record's `event_time`, when
 //!   it has one, says where in time it falls.
@@ -457,4 +459,59 @@ fn a_record_falls_in_time_where_its_event_time_says() {
     let mut expected = vec![release.id.to_string(), march.id.to_string()];
     expected.sort();
     assert_eq!(in_march, expected);
+}
+
+#[test]
+fn graph_proximity_needs_an_entity_the_query_names() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("graph.axil");
+    let db = open(&path, Arc::default(), true);
+    let now = Utc::now();
+    let mut named = Vec::new();
+    for i in 0..3 {
+        let summary = format!("AuthService connection pool timeout {i}");
+        let rec = db
+            .insert_at("notes", json!({ "summary": summary }), now - Duration::hours(i))
+            .unwrap();
+        named.push(rec.id);
+    }
+    let mut all = named.clone();
+    for i in 0..5 {
+        let summary = format!("connection pool timeout plain{i}");
+        let rec = db
+            .insert_at("notes", json!({ "summary": summary }), now - Duration::hours(i))
+            .unwrap();
+        all.push(rec.id);
+    }
+    // Every record linked to every other: there are links to count.
+    for a in &all {
+        for b in &all {
+            if a < b {
+                db.relate(a, "relates_to", b, None).unwrap();
+            }
+        }
+    }
+
+    let lifted = |query: &str| -> Vec<String> {
+        let mut ids: Vec<String> = db
+            .recall(query, 8, Some(cli_config()))
+            .unwrap()
+            .into_iter()
+            .filter(|r| {
+                r.explanation
+                    .signals
+                    .iter()
+                    .any(|(name, value)| name == "graph_proximity" && *value > 0.0)
+            })
+            .map(|r| r.record.id.to_string())
+            .collect();
+        ids.sort();
+        ids
+    };
+    // No entity named: no graph signal, however linked the records are.
+    assert_eq!(lifted("connection pool timeout"), Vec::<String>::new());
+    // Naming one: the records linked to it, and only those.
+    let mut expected: Vec<String> = named.iter().map(ToString::to_string).collect();
+    expected.sort();
+    assert_eq!(lifted("AuthService connection pool timeout"), expected);
 }
