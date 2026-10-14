@@ -1,8 +1,11 @@
 //! Production pattern arms on the U5 and U3 sets, without the model crates.
 //!
-//! * `--entities <u5.jsonl>` prints what `heuristic --entities` prints: the
-//!   entities `axil_core::extract_entities` finds in each text, capped at the
-//!   number `Axil::auto_link` keeps.
+//! * `--entities <u5.jsonl> [--project-dir <dir>]` prints what `heuristic
+//!   --entities` prints: the entities `axil_core::extract_entities` finds in
+//!   each text, capped at the number `Axil::auto_link` keeps. With
+//!   `--project-dir`, extraction uses the gazetteer `Axil::auto_link` builds
+//!   for a database under `<dir>/.axil/` (`Gazetteer::for_project_dir`; a
+//!   database with `_deps` rows adds those names too).
 //! * `--capture <u3.jsonl>` prints what `heuristic --capture` prints: every
 //!   capture `auto_capture::analyze` returns, with the table and importance of
 //!   the record it would store.
@@ -16,7 +19,7 @@ use std::time::Instant;
 
 use axil_core::auto_capture::{analyze, capture_to_record};
 use axil_core::importance::compute_importance;
-use axil_core::{extract_entities, EntityType, Record};
+use axil_core::{extract_entities, extract_entities_with, EntityType, Gazetteer, Record};
 use serde_json::{json, Value};
 
 /// `Axil::auto_link` keeps at most this many entities per record.
@@ -24,13 +27,22 @@ const MAX_AUTO_LINK_ENTITIES: usize = 50;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let usage = "usage: typed-decisions-regex-arm (--entities <u5.jsonl> | --capture <u3.jsonl>)";
+    let usage = "usage: typed-decisions-regex-arm \
+                 (--entities <u5.jsonl> [--project-dir <dir>] | --capture <u3.jsonl>)";
     let (Some(mode), Some(path)) = (args.first(), args.get(1)) else {
         eprintln!("{usage}");
         std::process::exit(2);
     };
+    let project_dir = match (args.get(2).map(String::as_str), args.get(3)) {
+        (Some("--project-dir"), Some(dir)) => Some(std::path::PathBuf::from(dir)),
+        (None, _) => None,
+        _ => {
+            eprintln!("{usage}");
+            std::process::exit(2);
+        }
+    };
     match mode.as_str() {
-        "--entities" => entities(path),
+        "--entities" => entities(path, project_dir.as_deref()),
         "--capture" => capture(path),
         _ => {
             eprintln!("{usage}");
@@ -49,15 +61,22 @@ fn read_rows(path: &str) -> Vec<Value> {
         .collect()
 }
 
-fn entities(path: &str) {
+fn entities(path: &str, project_dir: Option<&std::path::Path>) {
     let rows = read_rows(path);
+    let gazetteer = project_dir.map(Gazetteer::for_project_dir);
+    if let Some(g) = &gazetteer {
+        eprintln!("{}", json!({ "gazetteer_names": g.len() }));
+    }
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
     for row in &rows {
         let record = Record::new("decisions", json!({ "summary": row["text"] }));
         let t = Instant::now();
         let text = axil_core::util::record_text(&record);
-        let mut found = extract_entities(&text);
+        let mut found = match &gazetteer {
+            Some(g) => extract_entities_with(&text, g),
+            None => extract_entities(&text),
+        };
         found.truncate(MAX_AUTO_LINK_ENTITIES);
         let extract_us = t.elapsed().as_secs_f64() * 1e6;
         let entities: Vec<Value> = found

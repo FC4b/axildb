@@ -236,6 +236,9 @@ pub struct AxilBuilder {
     read_only: bool,
     /// Engines the adapter found on disk but could not attach.
     degraded_engines: Vec<crate::diagnostics::DegradedEngine>,
+    /// Known names for entity extraction. `None` = built on first use (see
+    /// [`Axil::entity_gazetteer`]).
+    entity_gazetteer: Option<crate::gazetteer::Gazetteer>,
     /// Leave notes of deletes made while the vector store was detached for a
     /// later open instead of applying them at build; see
     /// [`AxilBuilder::defer_vector_delete_notes`].
@@ -432,6 +435,14 @@ impl AxilBuilder {
     /// honor the same policy without extra wiring.
     pub fn with_lifecycle(mut self, lifecycle: crate::config::LifecycleConfig) -> Self {
         self.lifecycle = Some(lifecycle);
+        self
+    }
+
+    /// Use `gazetteer` for the known names entity extraction finds on insert
+    /// ([`Axil::auto_link`]), instead of building one from the project on
+    /// first use (see [`Axil::entity_gazetteer`]).
+    pub fn with_entity_gazetteer(mut self, gazetteer: crate::gazetteer::Gazetteer) -> Self {
+        self.entity_gazetteer = Some(gazetteer);
         self
     }
 
@@ -669,6 +680,10 @@ impl AxilBuilder {
             degraded_engines: self.degraded_engines,
             vector_store_detached,
             supersede_threshold,
+            entity_gazetteer: self
+                .entity_gazetteer
+                .map(std::sync::OnceLock::from)
+                .unwrap_or_default(),
             #[cfg(feature = "event-log")]
             event_log_enabled: std::sync::atomic::AtomicBool::new(event_log_enabled),
             #[cfg(feature = "event-log")]
@@ -919,6 +934,8 @@ pub struct Axil {
     /// Auto-supersede similarity threshold, resolved at build time from
     /// `healing.supersede_similarity_threshold` (default 0.92).
     supersede_threshold: f32,
+    /// Known names for entity extraction, built on first use.
+    entity_gazetteer: std::sync::OnceLock<crate::gazetteer::Gazetteer>,
     /// Runtime gate for the durable semantic event log. Off by default even when
     /// the `event-log` feature is compiled in — it is a write-amplifier, so the
     /// caller opts in: `[healing] event_log = true` in the nearest `axil.toml`
@@ -952,6 +969,7 @@ impl Axil {
             needs_fts_reindex: false,
             read_only: false,
             degraded_engines: Vec::new(),
+            entity_gazetteer: None,
             defer_vector_delete_notes: false,
             #[cfg(feature = "encryption")]
             cipher: None,
@@ -3143,6 +3161,33 @@ impl Axil {
         self.llm_call_guarded(|p| p.extract_json(prompt, schema_hint))
     }
 
+    /// The known names entity extraction uses on insert: the built-in
+    /// tools, languages, services and models, plus, when the database sits
+    /// in a project's `.axil/` directory, the crates, packages and direct
+    /// dependencies that project's manifests declare, plus the names of the
+    /// database's `_deps` rows. Built on first use and kept for the life of
+    /// the handle, so a dependency added later is known to the next handle.
+    pub fn entity_gazetteer(&self) -> &crate::gazetteer::Gazetteer {
+        self.entity_gazetteer.get_or_init(|| {
+            let mut gazetteer = crate::gazetteer::Gazetteer::builtin();
+            if let Some(dir) = project_dir_of(&self.path) {
+                gazetteer.load_project_dir(&dir);
+            }
+            let deps = self
+                .storage
+                .list(DEPS_TABLE, usize::MAX, 0)
+                .unwrap_or_default();
+            for row in &deps {
+                let name = row.data.get("name").and_then(|v| v.as_str());
+                let removed = row.data.get("status").and_then(|v| v.as_str()) == Some("removed");
+                if let (Some(name), false) = (name, removed) {
+                    gazetteer.add_dependency(name);
+                }
+            }
+            gazetteer
+        })
+    }
+
     /// Extract entities using LLM if available, falling back to regex-based extraction.
     ///
     /// LLM extraction produces richer results (person names, concepts) while
@@ -3150,7 +3195,7 @@ impl Axil {
     /// When both are available, results are merged (LLM wins on conflicts).
     pub fn extract_entities_enhanced(&self, text: &str) -> Vec<crate::entity::Entity> {
         // Always get algorithmic entities as baseline.
-        let mut entities = crate::entity::extract_entities(text);
+        let mut entities = crate::entity::extract_entities_with(text, self.entity_gazetteer());
 
         // Try LLM enhancement.
         if self.has_llm() {
@@ -5828,7 +5873,7 @@ impl Axil {
         // Step 1: Entity extraction (capped to prevent unbounded work)
         const MAX_AUTO_LINK_ENTITIES: usize = 50;
         let text = record_text_for_entity(&record);
-        let mut entities = crate::entity::extract_entities(&text);
+        let mut entities = crate::entity::extract_entities_with(&text, self.entity_gazetteer());
         entities.truncate(MAX_AUTO_LINK_ENTITIES);
         report.entities_found = entities.len();
 
@@ -7145,6 +7190,25 @@ fn record_text_for_entity(record: &Record) -> String {
     crate::util::record_text(record)
 }
 
+/// The dependency table `axil deps sync` writes (axil-docs owns it).
+const DEPS_TABLE: &str = "_deps";
+
+/// The project a database belongs to: the parent of the `.axil/` directory
+/// it sits in. A database anywhere else has no project, so its directory is
+/// never scanned for manifests (it may be a home directory).
+fn project_dir_of(db_path: &Path) -> Option<PathBuf> {
+    let dir = db_path.parent()?;
+    if dir.file_name()? != ".axil" {
+        return None;
+    }
+    let project = dir.parent()?;
+    Some(if project.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        project.to_path_buf()
+    })
+}
+
 /// Collapse near-duplicate recall results in place.
 ///
 /// Walks the score-sorted list keeping the first (highest-scored) member of
@@ -7921,6 +7985,31 @@ mod database_file_name_tests {
             "other.axil.ts",
         ] {
             assert!(!is_database_file_name("memory.axil", name), "{name}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod project_dir_tests {
+    use super::project_dir_of;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn only_a_database_in_a_dot_axil_directory_has_a_project() {
+        assert_eq!(
+            project_dir_of(Path::new("/work/app/.axil/memory.axil")),
+            Some(PathBuf::from("/work/app"))
+        );
+        assert_eq!(
+            project_dir_of(Path::new(".axil/memory.axil")),
+            Some(PathBuf::from("."))
+        );
+        for path in [
+            "/home/me/memory.axil",
+            "memory.axil",
+            "/work/app/axil/memory.axil",
+        ] {
+            assert_eq!(project_dir_of(Path::new(path)), None, "{path}");
         }
     }
 }

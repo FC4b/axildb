@@ -1,0 +1,119 @@
+# Words a project-derived name may not be on its own, for the entity
+# gazetteer (src/gazetteer.rs). A dependency or crate named like an English
+# word or a generic technical noun (`log`, `time`, `regex`, `toml`) would turn
+# every note that uses the word into a mention of the package, so such names
+# are left out of the gazetteer. Whitespace-separated, lowercase; `#` starts a
+# comment line.
+
+# Generic technical nouns (never entities on their own).
+abi agent api app archive arena args array ascii async atomic auth backend
+backtrace base base64 batch bench binary bit bitflags bits block blob bloom
+body bool boot buffer bug build builder bundle bus byte bytes cache call
+callback cell channel char check checksum chunk cipher class cli client clock
+cluster code codec codegen collection color colors column command commit
+compact compile compiler compress compression config console const container
+context core cors cpu crate crc cron crypto csv cursor daemon data database
+date datetime db debug decode decoder default delta deque derive diff digest
+dir dirs disk dns doc docs document driver dump edge editor embed embedding
+encode encoder engine entity enum env error errors event events exec executor
+export extension fetch field file files filter flag flags float font form
+format formatter frame fs function future futures gate glob gpu graph grammar
+grep guard handle handler hash hasher header heap hex hook host html http
+https icon id ident image import index input inspect int interface io ipc
+iter iterator jit job json kernel key keys lexer lib library lint list
+listener loader lock log logger logging loop lru macro macros map mask math
+matrix memory merge mesh message meta metadata metrics mime mock model module
+monitor mutex net network node num number object option options os output
+pack package packet page parse parser patch path pattern peer pipe pipeline
+plot plugin pointer poll pool port prefix process profile proto protocol
+proxy query queue random range reader record reflect regex registry
+release render repo request resolver response result retry ring router rpc
+rss runner runtime sandbox scan schema scope script sdk search semver serial
+server service session set shell signal sink slab slice socket sort source
+span spec spin stack state stats storage store str stream string struct
+style sync syntax system table tag tar task template term terminal test
+text thread time timer token tokenizer tokenizers tokens toml tool tools
+trace tracing trait transport tree trie tty type types ui unicode unit url
+uri user utf8 util utils uuid value vec vector version view vm wal walk
+ulid watch web widget window windows word worker writer xml yaml zip
+
+# Common English words.
+able about above accept across act action active actual add after again
+against age ago agree ahead air all allow almost alone along already also
+always amount and angle another answer any anything apart appear
+apply approx arbitrary area argue arm around arrive art article ask assume
+attack attempt attention available avoid away back bad bag ball band bank
+bar basic basis be bear beat beautiful because become bed before begin
+behind being believe below best better between beyond big bill bird black
+blind blue board boat bone book border born both bottom box boy brain
+branch brave bread break bridge brief bright bring broad brother brown
+brush burn business busy but buy cake calm camera camp can capital car card
+care carry case cast catch cause center certain chain chair chance change
+charge cheap chief child choice choose church circle city claim clean clear
+climb close cloud coast coat cold combine come common company compare
+complete condition consider contain continue control cook cool copy corner
+correct cost could count country couple course cover crash cream create
+credit crime criterion cross crowd crunchy cry cup cut damage dance dark date day dead
+deal dear death decide deep degree deliver depend describe design desk
+detail develop die different difficult dinner direct direction dirty discover
+discuss dish divide doctor dog door double doubt down draw dream dress drink
+drive drop dry due during duty each early earn earth east easy eat economy
+edge effect effort egg eight either else empty end enemy energy enjoy enough
+enter entire equal equivalent escape even evening ever every exact example
+except exchange excite exercise exist expect expensive experience explain
+express extra eye face fact fail fair fall false familiar family famous far
+farm fast fat father fear feel few fight figure fill film final find fine
+finger finish fire firm first fish fit five fix flat floor flow flower fly
+follow food foot force foreign forest forget forward four free fresh friend
+front fruit full fun funny game garden gas general get gift girl give glad
+glass go goal god gold good great green ground group grow guess gun hair
+half hall hand hang happen happy hard hat hate have he head health hear
+heart heat heavy heck help her here hide high hill him his history hit hold
+hole holiday home hope horse hospital hot hotel hour house how however huge
+human hundred hungry hurry hurt husband hyper ice idea ignore ill imagine
+important improve include increase indeed industry inside instant instead
+interest into iron island issue it item its join joy judge jump just keep
+kick kid kill kind king kitchen knee knife know lady land language large
+last late laugh law lay lead leaf learn least leave left leg less let
+letter level lie life lift light like line lion lip listen little live load
+local long look lose loss lot loud love low luck lunch machine magic main
+make man manage many market marry mass master match matches matter may maybe
+meal mean measure meat medium meet member mention metal method middle might
+mile milk mind minute miss mistake mix moment money month moon more morning
+most mother mountain mouse mouth move much music must name narrow nation
+native nature near neat neck need never new news next nice night nine nix no
+noise none noon nor normal north nose not note nothing notice now nurse
+occur ocean odd of off offer office often oil old on once one oneshot only
+open opinion or orange order other our out outside over own pain paint pair
+paper parent park part party pass past paste pay peace pen people perfect
+period person pick picture piece pig place plain plan plane plant plate play
+please plenty pocket poem point police poor popular position possible pot
+pound power practice prepare present press pretty price print private prize
+probably problem produce program promise proper protect proud prove provide
+public pull pure purpose push put quality question quick quiet quite quote
+race rain raise rapid rare rate rather reach read ready real reason receive
+recent red reduce region relax remain remember remove repeat reply report
+rest return rich ride right rise risk river road rock role roll roof room
+root rough round row rule run rush safe sail salt same sand save say school
+science sea season seat second secret see seed seem sell send sense serve
+seven several shake shall shape share sharp she sheep sheet shine ship shirt
+shoe shoot shop short should shoulder shout show shut sick side sight sign
+silent silver simple since sing single sister sit six size skill skin sky
+sleep slow small smart smell smile smoke snow so social socks soft soil some
+son song soon sorry sound soup south space speak special speed spend spirit
+split sport spread spring square staff stage stand star start station stay
+steal steel step stick still stone stop storm story straight strange street
+strong student study stuff subject subtle success such sudden sugar suggest
+suit summer sun supply support suppose sure surface surprise sweet swim
+take talk tall taste tax teach team tear tell ten tend test than thank that
+the their them then there these they thick thin thing think third this those
+though thought three through throw tie tiny tired title to today together
+tomorrow tone tonight too top total touch tough tour tower town toy track
+trade traffic train travel treat trip trouble truck true trust truth try
+turn twice two under understand union unless until up upon us use useful
+usual valley various very victory visit voice wait walk wall want war warm wat
+wash waste watch water wave way we weak wear weather week weight welcome
+well west wet what wheel when where which while white who whole why wide
+wife wild will win wind wine winter wire wise wish with within without woman
+wonder wood work world worry would write writeable wrong yard year yellow yes
+yesterday yet yoke you young your zero

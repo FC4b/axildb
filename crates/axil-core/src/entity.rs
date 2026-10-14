@@ -12,6 +12,8 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
+
+use crate::gazetteer::Gazetteer;
 use std::ops::Range;
 use std::sync::LazyLock;
 
@@ -23,10 +25,12 @@ pub enum EntityType {
     File,
     /// Code identifier: `AuthModule`, `auth_module`
     Code,
-    /// Project name
+    /// A product, library, tool, language or platform (`redb`, `GitHub`),
+    /// found through a [`Gazetteer`].
     Project,
-    /// A name that fits no other type: what an LLM extractor returns for
-    /// people and concepts. The patterns never produce it.
+    /// A name that fits no other type: a named technique the gazetteer
+    /// knows (`HNSW`, `BM25`), or what an LLM extractor returns for people
+    /// and concepts. The patterns never produce it.
     Reference,
     /// A code symbol extracted via a language-aware pattern.
     /// `lang_hint` is `"rust" | "python" | "ts" | "go" | "java" | ...`
@@ -93,6 +97,20 @@ pub struct Entity {
 /// example, and linking notes on it joins notes that merely quote the same
 /// words.
 pub fn extract_entities(text: &str) -> Vec<Entity> {
+    extract(text, None)
+}
+
+/// [`extract_entities`], plus the names `gazetteer` knows: products,
+/// libraries, tools and languages (`redb`, `GitHub`, `Claude Code`), the
+/// project's own crates and its dependencies. They run after the file
+/// patterns and before the identifier patterns, so a known name inside a
+/// path or a command is not minted again, and `GitHub` is a project rather
+/// than a CamelCase identifier.
+pub fn extract_entities_with(text: &str, gazetteer: &Gazetteer) -> Vec<Entity> {
+    extract(text, Some(gazetteer))
+}
+
+fn extract(text: &str, gazetteer: Option<&Gazetteer>) -> Vec<Entity> {
     let mut x = Extraction::new(text);
     extract_backtick_entities(&mut x);
     extract_commands(&mut x);
@@ -100,6 +118,9 @@ pub fn extract_entities(text: &str) -> Vec<Entity> {
     extract_qualified_paths(&mut x);
     extract_branches(&mut x);
     extract_file_paths(&mut x);
+    if let Some(g) = gazetteer.filter(|g| !g.is_empty()) {
+        extract_known_names(&mut x, g);
+    }
     extract_hyphenated_names(&mut x);
     extract_constants(&mut x);
     extract_camel_case(&mut x);
@@ -1001,6 +1022,88 @@ fn is_companion_file(s: &str, next_word: &str) -> bool {
     COMPANION_SUFFIXES.contains(&s) || s == ".ts" && matches!(next_word, "store" | "file")
 }
 
+/// A word a known name may be: letters and digits, with inner `.`, `-`,
+/// `_`, `+` and `#` (`crates.io`, `release-plz`, `C++`).
+static NAME_TOKEN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"[A-Za-z0-9][A-Za-z0-9._+#-]*[A-Za-z0-9+#]|[A-Za-z0-9]").unwrap());
+
+/// Suffixes that derive an adjective from a name (`SQLite-style`,
+/// `redb-backed`): the name inside is the mention.
+const DERIVING_SUFFIXES: &[&str] = &[
+    "aware",
+    "backed",
+    "based",
+    "compatible",
+    "driven",
+    "free",
+    "friendly",
+    "like",
+    "native",
+    "only",
+    "powered",
+    "side",
+    "specific",
+    "style",
+];
+
+/// Names the gazetteer knows, longest first (`Claude Code` before
+/// `Claude`). A word under the project's prefix (`axil-learn`) is one of its
+/// components.
+fn extract_known_names(x: &mut Extraction<'_>, g: &Gazetteer) {
+    let text = x.text;
+    let tokens: Vec<Range<usize>> = NAME_TOKEN.find_iter(text).map(|m| m.range()).collect();
+    let mut i = 0;
+    while i < tokens.len() {
+        let mut found = None;
+        for n in (1..=g.max_words().min(tokens.len() - i)).rev() {
+            let words = &tokens[i..i + n];
+            // The words of a name are separated by single spaces.
+            if words.windows(2).any(|w| &text[w[0].end..w[1].start] != " ") {
+                continue;
+            }
+            let span = words[0].start..words[n - 1].end;
+            if let Some(known) = g.lookup(&text[span.clone()]) {
+                found = Some((n, span, known.name.clone(), known.entity_type.clone()));
+                break;
+            }
+        }
+        if found.is_none() {
+            let word = &text[tokens[i].clone()];
+            if g.is_project_component(word) {
+                found = Some((1, tokens[i].clone(), word.to_string(), EntityType::Code));
+            } else if let Some((stem, suffix)) = word.rsplit_once('-') {
+                if DERIVING_SUFFIXES.binary_search(&suffix).is_ok() {
+                    if let Some(known) = g.lookup(stem) {
+                        let span = tokens[i].start..tokens[i].start + stem.len();
+                        found = Some((1, span, known.name.clone(), known.entity_type.clone()));
+                    }
+                }
+            }
+        }
+        let Some((n, span, name, entity_type)) = found else {
+            i += 1;
+            continue;
+        };
+        i += n;
+        // `axil:plugin` is one identifier (a WIT package), not `axil`.
+        let colon_joined = text[span.end..].starts_with(':')
+            && text[span.end + 1..].starts_with(|c: char| c.is_ascii_alphabetic())
+            || text[..span.start].ends_with(':');
+        if x.is_claimed(&span) || colon_joined {
+            continue;
+        }
+        x.claim(span.clone());
+        x.push(
+            name.to_lowercase(),
+            Entity {
+                name,
+                entity_type,
+                source_text: text[span].to_string(),
+            },
+        );
+    }
+}
+
 /// A hyphenated word: letters first, then `-`-joined segments that may hold
 /// digits, dots and underscores (`nli-deberta-v3-xsmall`, `glm-5.3-flash`,
 /// `x86_64-apple-darwin`).
@@ -1769,6 +1872,7 @@ mod tests {
             ("FILE_EXTENSIONS", FILE_EXTENSIONS),
             ("PROJECT_DIRS", PROJECT_DIRS),
             ("ENV_VARS", ENV_VARS),
+            ("DERIVING_SUFFIXES", DERIVING_SUFFIXES),
         ];
         for p in PROGRAMS {
             lists.push((p.name, p.subcommands));
@@ -1982,6 +2086,50 @@ mod tests {
         for word in ["__init__", "_x_"] {
             assert!(!found.iter().any(|f| f == word), "{word}: {found:?}");
         }
+    }
+
+    #[test]
+    fn known_names_come_from_the_gazetteer() {
+        let mut g = Gazetteer::builtin();
+        g.add_project_crate("axil-core");
+        g.add_project_name("axil");
+        g.add_dependency("redb");
+        let entities = extract_entities_with(
+            "Axil keeps redb under Claude Code on macOS; a SQLite-style file via GitHub. \
+             axil-learn ships with axil-core, see crates/axil-core/src/db.rs and cargo test.",
+            &g,
+        );
+        let find = |s: &str| entities.iter().find(|e| e.source_text == s);
+        for (source, name, ty) in [
+            ("Axil", "axil", EntityType::Project),
+            ("redb", "redb", EntityType::Project),
+            ("Claude Code", "Claude Code", EntityType::Project),
+            ("macOS", "macOS", EntityType::Project),
+            ("SQLite", "SQLite", EntityType::Project),
+            ("GitHub", "GitHub", EntityType::Project),
+            ("axil-learn", "axil-learn", EntityType::Code),
+            ("axil-core", "axil-core", EntityType::Code),
+        ] {
+            let e = find(source).unwrap_or_else(|| panic!("{source}: {entities:?}"));
+            assert_eq!((e.name.as_str(), &e.entity_type), (name, &ty), "{source}");
+        }
+        // Inside a path or a command a known name is not minted again, and
+        // the plain extractor knows none of them.
+        assert_eq!(
+            entities
+                .iter()
+                .filter(|e| e.source_text == "axil-core")
+                .count(),
+            1,
+            "{entities:?}"
+        );
+        assert!(
+            !entities.iter().any(|e| e.source_text == "cargo"),
+            "{entities:?}"
+        );
+        assert!(!sources("Axil keeps redb on macOS")
+            .iter()
+            .any(|f| f == "redb"));
     }
 
     #[test]
