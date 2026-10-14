@@ -251,4 +251,54 @@ mod tests {
         assert!(flags >= 0 && flags & libc::FD_CLOEXEC != 0, "flags {flags}");
         assert_eq!(held.read_timeout().unwrap(), None);
     }
+
+    /// A daemon from before leases can't parse the request: it is asked to
+    /// shut down, with the frozen `shutdown` every daemon answers, so the
+    /// database is not left busy for good.
+    #[test]
+    fn a_daemon_that_does_not_know_lease_is_asked_to_go() {
+        let tmp = tempfile::Builder::new().prefix("l").tempdir().unwrap();
+        let key = tmp.path().canonicalize().unwrap().join("memory.axil");
+        std::fs::write(&key, b"").unwrap();
+        let run = RunDir::of(&key);
+        run.create().unwrap();
+        let listener = std::os::unix::net::UnixListener::bind(run.socket()).unwrap();
+        let daemon = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            // As a daemon without the op answers it.
+            assert!(proto::read_frame(&mut stream).is_ok());
+            let unknown = proto::RunReply::Error {
+                message: "bad request: unknown variant `lease`".into(),
+            };
+            proto::write_json(&mut stream, &unknown).unwrap();
+            let (mut stream, _) = listener.accept().unwrap();
+            let op: Op = proto::read_json(&mut stream).unwrap();
+            let ack = Ack {
+                op: "shutdown".into(),
+                ok: true,
+            };
+            proto::write_json(&mut stream, &ack).unwrap();
+            op
+        });
+        assert!(matches!(lease(&key, LEASE_WAIT), Lease::NoDaemon));
+        assert!(matches!(daemon.join().unwrap(), Op::Shutdown { .. }));
+    }
+
+    /// A socket in a directory others can enter is not asked anything.
+    #[test]
+    fn an_untrusted_socket_is_not_asked() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::Builder::new().prefix("l").tempdir().unwrap();
+        let key = tmp.path().canonicalize().unwrap().join("memory.axil");
+        std::fs::write(&key, b"").unwrap();
+        let run = RunDir::of(&key);
+        if run.socket().parent() != Some(run.dir()) {
+            eprintln!("skipped: the socket is not in the run directory");
+            return;
+        }
+        run.create().unwrap();
+        let _listener = std::os::unix::net::UnixListener::bind(run.socket()).unwrap();
+        std::fs::set_permissions(run.dir(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(matches!(lease(&key, LEASE_WAIT), Lease::Refused));
+    }
 }

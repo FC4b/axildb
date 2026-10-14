@@ -126,6 +126,12 @@ pub enum Op {
     /// shutdown wait for it. Answered by `{"op":"debug_hold","ok":true}`.
     #[cfg(debug_assertions)]
     DebugHold { ms: u64 },
+    /// Debug builds only: run the open guard on the database the daemon
+    /// serves, as a command that opened it would, so a test can see that
+    /// the guard's check is armed in the daemon. Answered by
+    /// `{"op":"debug_open_guard","tripped":true}` when the check fired.
+    #[cfg(debug_assertions)]
+    DebugOpenGuard,
 }
 
 /// The frozen answer to `hello`.

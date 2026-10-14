@@ -910,6 +910,15 @@ impl Server {
                 };
                 write_json(&mut stream, &ack)
             }
+            #[cfg(debug_assertions)]
+            Op::DebugOpenGuard => {
+                let key = self.key.clone();
+                let tripped = panic::catch_unwind(move || axil_core::open_guard(&key)).is_err();
+                write_json(
+                    &mut stream,
+                    &json!({"op": "debug_open_guard", "tripped": tripped}),
+                )
+            }
         };
     }
 
