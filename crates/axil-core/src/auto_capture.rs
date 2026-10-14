@@ -254,23 +254,6 @@ const NO_DEFECT_FIXES: &[&str] = &[
 static FIX_SUBJECT: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^(?:fix|bugfix|hotfix)(?:\([^)]*\))?!?:\s+\S").unwrap());
 
-/// A conventional-commit subject of a kind that can make a choice
-/// (`refactor(cache): ...`). A `fix:` subject is read as an error.
-static CHANGE_SUBJECT: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^(?:bench|build|chore|ci|docs|feat|perf|refactor|revert|style|test)(?:\([^)]*\))?!?:\s+\S")
-        .unwrap()
-});
-
-/// What a commit subject says when it names the choice it makes against
-/// what it replaces or rules out: "scan exactly instead of building the
-/// graph", "nomic stays unprompted", "retire the dead crate".
-static CHOICE_PHRASE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        r"(?i)\b(?:instead of|rather than|stays?|retire[sd]?|drops?|dropped|replaces?|replaced|switch(?:es)? to|keeps?|no longer|moves? to|prefers?)\b",
-    )
-    .unwrap()
-});
-
 /// A list of standing rules: `CONVENTIONS:`, `**Rules:**`, `- Invariant:`.
 static RULE_LABEL: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
@@ -398,22 +381,6 @@ pub fn analyze(text: &str, source: &str) -> Vec<CapturedKnowledge> {
             });
             claimed_line = Some(idx);
         }
-    }
-
-    // A commit subject that names its choice is a decision.
-    let subject = text.trim();
-    if captures.is_empty()
-        && !subject.contains('\n')
-        && CHANGE_SUBJECT.is_match(subject)
-        && CHOICE_PHRASE.is_match(subject)
-    {
-        captures.push(CapturedKnowledge {
-            capture_type: CaptureType::Decision,
-            summary: truncate(subject, 200),
-            confidence: 0.8,
-            source: source.to_string(),
-        });
-        return captures;
     }
 
     // Detect decisions. Skip the line already claimed by the error capture
@@ -1166,34 +1133,6 @@ mod tests {
             .into_iter()
             .filter(|c| c.capture_type == CaptureType::Error)
             .collect()
-    }
-
-    #[test]
-    fn a_commit_subject_that_names_its_choice_is_a_decision() {
-        for text in [
-            "perf(vector): scan exactly instead of building the graph in every process",
-            "bench(vector): nomic stays unprompted; its prompts still lose",
-            "refactor: retire the dead axil-rerank crate",
-            "build: keep LTO off for dev builds",
-        ] {
-            let captures = analyze(text, "auto");
-            assert_eq!(captures.len(), 1, "{text}: {captures:?}");
-            assert_eq!(captures[0].capture_type, CaptureType::Decision, "{text}");
-            assert!(captures[0].confidence >= 0.8, "{text}");
-        }
-        for text in [
-            "feat(runtime): embed Wasmtime behind wasm-host",
-            "fix: address Codex review (Windows replace, struct break)",
-            "Merge branch 'feat/keep-alive' into dev and drop the old one",
-        ] {
-            let captures = analyze(text, "auto");
-            assert!(
-                captures
-                    .iter()
-                    .all(|c| c.capture_type != CaptureType::Decision),
-                "{text}: {captures:?}"
-            );
-        }
     }
 
     #[test]
