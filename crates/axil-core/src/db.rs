@@ -7127,10 +7127,12 @@ pub struct WarmUpReport {
     pub vector_rebuilt: bool,
 }
 
-/// Graph proximity of each candidate: its 1-hop links to the other
-/// candidates, over the pool size. Only a candidate that is itself linked
-/// to an entity in `named` (the entities the query names) gets one; with
-/// none named, nobody does.
+/// Graph proximity of each candidate: its 1-hop neighbours among the other
+/// candidates, normalized by its degree and the pool size,
+/// `links / sqrt(degree * pool)`, so a hub linked to everything does not
+/// outscore a record whose few links all land in the pool. Only a candidate
+/// that is itself linked to an entity in `named` (the entities the query
+/// names) gets one; with none named, nobody does.
 fn compute_graph_proximity(
     gi: &dyn GraphIndex,
     candidates: &[(RecordId, f32)],
@@ -7147,10 +7149,12 @@ fn compute_graph_proximity(
     }
 
     for (rid, _) in candidates {
-        // Check 1-hop neighbors
-        let neighbors = gi
+        // Distinct 1-hop neighbours: parallel edges count once.
+        let neighbors: std::collections::HashSet<RecordId> = gi
             .neighbors(rid.clone(), None, Direction::Both)
-            .unwrap_or_default();
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
         if !neighbors.iter().any(|nid| named.contains(nid.as_str())) {
             continue;
         }
@@ -7161,7 +7165,8 @@ fn compute_graph_proximity(
             .count();
 
         if connected > 0 {
-            let proximity = (connected as f32 / ids.len() as f32).min(1.0);
+            let norm = ((neighbors.len() * ids.len()) as f32).sqrt();
+            let proximity = (connected as f32 / norm).min(1.0);
             scores.insert(rid.as_str().to_string(), proximity);
         }
     }
