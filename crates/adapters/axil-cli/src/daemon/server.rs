@@ -157,8 +157,12 @@ pub enum Finish {
     Poisoned,
 }
 
-/// One line in the daemon's log.
+/// One line in the daemon's log. Unit tests run daemons in the test
+/// process, whose stderr is not a log.
 fn log(message: impl std::fmt::Display) {
+    if cfg!(test) {
+        return;
+    }
     errln!(
         "{} axil daemon[{}]: {message}",
         chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ"),
@@ -228,7 +232,8 @@ impl Server {
     /// Fails, with the socket gone and the reason written to
     /// `daemon.blocked`, when the database can't be served.
     pub fn start(key: PathBuf, run: RunDir, opts: Options) -> Result<Arc<Server>, String> {
-        let identity = Identity::current().map_err(|e| format!("can't identify this binary: {e}"))?;
+        let identity =
+            Identity::current().map_err(|e| format!("can't identify this binary: {e}"))?;
         let exe = ExeId::current().ok();
         let info = DaemonInfo {
             proto: DAEMON_PROTO,
@@ -297,7 +302,10 @@ impl Server {
         let deadline = Instant::now() + self.opts.open_wait;
         let state = loop {
             if let Some(reason) = self.stop_reason() {
-                return Err(format!("stopped while opening the database: {}", reason.describe()));
+                return Err(format!(
+                    "stopped while opening the database: {}",
+                    reason.describe()
+                ));
             }
             let fp = FileFp::read(&self.key);
             match WarmState::open(&self.key) {
@@ -351,8 +359,7 @@ impl Server {
         if let Some(sig) = take_signal() {
             return Some(StopReason::Signal(sig));
         }
-        if self.in_flight.load(Ordering::Acquire) == 0
-            && self.idle_for() >= self.opts.idle_timeout
+        if self.in_flight.load(Ordering::Acquire) == 0 && self.idle_for() >= self.opts.idle_timeout
         {
             return Some(StopReason::Idle);
         }
@@ -395,7 +402,9 @@ impl Server {
         }
         let left = self.in_flight.load(Ordering::Acquire);
         if left > 0 {
-            log(format!("{left} requests still running after {DRAIN_WAIT:?}"));
+            log(format!(
+                "{left} requests still running after {DRAIN_WAIT:?}"
+            ));
         }
 
         let poisoned = self.state.get().is_some_and(WarmState::poisoned);
@@ -476,7 +485,10 @@ impl Server {
     }
 
     fn touch(&self) {
-        *self.last_active.lock().unwrap_or_else(PoisonError::into_inner) = Instant::now();
+        *self
+            .last_active
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Instant::now();
     }
 
     fn set_fresh(&self, baseline: FileFp) {
@@ -646,7 +658,10 @@ impl Server {
             return refused(RunReply::Overloaded);
         };
         self.touch();
-        if header.deadline_ms.is_some_and(|deadline| epoch_ms() >= deadline) {
+        if header
+            .deadline_ms
+            .is_some_and(|deadline| epoch_ms() >= deadline)
+        {
             return refused(RunReply::Expired);
         }
         let Some(state) = self.state.get() else {
@@ -665,7 +680,9 @@ impl Server {
             self.request_stop(StopReason::Panicked);
         }
         match result {
-            Ok(response) if response.stdout.len() > MAX_FRAME || response.stderr.len() > MAX_FRAME => {
+            Ok(response)
+                if response.stdout.len() > MAX_FRAME || response.stderr.len() > MAX_FRAME =>
+            {
                 self.stats.not_served(op);
                 let reply = RunReply::NotServed {
                     reason: "too_large".into(),
@@ -675,7 +692,12 @@ impl Server {
             }
             Ok(response) => {
                 self.stats.served(op, took);
-                (RunReply::Served { exit: response.exit }, Some(response))
+                (
+                    RunReply::Served {
+                        exit: response.exit,
+                    },
+                    Some(response),
+                )
             }
             Err(not_served) => {
                 self.stats.not_served(op);
@@ -771,10 +793,11 @@ impl Server {
     }
 
     /// Load the embedding model and the graph's backend in the background.
-    /// What they print is logged, and the policy for prints at open holds:
-    /// a line a command would print, once per process, is a database that
-    /// is not served. A graph left in memory prints that warning in each
-    /// one-shot command; a failed graph is reloaded by the next check.
+    /// What they print is logged. Beyond the embedder's banners, a line
+    /// printed here is one every one-shot command would print and no served
+    /// command would, so the database is not served: a graph left in memory
+    /// prints that warning in each one-shot command. A failed graph is
+    /// reloaded by the next check instead.
     fn prewarm_on(self: &Arc<Self>, state: &WarmState) {
         let Some(warm) = state.handle() else {
             return;
@@ -784,8 +807,7 @@ impl Server {
             .name("axil-prewarm".into())
             .spawn(move || {
                 let started = Instant::now();
-                let (out, err, report) =
-                    cli_io::capture(ReqCtx::default(), || warm.db().prewarm());
+                let (out, err, report) = cli_io::capture(ReqCtx::default(), || warm.db().prewarm());
                 drop(warm);
                 let printed = String::from_utf8_lossy(&[out, err].concat()).into_owned();
                 log(format!(
@@ -803,6 +825,14 @@ impl Server {
                 }
                 let graph = report.graph.clone();
                 server.stats.set_prewarm(report);
+                // The embedder's banners (its execution provider, its
+                // session pool) print once per process in the daemon, in
+                // whichever command loads it first in a one-shot run; any
+                // other line reports something wrong with the database.
+                let problems: Vec<&str> = printed
+                    .lines()
+                    .filter(|line| !line.trim().is_empty() && !line.starts_with("[axil-vector]"))
+                    .collect();
                 match graph {
                     Some(GraphState::Failed(_)) => {}
                     Some(GraphState::Memory) => server.stop_blocked(
@@ -810,8 +840,8 @@ impl Server {
                          print that it loads every edge into memory"
                             .to_string(),
                     ),
-                    _ if !printed.trim().is_empty() => {
-                        server.stop_blocked(format!("warming up printed:\n{}", printed.trim_end()))
+                    _ if !problems.is_empty() => {
+                        server.stop_blocked(format!("warming up printed:\n{}", problems.join("\n")))
                     }
                     _ => server.graph_reloads.store(0, Ordering::Release),
                 }
@@ -1043,5 +1073,371 @@ pub fn run_daemon(db: &Path, idle_timeout: Duration) -> anyhow::Result<i32> {
             std::mem::forget(server);
             std::process::exit(crate::EXIT_ERROR)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli_io::tests::parity::{
+        self, build_fixture, check_parity_with, matrix, one_shot_at, Case, Run,
+    };
+    use crate::daemon::proto::RunOutcome;
+
+    fn options(idle_timeout: Duration) -> Options {
+        Options {
+            idle_timeout,
+            open_wait: Duration::from_secs(5),
+            process: false,
+        }
+    }
+
+    fn start_with(db: &Path, opts: Options) -> Arc<Server> {
+        let key = cli_io::db_key(db).unwrap();
+        let run = RunDir::of(&key);
+        run.create().unwrap();
+        Server::start(key, run, opts).unwrap_or_else(|why| panic!("not started: {why}"))
+    }
+
+    fn start(db: &Path) -> Arc<Server> {
+        start_with(db, options(Duration::from_secs(3600)))
+    }
+
+    fn stop(server: Arc<Server>) {
+        let finish = server.shutdown(&StopReason::Requested("test".into()));
+        assert_eq!(finish, Finish::Exit(0));
+    }
+
+    /// A client in `cwd` with no `AXIL_DB`, whose stdin is piped and holds
+    /// `stdin`, empty by default, like the one-shot children's.
+    fn send(server: &Server, args: &[&str], cwd: &Path, stdin: Option<&[u8]>) -> RunOutcome {
+        let mut header = Identity::current()
+            .unwrap()
+            .header(parity::argv(args), cwd, true);
+        header.env.clear();
+        let stdin = stdin.unwrap_or_default();
+        proto::run(
+            server.run.socket(),
+            &header,
+            Some(stdin),
+            Duration::from_secs(120),
+        )
+        .unwrap()
+    }
+
+    fn served(outcome: RunOutcome) -> Run {
+        match outcome.reply {
+            RunReply::Served { exit } => (outcome.stdout, outcome.stderr, exit),
+            other => panic!("not served: {other:?}"),
+        }
+    }
+
+    /// The cli_io parity matrix sent through the socket of a daemon on the
+    /// database, against the one-shot binary, both run in the project's
+    /// directory. The daemon's run directory sits beside the database
+    /// while it serves.
+    #[test]
+    fn served_output_matches_one_shot_through_the_socket() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fixture = build_fixture(&tmp.path().join("fixture"));
+        let proj = tmp.path().join("work/proj");
+        let db_path = proj.join(".axil/memory.axil");
+        let db = db_path.to_str().unwrap();
+        let auth_rs = proj.join("src/auth.rs");
+        let auth_rs = auth_rs.to_str().unwrap();
+        // Refused before they run; exec's tests cover them.
+        let refused = |c: &Case| c.cold_only || c.name == "clap unknown flag";
+        let cases: Vec<Case> = matrix(db, auth_rs)
+            .into_iter()
+            .filter(|c| !refused(c))
+            .collect();
+        let cwd = || proj.canonicalize().unwrap();
+        let results = check_parity_with(
+            &fixture,
+            &proj,
+            &cases,
+            |c, args| {
+                let server = start(&db_path);
+                let run = served(send(&server, args, &cwd(), c.stdin));
+                stop(server);
+                run
+            },
+            |c, args| one_shot_at(args, c.stdin, &cwd(), None),
+        );
+        let (_, boot) = results.iter().find(|(n, _)| *n == "boot json").unwrap();
+        assert!(boot.2 == 0 && boot.0.starts_with(b"{"));
+    }
+
+    /// Sixteen recalls at once, with stores running beside them: every one
+    /// is served, and every store is in the database afterwards. A request
+    /// over the in-flight cap is answered `overloaded` and sent again.
+    #[test]
+    fn sixteen_recalls_beside_stores_are_all_served() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = build_fixture(tmp.path());
+        let server = start(&proj.join(".axil/memory.axil"));
+        let cwd = proj.canonicalize().unwrap();
+        let overloaded = AtomicUsize::new(0);
+        let retrying = |args: &[&str], stdin: Option<&[u8]>| loop {
+            let outcome = send(&server, args, &cwd, stdin);
+            if outcome.reply == RunReply::Overloaded {
+                overloaded.fetch_add(1, Ordering::Relaxed);
+                thread::sleep(Duration::from_millis(5));
+                continue;
+            }
+            return served(outcome);
+        };
+        let read: &[&str] = if cfg!(feature = "embed") {
+            &["recall", "auth timeout"]
+        } else {
+            &["boot"]
+        };
+        let stored: Vec<(String, String)> = thread::scope(|s| {
+            for _ in 0..16 {
+                s.spawn(|| {
+                    for _ in 0..2 {
+                        let (out, err, exit) = retrying(read, None);
+                        assert!(
+                            exit == 0 && !out.is_empty(),
+                            "{}",
+                            String::from_utf8_lossy(&err)
+                        );
+                    }
+                });
+            }
+            let writers: Vec<_> = (0..4)
+                .map(|w| {
+                    let retrying = &retrying;
+                    s.spawn(move || {
+                        (0..4)
+                            .map(|n| {
+                                let summary = format!("socket store {w}-{n}");
+                                let data = json!({ "summary": summary }).to_string();
+                                let (out, err, exit) = if n % 2 == 0 {
+                                    retrying(&["store", "decisions", &data], None)
+                                } else {
+                                    retrying(&["store", "decisions", "-"], Some(data.as_bytes()))
+                                };
+                                assert_eq!(exit, 0, "{}", String::from_utf8_lossy(&err));
+                                let record: Value = serde_json::from_slice(&out).unwrap();
+                                (record["id"].as_str().unwrap().to_string(), summary)
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            writers
+                .into_iter()
+                .flat_map(|w| w.join().unwrap())
+                .collect()
+        });
+        let warm = server.state.get().unwrap().handle().unwrap();
+        for (id, summary) in &stored {
+            let id = axil_core::RecordId::from_string(id).unwrap();
+            let record = warm.db().get(&id).unwrap().expect("stored");
+            assert_eq!(record.data["summary"], summary.as_str());
+        }
+        drop(warm);
+        assert_eq!(stored.len(), 16);
+        let ops = server.stats.ops();
+        assert_eq!(ops["store"].served, 16);
+        eprintln!(
+            "{} requests were over the cap and sent again",
+            overloaded.load(Ordering::Relaxed)
+        );
+        stop(server);
+    }
+
+    /// A change the handle didn't make reloads it before the next request:
+    /// an engines edit in `axil.toml`, a backup renamed over the database,
+    /// a dropped store, and a graph that failed to load.
+    #[test]
+    fn a_change_under_the_open_handle_reloads_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = build_fixture(tmp.path());
+        let db = proj.join(".axil/memory.axil");
+        let backup = proj.join(".axil/backup.axil");
+        fs::copy(&db, &backup).unwrap();
+        let server = start(&db);
+        let cwd = proj.canonicalize().unwrap();
+        let reloads = || server.stats.reloads.load(Ordering::Acquire);
+        let after_change = || thread::sleep(FRESH_FOR + Duration::from_millis(50));
+
+        let (_, _, exit) = served(send(&server, &["boot"], &cwd, None));
+        assert_eq!((exit, reloads()), (0, 0));
+
+        fs::write(proj.join("axil.toml"), "[engines]\ndisabled = [\"ts\"]\n").unwrap();
+        after_change();
+        let since = send(&server, &["since", "1h"], &cwd, None);
+        assert_eq!(reloads(), 1);
+        assert!(server
+            .stats
+            .last_reload()
+            .unwrap()
+            .ends_with("axil.toml changed"));
+        if cfg!(feature = "timeseries") {
+            assert!(
+                matches!(&since.reply, RunReply::NotServed { reason, .. } if reason == "lacks"),
+                "{since:?}"
+            );
+        }
+
+        fs::rename(&backup, &db).unwrap();
+        after_change();
+        served(send(&server, &["boot"], &cwd, None));
+        assert_eq!(reloads(), 2);
+        assert_eq!(
+            server.stats.last_reload().as_deref(),
+            Some("the database was replaced")
+        );
+
+        axil_core::drop_engine_companion(&db, "fts").unwrap();
+        after_change();
+        let fts = send(&server, &["fts", "cache"], &cwd, None);
+        assert_eq!(reloads(), 3);
+        if cfg!(feature = "fts") {
+            assert!(
+                matches!(&fts.reply, RunReply::NotServed { reason, .. } if reason == "lacks"),
+                "{fts:?}"
+            );
+        }
+
+        server.fail_graph.store(true, Ordering::Release);
+        served(send(&server, &["boot"], &cwd, None));
+        assert_eq!(reloads(), 4);
+        assert_eq!(
+            server.stats.last_reload().as_deref(),
+            Some("the graph failed to load")
+        );
+        assert_eq!(server.phase.get(), Phase::Ready);
+        stop(server);
+    }
+
+    /// What a request is refused for, and the ops beside `run`.
+    #[test]
+    fn requests_that_must_not_run_are_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = build_fixture(tmp.path());
+        let server = start(&proj.join(".axil/memory.axil"));
+        let cwd = proj.canonicalize().unwrap();
+        let id = Identity::current().unwrap();
+        let header = id.header(parity::argv(&["boot"]), &cwd, false);
+        let socket = server.run.socket().to_path_buf();
+        let reply = |header: RunHeader| {
+            proto::run(&socket, &header, None, Duration::from_secs(30))
+                .unwrap()
+                .reply
+        };
+        let incompatible = |reason: &str| RunReply::Incompatible {
+            reason: reason.into(),
+        };
+
+        assert!(matches!(
+            reply(header.clone()),
+            RunReply::Served { exit: 0 }
+        ));
+        let mut other = header.clone();
+        other.build_id = "0000000000000000".into();
+        assert_eq!(reply(other), incompatible("build"));
+        let mut other = header.clone();
+        other.env_fp = "0000000000000000".into();
+        assert_eq!(reply(other), incompatible("env"));
+        let mut other = header.clone();
+        other.features.push("not-a-feature".into());
+        assert_eq!(reply(other), incompatible("features"));
+        let mut other = header.clone();
+        other.proto = DAEMON_PROTO + 1;
+        assert_eq!(reply(other), incompatible("proto"));
+        let mut other = header.clone();
+        other.deadline_ms = Some(1);
+        assert_eq!(reply(other), RunReply::Expired);
+        let mut other = header.clone();
+        other.argv = parity::argv(&["--db", "/elsewhere/.axil/memory.axil", "boot"]);
+        assert!(matches!(
+            reply(other),
+            RunReply::NotServed { reason, .. } if reason == "wrong_db"
+        ));
+
+        let hello = proto::hello(&socket, Duration::from_secs(5)).unwrap();
+        assert_eq!(
+            (hello.op.as_str(), hello.proto, hello.state.as_str()),
+            ("hello", DAEMON_PROTO, "ready")
+        );
+        assert_eq!(hello.build_id, id.build_id);
+        assert_eq!(hello.pid, std::process::id());
+        let status: Value = proto::call(&socket, &Op::Status, Duration::from_secs(5)).unwrap();
+        assert_eq!(status["state"], "ready");
+        assert_eq!(status["ops"]["boot"]["served"], 1);
+        assert_eq!(status["refused"], 5);
+        assert_eq!(status["lease_holder"], Value::Null);
+
+        let mut garbage = UnixStream::connect(&socket).unwrap();
+        write_frame(&mut garbage, b"{\"op\":\"nonsense\"}").unwrap();
+        let answer: RunReply = read_json(&mut garbage).unwrap();
+        assert!(matches!(answer, RunReply::Error { .. }), "{answer:?}");
+
+        let ack: Ack = proto::call(
+            &socket,
+            &Op::Shutdown {
+                reason: "done".into(),
+            },
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        assert!(ack.ok);
+        assert_eq!(server.serve(), StopReason::Requested("done".into()));
+        stop(server);
+        assert!(!socket.exists(), "the socket goes with the daemon");
+    }
+
+    #[test]
+    fn requests_over_the_cap_are_not_admitted() {
+        let count = AtomicUsize::new(0);
+        let first = Admitted::new(&count, 2).unwrap();
+        let second = Admitted::new(&count, 2).unwrap();
+        assert!(Admitted::new(&count, 2).is_none());
+        drop(first);
+        let third = Admitted::new(&count, 2);
+        assert!(third.is_some());
+        drop((second, third));
+        assert_eq!(count.load(Ordering::Acquire), 0);
+    }
+
+    /// An idle daemon stops by itself, and so does a signalled one, and
+    /// either leaves every store closed cleanly and says how it ended.
+    #[test]
+    fn an_idle_or_signalled_daemon_stops_and_closes_its_stores() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = build_fixture(tmp.path());
+        let db = proj.join(".axil/memory.axil");
+        let closed_cleanly = || {
+            for suffix in ["", ".graph", ".ts", ".vec"] {
+                let path = axil_core::companion_path(&db, suffix);
+                if path.exists() {
+                    redb::ReadOnlyDatabase::open(&path)
+                        .unwrap_or_else(|e| panic!("{} was left open: {e}", path.display()));
+                }
+            }
+        };
+
+        let server = start_with(&db, options(Duration::from_secs(1)));
+        let started = Instant::now();
+        assert_eq!(server.serve(), StopReason::Idle);
+        assert!(started.elapsed() < Duration::from_secs(4));
+        assert_eq!(server.shutdown(&StopReason::Idle), Finish::Exit(0));
+        closed_cleanly();
+        let info: DaemonInfo =
+            serde_json::from_slice(&fs::read(server.run.info()).unwrap()).unwrap();
+        assert_eq!(info.state, "stopped");
+        assert_eq!(info.exit_reason.as_deref(), Some("idle"));
+
+        let server = start(&db);
+        SIGNAL.store(libc::SIGTERM, Ordering::Relaxed);
+        assert_eq!(server.serve(), StopReason::Signal(libc::SIGTERM));
+        assert_eq!(
+            server.shutdown(&StopReason::Signal(libc::SIGTERM)),
+            Finish::Exit(0)
+        );
+        closed_cleanly();
     }
 }

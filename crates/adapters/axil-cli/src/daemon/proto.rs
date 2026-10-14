@@ -480,7 +480,10 @@ mod tests {
     /// `hello` and `shutdown` look like this to every build, forever.
     #[test]
     fn the_frozen_ops_keep_their_shape() {
-        assert_eq!(serde_json::to_string(&Op::Hello).unwrap(), r#"{"op":"hello"}"#);
+        assert_eq!(
+            serde_json::to_string(&Op::Hello).unwrap(),
+            r#"{"op":"hello"}"#
+        );
         assert_eq!(
             serde_json::from_str::<Op>(r#"{"op":"hello"}"#).unwrap(),
             Op::Hello
@@ -552,10 +555,7 @@ mod tests {
         let json = serde_json::to_value(Op::Run(header.clone())).unwrap();
         assert_eq!(json["op"], "run");
         assert_eq!(json["argv"], serde_json::json!(["axil", "boot"]));
-        assert_eq!(
-            serde_json::from_value::<Op>(json).unwrap(),
-            Op::Run(header)
-        );
+        assert_eq!(serde_json::from_value::<Op>(json).unwrap(), Op::Run(header));
         let served = serde_json::to_string(&RunReply::Served { exit: 0 }).unwrap();
         assert_eq!(served, r#"{"reply":"served","exit":0}"#);
     }
@@ -575,8 +575,20 @@ mod tests {
         };
         assert_eq!(id.mismatch(&fewer), None, "a subset of ours is served");
         let cases = [
-            (RunHeader { proto: 2, ..ok.clone() }, "proto"),
-            (RunHeader { build_id: "x".into(), ..ok.clone() }, "build"),
+            (
+                RunHeader {
+                    proto: 2,
+                    ..ok.clone()
+                },
+                "proto",
+            ),
+            (
+                RunHeader {
+                    build_id: "x".into(),
+                    ..ok.clone()
+                },
+                "build",
+            ),
             (
                 RunHeader {
                     features: vec!["core".into(), "wasm-host".into()],
@@ -584,7 +596,13 @@ mod tests {
                 },
                 "features",
             ),
-            (RunHeader { env_fp: "x".into(), ..ok.clone() }, "env"),
+            (
+                RunHeader {
+                    env_fp: "x".into(),
+                    ..ok.clone()
+                },
+                "env",
+            ),
         ];
         for (header, reason) in cases {
             assert_eq!(id.mismatch(&header), Some(reason));
@@ -601,7 +619,12 @@ mod tests {
                 .iter()
                 .map(|(n, v)| (n.to_string(), OsString::from(v)))
                 .collect();
-            env_fp(move |name| pairs.iter().find(|(n, _)| n == name).map(|(_, v)| v.clone()))
+            env_fp(move |name| {
+                pairs
+                    .iter()
+                    .find(|(n, _)| n == name)
+                    .map(|(_, v)| v.clone())
+            })
         };
         let base = env(&[]);
         assert_eq!(base, env(&[]));
@@ -616,6 +639,177 @@ mod tests {
         std::fs::write(&key, b"key two").unwrap();
         assert_ne!(env(&[("AXIL_ENC_KEY_FILE", key_s)]), before);
     }
+
+    /// Variables the code reads that the fingerprint leaves out, and why a
+    /// served command can still print what the client's own run would.
+    const EXEMPT: &[(&str, &str)] = &[
+        ("AXIL_DB", "carried by each request (exec::CLI_ENV)"),
+        ("AXIL_MCP_TOOLS", "carried by each request (exec::CLI_ENV)"),
+        (
+            "AXIL_SLOW_QUERY_LOG",
+            "per request: the run header's slow_query_log",
+        ),
+        (
+            "AXIL_DAEMON",
+            "the kill switch, read where a daemon is started",
+        ),
+    ];
+
+    /// Reads that name no variable at the call: the name comes from a
+    /// list or a function, and the reason says whose they are.
+    const INDIRECT: &[(&str, &str)] = &[
+        (
+            "crates/adapters/axil-cli/src/daemon/exec.rs",
+            "the exec::CLI_ENV values, carried by each request",
+        ),
+        (
+            "crates/adapters/axil-cli/src/hook_brain.rs",
+            "a hook's project directory; hooks are never served",
+        ),
+        (
+            "crates/adapters/axil-cli/src/daemon/proto.rs",
+            "the FP_ENV and CLI_ENV values themselves",
+        ),
+    ];
+
+    /// Every environment variable the code reads at run time, outside
+    /// tests, is in [`FP_ENV`], or exempt with a reason above, or read
+    /// only where nothing is served. A variable a served command reads
+    /// that is in none of them would make it print what the daemon's
+    /// environment says rather than the client's.
+    #[test]
+    fn every_variable_the_code_reads_is_fingerprinted_or_exempt() {
+        use crate::cli_io::tests::{code_only, without_test_modules};
+
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let mut dirs = vec![
+            root.join("crates/axil-core/src"),
+            root.join("crates/axil-bundle/src"),
+            root.join("crates/adapters/axil-cli/src"),
+            root.join("crates/adapters/axil-runtime/src"),
+        ];
+        for group in ["crates/engines", "crates/extensions"] {
+            for entry in std::fs::read_dir(root.join(group)).unwrap() {
+                dirs.push(entry.unwrap().path().join("src"));
+            }
+        }
+        let mut sources = Vec::new();
+        while let Some(dir) = dirs.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    dirs.push(path);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    let file = path
+                        .strip_prefix(&root)
+                        .unwrap()
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    sources.push((file, std::fs::read_to_string(&path).unwrap()));
+                }
+            }
+        }
+        assert!(sources.len() > 100, "read only {} files", sources.len());
+
+        // `const NAME: &str = "VALUE";`, for reads that name a constant.
+        let mut consts = std::collections::HashMap::new();
+        for (_, src) in &sources {
+            for line in src.lines() {
+                let line = line
+                    .trim_start()
+                    .trim_start_matches("pub ")
+                    .trim_start_matches("pub(crate) ");
+                let Some(rest) = line.strip_prefix("const ") else {
+                    continue;
+                };
+                if let Some((name, value)) = rest.split_once(": &str = \"") {
+                    if let Some(value) = value.strip_suffix("\";") {
+                        consts.insert(name.to_string(), value.to_string());
+                    }
+                }
+            }
+        }
+
+        let mut read = BTreeSet::new();
+        let mut unexplained = Vec::new();
+        for (file, src) in &sources {
+            let mut code = code_only(src);
+            without_test_modules(&mut code);
+            let bytes = src.as_bytes();
+            for needle in [
+                "env::var(",
+                "env::var_os(",
+                "env::var)",
+                "env::var_os)",
+                "env::vars",
+            ] {
+                let n = needle.as_bytes();
+                for pos in 0..code.len().saturating_sub(n.len()) {
+                    if &code[pos..pos + n.len()] != n {
+                        continue;
+                    }
+                    let line = src[..pos].matches('\n').count() + 1;
+                    let mut i = pos + n.len();
+                    if needle.ends_with('(') {
+                        while bytes[i].is_ascii_whitespace() {
+                            i += 1;
+                        }
+                        if bytes[i] == b'"' {
+                            let end = i + 1 + src[i + 1..].find('"').unwrap();
+                            read.insert(src[i + 1..end].to_string());
+                            continue;
+                        }
+                        let ident: String = src[i..]
+                            .chars()
+                            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == ':')
+                            .collect();
+                        let last = ident.rsplit("::").next().unwrap_or_default();
+                        if let Some(value) = consts.get(last) {
+                            read.insert(value.clone());
+                            continue;
+                        }
+                    }
+                    if !INDIRECT.iter().any(|(f, _)| f == file) {
+                        unexplained.push(format!(
+                            "{file}:{line}: {}",
+                            src.lines().nth(line - 1).unwrap().trim()
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(read.contains("HOME"), "the scan found nothing: {read:?}");
+        assert!(
+            unexplained.is_empty(),
+            "reads that name no variable; add their file to INDIRECT with a reason:\n{}",
+            unexplained.join("\n")
+        );
+        let covered = |name: &str| {
+            FP_ENV.contains(&name)
+                || EXEMPT.iter().any(|(n, _)| *n == name)
+                || NOT_SERVED.iter().any(|(n, _)| *n == name)
+        };
+        let missing: Vec<&String> = read.iter().filter(|name| !covered(name)).collect();
+        assert!(
+            missing.is_empty(),
+            "read but neither fingerprinted nor exempt: {missing:?}"
+        );
+    }
+
+    /// Variables read only by code no served command runs.
+    const NOT_SERVED: &[(&str, &str)] = &[
+        (
+            "AXIL_BENCH_COMMIT",
+            "labels the indexer's benchmark reports",
+        ),
+        ("CLAUDE_PROJECT_DIR", "hook commands"),
+        ("PATH", "install and hook setup look for an installed axil"),
+        ("USER", "the scheduled maintenance's log directory"),
+        ("SystemRoot", "Windows only, where there is no daemon"),
+    ];
 
     #[test]
     fn the_build_id_follows_the_binary_on_disk() {

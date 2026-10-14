@@ -175,7 +175,11 @@ pub fn op_label(argv: &[String]) -> &'static str {
         if word.starts_with('-') {
             continue;
         }
-        return OPS.iter().find(|op| *op == word).copied().unwrap_or("other");
+        return OPS
+            .iter()
+            .find(|op| *op == word)
+            .copied()
+            .unwrap_or("other");
     }
     "other"
 }
@@ -187,8 +191,6 @@ pub struct Stats {
     /// Requests refused before running: incompatible, overloaded, expired,
     /// starting or stopping.
     pub refused: AtomicU64,
-    /// Requests that panicked.
-    pub panics: AtomicU64,
     /// Times the database was reopened.
     pub reloads: AtomicU64,
     last_reload: Mutex<Option<String>>,
@@ -235,7 +237,10 @@ impl Stats {
     /// A reload, and why.
     pub fn reloaded(&self, why: &str) {
         self.reloads.fetch_add(1, Ordering::AcqRel);
-        *self.last_reload.lock().unwrap_or_else(PoisonError::into_inner) = Some(why.to_string());
+        *self
+            .last_reload
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(why.to_string());
     }
 
     /// Why the last reload ran.
@@ -327,7 +332,11 @@ impl FileFp {
         }
         for ((suffix, was), (_, is)) in self.stores.iter().zip(&now.stores) {
             if was != is {
-                let name = if suffix.is_empty() { "the database" } else { suffix };
+                let name = if suffix.is_empty() {
+                    "the database"
+                } else {
+                    suffix
+                };
                 return Some(match (was, is) {
                     (None, Some(_)) => format!("{name} appeared"),
                     (Some(_), None) => format!("{name} was removed"),
@@ -359,7 +368,9 @@ mod tests {
         let argv = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         assert_eq!(op_label(&argv(&["axil", "recall", "q"])), "recall");
         assert_eq!(
-            op_label(&argv(&["axil", "--db", "x", "--format", "table", "fts", "q"])),
+            op_label(&argv(&[
+                "axil", "--db", "x", "--format", "table", "fts", "q"
+            ])),
             "fts"
         );
         assert_eq!(op_label(&argv(&["axil", "--quiet", "boot"])), "boot");
