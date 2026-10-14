@@ -126,6 +126,7 @@ def u3(args):
         **{k: cm[k] for k in ("items", "accuracy", "macro_f1", "false_capture_rate", "false_captures",
                               "gold_none", "wrong_table", "missed", "stored")},
         "per_class": cm["per_class"],
+        "per_source": m.per_source(pred, gold, rows, ids),
         "importance": m.importance_metrics(bucket, gold_rows, ids),
         "importance_cuts": cuts,
         "importance_majority_baseline": m.importance_baseline(gold_rows, train, ids),
