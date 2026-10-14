@@ -191,37 +191,53 @@ Two rerankers share this name and run at different points.
 
 **The CLI's `--rerank`** is not a stage inside `db.recall()`: it runs after
 recall has returned, so after query-time chunk rescoring (Step 4c) and the
-post-filter. `axil recall --rerank cross-encoder` re-scores those returned
-hits with an ONNX cross-encoder and reorders them by its score (recall's
-order is replaced, not blended; at most the first 20 entries are scored).
+post-filter. `axil recall --rerank cross-encoder` re-scores a pool of
+recall's hits with an ONNX cross-encoder, reorders the pool by that score
+(recall's order is replaced unless `--rerank-weight` blends the two), and
+prints the first `--top-k` of the new order.
 
-- **What the rerank receives.** Recall's final, QTC-scored hits. When the
-  primary recall returns nothing, the CLI cascades through fallbacks in
-  order and the rerank gets the first that returns hits: recall again with
-  the filters relaxed (and query-time chunks off), recall on the expanded
-  query, then direct FTS; `--no-cascade` turns all three off. With no
-  post-filter: the first `--top-k` hits (default 5), or up to ⌈1.5 × `--top-k`⌉ when completeness
-  widening fires (on by default; `--no-widen` turns it off). With a
+- **What the rerank receives.** A pool of max(4 × `--top-k`, 20) of recall's
+  final, QTC-scored hits: 20 at the default `--top-k 5`, the depth the
+  LongMemEval harness reranks. Hits ranked below the `--top-k` cut are in the
+  pool, so the rerank can promote them. Recall is asked for the pool size, and
+  completeness widening (on by default; `--no-widen` turns it off) can grow
+  the pool to ⌈1.5 × the pool size⌉; every hit in the pool is scored. With a
   post-filter (`--table`, `--type`, `--after`, `--before`, `--agent`,
-  `--min-importance`, `--fresh-only`): recall over-fetches 5 × `--top-k`
-  candidates (more if widening fires), filters them, and the rerank
-  receives the first `--top-k` that pass. Nothing outside this list can be
-  promoted.
-- **What is printed.** The whole reranked list in its new order, minus hits
+  `--min-importance`, `--fresh-only`), recall over-fetches 5 × `--top-k`
+  candidates, or the pool size when that is larger, filters them, and keeps
+  the first max(4 × `--top-k`, 20) that pass as the pool. When the primary
+  recall returns nothing, the CLI cascades through fallbacks in order and the
+  pool comes from the first that returns hits: recall again with the filters
+  relaxed (and query-time chunks off), recall on the expanded query, then
+  direct FTS; `--no-cascade` turns all three off. `--profile` prints the pool
+  size to stderr.
+- **Blending.** `--rerank-weight W` (cross-encoder only, default 1.0) ranks
+  each pooled hit by W × cross-encoder score + (1 − W) × recall score, both
+  min-max normalized over the pool. At 1.0 the cross-encoder's order stands
+  alone; at 0.0 recall's order comes back.
+- **What is printed.** The first `--top-k` of the reranked pool, minus hits
   the `--recall-format` has nothing to show for (`compact`, `oneline` and
   `context-block` skip them; `context-block` also lists code hits before
-  memories). With `--budget`, only the prefix that fits is printed, except
-  that most formats print the first hit even when it alone is over the
-  budget (`context-block` may print just a code-section heading then), so
-  the rerank can change which records appear.
+  memories). The cut to `--top-k` also applies when the rerank is skipped
+  (the `--timeout-ms` deadline passed) or fails (no model): the output is
+  then the first `--top-k` of the pool in recall's order. Widening never adds
+  hits past `--top-k` under `--rerank`. With `--budget`, only the prefix
+  that fits is printed, except that most formats print the first hit even
+  when it alone is over the budget (`context-block` may print just a
+  code-section heading then).
+- **Without `--rerank`** (or with `--rerank off`) none of this runs: recall
+  keeps `--top-k`, widened as usual, and the output is the same as before the
+  pool existed.
 
 The implementation is
 [`crates/extensions/axil-indexer/src/rerank.rs`](../../../crates/extensions/axil-indexer/src/rerank.rs),
 compiled in by the `rerank` Cargo feature (part of the CLI's `full`
-build, not `default`). It loads `models/cross-encoder.onnx`; the
-expected model is `cross-encoder/ms-marco-MiniLM-L-6-v2`.
-`--rerank llm` reorders the same list through the configured
-`LlmProvider` instead.
+build, not `default`). It loads `models/cross-encoder.onnx`, with
+`tokenizer.json` beside it, relative to the working directory; the expected
+model is `cross-encoder/ms-marco-MiniLM-L-6-v2` (`onnx/model.onnx` and
+`tokenizer.json` from its Hugging Face repository; Axil does not download
+it). `--rerank llm` reorders the same pool through the configured
+`LlmProvider` instead; the LLM sees the first 20 hits of the pool.
 
 **The library reranker** belongs to the `QueryBuilder` path only. Embedded
 library users can bring their own: implement the `Rerank` trait in
