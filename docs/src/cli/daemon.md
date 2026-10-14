@@ -74,9 +74,10 @@ store removed by `compact --drop-engine` or created by another command), and
 the plugins directory. Any change, or a graph that failed to load, makes it
 finish the requests running on the old handle and open the database again.
 
-It stops by itself after its idle timeout with no command to run, on
-SIGTERM, SIGINT or SIGHUP, and when its own executable changes on disk (a new
-build installed over it). Stopping removes the socket first, finishes the
+It stops by itself after its idle timeout with no command to run (counting
+time the machine slept), on SIGTERM, SIGINT or SIGHUP, and when its
+executable changes on disk: a new build installed over it, or the path it was
+started by, a symlink say, now leading to another build. Stopping removes the socket first, finishes the
 requests running, and closes every store cleanly.
 
 It refuses to serve, and says why in `daemon.blocked`, a database whose open

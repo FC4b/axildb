@@ -43,6 +43,10 @@ pub enum DaemonCommand {
         /// Stop after this long without a command to run.
         #[arg(long, default_value = "30m", value_parser = parse_duration)]
         idle_timeout: Duration,
+        /// The path `start` was run by, symlinks unresolved: the daemon
+        /// retires once it leads to another binary.
+        #[arg(long)]
+        launch_path: Option<PathBuf>,
     },
     /// Ask the daemon to stop, and wait until it has closed the database.
     Stop {
@@ -108,7 +112,10 @@ pub fn dispatch(db_opt: &Option<PathBuf>, command: DaemonCommand, out: &Output) 
         DaemonCommand::Start { idle_timeout, wait } => {
             start(&db, idle_timeout, Duration::from_secs(wait), out)
         }
-        DaemonCommand::Run { idle_timeout } => server::run_daemon(&db, idle_timeout),
+        DaemonCommand::Run {
+            idle_timeout,
+            launch_path,
+        } => server::run_daemon(&db, idle_timeout, launch_path),
         DaemonCommand::Stop { wait } => stop(&db, Duration::from_secs(wait), out),
         DaemonCommand::Status { json } => status(&db, json, out),
         DaemonCommand::Logs { lines } => logs(&db, lines),
@@ -204,8 +211,11 @@ fn spawn(key: &Path, run: &RunDir, idle_timeout: Duration) -> Result<std::proces
     cmd.arg("--db")
         .arg(key)
         .args(["daemon", "run", "--idle-timeout"])
-        .arg(format!("{}s", idle_timeout.as_secs()))
-        .current_dir("/")
+        .arg(format!("{}s", idle_timeout.as_secs()));
+    if let Some(launch) = launch_path() {
+        cmd.arg("--launch-path").arg(launch);
+    }
+    cmd.current_dir("/")
         .stdin(Stdio::null())
         .stdout(Stdio::from(log.try_clone()?))
         .stderr(Stdio::from(log));
@@ -227,6 +237,25 @@ fn spawn(key: &Path, run: &RunDir, idle_timeout: Duration) -> Result<std::proces
     let stamp = json!({"pid": child.id(), "at": chrono::Utc::now().to_rfc3339()});
     let _ = write_atomic(&run.spawn_stamp(), stamp.to_string().as_bytes());
     Ok(child)
+}
+
+/// The path this binary was started by, before symlinks are resolved:
+/// `argv[0]` when it names a file, made absolute, else its first match on
+/// `PATH`. Only a path that leads to this very binary is given; the daemon
+/// started with it retires once it leads elsewhere, as when a package
+/// manager moves a symlink to a new build.
+fn launch_path() -> Option<PathBuf> {
+    let arg0 = PathBuf::from(std::env::args_os().next()?);
+    let path = if arg0.components().count() > 1 {
+        std::env::current_dir().ok()?.join(arg0)
+    } else {
+        let dirs = std::env::var_os("PATH")?;
+        std::env::split_paths(&dirs)
+            .map(|dir| dir.join(&arg0))
+            .find(|candidate| candidate.is_file())?
+    };
+    let this = proto::ExeId::current().ok()?;
+    (proto::ExeId::of(&path).ok()? == this).then_some(path)
 }
 
 fn stop(db: &Path, wait: Duration, out: &Output) -> Result<i32> {

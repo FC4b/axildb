@@ -889,7 +889,10 @@ mod tests {
             "labels the indexer's benchmark reports",
         ),
         ("CLAUDE_PROJECT_DIR", "hook commands"),
-        ("PATH", "install and hook setup look for an installed axil"),
+        (
+            "PATH",
+            "install, hook setup and `daemon start` look for an installed axil",
+        ),
         ("USER", "the scheduled maintenance's log directory"),
         ("SystemRoot", "Windows only, where there is no daemon"),
     ];

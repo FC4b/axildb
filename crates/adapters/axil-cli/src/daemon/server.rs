@@ -31,8 +31,9 @@
 //! open handle changed without it ([`FileFp`]) or the graph failed to load;
 //! either reopens the database once the requests on the old handle finish.
 //! A tick each second does the same check, and stops the daemon when it has
-//! been idle for its idle timeout, when it was signalled, or when its own
-//! executable changed on disk.
+//! been idle for its idle timeout, when it was signalled, or when its
+//! executable changed on disk, or the path it was started by now leads to
+//! another.
 //!
 //! Shutting down unlinks the socket first, so new clients fall back at
 //! once, answers queued connections `stopping`, lets running requests
@@ -108,6 +109,9 @@ pub struct Options {
     pub idle_timeout: Duration,
     /// How long to retry an open that another process's lock blocks.
     pub open_wait: Duration,
+    /// The path the daemon's binary was started by, before symlinks are
+    /// resolved: the daemon retires when it leads to another binary.
+    pub launch_path: Option<PathBuf>,
     /// This is the daemon process: bind under umask 077 and rotate the log
     /// at fd 1 and 2. Both are process-wide.
     pub process: bool,
@@ -220,6 +224,8 @@ pub struct Server {
     graph_reloads: AtomicU32,
     fail_graph: AtomicBool,
     accept: Mutex<Option<JoinHandle<()>>>,
+    /// [`Options::launch_path`], when it leads to this binary.
+    launch: Option<PathBuf>,
 }
 
 /// A run request counted against [`MAX_IN_FLIGHT`] until dropped.
@@ -249,6 +255,16 @@ impl Server {
         let identity =
             Identity::current().map_err(|e| format!("can't identify this binary: {e}"))?;
         let exe = ExeId::current().ok();
+        let launch = opts.launch_path.clone().filter(|path| {
+            let same = exe.is_some() && ExeId::of(path).ok() == exe;
+            if !same {
+                log(format!(
+                    "not watching {}: it does not lead to this binary",
+                    path.display()
+                ));
+            }
+            same
+        });
         let info = DaemonInfo {
             proto: DAEMON_PROTO,
             pid: std::process::id(),
@@ -285,6 +301,7 @@ impl Server {
             graph_reloads: AtomicU32::new(0),
             fail_graph: AtomicBool::new(false),
             accept: Mutex::new(None),
+            launch,
         });
         server.write_info();
 
@@ -386,7 +403,10 @@ impl Server {
             return Some(StopReason::Idle);
         }
         if let Some(exe) = &self.exe {
-            if ExeId::of(&exe.path).ok().as_ref() != Some(exe) {
+            // Through the path it was started by: a symlink moved to a new
+            // build leads elsewhere, though this binary is unchanged.
+            let watched = self.launch.as_deref().unwrap_or(&exe.path);
+            if ExeId::of(watched).ok().as_ref() != Some(exe) {
                 return Some(StopReason::ExeChanged);
             }
         }
@@ -1107,7 +1127,11 @@ pub fn lock_held(run: &RunDir) -> bool {
 
 /// `axil daemon run`: be the daemon for the database at `db` until it
 /// stops; see the module docs. Returns the exit code.
-pub fn run_daemon(db: &Path, idle_timeout: Duration) -> anyhow::Result<i32> {
+pub fn run_daemon(
+    db: &Path,
+    idle_timeout: Duration,
+    launch_path: Option<PathBuf>,
+) -> anyhow::Result<i32> {
     let key = cli_io::db_key(db)?;
     anyhow::ensure!(key.is_file(), "no database at {}", key.display());
     let run = RunDir::of(&key);
@@ -1124,6 +1148,7 @@ pub fn run_daemon(db: &Path, idle_timeout: Duration) -> anyhow::Result<i32> {
     let opts = Options {
         idle_timeout,
         open_wait: Duration::from_secs(10),
+        launch_path,
         process: true,
     };
     let server = match Server::start(key, run, opts) {
@@ -1156,6 +1181,7 @@ mod tests {
         Options {
             idle_timeout,
             open_wait: Duration::from_secs(5),
+            launch_path: None,
             process: false,
         }
     }

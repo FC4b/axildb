@@ -395,6 +395,26 @@ fn replacing_the_executable_retires_the_daemon() {
     );
     assert_eq!(fx.info()["exit_reason"], "its executable changed");
     fx.closed_cleanly().unwrap();
+
+    // A symlink moved to another build, as a package manager upgrades: the
+    // binary the daemon runs is unchanged, the path it was started by now
+    // leads to another.
+    let (one, two) = (bin_dir.join("axil-one"), bin_dir.join("axil-two"));
+    std::fs::copy(BIN, &one).unwrap();
+    std::fs::copy(BIN, &two).unwrap();
+    let link = bin_dir.join("axil-link");
+    std::os::unix::fs::symlink(&one, &link).unwrap();
+    let pid = fx.start_with(link.to_str().unwrap(), "60s")["pid"]
+        .as_u64()
+        .unwrap();
+    let moved = bin_dir.join("axil-link.new");
+    std::os::unix::fs::symlink(&two, &moved).unwrap();
+    std::fs::rename(&moved, &link).unwrap();
+    assert!(
+        wait_for(Duration::from_secs(10), || !fx.locked()),
+        "pid {pid} still running"
+    );
+    assert_eq!(fx.info()["exit_reason"], "its executable changed");
 }
 
 #[test]
