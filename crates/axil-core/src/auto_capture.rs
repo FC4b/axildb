@@ -1,9 +1,12 @@
-//! Auto-capture —//!
+//! Auto-capture.
+//!
 //! Analyzes text from agent actions and auto-extracts knowledge:
 //! errors, decisions, and context. The agent doesn't need to explicitly store.
 
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::sync::LazyLock;
 
 /// Classification of captured knowledge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -90,6 +93,104 @@ const CAPTURE_NEGATIONS: &[&str] = &[
     "no error found",
 ];
 
+/// Shell prefixes of a message about the command line itself (a glob that
+/// matched nothing, zsh reading `===` as a command, a quoting error).
+const SHELL_PREFIXES: &[&str] = &["(eval):", "zsh:", "bash:", "-bash:", "sh:"];
+
+/// Shell messages that do report a failure of the program that ran.
+const SHELL_FAILURES: &[&str] = &[
+    "abort",
+    "bus error",
+    "killed",
+    "out of memory",
+    "segmentation fault",
+    "terminated",
+];
+
+/// What rg (after its `regex parse error:` header) and grep say about a
+/// regex the agent wrote; nothing in the project failed.
+const REGEX_SYNTAX_ERRORS: &[&str] = &[
+    "backreferences are not supported",
+    "empty character class",
+    "incomplete escape sequence",
+    "invalid character class range",
+    "invalid character range",
+    "invalid regular expression",
+    "look-around",
+    "repetition operator missing expression",
+    "trailing backslash",
+    "unclosed character class",
+    "unclosed counted repetition",
+    "unclosed group",
+    "unmatched (",
+    "unmatched [",
+    "unopened group",
+    "unrecognized escape sequence",
+];
+
+/// git refusing a command as typed: a guessed ref or path, a branch that
+/// exists, a worktree in the way. Nothing in the project failed.
+const GIT_REFUSALS: &[&str] = &[
+    "already checked out",
+    "already exists",
+    "already used by worktree",
+    "ambiguous argument",
+    "bad revision",
+    "cannot delete branch",
+    "couldn't find remote ref",
+    "did not match any",
+    "does not exist in",
+    "exists on disk, but not in",
+    "invalid reference",
+    "is not fully merged",
+    "needed a single revision",
+    "no upstream",
+    "not a git repository",
+    "not a valid object name",
+    "not something we can merge",
+    "refusing to",
+    "unknown revision",
+    "would be overwritten",
+    "you have unstaged changes",
+];
+
+/// A program rejecting its own command line (clap, cargo, argparse, BSD
+/// tools): a typo'd flag or subcommand, a missing argument.
+const USAGE_ERRORS: &[&str] = &[
+    "a value is required for",
+    "cannot be used with",
+    "illegal option",
+    "invalid choice",
+    "invalid option",
+    "no bin target named",
+    "no example target named",
+    "no such command",
+    "no such subcommand",
+    "no test target named",
+    "not found in workspace",
+    "required arguments were not provided",
+    "the following arguments are required",
+    "unexpected argument",
+    "unknown option",
+    "unrecognized arguments",
+    "unrecognized option",
+    "unrecognized subcommand",
+];
+
+/// A search hit or numbered listing (`path:12:` / `path-12-` / `12:`)
+/// followed by source text rather than by a compiler-style ` message`:
+/// right after the prefix, or after an indent. `file.c:10:5: error: ...`
+/// (one space, then the message) is not matched.
+static PRINTED_LINE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^(?:[^\s:]+\.[A-Za-z0-9]+[:-])?\d+[:-](?:\d+[:-])?(?:[^\s\d]|\s{2,}|$)").unwrap()
+});
+
+/// The start of a source line printed for reading.
+const CODE_LINE_STARTS: &[&str] = &[
+    "#![", "#[", "/*", "//", "def ", "fn ", "impl ", "let ", "match ", "pub ", "raise ", "return ",
+    "use ",
+];
+
 /// Minimum line length for a capture summary. Below this, a match is
 /// almost certainly too short to be a useful knowledge entry.
 const MIN_SUMMARY_LEN: usize = 20;
@@ -116,6 +217,7 @@ pub fn analyze(text: &str, source: &str) -> Vec<CapturedKnowledge> {
     }
 
     let lines: Vec<&str> = text.lines().collect();
+    let guards = TextGuards::of(&lines, &text_lower);
     let mut captures = Vec::new();
     let mut claimed_line: Option<usize> = None;
 
@@ -129,11 +231,10 @@ pub fn analyze(text: &str, source: &str) -> Vec<CapturedKnowledge> {
         let Some((idx, line)) = lines
             .iter()
             .enumerate()
-            .find(|(_, l)| l.to_lowercase().contains(pattern))
+            .find(|(_, l)| l.to_lowercase().contains(pattern) && !guards.is_guarded(l))
         else {
             continue;
         };
-        let _ = idx;
         let summary = line.trim();
         if summary.len() < MIN_SUMMARY_LEN {
             continue;
@@ -157,11 +258,9 @@ pub fn analyze(text: &str, source: &str) -> Vec<CapturedKnowledge> {
         if !text_lower.contains(pattern) {
             continue;
         }
-        let Some((_idx, line)) = lines
-            .iter()
-            .enumerate()
-            .find(|(i, l)| Some(*i) != claimed_line && l.to_lowercase().contains(pattern))
-        else {
+        let Some((_idx, line)) = lines.iter().enumerate().find(|(i, l)| {
+            Some(*i) != claimed_line && l.to_lowercase().contains(pattern) && !guards.is_guarded(l)
+        }) else {
             continue;
         };
         let summary = line.trim();
@@ -178,6 +277,72 @@ pub fn analyze(text: &str, source: &str) -> Vec<CapturedKnowledge> {
     }
 
     captures
+}
+
+/// What a text says about all of its lines: whether it prints a diff, and
+/// whether rg reported a regex of the agent's as unparseable.
+struct TextGuards {
+    in_diff: bool,
+    regex_error: bool,
+}
+
+impl TextGuards {
+    fn of(lines: &[&str], text_lower: &str) -> Self {
+        Self {
+            in_diff: lines.iter().any(|l| {
+                l.starts_with("diff --git ") || l.starts_with("@@ -") || l.starts_with("Diff in ")
+            }),
+            regex_error: text_lower.contains("regex parse error"),
+        }
+    }
+
+    /// A line whose failure words are not a failure of the project: the
+    /// command line was wrong, or the command printed text for reading.
+    fn is_guarded(&self, line: &str) -> bool {
+        let lower = line.trim().to_lowercase();
+        self.is_command_line_mistake(&lower) || self.is_printed_text(line)
+    }
+
+    fn is_command_line_mistake(&self, lower: &str) -> bool {
+        if SHELL_PREFIXES.iter().any(|p| lower.starts_with(p)) {
+            return !SHELL_FAILURES.iter().any(|f| lower.contains(f));
+        }
+        if lower.contains("regex parse error") {
+            return true;
+        }
+        let regex_message = REGEX_SYNTAX_ERRORS.iter().any(|m| lower.contains(m));
+        if regex_message
+            && (lower.starts_with("grep: ")
+                || lower.starts_with("rg: ")
+                || (self.regex_error && lower.starts_with("error: ")))
+        {
+            return true;
+        }
+        let reported = lower.starts_with("error: ")
+            || lower.starts_with("fatal: ")
+            || lower.contains(": error: ")
+            || lower.contains(": illegal option");
+        reported
+            && (GIT_REFUSALS.iter().any(|m| lower.contains(m))
+                || USAGE_ERRORS.iter().any(|m| lower.contains(m)))
+    }
+
+    /// Source code, a search hit or a diff line, printed for reading. Code
+    /// that handles errors (`eprintln!("... failed")`) is not a failure.
+    fn is_printed_text(&self, line: &str) -> bool {
+        if PRINTED_LINE.is_match(line) {
+            return true;
+        }
+        if self.in_diff && (line.starts_with('+') || line.starts_with('-')) {
+            return true;
+        }
+        let trimmed = line.trim();
+        CODE_LINE_STARTS.iter().any(|p| trimmed.starts_with(p))
+            || trimmed.contains("!(")
+            || trimmed.contains("=>")
+            || trimmed.ends_with(';')
+            || trimmed.ends_with('{')
+    }
 }
 
 /// Returns `true` when a pattern match looks like a known false positive
@@ -232,6 +397,37 @@ fn is_pattern_false_positive(pattern: &str, line: &str) -> bool {
                 || lower.contains("library")
                 || lower.contains("dependency")
                 || lower.contains("symbol"))
+        }
+        "out of memory" => {
+            // "keep the code-index vectors out of memory recall" is about
+            // where rows live. An OOM is something that runs or is out of
+            // memory, or a message that ends there ("error: out of memory").
+            let Some(at) = lower.find(pattern) else {
+                return false;
+            };
+            let prev = lower[..at]
+                .trim_end()
+                .rsplit(|c: char| !c.is_alphanumeric())
+                .next()
+                .unwrap_or_default();
+            let ran_out = matches!(
+                prev,
+                "" | "run"
+                    | "runs"
+                    | "ran"
+                    | "running"
+                    | "go"
+                    | "goes"
+                    | "went"
+                    | "is"
+                    | "was"
+                    | "are"
+                    | "were"
+                    | "been"
+            );
+            let next = lower[at + pattern.len()..].trim_start();
+            let ends_there = !next.starts_with(|c: char| c.is_alphabetic());
+            !(ran_out || ends_there)
         }
         "fatal" => {
             // "fatal error" and "fatal:" are real; "fatal flaw" / "fatal
@@ -530,5 +726,102 @@ mod tests {
         );
         assert_eq!(captures.len(), 1);
         assert_eq!(captures[0].capture_type, CaptureType::Error);
+    }
+
+    // ── Guards: a failure of the command line, or text printed for reading ──
+
+    fn errors_in(text: &str) -> Vec<CapturedKnowledge> {
+        analyze(text, "bash")
+            .into_iter()
+            .filter(|c| c.capture_type == CaptureType::Error)
+            .collect()
+    }
+
+    #[test]
+    fn zsh_reading_equals_signs_as_a_command_is_not_an_error() {
+        let text = "Exit code 1\nThe import finished and the table is ready for review.\n\
+                    (eval):1: === not found";
+        assert!(errors_in(text).is_empty());
+    }
+
+    #[test]
+    fn a_shell_kill_is_still_a_failure_line() {
+        let guards = TextGuards::of(&[], "");
+        assert!(!guards.is_guarded("zsh: killed     cargo test --release -p axil-core"));
+        assert!(guards.is_guarded("zsh: no such file or directory: ./target/release/axil"));
+    }
+
+    #[test]
+    fn an_unparseable_rg_regex_is_not_an_error() {
+        let text = "Exit code 2\nrg: regex parse error:\n    (?:fn add(|fn remove)\n    ^\n\
+                    error: unclosed group";
+        assert!(errors_in(text).is_empty());
+    }
+
+    #[test]
+    fn a_git_refusal_is_not_an_error() {
+        let text = "Exit code 128\nfatal: ambiguous argument 'feat/x..dev': unknown revision or \
+                    path not in the working tree.";
+        assert!(errors_in(text).is_empty());
+        let text = "Exit code 1\nerror: pathspec 'crates/axil-core/src/old.rs' did not match \
+                    any file(s) known to git";
+        assert!(errors_in(text).is_empty());
+    }
+
+    #[test]
+    fn a_usage_error_is_not_an_error() {
+        let text = "Exit code 2\nerror: unexpected argument '--fast' found\n\n\
+                    Usage: axil recall [OPTIONS] <QUERY>";
+        assert!(errors_in(text).is_empty());
+    }
+
+    #[test]
+    fn a_usage_error_does_not_hide_a_failing_test_in_the_same_output() {
+        let text = "error: unexpected argument 'hits_with_nothing' found\n\
+                    test db::tests::a_failed_batch_rescores_the_rest ... FAILED";
+        let errors = errors_in(text);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(
+            errors[0].summary.starts_with("test db::tests::"),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn search_hits_and_source_lines_are_not_errors() {
+        let text = "crates/axil-core/src/query.rs:851:                        eprintln!(\n\
+                    crates/axil-core/src/worker.rs:743:      eprintln!(\"maintenance worker error: {e}\");\n\
+                    crates/axil-core/src/db.rs:1702:     .map_err(|e| format!(\"open failed: {e}\"))?;";
+        assert!(errors_in(text).is_empty());
+        let text = "19652:fn format_failed_line(v: &Value) -> String {\n\
+                    19653-    // error: the proxy row has no path";
+        assert!(errors_in(text).is_empty());
+    }
+
+    #[test]
+    fn a_compiler_message_after_a_location_is_still_an_error() {
+        let errors = errors_in("src/main.c:10:5: error: expected ';' before 'return'");
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        let errors = errors_in("./main.go:12:2: fatal error: undefined reference to foo");
+        assert_eq!(errors.len(), 1, "{errors:?}");
+    }
+
+    #[test]
+    fn diff_lines_are_not_errors() {
+        let text = "diff --git a/src/db.rs b/src/db.rs\n@@ -612,6 +690,9 @@ impl Db {\n\
+                    -        return Err(\"connection refused by peer\".into())\n\
+                    +        warn!(\"retrying after connection refused\")";
+        assert!(errors_in(text).is_empty());
+    }
+
+    #[test]
+    fn out_of_memory_is_an_oom_only_when_something_runs_out() {
+        assert!(
+            errors_in("The new item keeps the code-index vectors out of memory recall.").is_empty()
+        );
+        let errors = errors_in("- Batch embedding runs out of memory with 8,192-token models.");
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        let errors = errors_in("memory allocation failed; error: out of memory (os error 12)");
+        assert_eq!(errors.len(), 1, "{errors:?}");
     }
 }
