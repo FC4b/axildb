@@ -1118,10 +1118,10 @@ impl Server {
                 self.fail_graph.store(false, Ordering::Release);
                 // Idle from now, not from before the lease.
                 self.touch();
+                log("opened the database again");
                 // On disk before a client can see it, as at the first open.
                 self.write_info_as(Phase::Ready.name());
                 self.phase.advance(Phase::Reloading, Phase::Ready);
-                log("opened the database again");
                 self.prewarm_on(state);
             }
             Err(failed) => self.stop_blocked(format!("reopening after a lease: {failed}")),
