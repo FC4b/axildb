@@ -79,11 +79,12 @@ pub struct Entity {
 ///    spaces (a command line, an expression) is not one name; the patterns
 ///    below read the names inside it.
 /// 2. Commands: `cargo test`, `axil recall`, `git worktree add` → code entity
-/// 3. Qualified paths: `auth::login`, `axil-core::brain::MemoryType` → code symbol
-/// 4. File paths: `/src/auth/login.rs` → file entity
-/// 5. CamelCase identifiers: `AuthModule` → code entity
-/// 6. snake_case identifiers: `auth_module` → code entity
-/// 7. Declarations in code: `fn parse_token(` → code symbol
+/// 3. Long flags: `--dry-run`, `--top-k` (without a value) → code entity
+/// 4. Qualified paths: `auth::login`, `axil-core::brain::MemoryType` → code symbol
+/// 5. File paths: `/src/auth/login.rs` → file entity
+/// 6. CamelCase identifiers: `AuthModule` → code entity
+/// 7. snake_case identifiers: `auth_module` → code entity
+/// 8. Declarations in code: `fn parse_token(` → code symbol
 ///
 /// Quoted strings are not entities: a quoted phrase is an error message or an
 /// example, and linking notes on it joins notes that merely quote the same
@@ -92,6 +93,7 @@ pub fn extract_entities(text: &str) -> Vec<Entity> {
     let mut x = Extraction::new(text);
     extract_backtick_entities(&mut x);
     extract_commands(&mut x);
+    extract_long_flags(&mut x);
     extract_qualified_paths(&mut x);
     extract_file_paths(&mut x);
     extract_camel_case(&mut x);
@@ -934,6 +936,32 @@ fn normalize_file_path(s: &str) -> String {
     s.strip_prefix("./").unwrap_or(s).to_string()
 }
 
+/// A long flag where a word starts: `--top-k`, `--no-default-features`.
+/// A value (`--format=json`) is not part of it, and `--` alone or a
+/// markdown rule (`---`) is not a flag.
+static LONG_FLAG: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?:^|[\s`(\[{"',/|])(--[a-z0-9]+(?:[-_][a-z0-9]+)*)\b"#).unwrap()
+});
+
+fn extract_long_flags(x: &mut Extraction<'_>) {
+    let text = x.text;
+    for caps in LONG_FLAG.captures_iter(text) {
+        let Some(m) = caps.get(1) else { continue };
+        if x.is_claimed(&m.range()) {
+            continue;
+        }
+        x.claim(m.range());
+        x.push(
+            m.as_str().to_string(),
+            Entity {
+                name: m.as_str().to_string(),
+                entity_type: EntityType::Code,
+                source_text: m.as_str().to_string(),
+            },
+        );
+    }
+}
+
 // ── Language-aware code-symbol extraction ─────────────────────
 
 /// A single code-symbol pattern: language hint + compiled regex.
@@ -1500,6 +1528,27 @@ mod tests {
         for literal in ["true", "0", "with", "mod", "default"] {
             assert!(!found.iter().any(|f| f == literal), "{literal}: {found:?}");
         }
+    }
+
+    #[test]
+    fn long_flags_without_their_values() {
+        let found = sources(
+            "Run it with --top-k 5 --format=json; `--no-default-features` and --save/--compare \
+             both work -- but --- and a-b--c are not flags.",
+        );
+        for flag in [
+            "--top-k",
+            "--format",
+            "--no-default-features",
+            "--save",
+            "--compare",
+        ] {
+            assert!(found.iter().any(|f| f == flag), "{flag}: {found:?}");
+        }
+        assert!(
+            !found.iter().any(|f| f == "--" || f == "---" || f == "--c"),
+            "{found:?}"
+        );
     }
 
     #[test]
