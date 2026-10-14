@@ -85,6 +85,10 @@ const REOPEN_WAIT: Duration = Duration::from_secs(10);
 /// How long shutting down waits for running requests.
 const DRAIN_WAIT: Duration = Duration::from_secs(10);
 
+/// How long a connection over [`MAX_CONNECTIONS`] may take to send its
+/// request, which is answered on the accepting thread.
+const OVER_CAP_READ: Duration = Duration::from_millis(200);
+
 /// How long shutting down waits for the last references to the handle,
 /// after the requests are done: recall workers a deadline left running.
 const RELEASE_WAIT: Duration = Duration::from_secs(3);
@@ -617,8 +621,18 @@ impl Server {
     fn spawn_connection(self: &Arc<Self>, mut stream: UnixStream) {
         if self.connections.fetch_add(1, Ordering::AcqRel) >= MAX_CONNECTIONS {
             self.connections.fetch_sub(1, Ordering::AcqRel);
-            let _ = stream.set_write_timeout(Some(Duration::from_millis(100)));
-            let _ = write_json(&mut stream, &RunReply::Overloaded);
+            // Answered here, briefly: `hello` and `shutdown` work whatever
+            // the load, so `daemon stop` does; anything else is told to
+            // come back.
+            let _ = stream.set_read_timeout(Some(OVER_CAP_READ));
+            let _ = stream.set_write_timeout(Some(OVER_CAP_READ));
+            if let Ok(op) = read_json::<Op>(&mut stream) {
+                let _ = match op {
+                    Op::Hello => write_json(&mut stream, &self.hello()),
+                    Op::Shutdown { reason } => self.acknowledge_shutdown(&mut stream, reason),
+                    _ => write_json(&mut stream, &RunReply::Overloaded),
+                };
+            }
             return;
         }
         let server = self.clone();
@@ -655,15 +669,7 @@ impl Server {
         };
         let _ = match op {
             Op::Hello => write_json(&mut stream, &self.hello()),
-            Op::Shutdown { reason } => {
-                let ack = Ack {
-                    op: "shutdown".into(),
-                    ok: true,
-                };
-                let sent = write_json(&mut stream, &ack);
-                self.request_stop(StopReason::Requested(reason));
-                sent
-            }
+            Op::Shutdown { reason } => self.acknowledge_shutdown(&mut stream, reason),
             Op::Status => write_json(&mut stream, &self.status()),
             Op::Run(header) => {
                 self.handle_run(&mut stream, header);
@@ -679,6 +685,17 @@ impl Server {
                 write_json(&mut stream, &ack)
             }
         };
+    }
+
+    /// Answer `shutdown`, then begin it.
+    fn acknowledge_shutdown(&self, stream: &mut UnixStream, reason: String) -> io::Result<()> {
+        let ack = Ack {
+            op: "shutdown".into(),
+            ok: true,
+        };
+        let sent = write_json(stream, &ack);
+        self.request_stop(StopReason::Requested(reason));
+        sent
     }
 
     fn handle_run(self: &Arc<Self>, stream: &mut UnixStream, header: RunHeader) {
@@ -1404,6 +1421,45 @@ mod tests {
             Some("the graph failed to load")
         );
         assert_eq!(server.phase.get(), Phase::Ready);
+        stop(server);
+    }
+
+    /// With every connection taken by clients that send nothing, `hello`
+    /// and `shutdown` are still answered, so `daemon stop` works; a run is
+    /// told to come back.
+    #[test]
+    fn the_frozen_ops_are_answered_with_every_connection_taken() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = build_fixture(tmp.path());
+        let server = start(&proj.join(".axil/memory.axil"));
+        let socket = server.run.socket().to_path_buf();
+        let idle: Vec<UnixStream> = (0..MAX_CONNECTIONS)
+            .map(|_| UnixStream::connect(&socket).unwrap())
+            .collect();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while server.connections.load(Ordering::Acquire) < MAX_CONNECTIONS {
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(10));
+        }
+        let hello = proto::hello(&socket, Duration::from_secs(5)).unwrap();
+        assert_eq!(hello.state, "ready");
+        let cwd = proj.canonicalize().unwrap();
+        let header = Identity::current()
+            .unwrap()
+            .header(parity::argv(&["boot"]), &cwd, false);
+        let run = proto::run(&socket, &header, None, Duration::from_secs(5)).unwrap();
+        assert_eq!(run.reply, RunReply::Overloaded);
+        let ack: Ack = proto::call(
+            &socket,
+            &Op::Shutdown {
+                reason: "full".into(),
+            },
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        assert!(ack.ok);
+        assert_eq!(server.serve(), StopReason::Requested("full".into()));
+        drop(idle);
         stop(server);
     }
 
