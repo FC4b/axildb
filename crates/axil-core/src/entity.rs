@@ -81,11 +81,12 @@ pub struct Entity {
 /// 2. Commands: `cargo test`, `axil recall`, `git worktree add` → code entity
 /// 3. Long flags: `--dry-run`, `--top-k` (without a value) → code entity
 /// 4. Qualified paths: `auth::login`, `axil-core::brain::MemoryType` → code symbol
-/// 5. File paths: `/src/auth/login.rs` → file entity
-/// 6. Hyphenated names: `recall-for-file`, `bge-m3`, `cargo-component` → code entity
-/// 7. Constants and env vars: `BRUTE_FORCE_MAX`, `$GOMODCACHE`, `HOME` → code entity
-/// 8. CamelCase identifiers: `AuthModule` → code entity
-/// 9. snake_case identifiers: `auth_module` → code entity
+/// 5. Git branches: `feat/open-backlog`, `origin/main` → code entity
+/// 6. File paths: `/src/auth/login.rs` → file entity
+/// 7. Hyphenated names: `recall-for-file`, `bge-m3`, `cargo-component` → code entity
+/// 8. Constants and env vars: `BRUTE_FORCE_MAX`, `$GOMODCACHE`, `HOME` → code entity
+/// 9. CamelCase identifiers: `AuthModule` → code entity
+/// 10. snake_case identifiers: `auth_module` → code entity
 /// 10. Declarations in code: `fn parse_token(` → code symbol
 ///
 /// Quoted strings are not entities: a quoted phrase is an error message or an
@@ -97,6 +98,7 @@ pub fn extract_entities(text: &str) -> Vec<Entity> {
     extract_commands(&mut x);
     extract_long_flags(&mut x);
     extract_qualified_paths(&mut x);
+    extract_branches(&mut x);
     extract_file_paths(&mut x);
     extract_hyphenated_names(&mut x);
     extract_constants(&mut x);
@@ -799,6 +801,39 @@ fn inline_code_spans(line: &str) -> Vec<&str> {
         .collect()
 }
 
+/// A git branch or remote ref: a work-type prefix (`feat/`, `fix/`,
+/// `review/`, ...) or a remote (`origin/`, `upstream/`), then a name.
+/// `docs/`, `test/` and `build/` are left to the path pattern, since they
+/// open directories far more often than branches.
+static BRANCH: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r#"(?:^|[\s`(\[{"',])((?:bench|bugfix|chore|ci|exp|feat|feature|fix|hotfix|origin|perf|refactor|release|review|spike|upstream|wip)/[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)*)"#,
+    )
+    .unwrap()
+});
+
+fn extract_branches(x: &mut Extraction<'_>) {
+    let text = x.text;
+    for caps in BRANCH.captures_iter(text) {
+        let Some(m) = caps.get(1) else { continue };
+        let name = m.as_str().trim_end_matches(['.', '-', '_']);
+        let range = m.start()..m.start() + name.len();
+        // A file under such a directory is a path, not a branch.
+        if x.is_claimed(&range) || is_file_name(name.rsplit('/').next().unwrap_or(name)) {
+            continue;
+        }
+        x.claim(range);
+        x.push(
+            name.to_lowercase(),
+            Entity {
+                name: name.to_string(),
+                entity_type: EntityType::Code,
+                source_text: name.to_string(),
+            },
+        );
+    }
+}
+
 fn extract_file_paths(x: &mut Extraction<'_>) {
     let text = x.text;
     for word in text.split_whitespace() {
@@ -816,6 +851,9 @@ fn extract_file_paths(x: &mut Extraction<'_>) {
             continue;
         }
         let range = x.range_of(trimmed);
+        if trimmed.is_empty() || x.is_claimed(&range) {
+            continue;
+        }
         let next_word = text[range.end..]
             .split_whitespace()
             .next()
@@ -1880,6 +1918,35 @@ mod tests {
         for word in ["VERDICT", "NOT", "FIXED", "DONE", "$GOMODCACHE"] {
             assert!(!found.iter().any(|f| f == word), "{word}: {found:?}");
         }
+    }
+
+    #[test]
+    fn branch_names_are_code_not_paths() {
+        let entities = extract_entities(
+            "Merged feat/phase-29-supersede-split and review/recall-core, then synced \
+             origin/main. fix/notes.md is a file.",
+        );
+        for name in [
+            "feat/phase-29-supersede-split",
+            "review/recall-core",
+            "origin/main",
+        ] {
+            assert!(
+                entities
+                    .iter()
+                    .any(|e| e.source_text == name && e.entity_type == EntityType::Code),
+                "{name}: {entities:?}"
+            );
+        }
+        assert!(
+            !entities
+                .iter()
+                .any(|e| e.source_text == "daemon-d2" || e.source_text == "main"),
+            "{entities:?}"
+        );
+        assert!(entities
+            .iter()
+            .any(|e| e.source_text == "fix/notes.md" && e.entity_type == EntityType::File));
     }
 
     #[test]
