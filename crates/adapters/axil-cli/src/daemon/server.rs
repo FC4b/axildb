@@ -2500,10 +2500,11 @@ mod tests {
         let db = proj.join(".axil/memory.axil");
         let server = start(&db);
         quiet(&server);
+        // Taken here, so it is held before the lease is asked for.
         let hold = |server: &Arc<Server>, ms: u64| {
+            let held = server.state.get().and_then(WarmState::handle).unwrap();
             server.spawn_background("test-hold", move |server| {
                 let _busy = server.busy();
-                let held = server.state.get().and_then(WarmState::handle);
                 thread::sleep(Duration::from_millis(ms));
                 drop(held);
             });
