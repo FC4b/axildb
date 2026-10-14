@@ -23,6 +23,9 @@
 //!   Replaying the lines into each response instead would not match: each
 //!   command's one-shot open attaches only the engines it needs, and prints
 //!   only theirs.
+//! - A vector store a killed writer left needing repair is repaired by the
+//!   host's open, which says so on the host's stderr; the one-shot binary
+//!   says so in the first command after the crash.
 //! - A line an engine prints the first time a handle uses something (the
 //!   graph store when its adjacency tables can't be used, say) prints in
 //!   the first request that does, not in every one.
@@ -187,7 +190,13 @@ impl std::error::Error for OpenPrinted {}
 
 /// [`WarmDb::open`], as long as the open prints nothing; [`OpenPrinted`]
 /// otherwise, with the handle closed again.
+///
+/// A vector store a killed writer left needing repair is repaired first,
+/// and said so on the host's own stderr. The open would repair it too and
+/// print that it did, which would keep the database from being served for
+/// a line a one-shot run prints once, in the first command after the crash.
 fn open_warm(path: &Path) -> anyhow::Result<WarmDb> {
+    repair_vector_store(path);
     let (stdout, stderr, warm) = cli_io::capture(ReqCtx::default(), || WarmDb::open(path));
     let warm = warm?;
     if stdout.is_empty() && stderr.is_empty() {
@@ -196,6 +205,32 @@ fn open_warm(path: &Path) -> anyhow::Result<WarmDb> {
     drop(warm);
     let printed = [stdout, stderr].concat();
     Err(OpenPrinted(String::from_utf8_lossy(&printed).into_owned()).into())
+}
+
+/// Repair the default vector store at `path` if a killed writer left it
+/// needing it, as the open's probe would; see [`open_warm`]. A store that
+/// can't be probed is left for the open to report.
+fn repair_vector_store(path: &Path) {
+    #[cfg(feature = "vector")]
+    {
+        let disabled = path
+            .parent()
+            .and_then(|dir| axil_core::load_config_from(dir).ok())
+            .is_some_and(|config| config.is_engine_disabled("vec"));
+        if disabled {
+            return;
+        }
+        if let Ok(axil_vector::VectorStoreProbe::Ready { repaired: true, .. }) =
+            axil_vector::probe_vector_store(path)
+        {
+            errln!(
+                "axil: vector store {} was not closed cleanly; repaired it",
+                axil_vector::vector_db_path(path).display()
+            );
+        }
+    }
+    #[cfg(not(feature = "vector"))]
+    let _ = path;
 }
 
 /// Why [`WarmState::reopen`] did not reopen the database.
@@ -311,6 +346,50 @@ impl WarmState {
         let warm = open_warm(&self.path).map_err(ReopenError::Open)?;
         *self.slot_write() = Some(warm);
         Ok(())
+    }
+
+    /// Close the database, for a host that is shutting down: wait up to
+    /// `timeout` for a reopen that is running and for the requests still
+    /// using the handle (see [`WarmDb::release`]), then close it. Requests
+    /// are [`NotServed::Unavailable`] from then on.
+    ///
+    /// A poisoned handle is never closed ([`ReopenError::Poisoned`]; see
+    /// [`WarmState::poisoned`]). One still in use when the time runs out is
+    /// kept ([`ReopenError::InUse`]), and so is everything while a reopen
+    /// still runs ([`ReopenError::Running`]).
+    pub fn release(&self, timeout: Duration) -> Result<(), ReopenError> {
+        let deadline = std::time::Instant::now() + timeout;
+        // A reopen that is running would put a handle back.
+        while self
+            .reopening
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            if std::time::Instant::now() >= deadline {
+                return Err(ReopenError::Running);
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let result = self.release_claimed(deadline);
+        self.reopening.store(false, Ordering::Release);
+        result
+    }
+
+    fn release_claimed(&self, deadline: std::time::Instant) -> Result<(), ReopenError> {
+        if self.poisoned() {
+            return Err(ReopenError::Poisoned);
+        }
+        let Some(old) = self.slot_write().take() else {
+            return Ok(());
+        };
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        match old.release(left) {
+            Ok(_) => Ok(()),
+            Err(old) => {
+                *self.slot_write() = Some(old);
+                Err(ReopenError::InUse)
+            }
+        }
     }
 
     /// The handle a request runs on.

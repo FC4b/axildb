@@ -6529,6 +6529,13 @@ impl Axil {
         PrewarmReport { embedder, graph }
     }
 
+    /// How far the graph's query backend has settled (see
+    /// [`GraphIndex::load_state`](crate::plugin::GraphIndex::load_state)),
+    /// without settling it. `None` without a graph.
+    pub fn graph_load_state(&self) -> Option<crate::plugin::GraphState> {
+        self.graph_index.as_ref().map(|graph| graph.load_state())
+    }
+
     /// Get the embedder reference (for external use like feedback).
     pub fn embedder(&self) -> Option<&dyn crate::plugin::TextEmbedder> {
         self.embedder.as_ref().map(|a| a.as_ref())
