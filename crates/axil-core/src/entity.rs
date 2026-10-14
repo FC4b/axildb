@@ -83,9 +83,10 @@ pub struct Entity {
 /// 4. Qualified paths: `auth::login`, `axil-core::brain::MemoryType` → code symbol
 /// 5. File paths: `/src/auth/login.rs` → file entity
 /// 6. Hyphenated names: `recall-for-file`, `bge-m3`, `cargo-component` → code entity
-/// 7. CamelCase identifiers: `AuthModule` → code entity
-/// 8. snake_case identifiers: `auth_module` → code entity
-/// 9. Declarations in code: `fn parse_token(` → code symbol
+/// 7. Constants and env vars: `BRUTE_FORCE_MAX`, `$GOMODCACHE`, `HOME` → code entity
+/// 8. CamelCase identifiers: `AuthModule` → code entity
+/// 9. snake_case identifiers: `auth_module` → code entity
+/// 10. Declarations in code: `fn parse_token(` → code symbol
 ///
 /// Quoted strings are not entities: a quoted phrase is an error message or an
 /// example, and linking notes on it joins notes that merely quote the same
@@ -98,6 +99,7 @@ pub fn extract_entities(text: &str) -> Vec<Entity> {
     extract_qualified_paths(&mut x);
     extract_file_paths(&mut x);
     extract_hyphenated_names(&mut x);
+    extract_constants(&mut x);
     extract_camel_case(&mut x);
     extract_snake_case(&mut x);
     extract_declarations(&mut x);
@@ -1001,6 +1003,46 @@ fn extract_hyphenated_names(x: &mut Extraction<'_>) {
     }
 }
 
+/// An ALL_CAPS name joined by underscores (`CARGO_REGISTRY_TOKEN`), or any
+/// ALL_CAPS name after a `$` sigil (`$GOMODCACHE`, `${HOME}`).
+static CONSTANT: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\$\{?([A-Z][A-Z0-9_]*[A-Z0-9])\b|\b([A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+)\b").unwrap()
+});
+
+/// Environment variables whose names have no underscore, sorted. Other
+/// ALL_CAPS words without one are emphasis (`NOT FIXED`, `DONE`).
+const ENV_VARS: &[&str] = &[
+    "EDITOR", "HOME", "LANG", "PATH", "PWD", "SHELL", "TERM", "TMPDIR", "USER",
+];
+
+static CAPS_WORD: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b[A-Z]{2,}\b").unwrap());
+
+/// Constants and environment variables, without a `$` sigil.
+fn extract_constants(x: &mut Extraction<'_>) {
+    let text = x.text;
+    let sigiled = CONSTANT
+        .captures_iter(text)
+        .filter_map(|caps| caps.get(1).or_else(|| caps.get(2)));
+    let known = CAPS_WORD
+        .find_iter(text)
+        .filter(|m| ENV_VARS.binary_search(&m.as_str()).is_ok());
+    let found: Vec<regex::Match<'_>> = sigiled.chain(known).collect();
+    for m in found {
+        if x.is_claimed(&m.range()) {
+            continue;
+        }
+        x.claim(m.range());
+        x.push(
+            m.as_str().to_lowercase(),
+            Entity {
+                name: m.as_str().to_string(),
+                entity_type: EntityType::Code,
+                source_text: m.as_str().to_string(),
+            },
+        );
+    }
+}
+
 fn extract_camel_case(x: &mut Extraction<'_>) {
     for word in split_into_identifiers(x.text) {
         if is_camel_case(word) && word.len() >= 4 && !x.is_claimed(&x.range_of(word)) {
@@ -1681,6 +1723,7 @@ mod tests {
             ("AXIL_COMMAND_GROUPS", AXIL_COMMAND_GROUPS),
             ("FILE_EXTENSIONS", FILE_EXTENSIONS),
             ("PROJECT_DIRS", PROJECT_DIRS),
+            ("ENV_VARS", ENV_VARS),
         ];
         for p in PROGRAMS {
             lists.push((p.name, p.subcommands));
@@ -1823,6 +1866,20 @@ mod tests {
             assert!(!found.iter().any(|f| f == word), "{word}: {found:?}");
         }
         assert!(!found.iter().any(|f| f == "x86_64"), "{found:?}");
+    }
+
+    #[test]
+    fn constants_and_env_vars_but_not_emphasis() {
+        let found = sources(
+            "Rotated CARGO_REGISTRY_TOKEN; with AXIL_DB unset it reads $GOMODCACHE and HOME. \
+             VERDICT: NOT FIXED, DONE.",
+        );
+        for name in ["CARGO_REGISTRY_TOKEN", "AXIL_DB", "GOMODCACHE", "HOME"] {
+            assert!(found.iter().any(|f| f == name), "{name}: {found:?}");
+        }
+        for word in ["VERDICT", "NOT", "FIXED", "DONE", "$GOMODCACHE"] {
+            assert!(!found.iter().any(|f| f == word), "{word}: {found:?}");
+        }
     }
 
     #[test]
