@@ -12,6 +12,29 @@ use std::sync::LazyLock;
 use chrono::{DateTime, Datelike, Duration, NaiveDate, Utc};
 use regex::Regex;
 
+use crate::record::Record;
+
+/// When what a record describes happened: its `event_time` field (RFC 3339
+/// or `YYYY-MM-DD`) when it has a readable one, else when it was stored. A
+/// note written today about last month's release says when the release was
+/// in `event_time`, so a question about last month finds it.
+pub fn record_time(record: &Record) -> DateTime<Utc> {
+    record
+        .data
+        .get("event_time")
+        .and_then(|v| v.as_str())
+        .and_then(|t| {
+            DateTime::parse_from_rfc3339(t)
+                .map(|t| t.with_timezone(&Utc))
+                .ok()
+                .or_else(|| {
+                    let date = NaiveDate::parse_from_str(t, "%Y-%m-%d").ok()?;
+                    Some(date.and_hms_opt(12, 0, 0)?.and_utc())
+                })
+        })
+        .unwrap_or(record.created_at)
+}
+
 /// A span of time a query names, `start` inclusive and `end` exclusive. A
 /// side left `None` is unbounded ("before March" has no start).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -809,6 +832,22 @@ mod tests {
         let half = now - chrono::Duration::days(5);
         let boost = temporal_boost(&half, &target);
         assert!((boost - 0.20).abs() < 0.02);
+    }
+
+    #[test]
+    fn record_time_reads_event_time_before_the_store_time() {
+        let mut record = Record::new("context", serde_json::json!({"summary": "x"}));
+        record.created_at = fixed_now();
+        assert_eq!(record_time(&record), fixed_now());
+        record.data["event_time"] = serde_json::json!("2026-03-12");
+        assert_eq!(record_time(&record), day(2026, 3, 12) + Duration::hours(12));
+        record.data["event_time"] = serde_json::json!("2026-03-12T08:30:00+02:00");
+        assert_eq!(
+            record_time(&record),
+            Utc.with_ymd_and_hms(2026, 3, 12, 6, 30, 0).unwrap()
+        );
+        record.data["event_time"] = serde_json::json!("sometime in March");
+        assert_eq!(record_time(&record), fixed_now(), "unreadable: the store time");
     }
 
     #[test]

@@ -5607,14 +5607,15 @@ impl Axil {
         }
 
         // A query that names a span of time ("in March", "last 3 days")
-        // keeps the candidates inside it. When none are, the span is set
-        // aside and relevance alone decides, as for a query without one.
+        // keeps the candidates inside it, by when their event happened
+        // (`event_time`, else the store time). When none are, the span is
+        // set aside and relevance alone decides, as for a query without one.
         if let Some(range) = cfg.temporal_target.as_ref().and_then(|t| t.range) {
-            if scored_results
-                .iter()
-                .any(|r| range.contains(&r.record.created_at))
-            {
-                scored_results.retain(|r| range.contains(&r.record.created_at));
+            let inside = |r: &crate::scoring::RecallResult| {
+                range.contains(&crate::temporal::record_time(&r.record))
+            };
+            if scored_results.iter().any(inside) {
+                scored_results.retain(inside);
             }
         }
 

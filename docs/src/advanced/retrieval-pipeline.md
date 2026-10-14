@@ -177,8 +177,9 @@ hops from the active context (Phase 5e).
 
 A query that names a span of time (`in March`, `March 2026`, `between
 2026-03-01 and 2026-03-15`, `before 2026-04-01`, `since March`, `last 3 days`)
-also keeps only the candidates created inside it. When none are, the span is
-set aside and relevance alone decides. A point in time (`yesterday`,
+also keeps only the candidates inside it, by when what they describe happened:
+a record's `event_time` field (a date or RFC 3339) when it has one, else when it
+was stored. When none are, the span is set aside and relevance alone decides. A point in time (`yesterday`,
 `3 days ago`, `March 15`) only boosts. `before`/`after` followed by anything but
 a date ("after the release") name no span.
 

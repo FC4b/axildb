@@ -12,7 +12,8 @@
 //! - Equal scores come back in record-id order, the same in every process,
 //!   from recall and from full-text search.
 //! - A query that names a span of time keeps the candidates inside it, and
-//!   ranks on relevance alone when none are.
+//!   ranks on relevance alone when none are. A record's `event_time`, when
+//!   it has one, says where in time it falls.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -413,4 +414,47 @@ fn a_named_span_keeps_the_candidates_inside_it() {
         ids(&db, "connection pool timeout in January", 5, cfg).len(),
         2
     );
+}
+
+#[test]
+fn a_record_falls_in_time_where_its_event_time_says() {
+    use chrono::TimeZone;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("event.axil");
+    let db = open(&path, Arc::default(), false);
+    let now = Utc.with_ymd_and_hms(2026, 4, 10, 12, 0, 0).unwrap();
+    // Written yesterday, about a release in March.
+    let release = db
+        .insert_at(
+            "context",
+            json!({"summary": "the connection pool release", "event_time": "2026-03-12"}),
+            now - Duration::days(1),
+        )
+        .unwrap();
+    // Written in March about something that happened then too.
+    let march = db
+        .insert_at(
+            "decisions",
+            json!({"summary": "raise the connection pool timeout"}),
+            Utc.with_ymd_and_hms(2026, 3, 20, 9, 0, 0).unwrap(),
+        )
+        .unwrap();
+    // Written in April, no event_time.
+    db.insert_at(
+        "commits",
+        json!({"summary": "connection pool release"}),
+        now - Duration::days(2),
+    )
+    .unwrap();
+    let cfg = RecallConfig {
+        now,
+        ..cli_config()
+    };
+
+    let mut in_march = ids(&db, "connection pool release in March", 5, cfg);
+    in_march.sort();
+    let mut expected = vec![release.id.to_string(), march.id.to_string()];
+    expected.sort();
+    assert_eq!(in_march, expected);
 }

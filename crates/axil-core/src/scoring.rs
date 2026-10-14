@@ -387,11 +387,14 @@ pub fn fuse_signals(
         config.recency_half_life_hours,
     );
 
-    // Compute temporal proximity boost
+    // Compute temporal proximity boost, against when the record's event
+    // happened (`event_time`) where it says so
     let temporal = config
         .temporal_target
         .as_ref()
-        .map(|t| crate::temporal::temporal_boost(&record.created_at, t))
+        .map(|t| {
+            crate::temporal::temporal_boost(&crate::temporal::record_time(record), t)
+        })
         .unwrap_or(0.0);
 
     // Compute keyword overlap from record text
