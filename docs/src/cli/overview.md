@@ -13,7 +13,7 @@ axil [OPTIONS] <COMMAND> [ARGS]
 | Option | Description |
 |--------|-------------|
 | `--db <PATH>` | Database path (or set `AXIL_DB`) |
-| `--format <FMT>` | Output format: `json` (default), `pretty`, `table` |
+| `--format <FMT>` | Output format: `json` (default), `pretty`, `table`. `context-savings --format` (after the command name) takes the report format instead: `text` (default), `markdown`, `json` |
 
 ## Command groups
 
