@@ -18236,7 +18236,14 @@ fn format_recall_results(
         RecallFormat::Compact => values
             .iter()
             .filter_map(|v| {
-                let summary = truncate_str(pick_summary(v.get("data"))?, 200);
+                // A long record shows the piece that matched the query in
+                // place of its opening.
+                let shown = v
+                    .get("snippet")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.trim().is_empty())
+                    .or_else(|| pick_summary(v.get("data")))?;
+                let summary = truncate_str(shown, 200);
                 Some(json!({
                     "id": v.get("id"),
                     "score": v.get("score"),
@@ -21922,6 +21929,19 @@ mod recall_summary_tests {
 
         // Nothing displayable at all: no block, so the hook stays silent.
         assert!(format_context_block(&hits[..1], None, &[]).is_empty());
+    }
+
+    #[test]
+    fn compact_output_shows_the_piece_that_matched() {
+        let opening = "user: hello there";
+        let hits = vec![
+            json!({"id": "A", "table": "sessions", "score": 0.9,
+                   "data": {"summary": opening}, "snippet": "user: the pool timeout is 30s"}),
+            json!({"id": "B", "table": "sessions", "score": 0.8, "data": {"summary": opening}}),
+        ];
+        let compact = format_recall_results(&hits, &RecallFormat::Compact, None);
+        assert_eq!(compact[0]["summary"], "user: the pool timeout is 30s");
+        assert_eq!(compact[1]["summary"], opening);
     }
 
     #[test]
