@@ -213,7 +213,9 @@ pub struct Server {
     stopped: Condvar,
     in_flight: AtomicUsize,
     connections: AtomicUsize,
-    last_active: Mutex<Instant>,
+    /// When the last run request came or finished, on both clocks: an
+    /// [`Instant`] does not advance while the machine sleeps.
+    last_active: Mutex<(Instant, SystemTime)>,
     fresh: Mutex<Option<Freshness>>,
     graph_reloads: AtomicU32,
     fail_graph: AtomicBool,
@@ -278,7 +280,7 @@ impl Server {
             stopped: Condvar::new(),
             in_flight: AtomicUsize::new(0),
             connections: AtomicUsize::new(0),
-            last_active: Mutex::new(Instant::now()),
+            last_active: Mutex::new((Instant::now(), SystemTime::now())),
             fresh: Mutex::new(None),
             graph_reloads: AtomicU32::new(0),
             fail_graph: AtomicBool::new(false),
@@ -507,18 +509,23 @@ impl Server {
         }
     }
 
+    /// How long since the last run request, by the longer of the two
+    /// clocks: the monotonic one misses a sleep, the wall clock can be set
+    /// back.
     fn idle_for(&self) -> Duration {
-        self.last_active
+        let (instant, wall) = *self
+            .last_active
             .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .elapsed()
+            .unwrap_or_else(PoisonError::into_inner);
+        let slept = SystemTime::now().duration_since(wall).unwrap_or_default();
+        instant.elapsed().max(slept)
     }
 
     fn touch(&self) {
         *self
             .last_active
             .lock()
-            .unwrap_or_else(PoisonError::into_inner) = Instant::now();
+            .unwrap_or_else(PoisonError::into_inner) = (Instant::now(), SystemTime::now());
     }
 
     fn set_fresh(&self, baseline: FileFp) {
@@ -1493,5 +1500,22 @@ mod tests {
             serde_json::from_slice(&fs::read(server.run.info()).unwrap()).unwrap();
         assert_eq!(info.state, "stopped");
         assert_eq!(info.exit_reason.as_deref(), Some("idle"));
+    }
+
+    /// A machine that slept through the idle timeout: the monotonic clock
+    /// says a moment passed, the wall clock says hours did.
+    #[test]
+    fn idle_time_counts_the_time_the_machine_slept() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = build_fixture(tmp.path());
+        let server = start_with(
+            &proj.join(".axil/memory.axil"),
+            options(Duration::from_secs(60)),
+        );
+        assert_eq!(server.tick(), None);
+        let hours_ago = SystemTime::now() - Duration::from_secs(7200);
+        *server.last_active.lock().unwrap() = (Instant::now(), hours_ago);
+        assert_eq!(server.tick(), Some(StopReason::Idle));
+        stop(server);
     }
 }
