@@ -1931,6 +1931,12 @@ mod tests {
                 thread::sleep(Duration::from_millis(5));
                 continue;
             }
+            // Nothing here reloads the handle; say what did, if anything.
+            assert!(!unavailable(&outcome), "{:?}: {}", outcome.reply, {
+                let status = server.status();
+                json!({"stale": status["stale"], "last_reload": status["last_reload"],
+                    "reloads": status["reloads"], "graph": status["graph"]})
+            });
             return served(outcome);
         };
         let read: &[&str] = if cfg!(feature = "embed") {
@@ -2320,7 +2326,8 @@ mod tests {
         assert_eq!(status["state"], "ready");
         assert_eq!(status["ops"]["boot"]["served"], 1);
         assert_eq!(status["refused"], 5);
-        assert_eq!(status["lease_holder"], Value::Null);
+        assert_eq!(status["lease_holders"], json!([]));
+        assert_eq!(status["leases_granted"], 0);
 
         let mut garbage = UnixStream::connect(&socket).unwrap();
         write_frame(&mut garbage, b"{\"op\":\"nonsense\"}").unwrap();

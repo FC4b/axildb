@@ -1060,7 +1060,9 @@ fn a_hook_recall_under_a_lease_returns_nothing_at_once() {
     let (context, took) = hook("s-leased");
     assert_eq!(context, "");
     assert!(took < Duration::from_secs(5), "took {took:?}");
-    assert_eq!(fx.holders(), [pid]);
+    // The server still holds it. The recall's own lease, which ended with
+    // its process, may not be counted out yet.
+    assert!(fx.holders().contains(&pid), "{}", fx.live());
     assert!(mcp.close().success());
     fx.warm_again();
 }
