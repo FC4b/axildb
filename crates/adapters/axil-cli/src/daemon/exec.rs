@@ -22,16 +22,17 @@
 //!   line on stderr, not the panic hook's message. The host then serves
 //!   nothing more and must exit; see [`WarmState::poisoned`].
 //! - Help and usage errors render as for a pipe, without color. They are
-//!   served only to a client whose `AXIL_DB` matches the host's (unset, once
-//!   the host has removed its own), since clap prints them differently with
-//!   the variable set.
+//!   served only to a client whose [`CLI_ENV`] variables match the host's
+//!   (unset, once the host has removed its own), since clap prints them
+//!   differently with a variable set.
 //!
 //! The process-wide setup a one-shot run does first (the vector exact-scan
 //! ceiling, the encryption cipher) is the host's to do once, and so is
-//! removing its own `AXIL_DB`: the request carries the client's.
+//! removing its own [`CLI_ENV`] variables, before the first request: the
+//! request carries the client's.
 
 use std::any::Any;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
@@ -51,6 +52,12 @@ use crate::{Cli, Command, Output};
 /// the whole command set overflows a default thread stack.
 const REQUEST_STACK: usize = 32 * 1024 * 1024;
 
+/// Every environment variable the command line reads through clap (an
+/// argument's `env =`). clap reads each one as it makes the argument, so
+/// the host's parser keeps the values the host had then, and a request
+/// carries the client's.
+pub const CLI_ENV: &[&str] = &["AXIL_DB", "AXIL_MCP_TOOLS"];
+
 /// One command line, as the client's process was asked to run it.
 pub struct Request {
     /// The command line, program name first.
@@ -59,13 +66,23 @@ pub struct Request {
     /// `AXIL_DB` resolves against it, and with neither the database is the
     /// `.axil/memory.axil` found walking up from it.
     pub cwd: PathBuf,
-    /// The client's `AXIL_DB`, the one environment variable the command line
-    /// reads. The host's own is never consulted.
-    pub axil_db: Option<OsString>,
+    /// The client's values of the [`CLI_ENV`] variables it has set; one
+    /// missing here is unset. The host's own are never consulted.
+    pub env: Vec<(OsString, OsString)>,
     /// Piped stdin. `None` stands for a terminal: nothing was piped.
     pub stdin: Option<Vec<u8>>,
     /// Whether the command may record a slow query in the database's log.
     pub slow_query_log: bool,
+}
+
+impl Request {
+    /// The client's value of the environment variable `name`.
+    fn env(&self, name: &str) -> Option<&OsStr> {
+        self.env
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, value)| value.as_os_str())
+    }
 }
 
 /// What a served command printed, and the code it exited with.
@@ -84,9 +101,11 @@ pub struct Response {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NotServed {
     /// The command line holds an argument or subcommand this build doesn't
-    /// know, or it doesn't parse and the client's `AXIL_DB` differs from the
-    /// one the host's parser was made with: clap's help and usage errors
-    /// depend on that variable (an empty one is itself a usage error).
+    /// know, or it would parse differently in the client's process: it
+    /// doesn't parse, or the command reads a [`CLI_ENV`] variable other than
+    /// `AXIL_DB`, and the client's [`CLI_ENV`] values differ from the ones
+    /// the host's parser was made with (an empty `AXIL_DB` is itself a usage
+    /// error).
     Parse,
     /// The command is for another database than the one held, or for none.
     WrongDb,
@@ -463,26 +482,38 @@ enum Parsed {
 /// debug-build checks on subcommands the command line never names.
 struct CliParser {
     command: clap::Command,
-    /// The `AXIL_DB` the command was made with: clap reads the variable when
-    /// it builds the argument, and what it prints for help and usage errors
-    /// depends on it.
-    env_db: Option<OsString>,
+    /// The [`CLI_ENV`] values the command was made with, in that order:
+    /// clap reads each variable as it makes the argument, and both what a
+    /// command line parses to and what help and usage errors print depend
+    /// on them.
+    env: Vec<Option<OsString>>,
+}
+
+impl CliParser {
+    /// Whether `req`'s client has any [`CLI_ENV`] variable other than the
+    /// parser was made with, among those `wanted` picks.
+    fn env_differs(&self, req: &Request, wanted: impl Fn(&str) -> bool) -> bool {
+        CLI_ENV
+            .iter()
+            .zip(&self.env)
+            .any(|(name, host)| wanted(name) && req.env(name) != host.as_deref())
+    }
 }
 
 fn parser() -> &'static CliParser {
     static PARSER: OnceLock<CliParser> = OnceLock::new();
     PARSER.get_or_init(|| {
-        let env_db = std::env::var_os("AXIL_DB");
+        let env = CLI_ENV.iter().map(std::env::var_os).collect();
         let command = Cli::command();
-        CliParser { command, env_db }
+        CliParser { command, env }
     })
 }
 
 /// Parse `req`'s command line as `Cli::parse` would in the client's
-/// process, with the client's `AXIL_DB`.
+/// process, with the client's [`CLI_ENV`] values.
 fn parse(req: &Request) -> Result<Parsed, NotServed> {
     // An empty `AXIL_DB` makes every command line a usage error.
-    if req.axil_db.as_ref().is_some_and(|v| v.is_empty()) {
+    if req.env("AXIL_DB").is_some_and(OsStr::is_empty) {
         return Err(NotServed::Parse);
     }
     let parser = parser();
@@ -495,27 +526,50 @@ fn parse(req: &Request) -> Result<Parsed, NotServed> {
         Err(e) => return printed(e.format(&mut parser.command.clone()), req, parser),
     };
     // Without `--db` on the command line, the client's `AXIL_DB` applies,
-    // not one the host's environment supplied.
+    // not one the host's environment supplied. Any other variable the
+    // command reads would have to be applied the same way, field by field;
+    // no command served in-process reads one, so the client runs it itself.
     if matches.value_source("db") != Some(ValueSource::CommandLine) {
-        cli.db = req.axil_db.clone().map(PathBuf::from);
+        cli.db = req.env("AXIL_DB").map(PathBuf::from);
+    }
+    let mut read = Vec::new();
+    env_read(&parser.command, &matches, &mut read);
+    if parser.env_differs(req, |name| name != "AXIL_DB" && read.contains(&name)) {
+        return Err(NotServed::Parse);
     }
     Ok(Parsed::Run(cli))
+}
+
+/// The environment variables the arguments of `command`, and of each
+/// subcommand `matches` goes on to name, read.
+fn env_read<'a>(command: &'a clap::Command, matches: &clap::ArgMatches, read: &mut Vec<&'a str>) {
+    read.extend(
+        command
+            .get_arguments()
+            .filter_map(|arg| arg.get_env()?.to_str()),
+    );
+    if let Some((name, sub)) = matches.subcommand() {
+        if let Some(command) = command.find_subcommand(name) {
+            env_read(command, sub, read);
+        }
+    }
 }
 
 /// What `clap::Error::exit` would print for `e`, as a response.
 ///
 /// An unknown argument or subcommand is [`NotServed::Parse`]: a client of a
 /// newer build runs it in its own process. So is any of this when the
-/// client's `AXIL_DB` is not the one the parser was made with. clap reads the
-/// variable as it builds the command: help shows its value, a usage line
-/// lists `--db` when it is set, and a command line without a subcommand
-/// prints help without it and an error with it.
+/// client's [`CLI_ENV`] values are not the ones the parser was made with.
+/// clap reads them as it builds the command: help shows an argument's value,
+/// a usage line lists `--db` when `AXIL_DB` is set, a command line without a
+/// subcommand prints help without it and an error with it, and an invalid
+/// value is an error only where it is set.
 fn printed(e: clap::Error, req: &Request, parser: &CliParser) -> Result<Parsed, NotServed> {
     let unknown = matches!(
         e.kind(),
         ErrorKind::UnknownArgument | ErrorKind::InvalidSubcommand
     );
-    if unknown || parser.env_db != req.axil_db {
+    if unknown || parser.env_differs(req, |_| true) {
         return Err(NotServed::Parse);
     }
     let text = e.render().to_string().into_bytes();
@@ -537,7 +591,6 @@ mod tests {
     use crate::cli_io::tests::parity::{
         self, build_fixture, case, check_parity_with, copy_dir, matrix, one_shot_at, Case, Run,
     };
-    use std::ffi::OsStr;
     use std::sync::Arc;
     use std::time::Instant;
 
@@ -547,7 +600,9 @@ mod tests {
         Request {
             argv: parity::argv(args).into_iter().map(OsString::from).collect(),
             cwd: cwd.to_path_buf(),
-            axil_db: axil_db.map(OsString::from),
+            env: axil_db
+                .map(|db| vec![("AXIL_DB".into(), db.into())])
+                .unwrap_or_default(),
             stdin: Some(stdin.unwrap_or_default().to_vec()),
             slow_query_log: true,
         }
@@ -706,7 +761,7 @@ mod tests {
         // Making the parser needs a request thread's stack.
         let host_env = std::thread::Builder::new()
             .stack_size(REQUEST_STACK)
-            .spawn(|| parser().env_db.clone())
+            .spawn(|| parser().env.clone())
             .unwrap()
             .join()
             .unwrap();
@@ -725,7 +780,14 @@ mod tests {
         ];
         for (args, env) in cases {
             let req = request(&args, &cwd, env, None);
-            if host_env.as_deref() != env.map(OsStr::new) {
+            let client_env: Vec<Option<OsString>> = CLI_ENV
+                .iter()
+                .map(|name| match *name {
+                    "AXIL_DB" => env.map(OsString::from),
+                    other => std::env::var_os(other),
+                })
+                .collect();
+            if host_env != client_env {
                 let got = execute_captured(req, &state);
                 assert_eq!(got, Err(NotServed::Parse), "{args:?} AXIL_DB={env:?}");
                 continue;
@@ -743,6 +805,78 @@ mod tests {
                 assert!(got.2 == 0 && out.starts_with("One file."), "{out}");
             }
         }
+    }
+
+    /// A command that reads a variable other than `AXIL_DB` from the
+    /// environment is the client's to run when the client's value is not
+    /// the host's, and so is its help; a command that doesn't read it is
+    /// served whatever the client has.
+    #[test]
+    fn a_variable_the_command_reads_is_the_clients() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = build_fixture(tmp.path());
+        let state = WarmState::open(&proj.join(".axil/memory.axil")).unwrap();
+        let host_tools = std::env::var_os("AXIL_MCP_TOOLS");
+        let with_tools = |args: &[&str], tools: Option<&str>| Request {
+            env: tools
+                .map(|v| vec![("AXIL_MCP_TOOLS".into(), v.into())])
+                .unwrap_or_default(),
+            ..request(args, &proj, None, None)
+        };
+        let differs = Some("bogus");
+        assert_ne!(host_tools.as_deref(), differs.map(OsStr::new));
+        for args in [&["mcp"][..], &["mcp", "--help"]] {
+            let got = execute_captured(with_tools(args, differs), &state);
+            assert_eq!(got, Err(NotServed::Parse), "{args:?}");
+        }
+        let r = execute_captured(with_tools(&["boot"], differs), &state).unwrap();
+        assert_eq!(r.exit, 0, "{}", String::from_utf8_lossy(&r.stderr));
+        if host_tools.is_none() {
+            let got = execute_captured(with_tools(&["mcp"], None), &state);
+            assert_eq!(got, Err(NotServed::Command));
+        }
+    }
+
+    /// Every `env =` on an argument is a variable the request carries. A new
+    /// one the parser reads but a request lacks would quietly take the
+    /// host's value.
+    #[test]
+    fn every_variable_the_parser_reads_is_carried() {
+        let source = include_str!("../main.rs");
+        let mut literal: Vec<&str> = source
+            .split("env = \"")
+            .skip(1)
+            .map(|rest| &rest[..rest.find('"').unwrap()])
+            .collect();
+        literal.sort_unstable();
+        literal.dedup();
+        let mut carried = CLI_ENV.to_vec();
+        carried.sort_unstable();
+        assert_eq!(literal, carried, "the `env = \"…\"` attributes in main.rs");
+
+        fn walk(command: &clap::Command, found: &mut Vec<String>) {
+            for arg in command.get_arguments() {
+                if let Some(name) = arg.get_env() {
+                    found.push(name.to_string_lossy().into_owned());
+                }
+            }
+            for sub in command.get_subcommands() {
+                walk(sub, found);
+            }
+        }
+        let mut parsed = std::thread::Builder::new()
+            .stack_size(REQUEST_STACK)
+            .spawn(|| {
+                let mut found = Vec::new();
+                walk(&Cli::command(), &mut found);
+                found
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+        parsed.sort_unstable();
+        parsed.dedup();
+        assert_eq!(parsed, carried, "the variables the parser reads");
     }
 
     /// A request runs on the database its client's process would have found,
