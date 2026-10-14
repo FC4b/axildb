@@ -16199,9 +16199,10 @@ fn detect_project_root(db_path: &Path) -> Option<PathBuf> {
 
 /// [`detect_project_root`] with the home directory passed in.
 fn detect_project_root_under(db_path: &Path, home: Option<&Path>) -> Option<PathBuf> {
-    // Walk the absolute path, so a relative `--db .axil/memory.axil` finds
-    // the root its absolute form finds and names it the same way.
-    let db_path = std::path::absolute(db_path).unwrap_or_else(|_| db_path.to_path_buf());
+    // Walk the absolute path, so a relative `--db .axil/memory.axil` (or
+    // `../shared/.axil/memory.axil`) finds the root its absolute form finds
+    // and names it the same way.
+    let db_path = axil_core::absolute_path(db_path);
     let mut dir = db_path.parent()?.to_path_buf();
     let markers = [
         "Cargo.toml",
@@ -22624,6 +22625,14 @@ mod project_root_tests {
 
         // A marker in the project does.
         std::fs::write(proj.join("Cargo.toml"), "").unwrap();
-        assert_eq!(root(&db), Some(proj));
+        assert_eq!(root(&db), Some(proj.clone()));
+
+        // A path through the project to a database beside it walks only
+        // the directories it names, as its absolute form does.
+        let shared = home.join("shared").join(".axil").join("memory.axil");
+        std::fs::create_dir_all(shared.parent().unwrap()).unwrap();
+        let through_proj = proj.join("../shared/.axil/memory.axil");
+        assert_eq!(root(&through_proj), root(&shared));
+        assert_eq!(root(&through_proj), None);
     }
 }

@@ -82,12 +82,12 @@ pub use boot::{
     DEFAULT_TOKEN_BUDGET,
 };
 pub use config::{
-    default_config_toml, find_config_file, get_config_value, home_dir, load_config_from,
-    load_lifecycle_checked_from, load_lifecycle_from, set_config_string_array, set_config_value,
-    AxilConfig, CompactMode, DatabaseConfig, DebugConfig, DecayConfig, DevConfig, DiagnoseConfig,
-    EnginesConfig, ExtensionsConfig, FtsConfig, HealingConfig, IndexConfig, LifecycleConfig,
-    LifecycleLoad, MetricsHealingConfig, OptimizeConfig, PluginConfig, RuntimeConfig,
-    TableLifecycle, TimeseriesConfig,
+    absolute_path, default_config_toml, find_config_file, get_config_value, home_dir,
+    load_config_from, load_lifecycle_checked_from, load_lifecycle_from, set_config_string_array,
+    set_config_value, AxilConfig, CompactMode, DatabaseConfig, DebugConfig, DecayConfig, DevConfig,
+    DiagnoseConfig, EnginesConfig, ExtensionsConfig, FtsConfig, HealingConfig, IndexConfig,
+    LifecycleConfig, LifecycleLoad, MetricsHealingConfig, OptimizeConfig, PluginConfig,
+    RuntimeConfig, TableLifecycle, TimeseriesConfig,
 };
 pub use db::{
     companion_path, drop_engine_companion, is_database_file_name, is_expired_record,

@@ -906,17 +906,17 @@ pub fn default_config_toml() -> String {
     .to_string()
 }
 
-/// Where a walk up for `axil.toml` starts: `start_dir` made absolute, so a
-/// relative directory (the parent of `--db .axil/memory.axil`, say) walks the
-/// same directories as its absolute form instead of stopping at the working
-/// directory.
+/// Where a walk up for `axil.toml` starts: `start_dir` made absolute (see
+/// [`absolute_path`]), so a relative directory (the parent of `--db
+/// .axil/memory.axil`, say) walks the same directories as its absolute form
+/// instead of stopping at the working directory.
 fn walk_start(start_dir: &Path) -> PathBuf {
     let dir = if start_dir.as_os_str().is_empty() {
         Path::new(".")
     } else {
         start_dir
     };
-    std::path::absolute(dir).unwrap_or_else(|_| dir.to_path_buf())
+    absolute_path(dir)
 }
 
 /// Find the nearest `axil.toml` by walking up from `start_dir`.
@@ -1148,6 +1148,36 @@ pub fn set_config_string_array(
         .map_err(|e| format!("failed to write {}: {e}", config_path.display()))?;
 
     Ok(())
+}
+
+/// `path` made absolute against the working directory, with each `.`
+/// dropped and each `..` folded into the directory before it, without
+/// touching the filesystem: the absolute path a user would write for it.
+/// [`std::path::absolute`] keeps `..` on Unix, and a walk up from
+/// `/w/app/../shared/.axil` would visit `/w/app/..` and then `/w/app`, a
+/// directory its absolute form `/w/shared/.axil` never reaches. `path` comes
+/// back as given when the working directory can't be read.
+pub fn absolute_path(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let Ok(path) = std::path::absolute(path) else {
+        return path.to_path_buf();
+    };
+    let mut out = PathBuf::new();
+    for c in path.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => match out.components().next_back() {
+                Some(Component::Normal(_)) => {
+                    out.pop();
+                }
+                // `..` at the root is the root.
+                Some(Component::RootDir | Component::Prefix(_)) => {}
+                _ => out.push(c),
+            },
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 /// Get the user's home directory (`HOME` or `USERPROFILE`).
@@ -1595,6 +1625,27 @@ full_retention_days = 7
         assert!(from_abs.as_ref().is_some_and(|p| !p.starts_with(&cwd)));
         assert_eq!(find_config_file(Path::new("src")), from_abs);
         assert_eq!(find_config_file(Path::new("")), find_config_file(&cwd));
+    }
+
+    #[test]
+    fn a_start_through_dotdot_walks_the_directories_it_names() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let app = tmp.path().join("app");
+        let shared = tmp.path().join("shared").join(".axil");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::create_dir_all(&shared).unwrap();
+        std::fs::write(app.join("axil.toml"), "").unwrap();
+        let through_app = app.join("..").join("shared").join(".axil");
+        assert_eq!(absolute_path(&through_app), shared);
+        assert_eq!(find_config_file(&through_app), find_config_file(&shared));
+        assert_ne!(find_config_file(&through_app), Some(app.join("axil.toml")));
+
+        // Relative, from the crate directory the tests run in.
+        let cwd = std::env::current_dir().unwrap();
+        let up = Path::new("..").join(cwd.file_name().unwrap()).join("src");
+        assert_eq!(absolute_path(&up), cwd.join("src"));
+        assert_eq!(find_config_file(&up), find_config_file(&cwd.join("src")));
+        assert_eq!(absolute_path(Path::new("/..")), Path::new("/"));
     }
 
     #[test]
