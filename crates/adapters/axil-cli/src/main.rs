@@ -2336,8 +2336,10 @@ enum Command {
     // ── AI Agent Performance ──────────────────────────────
     /// Extract entities from text using pattern-based extraction (no LLM).
     ///
-    /// Extracts file paths, CamelCase/snake_case identifiers and backtick
-    /// code. Used by hooks for auto-entity capture.
+    /// Extracts file paths, commands, long flags, constants, branch names,
+    /// CamelCase/snake_case identifiers and backtick code. Known tool and
+    /// dependency names are added only on insert, where the database's
+    /// project is known. Used by hooks for auto-entity capture.
     #[command(name = "extract-entities")]
     ExtractEntities {
         /// Text to extract entities from (or "-" to read from stdin).
