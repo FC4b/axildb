@@ -11,6 +11,7 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
+use std::ops::Range;
 
 /// Type of extracted entity.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -69,39 +70,84 @@ pub struct Entity {
 
 /// Extract entities from a text string.
 ///
-/// Priority order (higher priority wins for overlapping extractions):
+/// Patterns run in priority order, and a later pattern never mints a part of
+/// a name an earlier one took at the same spot (`host_linker` inside
+/// `WasmHost::host_linker`):
 /// 1. Backtick-wrapped code: `` `AuthModule` `` → exact entity
-/// 2. File paths: `/src/auth/login.rs` → file entity
-/// 3. CamelCase identifiers: `AuthModule` → code entity
-/// 4. snake_case identifiers: `auth_module` → code entity
+/// 2. Qualified paths: `auth::login`, `axil-core::brain::MemoryType` → code symbol
+/// 3. File paths: `/src/auth/login.rs` → file entity
+/// 4. CamelCase identifiers: `AuthModule` → code entity
+/// 5. snake_case identifiers: `auth_module` → code entity
+/// 6. Declarations in code: `fn parse_token(` → code symbol
 ///
 /// Quoted strings are not entities: a quoted phrase is an error message or an
 /// example, and linking notes on it joins notes that merely quote the same
 /// words.
 pub fn extract_entities(text: &str) -> Vec<Entity> {
-    let mut entities = Vec::new();
-    let mut seen = HashSet::new();
-
-    // 1. Backtick-wrapped code
-    extract_backtick_entities(text, &mut entities, &mut seen);
-
-    // 2. File paths
-    extract_file_paths(text, &mut entities, &mut seen);
-
-    // 3. CamelCase identifiers
-    extract_camel_case(text, &mut entities, &mut seen);
-
-    // 4. snake_case identifiers
-    extract_snake_case(text, &mut entities, &mut seen);
-
-    extract_code_symbols(text, &mut entities, &mut seen);
-
-    entities
+    let mut x = Extraction::new(text);
+    extract_backtick_entities(&mut x);
+    extract_qualified_paths(&mut x);
+    extract_file_paths(&mut x);
+    extract_camel_case(&mut x);
+    extract_snake_case(&mut x);
+    extract_declarations(&mut x);
+    x.entities
 }
 
-fn extract_backtick_entities(text: &str, entities: &mut Vec<Entity>, seen: &mut HashSet<String>) {
+/// One extraction in progress: what has been found so far, and which parts
+/// of the text are already taken.
+struct Extraction<'a> {
+    text: &'a str,
+    entities: Vec<Entity>,
+    /// Dedup keys of the entities found so far.
+    seen: HashSet<String>,
+    /// Byte ranges of `text` that hold a whole name. A shorter pattern that
+    /// matches inside one would mint a fragment of that name, so the
+    /// identifier patterns skip them; the same word elsewhere in the text
+    /// still counts.
+    claimed: Vec<Range<usize>>,
+}
+
+impl<'a> Extraction<'a> {
+    fn new(text: &'a str) -> Self {
+        Self {
+            text,
+            entities: Vec::new(),
+            seen: HashSet::new(),
+            claimed: Vec::new(),
+        }
+    }
+
+    /// The byte range of `part` within the text. `part` must be a slice of
+    /// the text (every pattern here matches on such slices).
+    fn range_of(&self, part: &str) -> Range<usize> {
+        let base = self.text.as_ptr() as usize;
+        let start = part.as_ptr() as usize - base;
+        debug_assert!(start + part.len() <= self.text.len());
+        start..start + part.len()
+    }
+
+    fn is_claimed(&self, range: &Range<usize>) -> bool {
+        self.claimed
+            .iter()
+            .any(|c| c.start < range.end && range.start < c.end)
+    }
+
+    fn claim(&mut self, range: Range<usize>) {
+        self.claimed.push(range);
+    }
+
+    /// Keep `entity` unless an entity with the same `key` was found already.
+    fn push(&mut self, key: String, entity: Entity) {
+        if self.seen.insert(key) {
+            self.entities.push(entity);
+        }
+    }
+}
+
+fn extract_backtick_entities(x: &mut Extraction<'_>) {
     // Inline code only: a fenced block is code to read, not a name.
-    for (line, fenced) in lines_with_fences(text) {
+    for (line, fenced) in lines_with_fences(x.text) {
         if fenced {
             continue;
         }
@@ -111,19 +157,22 @@ fn extract_backtick_entities(text: &str, entities: &mut Vec<Entity>, seen: &mut 
             if trimmed.len() > 200 || !trimmed.chars().any(char::is_alphanumeric) {
                 continue;
             }
-            let key = trimmed.to_lowercase();
-            if seen.insert(key) {
-                let entity_type = if looks_like_path(trimmed) {
-                    EntityType::File
-                } else {
-                    EntityType::Code
-                };
-                entities.push(Entity {
+            if !trimmed.contains(char::is_whitespace) {
+                x.claim(x.range_of(trimmed));
+            }
+            let entity_type = if looks_like_path(trimmed) {
+                EntityType::File
+            } else {
+                EntityType::Code
+            };
+            x.push(
+                trimmed.to_lowercase(),
+                Entity {
                     name: normalize_entity_name(trimmed),
                     entity_type,
                     source_text: trimmed.to_string(),
-                });
-            }
+                },
+            );
         }
     }
 }
@@ -156,48 +205,53 @@ fn inline_code_spans(line: &str) -> Vec<&str> {
         .collect()
 }
 
-fn extract_file_paths(text: &str, entities: &mut Vec<Entity>, seen: &mut HashSet<String>) {
-    for word in text.split_whitespace() {
+fn extract_file_paths(x: &mut Extraction<'_>) {
+    for word in x.text.split_whitespace() {
         let trimmed = trim_path_word(word);
         if looks_like_path(trimmed) {
-            let key = trimmed.to_lowercase();
-            if seen.insert(key) {
-                entities.push(Entity {
+            x.claim(x.range_of(trimmed));
+            x.push(
+                trimmed.to_lowercase(),
+                Entity {
                     name: normalize_file_path(trimmed),
                     entity_type: EntityType::File,
                     source_text: trimmed.to_string(),
-                });
-            }
+                },
+            );
         }
     }
 }
 
-fn extract_camel_case(text: &str, entities: &mut Vec<Entity>, seen: &mut HashSet<String>) {
-    for word in split_into_identifiers(text) {
-        if is_camel_case(word) && word.len() >= 4 {
-            let key = word.to_lowercase();
-            if seen.insert(key) {
-                entities.push(Entity {
+fn extract_camel_case(x: &mut Extraction<'_>) {
+    for word in split_into_identifiers(x.text) {
+        if is_camel_case(word) && word.len() >= 4 && !x.is_claimed(&x.range_of(word)) {
+            x.push(
+                word.to_lowercase(),
+                Entity {
                     name: camel_to_snake(word),
                     entity_type: EntityType::Code,
                     source_text: word.to_string(),
-                });
-            }
+                },
+            );
         }
     }
 }
 
-fn extract_snake_case(text: &str, entities: &mut Vec<Entity>, seen: &mut HashSet<String>) {
-    for word in split_into_identifiers(text) {
-        if is_snake_case(word) && word.len() >= 4 && word.contains('_') {
-            let key = word.to_lowercase();
-            if seen.insert(key) {
-                entities.push(Entity {
+fn extract_snake_case(x: &mut Extraction<'_>) {
+    for word in split_into_identifiers(x.text) {
+        if is_snake_case(word)
+            && word.len() >= 4
+            && word.contains('_')
+            && !x.is_claimed(&x.range_of(word))
+        {
+            x.push(
+                word.to_lowercase(),
+                Entity {
                     name: word.to_lowercase(),
                     entity_type: EntityType::Code,
                     source_text: word.to_string(),
-                });
-            }
+                },
+            );
         }
     }
 }
@@ -305,10 +359,13 @@ struct SymbolPattern {
 }
 
 /// Rust-qualified paths (`auth::login`, `Mod::Ty::method`). `::` does not
-/// occur in English, so this pattern reads all text.
+/// occur in English, so this pattern reads all text. The first segment may be
+/// a hyphenated crate name (`axil-core::brain`), which a path names in prose
+/// even though Rust code spells it with underscores.
 static QUALIFIED_PATH: LazyLock<SymbolPattern> = LazyLock::new(|| SymbolPattern {
     lang: "rust",
-    re: Regex::new(r"\b([A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)+)\b").unwrap(),
+    re: Regex::new(r"\b([A-Za-z_][A-Za-z0-9_]*(?:-[A-Za-z0-9_]+)*(?:::[A-Za-z_][A-Za-z0-9_]*)+)\b")
+        .unwrap(),
 });
 
 /// Declaration patterns. Their keywords (`trait`, `class`, `function`,
@@ -416,24 +473,31 @@ fn is_code_like_line(line: &str) -> bool {
     DECLARATION_LINE.is_match(line.trim())
 }
 
-fn extract_code_symbols(text: &str, entities: &mut Vec<Entity>, seen: &mut HashSet<String>) {
-    // Order matters: qualified paths come first so `auth::login` wins over
-    // `login` alone.
+fn extract_qualified_paths(x: &mut Extraction<'_>) {
+    let text = x.text;
     for caps in QUALIFIED_PATH.re.captures_iter(text) {
-        if let Some(m) = caps.get(1) {
-            push_code_symbol(QUALIFIED_PATH.lang, m.as_str(), entities, seen);
+        let Some(m) = caps.get(1) else { continue };
+        let mut end = m.end();
+        // A macro keeps its `!` (`bindgen!`); `a::b != c` compares.
+        if text[end..].starts_with('!') && !text[end + 1..].starts_with('=') {
+            end += 1;
         }
+        let path = &text[m.start()..end];
+        x.claim(m.start()..end);
+        push_code_symbol(x, QUALIFIED_PATH.lang, path);
     }
-    let segments = code_segments(text);
+}
+
+fn extract_declarations(x: &mut Extraction<'_>) {
+    let segments = code_segments(x.text);
     for pattern in DECLARATION_PATTERNS.iter() {
         for segment in &segments {
             for caps in pattern.re.captures_iter(segment.text) {
                 let Some(m) = caps.get(1) else { continue };
-                let name = m.as_str();
                 if segment.prose && !prose_declaration_counts(pattern, segment.text, m) {
                     continue;
                 }
-                push_code_symbol(pattern.lang, name, entities, seen);
+                push_code_symbol(x, pattern.lang, m.as_str());
             }
         }
     }
@@ -461,27 +525,22 @@ fn prose_declaration_counts(pattern: &SymbolPattern, line: &str, name: regex::Ma
             .any(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit())
 }
 
-fn push_code_symbol(
-    lang: &'static str,
-    name: &str,
-    entities: &mut Vec<Entity>,
-    seen: &mut HashSet<String>,
-) {
+fn push_code_symbol(x: &mut Extraction<'_>, lang: &'static str, name: &str) {
     if name.len() < 2 || name.len() > 200 {
         return;
     }
     // Collision key is scoped by language so `login` (Rust) and
     // `login` (Python) don't silently merge.
-    let key = format!("sym:{}:{}", lang, name.to_lowercase());
-    if seen.insert(key) {
-        entities.push(Entity {
+    x.push(
+        format!("sym:{}:{}", lang, name.to_lowercase()),
+        Entity {
             name: name.to_string(),
             entity_type: EntityType::CodeSymbol {
                 lang_hint: Some(lang.to_string()),
             },
             source_text: name.to_string(),
-        });
-    }
+        },
+    );
 }
 
 #[cfg(test)]
@@ -748,6 +807,52 @@ mod tests {
         // On a prose line the same word stays prose, even in call shape.
         let syms = code_syms("Then the builder takes a trait with(care) in mind");
         assert!(!syms.iter().any(|(n, _)| n == "with"), "{syms:?}");
+    }
+
+    fn sources(text: &str) -> Vec<String> {
+        extract_entities(text)
+            .into_iter()
+            .map(|e| e.source_text)
+            .collect()
+    }
+
+    #[test]
+    fn parts_of_a_name_are_not_minted_beside_it() {
+        let found = sources(
+            "WasmHost::host_linker() builds it; see crates/axil-core/benches/core_benchmarks.rs \
+             and `auth_config`.",
+        );
+        for part in ["WasmHost", "host_linker", "core_benchmarks"] {
+            assert!(!found.iter().any(|f| f == part), "{part}: {found:?}");
+        }
+        assert!(
+            found.iter().any(|f| f == "WasmHost::host_linker"),
+            "{found:?}"
+        );
+        // The same word on its own elsewhere in the text is still a mention.
+        let found = sources("GraphEngine::open fails, so GraphEngine retries.");
+        assert!(found.iter().any(|f| f == "GraphEngine"), "{found:?}");
+    }
+
+    #[test]
+    fn qualified_paths_keep_a_hyphenated_crate_and_a_macro_bang() {
+        let found = sources(
+            "axil-runtime::atomic_write calls wasmtime::component::bindgen! once; \
+             a::b != c is a comparison.",
+        );
+        for name in [
+            "axil-runtime::atomic_write",
+            "wasmtime::component::bindgen!",
+            "a::b",
+        ] {
+            assert!(found.iter().any(|f| f == name), "{name}: {found:?}");
+        }
+        for fragment in ["runtime::atomic_write", "atomic_write", "a::b!"] {
+            assert!(
+                !found.iter().any(|f| f == fragment),
+                "{fragment}: {found:?}"
+            );
+        }
     }
 
     #[test]
