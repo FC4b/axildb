@@ -516,15 +516,20 @@ fn describe(report: &Value) -> Vec<String> {
         .into_iter()
         .filter(|e| live["engines"][e] == true)
         .collect();
-    lines.push(format!(
-        "engines: {}; graph backend: {}",
-        if engines.is_empty() {
-            "none".to_string()
-        } else {
-            engines.join(", ")
-        },
-        graph_name(&graph)
-    ));
+    if live["engines"].is_null() {
+        // Not open: leased, or between a close and the open after it.
+        lines.push("engines: the database is closed".to_string());
+    } else {
+        lines.push(format!(
+            "engines: {}; graph backend: {}",
+            if engines.is_empty() {
+                "none".to_string()
+            } else {
+                engines.join(", ")
+            },
+            graph_name(&graph)
+        ));
+    }
     if let Some(ops) = live["ops"].as_object() {
         for (op, figures) in ops {
             let ms = |v: &Value| {

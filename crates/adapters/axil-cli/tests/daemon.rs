@@ -1078,6 +1078,7 @@ fn a_killed_lease_holder_lets_the_daemon_open_again() {
     assert_eq!(fx.live()["state"], "leased");
     let human = text(&fx.axil(&["daemon", "status"]).stdout);
     assert!(human.contains(&format!("leased to: pid {pid}")), "{human}");
+    assert!(human.contains("engines: the database is closed"), "{human}");
 
     signal(pid, "-KILL");
     let _ = mcp.child.wait();

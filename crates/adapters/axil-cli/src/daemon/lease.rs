@@ -127,6 +127,11 @@ pub enum Lease {
 pub fn lease(key: &Path, wait: Duration) -> Lease {
     let run = RunDir::of(key);
     if std::fs::symlink_metadata(run.socket()).is_err() {
+        // A daemon shutting down removes its socket first, and closes the
+        // database after the requests it runs: wait for it to be done.
+        if server::said_stopping(&run) && server::lock_held(&run) && !gone(&run, wait) {
+            return Lease::Refused;
+        }
         return Lease::NoDaemon;
     }
     let mut stream = match proto::connect(run.socket(), wait + ANSWER_SLACK) {
