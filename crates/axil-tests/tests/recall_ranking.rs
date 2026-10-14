@@ -11,6 +11,8 @@
 //!   take no place among recall's vector candidates.
 //! - Equal scores come back in record-id order, the same in every process,
 //!   from recall and from full-text search.
+//! - A query that names a span of time keeps the candidates inside it, and
+//!   ranks on relevance alone when none are.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -371,4 +373,44 @@ fn equal_scores_come_back_in_record_id_order() {
             "recall over full-text search only"
         );
     }
+}
+
+#[test]
+fn a_named_span_keeps_the_candidates_inside_it() {
+    use chrono::TimeZone;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("span.axil");
+    let db = open(&path, Arc::default(), false);
+    let now = Utc.with_ymd_and_hms(2026, 4, 10, 12, 0, 0).unwrap();
+    let march = db
+        .insert_at(
+            "decisions",
+            json!({"summary": "raise the connection pool timeout"}),
+            Utc.with_ymd_and_hms(2026, 3, 12, 9, 0, 0).unwrap(),
+        )
+        .unwrap();
+    let april = db
+        .insert_at(
+            "commits",
+            json!({"summary": "connection pool timeout"}),
+            now - Duration::days(1),
+        )
+        .unwrap();
+    let cfg = RecallConfig {
+        now,
+        ..cli_config()
+    };
+
+    let unscoped = ids(&db, "connection pool timeout", 5, cfg.clone());
+    assert_eq!(unscoped.first(), Some(&april.id.to_string()));
+    assert_eq!(
+        ids(&db, "connection pool timeout in March", 5, cfg.clone()),
+        vec![march.id.to_string()]
+    );
+    // Nothing falls in January: the span is set aside.
+    assert_eq!(
+        ids(&db, "connection pool timeout in January", 5, cfg).len(),
+        2
+    );
 }

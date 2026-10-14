@@ -5606,6 +5606,18 @@ impl Axil {
             });
         }
 
+        // A query that names a span of time ("in March", "last 3 days")
+        // keeps the candidates inside it. When none are, the span is set
+        // aside and relevance alone decides, as for a query without one.
+        if let Some(range) = cfg.temporal_target.as_ref().and_then(|t| t.range) {
+            if scored_results
+                .iter()
+                .any(|r| range.contains(&r.record.created_at))
+            {
+                scored_results.retain(|r| range.contains(&r.record.created_at));
+            }
+        }
+
         // Sort by fused score descending
         scored_results.sort_by(crate::scoring::RecallResult::rank_order);
 

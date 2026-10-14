@@ -153,7 +153,7 @@ From `ScoreWeights::default()`:
 | `vector`     | 0.40   | Cosine similarity from HNSW |
 | `recency`    | 0.15   | Exponential decay, half-life 168h (1 week) |
 | `graph`      | 0.15   | PageRank-style hop boost from active context |
-| `temporal`   | 0.10   | Boost when record falls near a parsed time target ("yesterday", "last week") |
+| `temporal`   | 0.10   | Boost when a record falls near a parsed time target ("yesterday", "3 days ago") or inside a named span ("in March", "last 3 days") |
 | `keyword`    | 0.10   | Multiplicative overlap of query keywords vs. record text (MemPalace technique, +1.2%) |
 | `feedback`   | 0.05   | Learned boost from past relevance signals |
 | `preference` | 0.05   | Matches against `axil prefer` keys |
@@ -174,6 +174,13 @@ algorithmic patterns. `recency_decay` is a true half-life exponential
 1600-char windows with 400-char stride so long records aren't penalized
 for keyword sparsity. `graph_proximity` boosts records reachable in few
 hops from the active context (Phase 5e).
+
+A query that names a span of time (`in March`, `March 2026`, `between
+2026-03-01 and 2026-03-15`, `before 2026-04-01`, `since March`, `last 3 days`)
+also keeps only the candidates created inside it. When none are, the span is
+set aside and relevance alone decides. A point in time (`yesterday`,
+`3 days ago`, `March 15`) only boosts. `before`/`after` followed by anything but
+a date ("after the release") name no span.
 
 ### Inspecting scores
 
