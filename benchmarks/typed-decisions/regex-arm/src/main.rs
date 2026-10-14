@@ -143,7 +143,10 @@ fn capture(path: &str, all_bash: bool) {
                     "confidence": c.confidence,
                     "summary": c.summary,
                     "table": table,
-                    "importance": compute_importance(&data),
+                    // Insert keeps an `_importance` the record carries.
+                    "importance": data["_importance"]
+                        .as_f64()
+                        .map_or_else(|| compute_importance(&data), |v| v as f32),
                 })
             })
             .collect();

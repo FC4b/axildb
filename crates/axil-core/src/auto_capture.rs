@@ -704,7 +704,51 @@ fn decision_confidence(text: &str, pattern: &str) -> f32 {
     conf.clamp(0.1, 1.0)
 }
 
+/// Importance of a captured failure that loses or corrupts data or makes
+/// the product wrong without saying so.
+const SEVERE_FAILURE_WORDS: &[&str] = &[
+    "broken",
+    "corrupt",
+    "data loss",
+    "dead since",
+    "lost data",
+    "panic",
+    "silent",
+];
+
+/// Importance buckets a capture is stored at: a transient failure, project
+/// knowledge, and knowledge that redirects later work.
+const LOW_IMPORTANCE: f32 = 0.3;
+const MEDIUM_IMPORTANCE: f32 = 0.5;
+const HIGH_IMPORTANCE: f32 = 0.8;
+
+/// The importance a capture is stored at. The text-based score
+/// (`compute_importance`) ranks a one-line capture by its length and entity
+/// count; what matters is the kind of record. A failure printed by a
+/// command, with no cause, is transient; a failure that corrupts data or
+/// goes silent, and a standing rule, redirect later work; the rest is
+/// ordinary project knowledge.
+fn capture_importance(capture: &CapturedKnowledge) -> f32 {
+    match capture.capture_type {
+        CaptureType::Error => {
+            let lower = capture.summary.to_lowercase();
+            if SEVERE_FAILURE_WORDS.iter().any(|w| lower.contains(w)) {
+                HIGH_IMPORTANCE
+            } else if capture.source == COMMAND_OUTPUT_SOURCE {
+                LOW_IMPORTANCE
+            } else {
+                MEDIUM_IMPORTANCE
+            }
+        }
+        CaptureType::Rule => HIGH_IMPORTANCE,
+        _ => MEDIUM_IMPORTANCE,
+    }
+}
+
 /// Build a storable JSON record from a capture.
+///
+/// The record carries `_importance` (see `capture_importance`), which
+/// `Axil::insert` keeps instead of computing one from the text.
 pub fn capture_to_record(capture: &CapturedKnowledge) -> (String, Value) {
     let table = match capture.capture_type {
         CaptureType::Error => "errors",
@@ -714,7 +758,7 @@ pub fn capture_to_record(capture: &CapturedKnowledge) -> (String, Value) {
         CaptureType::Skip => "context",
     };
 
-    let data = match capture.capture_type {
+    let mut data = match capture.capture_type {
         CaptureType::Error => json!({
             "error": capture.summary,
             "_auto_captured": true,
@@ -741,6 +785,7 @@ pub fn capture_to_record(capture: &CapturedKnowledge) -> (String, Value) {
             "_capture_confidence": capture.confidence,
         }),
     };
+    data["_importance"] = json!(capture_importance(capture));
 
     (table.to_string(), data)
 }
@@ -868,6 +913,43 @@ mod tests {
         let (table, data) = capture_to_record(&cap);
         assert_eq!(table, "errors");
         assert_eq!(data["_auto_captured"], true);
+    }
+
+    #[test]
+    fn a_capture_is_stored_at_the_importance_of_its_kind() {
+        let importance = |capture_type, summary: &str, source: &str| {
+            let (_, data) = capture_to_record(&CapturedKnowledge {
+                capture_type,
+                summary: summary.into(),
+                confidence: 0.8,
+                source: source.into(),
+            });
+            data["_importance"].as_f64().unwrap() as f32
+        };
+        let transient = importance(
+            CaptureType::Error,
+            "error: could not compile `axil-core` due to 2 previous errors",
+            COMMAND_OUTPUT_SOURCE,
+        );
+        let reported = importance(
+            CaptureType::Error,
+            "The first attempt failed because the writer lock was held.",
+            "auto",
+        );
+        let severe = importance(
+            CaptureType::Error,
+            "A parse error in [lifecycle] silently becomes the default config.",
+            "auto",
+        );
+        assert!(transient < reported && reported < severe);
+        assert_eq!(
+            importance(
+                CaptureType::Rule,
+                "Never edit the fixtures by hand.",
+                "auto"
+            ),
+            severe
+        );
     }
 
     // ── Precision guards (new) ─────────────────────────────────────────
