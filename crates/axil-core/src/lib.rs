@@ -59,6 +59,7 @@ pub mod llm;
 #[cfg(feature = "llm-http")]
 pub mod llm_http;
 pub mod metrics;
+pub mod open_guard;
 pub mod otel;
 pub mod plugin;
 pub mod portable;
@@ -130,6 +131,7 @@ pub use extension::{
     CliArg, CliInvocation, CliOutput, CliSubcommand, CliSurface, Dispatch, Extension, Hit, McpCall,
     McpSurface, McpTool, RefreshOpts, RefreshReport,
 };
+pub use open_guard::{open_guard, set_open_guard, without_open_guard, OpenGuard};
 pub use query::{
     graph_boost, EstimatedCost, Op, PlanStep, ProfileStep, QueryBuilder, QueryPlan, QueryProfile,
     SortDirection,

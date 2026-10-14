@@ -845,7 +845,13 @@ impl VectorStoreProbe {
 /// Errors are never "missing": [`AxilError::Busy`] means another process holds
 /// the store open for writing (retry), and a plugin error means the file is
 /// corrupt or unreadable.
+///
+/// It reads the store before the database is opened, so it runs the open guard
+/// first ([`axil_core::open_guard`]), whether the store exists or not: a
+/// process that has the database open is asked to let go before this reads
+/// its store, or before the open that follows creates one.
 pub fn probe_vector_store(db_path: impl AsRef<Path>) -> axil_core::Result<VectorStoreProbe> {
+    axil_core::open_guard(db_path.as_ref());
     let vec_path = vector_db_path(db_path.as_ref());
     if !vec_path.exists() {
         return Ok(VectorStoreProbe::Missing);
@@ -1449,6 +1455,33 @@ mod tests {
             read_stored_dimensions(dir.path().join("test.axil")).unwrap(),
             Some(3)
         );
+    }
+
+    /// The probe reads the store before the database is opened, so it asks
+    /// the open guard first, whether there is a store to read or not.
+    #[test]
+    fn probe_runs_the_open_guard_first() {
+        use std::cell::RefCell;
+        thread_local! {
+            static SEEN: RefCell<Option<Vec<PathBuf>>> = const { RefCell::new(None) };
+        }
+        fn record(path: &Path) {
+            SEEN.with(|s| {
+                if let Some(seen) = s.borrow_mut().as_mut() {
+                    seen.push(path.to_path_buf());
+                }
+            });
+        }
+        assert!(axil_core::set_open_guard(record));
+        SEEN.with(|s| *s.borrow_mut() = Some(Vec::new()));
+        let (engine, dir) = temp_engine(4);
+        drop(engine);
+        let db = dir.path().join("test.axil");
+        let missing = dir.path().join("none.axil");
+        probe_vector_store(&db).unwrap();
+        read_stored_dimensions(&missing).unwrap();
+        let seen = SEEN.with(|s| s.borrow_mut().take()).unwrap();
+        assert_eq!(seen, [db, missing]);
     }
 
     #[test]

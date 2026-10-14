@@ -950,7 +950,11 @@ pub struct Axil {
 
 impl Axil {
     /// Start building a database at the given path.
+    ///
+    /// The installed open guard runs first (see [`crate::open_guard`]), before
+    /// anything touches the database's files.
     pub fn open(path: impl AsRef<Path>) -> AxilBuilder {
+        crate::open_guard(path.as_ref());
         AxilBuilder {
             path: path.as_ref().to_path_buf(),
             plugins: Vec::new(),
