@@ -157,16 +157,7 @@ fn inline_code_spans(line: &str) -> Vec<&str> {
 
 fn extract_file_paths(text: &str, entities: &mut Vec<Entity>, seen: &mut HashSet<String>) {
     for word in text.split_whitespace() {
-        let trimmed = word.trim_matches(|c: char| {
-            c == ','
-                || c == '.'
-                || c == ';'
-                || c == ':'
-                || c == ')'
-                || c == '('
-                || c == '"'
-                || c == '\''
-        });
+        let trimmed = trim_path_word(word);
         if looks_like_path(trimmed) {
             let key = trimmed.to_lowercase();
             if seen.insert(key) {
@@ -252,6 +243,20 @@ fn extract_between(
         }
         i += 1;
     }
+}
+
+/// Strip the punctuation prose wraps around a path. A trailing `.` ends the
+/// sentence, but a leading one names a dot-directory or dot-file
+/// (`.claude/CLAUDE.md`, `./src`), so only an ellipsis is stripped there.
+fn trim_path_word(word: &str) -> &str {
+    let wrapper = |c: char| matches!(c, ',' | ';' | ':' | ')' | '(' | '"' | '\'');
+    let start = word.trim_start_matches(wrapper);
+    let start = if start.starts_with("...") {
+        start.trim_start_matches('.')
+    } else {
+        start
+    };
+    start.trim_end_matches(|c: char| wrapper(c) || c == '.')
 }
 
 /// Check if a string looks like a file path.
@@ -549,6 +554,29 @@ mod tests {
         let text = "Updated ./src/main.rs with new config";
         let entities = extract_entities(text);
         assert!(entities.iter().any(|e| e.entity_type == EntityType::File));
+    }
+
+    #[test]
+    fn file_paths_keep_a_leading_dot() {
+        let text = "Read .claude/CLAUDE.md, then (.axil/memory.axil.vec). See ../hooks/x.sh too.";
+        let files: Vec<String> = extract_entities(text)
+            .into_iter()
+            .filter(|e| e.entity_type == EntityType::File)
+            .map(|e| e.source_text)
+            .collect();
+        for path in [
+            ".claude/CLAUDE.md",
+            ".axil/memory.axil.vec",
+            "../hooks/x.sh",
+        ] {
+            assert!(files.iter().any(|f| f == path), "{path}: {files:?}");
+        }
+        // An ellipsis before a path is prose, not part of the name.
+        let files: Vec<String> = extract_entities("and so on ...src/main.rs")
+            .into_iter()
+            .map(|e| e.source_text)
+            .collect();
+        assert_eq!(files, vec!["src/main.rs".to_string()]);
     }
 
     #[test]
