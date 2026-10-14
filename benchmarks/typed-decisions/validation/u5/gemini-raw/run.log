@@ -1,0 +1,32 @@
+2026-10-14T11:40:37 batch 01 attempt 1: start
+2026-10-14T11:45:48 batch 01 attempt 1: rc=0 312s ok_ids=0/20 problems=['no JSON array found']
+2026-10-14T11:45:48 batch 01: RETRY 1/3 because ['no JSON array found']
+2026-10-14T11:45:48 batch 01 attempt 2: start
+2026-10-14T11:51:06 batch 01 attempt 2: rc=0 318s ok_ids=0/20 problems=['no JSON array found']
+2026-10-14T11:51:06 batch 01: RETRY 2/3 because ['no JSON array found']
+2026-10-14T11:51:06 batch 01 attempt 3: start
+2026-10-14T11:53:00 NOTE: batch 01 attempts 1-2 hit the 300s print timeout with no output ("[agy] print timeout after 5m0s with turn in progress"); attempt 3 was stopped by hand. Diagnostic: a 2-item prompt took 180s, 26279 thinking tokens, no tool calls. Those outputs moved to timeout300/. Rerunning every batch with --print-timeout 1800s, same model, prompts and batches; the attempt count restarts.
+2026-10-14T11:56:31 batch 02 attempt 1: start
+2026-10-14T11:56:31 batch 01 attempt 1: start
+2026-10-14T12:03:34 batch 01 attempt 1: rc=0 422s ok_ids=20/20 problems=[]
+2026-10-14T12:03:34 batch 01 done after 1 attempt(s); last problems=[]
+2026-10-14T12:03:51 batch 03 attempt 1: start
+2026-10-14T12:09:51 batch 02 attempt 1: rc=0 799s ok_ids=20/20 problems=[]
+2026-10-14T12:09:51 batch 02 done after 1 attempt(s); last problems=[]
+2026-10-14T12:10:04 batch 04 attempt 1: start
+2026-10-14T12:12:18 batch 03 attempt 1: rc=0 507s ok_ids=20/20 problems=[]
+2026-10-14T12:12:18 batch 03 done after 1 attempt(s); last problems=[]
+2026-10-14T12:12:22 batch 05 attempt 1: start
+2026-10-14T12:16:32 batch 04 attempt 1: rc=0 388s ok_ids=20/20 problems=[]
+2026-10-14T12:16:32 batch 06 attempt 1: start
+2026-10-14T12:16:32 batch 04 done after 1 attempt(s); last problems=[]
+2026-10-14T12:17:19 batch 05 attempt 1: rc=0 297s ok_ids=20/20 problems=[]
+2026-10-14T12:17:19 batch 05 done after 1 attempt(s); last problems=[]
+2026-10-14T12:17:19 batch 07 attempt 1: start
+2026-10-14T12:21:40 batch 06 attempt 1: rc=0 308s ok_ids=20/20 problems=[]
+2026-10-14T12:21:40 batch 06 done after 1 attempt(s); last problems=[]
+2026-10-14T12:21:40 batch 08 attempt 1: start
+2026-10-14T12:24:10 batch 07 attempt 1: rc=0 411s ok_ids=20/20 problems=[]
+2026-10-14T12:24:10 batch 07 done after 1 attempt(s); last problems=[]
+2026-10-14T12:28:30 batch 08 attempt 1: rc=0 410s ok_ids=20/20 problems=[]
+2026-10-14T12:28:30 batch 08 done after 1 attempt(s); last problems=[]

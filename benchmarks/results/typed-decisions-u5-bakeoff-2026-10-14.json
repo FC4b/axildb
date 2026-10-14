@@ -1,0 +1,1766 @@
+{
+ "date": "2026-10-14",
+ "decision": "U5: which strings in a stored note are entities worth linking",
+ "set": "benchmarks/typed-decisions/sets/u5_repo.jsonl",
+ "labels": "benchmarks/typed-decisions/validation/2026-10-14-u5-labels.json",
+ "texts": {
+  "train": 63,
+  "test": 97
+ },
+ "gold_mentions_test": 690,
+ "metric": "mention-level micro precision/recall/F1 on the test split over normalized surface forms (adjudicate_u5.norm), one form per text; span = form match, span_and_type = form and type match. The verdict uses span F1 and precision.",
+ "junk_definition": "a predicted test mention that is not gold and is markdown syntax or made only of words in u5_junk_words.txt (stopwords, generic nouns, language keywords, dictionary words); junk_rate = junk / predicted",
+ "selection": "per GLiNER arm, on train only: phrasing and threshold with the best train span F1 at train precision >= the production extractor's; see the script docstring",
+ "settings": {
+  "threads": 4,
+  "floor_threshold": 0.05,
+  "grid": [
+   0.05,
+   0.95,
+   0.01
+  ],
+  "phrasings": {
+   "short": {
+    "file": "file path",
+    "code": "code identifier",
+    "project": "software product",
+    "concept": "technical concept"
+   },
+   "descriptive": {
+    "file": "file or directory path",
+    "code": "function, type, command or flag name",
+    "project": "library, tool, programming language or model name",
+    "concept": "named algorithm or technique"
+   }
+  },
+  "device": "cpu",
+  "fit_bars": {
+   "peak_rss_mb_max": 1500.0,
+   "p95_ms_max": 1000.0
+  }
+ },
+ "machine": {
+  "platform": "macOS-26.6-arm64-arm-64bit",
+  "machine": "arm64",
+  "python": "3.12.1",
+  "logical_cpus": 10,
+  "cpu": "Apple M1 Pro",
+  "memory_bytes": "17179869184"
+ },
+ "versions": {
+  "torch": "2.14.1",
+  "transformers": "5.16.1",
+  "tokenizers": "0.23.3",
+  "gliner": "0.2.29",
+  "gliner2": "2.0.0",
+  "peft": "0.21.2",
+  "sentencepiece": "0.2.2",
+  "huggingface_hub": "1.33.0"
+ },
+ "arms": {
+  "production": {
+   "arm": "production",
+   "what": "axil_core::extract_entities over util::record_text of a record {summary: text}, truncated to 50: the no-LLM path Axil::auto_link runs on insert",
+   "binary": "heuristic/target/release/typed-decisions-heuristic",
+   "type_map": {
+    "file": "file",
+    "code": "code",
+    "code_symbol": "code",
+    "project": "project",
+    "reference": "file if it looks like a path, else concept"
+   },
+   "surface_form": "Entity.source_text (Entity.name lowercases and snake-cases CamelCase)",
+   "latency_ms": {
+    "p50": 0.027,
+    "p95": 0.051,
+    "loadavg_1m_before": 194.48,
+    "loadavg_1m_after": 194.48,
+    "measured_in": "Rust, Instant around record_text + extract_entities, per test text"
+   },
+   "load_ms": 1.657,
+   "load_note": "first call, which compiles the regex patterns (LazyLock)",
+   "peak_rss_mb": 12.0,
+   "rss_note": "whole heuristic process (it links axil-core and axil-vector; no model is loaded in --entities mode)",
+   "size_on_disk_bytes": 0,
+   "size_note": "no model file: the patterns are compiled into axil-core",
+   "wall_ms": 1389.6,
+   "test": {
+    "span": {
+     "precision": 0.6733,
+     "recall": 0.3435,
+     "f1": 0.4549,
+     "tp": 237,
+     "pred": 352,
+     "gold": 690
+    },
+    "span_and_type": {
+     "precision": 0.6193,
+     "recall": 0.3159,
+     "f1": 0.4184,
+     "tp": 218,
+     "pred": 352,
+     "gold": 690
+    },
+    "per_type": {
+     "file": {
+      "precision": 0.75,
+      "recall": 0.1818,
+      "f1": 0.2927,
+      "tp": 18,
+      "pred": 24,
+      "gold": 99
+     },
+     "code": {
+      "precision": 0.6515,
+      "recall": 0.5063,
+      "f1": 0.5698,
+      "tp": 200,
+      "pred": 307,
+      "gold": 395
+     },
+     "project": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "tp": 0,
+      "pred": 0,
+      "gold": 172
+     },
+     "concept": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "tp": 0,
+      "pred": 21,
+      "gold": 24
+     }
+    },
+    "per_stratum": {
+     "code_heavy": {
+      "texts": 29,
+      "span": {
+       "precision": 0.7051,
+       "recall": 0.3943,
+       "f1": 0.5057,
+       "tp": 110,
+       "pred": 156,
+       "gold": 279
+      },
+      "span_and_type": {
+       "precision": 0.6987,
+       "recall": 0.3907,
+       "f1": 0.5011,
+       "tp": 109,
+       "pred": 156,
+       "gold": 279
+      }
+     },
+     "mixed": {
+      "texts": 23,
+      "span": {
+       "precision": 0.6545,
+       "recall": 0.3186,
+       "f1": 0.4286,
+       "tp": 36,
+       "pred": 55,
+       "gold": 113
+      },
+      "span_and_type": {
+       "precision": 0.5455,
+       "recall": 0.2655,
+       "f1": 0.3571,
+       "tp": 30,
+       "pred": 55,
+       "gold": 113
+      }
+     },
+     "junk_trap": {
+      "texts": 17,
+      "span": {
+       "precision": 0.7229,
+       "recall": 0.3797,
+       "f1": 0.4979,
+       "tp": 60,
+       "pred": 83,
+       "gold": 158
+      },
+      "span_and_type": {
+       "precision": 0.6627,
+       "recall": 0.3481,
+       "f1": 0.4564,
+       "tp": 55,
+       "pred": 83,
+       "gold": 158
+      }
+     },
+     "markdown": {
+      "texts": 13,
+      "span": {
+       "precision": 0.5217,
+       "recall": 0.2927,
+       "f1": 0.375,
+       "tp": 24,
+       "pred": 46,
+       "gold": 82
+      },
+      "span_and_type": {
+       "precision": 0.4783,
+       "recall": 0.2683,
+       "f1": 0.3438,
+       "tp": 22,
+       "pred": 46,
+       "gold": 82
+      }
+     },
+     "prose": {
+      "texts": 15,
+      "span": {
+       "precision": 0.5833,
+       "recall": 0.1207,
+       "f1": 0.2,
+       "tp": 7,
+       "pred": 12,
+       "gold": 58
+      },
+      "span_and_type": {
+       "precision": 0.1667,
+       "recall": 0.0345,
+       "f1": 0.0571,
+       "tp": 2,
+       "pred": 12,
+       "gold": 58
+      }
+     }
+    },
+    "junk": {
+     "junk_mentions": 4,
+     "wrong_mentions": 115,
+     "predicted_mentions": 352,
+     "junk_rate": 0.0114,
+     "junk_share_of_wrong": 0.0348,
+     "top": [
+      [
+       "a stale legacy lock is taken over",
+       1
+      ],
+      [
+       "default",
+       1
+      ],
+      [
+       "make a new core",
+       1
+      ],
+      [
+       "no summary available",
+       1
+      ]
+     ]
+    },
+    "entities_per_text": {
+     "mean": 3.63,
+     "median": 3,
+     "gold_mean": 7.11
+    }
+   }
+  },
+  "gliner2.5-small": {
+   "arm": "gliner2.5-small",
+   "repo": "fastino/gliner2.5-small-v1",
+   "revision": "df5910e44bc4ffdb0d95399a83b0ca4516349aa5",
+   "library": "gliner2",
+   "backbone": null,
+   "params": 73881879,
+   "size_on_disk_bytes": 303915018,
+   "load_ms": 16198.7,
+   "load_loadavg_1m": [
+    139.61,
+    133.8
+   ],
+   "rss_mb": {
+    "after_import": 201.1,
+    "after_load": 458.5
+   },
+   "peak_rss_mb": 739.2,
+   "threads": 4,
+   "control_train_precision": 0.6557,
+   "phrasing": "descriptive",
+   "labels": {
+    "file": "file or directory path",
+    "code": "function, type, command or flag name",
+    "project": "library, tool, programming language or model name",
+    "concept": "named algorithm or technique"
+   },
+   "threshold": 0.59,
+   "selection": {
+    "short": {
+     "selected": {
+      "threshold": 0.12,
+      "precision": 0.2312,
+      "recall": 0.4464,
+      "f1": 0.3046,
+      "precision_constraint_met_on_train": false
+     },
+     "max_f1_train": {
+      "threshold": 0.12,
+      "precision": 0.2312,
+      "recall": 0.4464,
+      "f1": 0.3046
+     }
+    },
+    "descriptive": {
+     "selected": {
+      "threshold": 0.59,
+      "precision": 0.6875,
+      "recall": 0.0491,
+      "f1": 0.0917,
+      "precision_constraint_met_on_train": true
+     },
+     "max_f1_train": {
+      "threshold": 0.15,
+      "precision": 0.2781,
+      "recall": 0.442,
+      "f1": 0.3414
+     }
+    }
+   },
+   "sweep_mismatch_texts": 6,
+   "latency_ms": {
+    "p50": 578.177,
+    "p95": 968.332,
+    "mean": 581.228,
+    "loadavg_1m_before": 110.89,
+    "loadavg_1m_after": 123.02,
+    "measured_in": "Python, perf_counter around one predict call per test text, batch 1, model loaded and warmed"
+   },
+   "test": {
+    "span": {
+     "precision": 0.5085,
+     "recall": 0.0435,
+     "f1": 0.0801,
+     "tp": 30,
+     "pred": 59,
+     "gold": 690
+    },
+    "span_and_type": {
+     "precision": 0.4068,
+     "recall": 0.0348,
+     "f1": 0.0641,
+     "tp": 24,
+     "pred": 59,
+     "gold": 690
+    },
+    "per_type": {
+     "file": {
+      "precision": 0.44,
+      "recall": 0.1111,
+      "f1": 0.1774,
+      "tp": 11,
+      "pred": 25,
+      "gold": 99
+     },
+     "code": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "tp": 0,
+      "pred": 1,
+      "gold": 395
+     },
+     "project": {
+      "precision": 0.4062,
+      "recall": 0.0756,
+      "f1": 0.1275,
+      "tp": 13,
+      "pred": 32,
+      "gold": 172
+     },
+     "concept": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "tp": 0,
+      "pred": 1,
+      "gold": 24
+     }
+    },
+    "per_stratum": {
+     "code_heavy": {
+      "texts": 29,
+      "span": {
+       "precision": 0.5,
+       "recall": 0.0287,
+       "f1": 0.0542,
+       "tp": 8,
+       "pred": 16,
+       "gold": 279
+      },
+      "span_and_type": {
+       "precision": 0.3125,
+       "recall": 0.0179,
+       "f1": 0.0339,
+       "tp": 5,
+       "pred": 16,
+       "gold": 279
+      }
+     },
+     "mixed": {
+      "texts": 23,
+      "span": {
+       "precision": 0.4737,
+       "recall": 0.0796,
+       "f1": 0.1364,
+       "tp": 9,
+       "pred": 19,
+       "gold": 113
+      },
+      "span_and_type": {
+       "precision": 0.4211,
+       "recall": 0.0708,
+       "f1": 0.1212,
+       "tp": 8,
+       "pred": 19,
+       "gold": 113
+      }
+     },
+     "junk_trap": {
+      "texts": 17,
+      "span": {
+       "precision": 0.6,
+       "recall": 0.019,
+       "f1": 0.0368,
+       "tp": 3,
+       "pred": 5,
+       "gold": 158
+      },
+      "span_and_type": {
+       "precision": 0.4,
+       "recall": 0.0127,
+       "f1": 0.0245,
+       "tp": 2,
+       "pred": 5,
+       "gold": 158
+      }
+     },
+     "markdown": {
+      "texts": 13,
+      "span": {
+       "precision": 0.6154,
+       "recall": 0.0976,
+       "f1": 0.1684,
+       "tp": 8,
+       "pred": 13,
+       "gold": 82
+      },
+      "span_and_type": {
+       "precision": 0.5385,
+       "recall": 0.0854,
+       "f1": 0.1474,
+       "tp": 7,
+       "pred": 13,
+       "gold": 82
+      }
+     },
+     "prose": {
+      "texts": 15,
+      "span": {
+       "precision": 0.3333,
+       "recall": 0.0345,
+       "f1": 0.0625,
+       "tp": 2,
+       "pred": 6,
+       "gold": 58
+      },
+      "span_and_type": {
+       "precision": 0.3333,
+       "recall": 0.0345,
+       "f1": 0.0625,
+       "tp": 2,
+       "pred": 6,
+       "gold": 58
+      }
+     }
+    },
+    "junk": {
+     "junk_mentions": 8,
+     "wrong_mentions": 29,
+     "predicted_mentions": 59,
+     "junk_rate": 0.1356,
+     "junk_share_of_wrong": 0.2759,
+     "top": [
+      [
+       "hooks",
+       2
+      ],
+      [
+       "cli",
+       1
+      ],
+      [
+       "docs",
+       1
+      ],
+      [
+       "graph",
+       1
+      ],
+      [
+       "heal",
+       1
+      ],
+      [
+       "json",
+       1
+      ],
+      [
+       "rerank",
+       1
+      ]
+     ]
+    },
+    "entities_per_text": {
+     "mean": 0.61,
+     "median": 0,
+     "gold_mean": 7.11
+    }
+   },
+   "test_at_max_f1_train_threshold": {
+    "threshold": 0.15,
+    "note": "the unconstrained best-train-F1 threshold, from the sweep; for reference only, the verdict uses the selected setting",
+    "span": {
+     "precision": 0.289,
+     "recall": 0.4246,
+     "f1": 0.3439,
+     "tp": 293,
+     "pred": 1014,
+     "gold": 690
+    },
+    "span_and_type": {
+     "precision": 0.1578,
+     "recall": 0.2319,
+     "f1": 0.1878,
+     "tp": 160,
+     "pred": 1014,
+     "gold": 690
+    },
+    "per_type": {
+     "file": {
+      "precision": 0.129,
+      "recall": 0.3232,
+      "f1": 0.1844,
+      "tp": 32,
+      "pred": 248,
+      "gold": 99
+     },
+     "code": {
+      "precision": 0.1261,
+      "recall": 0.1063,
+      "f1": 0.1154,
+      "tp": 42,
+      "pred": 333,
+      "gold": 395
+     },
+     "project": {
+      "precision": 0.2602,
+      "recall": 0.4826,
+      "f1": 0.3381,
+      "tp": 83,
+      "pred": 319,
+      "gold": 172
+     },
+     "concept": {
+      "precision": 0.0263,
+      "recall": 0.125,
+      "f1": 0.0435,
+      "tp": 3,
+      "pred": 114,
+      "gold": 24
+     }
+    },
+    "entities_per_text": {
+     "mean": 10.45,
+     "median": 10,
+     "gold_mean": 7.11
+    },
+    "junk_rate": 0.3264
+   }
+  },
+  "gliner_small-v2.1": {
+   "arm": "gliner_small-v2.1",
+   "repo": "urchade/gliner_small-v2.1",
+   "revision": "4e091416cf7c3481db542c2a3d26156916f3a47f",
+   "library": "gliner",
+   "backbone": {
+    "repo": "microsoft/deberta-v3-small",
+    "revision": "a36c739020e01763fe789b4b85e2df55d6180012",
+    "files": [
+     "config.json",
+     "spm.model",
+     "tokenizer_config.json"
+    ],
+    "bytes": 2465246
+   },
+   "params": 152648704,
+   "size_on_disk_bytes": 613117957,
+   "load_ms": 25516.1,
+   "load_loadavg_1m": [
+    123.02,
+    111.41
+   ],
+   "rss_mb": {
+    "after_import": 200.1,
+    "after_load": 839.1
+   },
+   "peak_rss_mb": 1211.8,
+   "threads": 4,
+   "control_train_precision": 0.6557,
+   "phrasing": "descriptive",
+   "labels": {
+    "file": "file or directory path",
+    "code": "function, type, command or flag name",
+    "project": "library, tool, programming language or model name",
+    "concept": "named algorithm or technique"
+   },
+   "threshold": 0.65,
+   "selection": {
+    "short": {
+     "selected": {
+      "threshold": 0.89,
+      "precision": 0.75,
+      "recall": 0.0067,
+      "f1": 0.0133,
+      "precision_constraint_met_on_train": true
+     },
+     "max_f1_train": {
+      "threshold": 0.15,
+      "precision": 0.2839,
+      "recall": 0.4487,
+      "f1": 0.3478
+     }
+    },
+    "descriptive": {
+     "selected": {
+      "threshold": 0.65,
+      "precision": 0.6667,
+      "recall": 0.1071,
+      "f1": 0.1846,
+      "precision_constraint_met_on_train": true
+     },
+     "max_f1_train": {
+      "threshold": 0.11,
+      "precision": 0.3409,
+      "recall": 0.4688,
+      "f1": 0.3947
+     }
+    }
+   },
+   "sweep_mismatch_texts": 0,
+   "latency_ms": {
+    "p50": 594.21,
+    "p95": 911.641,
+    "mean": 615.812,
+    "loadavg_1m_before": 102.54,
+    "loadavg_1m_after": 77.37,
+    "measured_in": "Python, perf_counter around one predict call per test text, batch 1, model loaded and warmed"
+   },
+   "test": {
+    "span": {
+     "precision": 0.5904,
+     "recall": 0.071,
+     "f1": 0.1268,
+     "tp": 49,
+     "pred": 83,
+     "gold": 690
+    },
+    "span_and_type": {
+     "precision": 0.241,
+     "recall": 0.029,
+     "f1": 0.0517,
+     "tp": 20,
+     "pred": 83,
+     "gold": 690
+    },
+    "per_type": {
+     "file": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "tp": 0,
+      "pred": 2,
+      "gold": 99
+     },
+     "code": {
+      "precision": 1.0,
+      "recall": 0.0076,
+      "f1": 0.0151,
+      "tp": 3,
+      "pred": 3,
+      "gold": 395
+     },
+     "project": {
+      "precision": 0.2179,
+      "recall": 0.0988,
+      "f1": 0.136,
+      "tp": 17,
+      "pred": 78,
+      "gold": 172
+     },
+     "concept": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "tp": 0,
+      "pred": 0,
+      "gold": 24
+     }
+    },
+    "per_stratum": {
+     "code_heavy": {
+      "texts": 29,
+      "span": {
+       "precision": 0.5172,
+       "recall": 0.0538,
+       "f1": 0.0974,
+       "tp": 15,
+       "pred": 29,
+       "gold": 279
+      },
+      "span_and_type": {
+       "precision": 0.1724,
+       "recall": 0.0179,
+       "f1": 0.0325,
+       "tp": 5,
+       "pred": 29,
+       "gold": 279
+      }
+     },
+     "mixed": {
+      "texts": 23,
+      "span": {
+       "precision": 0.6364,
+       "recall": 0.0619,
+       "f1": 0.1129,
+       "tp": 7,
+       "pred": 11,
+       "gold": 113
+      },
+      "span_and_type": {
+       "precision": 0.3636,
+       "recall": 0.0354,
+       "f1": 0.0645,
+       "tp": 4,
+       "pred": 11,
+       "gold": 113
+      }
+     },
+     "junk_trap": {
+      "texts": 17,
+      "span": {
+       "precision": 0.6667,
+       "recall": 0.0759,
+       "f1": 0.1364,
+       "tp": 12,
+       "pred": 18,
+       "gold": 158
+      },
+      "span_and_type": {
+       "precision": 0.1111,
+       "recall": 0.0127,
+       "f1": 0.0227,
+       "tp": 2,
+       "pred": 18,
+       "gold": 158
+      }
+     },
+     "markdown": {
+      "texts": 13,
+      "span": {
+       "precision": 0.4615,
+       "recall": 0.0732,
+       "f1": 0.1263,
+       "tp": 6,
+       "pred": 13,
+       "gold": 82
+      },
+      "span_and_type": {
+       "precision": 0.3846,
+       "recall": 0.061,
+       "f1": 0.1053,
+       "tp": 5,
+       "pred": 13,
+       "gold": 82
+      }
+     },
+     "prose": {
+      "texts": 15,
+      "span": {
+       "precision": 0.75,
+       "recall": 0.1552,
+       "f1": 0.2571,
+       "tp": 9,
+       "pred": 12,
+       "gold": 58
+      },
+      "span_and_type": {
+       "precision": 0.3333,
+       "recall": 0.069,
+       "f1": 0.1143,
+       "tp": 4,
+       "pred": 12,
+       "gold": 58
+      }
+     }
+    },
+    "junk": {
+     "junk_mentions": 6,
+     "wrong_mentions": 34,
+     "predicted_mentions": 83,
+     "junk_rate": 0.0723,
+     "junk_share_of_wrong": 0.1765,
+     "top": [
+      [
+       "api",
+       1
+      ],
+      [
+       "benchmarks",
+       1
+      ],
+      [
+       "cli",
+       1
+      ],
+      [
+       "indexer",
+       1
+      ],
+      [
+       "narrative",
+       1
+      ],
+      [
+       "rerank",
+       1
+      ]
+     ]
+    },
+    "entities_per_text": {
+     "mean": 0.86,
+     "median": 1,
+     "gold_mean": 7.11
+    }
+   },
+   "test_at_max_f1_train_threshold": {
+    "threshold": 0.11,
+    "note": "the unconstrained best-train-F1 threshold, from the sweep; for reference only, the verdict uses the selected setting",
+    "span": {
+     "precision": 0.3382,
+     "recall": 0.4348,
+     "f1": 0.3805,
+     "tp": 300,
+     "pred": 887,
+     "gold": 690
+    },
+    "span_and_type": {
+     "precision": 0.1939,
+     "recall": 0.2493,
+     "f1": 0.2181,
+     "tp": 172,
+     "pred": 887,
+     "gold": 690
+    },
+    "per_type": {
+     "file": {
+      "precision": 0.0345,
+      "recall": 0.0505,
+      "f1": 0.041,
+      "tp": 5,
+      "pred": 145,
+      "gold": 99
+     },
+     "code": {
+      "precision": 0.2961,
+      "recall": 0.1747,
+      "f1": 0.2197,
+      "tp": 69,
+      "pred": 233,
+      "gold": 395
+     },
+     "project": {
+      "precision": 0.2245,
+      "recall": 0.564,
+      "f1": 0.3212,
+      "tp": 97,
+      "pred": 432,
+      "gold": 172
+     },
+     "concept": {
+      "precision": 0.013,
+      "recall": 0.0417,
+      "f1": 0.0198,
+      "tp": 1,
+      "pred": 77,
+      "gold": 24
+     }
+    },
+    "entities_per_text": {
+     "mean": 9.14,
+     "median": 9,
+     "gold_mean": 7.11
+    },
+    "junk_rate": 0.3281
+   }
+  },
+  "gliner2.5-base": {
+   "arm": "gliner2.5-base",
+   "repo": "fastino/gliner2.5-base-v1",
+   "revision": "54785d51df8d86a0d8f2eb212fec15871aad2c4d",
+   "library": "gliner2",
+   "backbone": null,
+   "params": 193581591,
+   "size_on_disk_bytes": 782713882,
+   "load_ms": 25446.2,
+   "load_loadavg_1m": [
+    83.4,
+    87.21
+   ],
+   "rss_mb": {
+    "after_import": 190.0,
+    "after_load": 684.7
+   },
+   "peak_rss_mb": 1421.6,
+   "threads": 4,
+   "control_train_precision": 0.6557,
+   "phrasing": "descriptive",
+   "labels": {
+    "file": "file or directory path",
+    "code": "function, type, command or flag name",
+    "project": "library, tool, programming language or model name",
+    "concept": "named algorithm or technique"
+   },
+   "threshold": 0.6,
+   "selection": {
+    "short": {
+     "selected": {
+      "threshold": 0.28,
+      "precision": 0.2994,
+      "recall": 0.5714,
+      "f1": 0.3929,
+      "precision_constraint_met_on_train": false
+     },
+     "max_f1_train": {
+      "threshold": 0.28,
+      "precision": 0.2994,
+      "recall": 0.5714,
+      "f1": 0.3929
+     }
+    },
+    "descriptive": {
+     "selected": {
+      "threshold": 0.6,
+      "precision": 0.6667,
+      "recall": 0.2768,
+      "f1": 0.3912,
+      "precision_constraint_met_on_train": true
+     },
+     "max_f1_train": {
+      "threshold": 0.29,
+      "precision": 0.4336,
+      "recall": 0.5246,
+      "f1": 0.4747
+     }
+    }
+   },
+   "sweep_mismatch_texts": 2,
+   "latency_ms": {
+    "p50": 968.33,
+    "p95": 1387.352,
+    "mean": 986.055,
+    "loadavg_1m_before": 55.33,
+    "loadavg_1m_after": 78.01,
+    "measured_in": "Python, perf_counter around one predict call per test text, batch 1, model loaded and warmed"
+   },
+   "test": {
+    "span": {
+     "precision": 0.5909,
+     "recall": 0.2261,
+     "f1": 0.327,
+     "tp": 156,
+     "pred": 264,
+     "gold": 690
+    },
+    "span_and_type": {
+     "precision": 0.4773,
+     "recall": 0.1826,
+     "f1": 0.2642,
+     "tp": 126,
+     "pred": 264,
+     "gold": 690
+    },
+    "per_type": {
+     "file": {
+      "precision": 0.5368,
+      "recall": 0.5152,
+      "f1": 0.5258,
+      "tp": 51,
+      "pred": 95,
+      "gold": 99
+     },
+     "code": {
+      "precision": 0.64,
+      "recall": 0.081,
+      "f1": 0.1438,
+      "tp": 32,
+      "pred": 50,
+      "gold": 395
+     },
+     "project": {
+      "precision": 0.3675,
+      "recall": 0.25,
+      "f1": 0.2976,
+      "tp": 43,
+      "pred": 117,
+      "gold": 172
+     },
+     "concept": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "tp": 0,
+      "pred": 2,
+      "gold": 24
+     }
+    },
+    "per_stratum": {
+     "code_heavy": {
+      "texts": 29,
+      "span": {
+       "precision": 0.6771,
+       "recall": 0.233,
+       "f1": 0.3467,
+       "tp": 65,
+       "pred": 96,
+       "gold": 279
+      },
+      "span_and_type": {
+       "precision": 0.5833,
+       "recall": 0.2007,
+       "f1": 0.2987,
+       "tp": 56,
+       "pred": 96,
+       "gold": 279
+      }
+     },
+     "mixed": {
+      "texts": 23,
+      "span": {
+       "precision": 0.3636,
+       "recall": 0.177,
+       "f1": 0.2381,
+       "tp": 20,
+       "pred": 55,
+       "gold": 113
+      },
+      "span_and_type": {
+       "precision": 0.3091,
+       "recall": 0.1504,
+       "f1": 0.2024,
+       "tp": 17,
+       "pred": 55,
+       "gold": 113
+      }
+     },
+     "junk_trap": {
+      "texts": 17,
+      "span": {
+       "precision": 0.6275,
+       "recall": 0.2025,
+       "f1": 0.3062,
+       "tp": 32,
+       "pred": 51,
+       "gold": 158
+      },
+      "span_and_type": {
+       "precision": 0.4706,
+       "recall": 0.1519,
+       "f1": 0.2297,
+       "tp": 24,
+       "pred": 51,
+       "gold": 158
+      }
+     },
+     "markdown": {
+      "texts": 13,
+      "span": {
+       "precision": 0.5263,
+       "recall": 0.2439,
+       "f1": 0.3333,
+       "tp": 20,
+       "pred": 38,
+       "gold": 82
+      },
+      "span_and_type": {
+       "precision": 0.5,
+       "recall": 0.2317,
+       "f1": 0.3167,
+       "tp": 19,
+       "pred": 38,
+       "gold": 82
+      }
+     },
+     "prose": {
+      "texts": 15,
+      "span": {
+       "precision": 0.7917,
+       "recall": 0.3276,
+       "f1": 0.4634,
+       "tp": 19,
+       "pred": 24,
+       "gold": 58
+      },
+      "span_and_type": {
+       "precision": 0.4167,
+       "recall": 0.1724,
+       "f1": 0.2439,
+       "tp": 10,
+       "pred": 24,
+       "gold": 58
+      }
+     }
+    },
+    "junk": {
+     "junk_mentions": 23,
+     "wrong_mentions": 108,
+     "predicted_mentions": 264,
+     "junk_rate": 0.0871,
+     "junk_share_of_wrong": 0.213,
+     "top": [
+      [
+       "cli",
+       2
+      ],
+      [
+       "dev",
+       2
+      ],
+      [
+       "json",
+       2
+      ],
+      [
+       "nli",
+       2
+      ],
+      [
+       "boot",
+       1
+      ],
+      [
+       "crates",
+       1
+      ],
+      [
+       "decide",
+       1
+      ],
+      [
+       "engine open",
+       1
+      ],
+      [
+       "heal",
+       1
+      ],
+      [
+       "hooks",
+       1
+      ],
+      [
+       "install",
+       1
+      ],
+      [
+       "oracle",
+       1
+      ],
+      [
+       "origin",
+       1
+      ],
+      [
+       "process start",
+       1
+      ],
+      [
+       "recall",
+       1
+      ],
+      [
+       "remove",
+       1
+      ],
+      [
+       "rerank",
+       1
+      ],
+      [
+       "run",
+       1
+      ],
+      [
+       "spec",
+       1
+      ]
+     ]
+    },
+    "entities_per_text": {
+     "mean": 2.72,
+     "median": 2,
+     "gold_mean": 7.11
+    }
+   },
+   "test_at_max_f1_train_threshold": {
+    "threshold": 0.29,
+    "note": "the unconstrained best-train-F1 threshold, from the sweep; for reference only, the verdict uses the selected setting",
+    "span": {
+     "precision": 0.4221,
+     "recall": 0.471,
+     "f1": 0.4452,
+     "tp": 325,
+     "pred": 770,
+     "gold": 690
+    },
+    "span_and_type": {
+     "precision": 0.3169,
+     "recall": 0.3536,
+     "f1": 0.3342,
+     "tp": 244,
+     "pred": 770,
+     "gold": 690
+    },
+    "per_type": {
+     "file": {
+      "precision": 0.3537,
+      "recall": 0.5859,
+      "f1": 0.4411,
+      "tp": 58,
+      "pred": 164,
+      "gold": 99
+     },
+     "code": {
+      "precision": 0.3175,
+      "recall": 0.2709,
+      "f1": 0.2923,
+      "tp": 107,
+      "pred": 337,
+      "gold": 395
+     },
+     "project": {
+      "precision": 0.3108,
+      "recall": 0.4535,
+      "f1": 0.3688,
+      "tp": 78,
+      "pred": 251,
+      "gold": 172
+     },
+     "concept": {
+      "precision": 0.0556,
+      "recall": 0.0417,
+      "f1": 0.0476,
+      "tp": 1,
+      "pred": 18,
+      "gold": 24
+     }
+    },
+    "entities_per_text": {
+     "mean": 7.94,
+     "median": 8,
+     "gold_mean": 7.11
+    },
+    "junk_rate": 0.2857
+   }
+  }
+ },
+ "verdict": {
+  "verdict": "NO-GO",
+  "rule": "a model wins only if (1) it beats the production extractor's test span F1 at equal or better test precision, (2) it fits a write-time CPU call site (worker or daemon, never a hook; FIT_BARS), and (3) it is the smallest model within 1 F1 point of the best model",
+  "control": {
+   "f1": 0.4549,
+   "precision": 0.6733,
+   "recall": 0.3435
+  },
+  "best_model_f1": 0.327,
+  "arms": {
+   "gliner2.5-small": {
+    "f1": 0.0801,
+    "precision": 0.5085,
+    "params": 73881879,
+    "beats_control_f1": false,
+    "precision_at_least_control": false,
+    "fits_write_time_cpu": true,
+    "fit_detail": {
+     "peak_rss_mb": {
+      "value": 739.2,
+      "ok": true
+     },
+     "p95_ms": {
+      "value": 968.332,
+      "ok": true
+     },
+     "load_s": {
+      "value": 16.2,
+      "ok": null,
+      "note": "reported, not gated: loaded once per worker or daemon process"
+     }
+    },
+    "within_1_f1_point_of_best": false,
+    "smallest_within_1_point": false,
+    "wins": false
+   },
+   "gliner_small-v2.1": {
+    "f1": 0.1268,
+    "precision": 0.5904,
+    "params": 152648704,
+    "beats_control_f1": false,
+    "precision_at_least_control": false,
+    "fits_write_time_cpu": true,
+    "fit_detail": {
+     "peak_rss_mb": {
+      "value": 1211.8,
+      "ok": true
+     },
+     "p95_ms": {
+      "value": 911.641,
+      "ok": true
+     },
+     "load_s": {
+      "value": 25.52,
+      "ok": null,
+      "note": "reported, not gated: loaded once per worker or daemon process"
+     }
+    },
+    "within_1_f1_point_of_best": false,
+    "smallest_within_1_point": false,
+    "wins": false
+   },
+   "gliner2.5-base": {
+    "f1": 0.327,
+    "precision": 0.5909,
+    "params": 193581591,
+    "beats_control_f1": false,
+    "precision_at_least_control": false,
+    "fits_write_time_cpu": false,
+    "fit_detail": {
+     "peak_rss_mb": {
+      "value": 1421.6,
+      "ok": true
+     },
+     "p95_ms": {
+      "value": 1387.352,
+      "ok": false
+     },
+     "load_s": {
+      "value": 25.45,
+      "ok": null,
+      "note": "reported, not gated: loaded once per worker or daemon process"
+     }
+    },
+    "within_1_f1_point_of_best": true,
+    "smallest_within_1_point": true,
+    "wins": false
+   }
+  },
+  "control_errors_test": {
+   "missed_gold_by_type_and_shape": [
+    {
+     "kind": "code / long flag",
+     "count": 53,
+     "examples": [
+      "--orphans",
+      "--target",
+      "--no-default-features",
+      "--features",
+      "--profile",
+      "--expand"
+     ]
+    },
+    {
+     "kind": "project / Capitalized word",
+     "count": 52,
+     "examples": [
+      "Windows",
+      "Axil",
+      "Axil",
+      "Python",
+      "Axil",
+      "Axil"
+     ]
+    },
+    {
+     "kind": "file / bare file name",
+     "count": 41,
+     "examples": [
+      ".axil.graph",
+      ".axil.vec",
+      "assert.h",
+      "hook_brain.rs",
+      "Cargo.lock",
+      "download.rs"
+     ]
+    },
+    {
+     "kind": "project / ALL_CAPS word",
+     "count": 33,
+     "examples": [
+      "MSVC",
+      "WASM",
+      "ONNX",
+      "LME",
+      "APFS",
+      "POSIX"
+     ]
+    },
+    {
+     "kind": "project / lowercase word",
+     "count": 32,
+     "examples": [
+      "redb",
+      "ring",
+      "ureq",
+      "rustls",
+      "tantivy",
+      "rg"
+     ]
+    },
+    {
+     "kind": "code / multi-word",
+     "count": 28,
+     "examples": [
+      "axil heal",
+      "axil store",
+      "axil search",
+      "axil stats",
+      "axil doctor",
+      "cargo check"
+     ]
+    },
+    {
+     "kind": "project / hyphenated",
+     "count": 28,
+     "examples": [
+      "ort-sys",
+      "zstd-sys",
+      "release-plz",
+      "laya-ultrafast",
+      "Apple-MLX",
+      "code-explorer"
+     ]
+    },
+    {
+     "kind": "code / hyphenated",
+     "count": 27,
+     "examples": [
+      "x86_64-pc-windows-msvc",
+      "llm-http",
+      "axil-core",
+      "axil-vector",
+      "axil-core",
+      "axil-indexer"
+     ]
+    },
+    {
+     "kind": "code / lowercase word",
+     "count": 24,
+     "examples": [
+      "axildb",
+      "axildb",
+      "boot",
+      "report",
+      "deps",
+      "recall"
+     ]
+    },
+    {
+     "kind": "file / slash path",
+     "count": 24,
+     "examples": [
+      ".claude/CLAUDE.md",
+      "crates/extensions/axil-decide",
+      "wt/vectors",
+      "tasks/archive/2026-10-04/",
+      "phase-28-closing-set/",
+      ".claude/worktrees/"
+     ]
+    },
+    {
+     "kind": "code / Capitalized word",
+     "count": 18,
+     "examples": [
+      "Storage",
+      "Extension",
+      "Adapter",
+      "Stop",
+      "Busy",
+      "Capabilities"
+     ]
+    },
+    {
+     "kind": "code / ALL_CAPS word",
+     "count": 15,
+     "examples": [
+      "CARGO_REGISTRY_TOKEN",
+      "TMPDIR",
+      "DEFAULT_TOKEN_ESTIMATOR",
+      "ALL_NAMES",
+      "BRUTE_FORCE_MAX",
+      "RRF_K_FTS_IDENTIFIER"
+     ]
+    },
+    {
+     "kind": "code / slash path",
+     "count": 12,
+     "examples": [
+      "feat/phase-28-cli-weights",
+      "feat/tokens",
+      "fix/cli-bugs",
+      "refs/stash",
+      "feat/open-backlog",
+      "fix/cli-bugs"
+     ]
+    },
+    {
+     "kind": "concept / multi-word",
+     "count": 10,
+     "examples": [
+      "Dogfood DB",
+      "QTC window",
+      "dogfood snapshot",
+      "warm daemon",
+      "needle gate",
+      "dogfood DB"
+     ]
+    },
+    {
+     "kind": "code / other",
+     "count": 8,
+     "examples": [
+      "axil:plugin",
+      "axil:plugin@1.0.0",
+      "outln!",
+      "outp!",
+      "errln!",
+      "errp!"
+     ]
+    },
+    {
+     "kind": "code / snake_case",
+     "count": 7,
+     "examples": [
+      "_entities",
+      "_entities",
+      "_sessions.files_changed",
+      "CARGO_BIN_EXE_axil",
+      "freshness_scan.budget_share",
+      "_superseded"
+     ]
+    },
+    {
+     "kind": "concept / ALL_CAPS word",
+     "count": 7,
+     "examples": [
+      "QTC",
+      "QTC",
+      "RRF",
+      "RRF",
+      "DEFLATE",
+      "QTC"
+     ]
+    },
+    {
+     "kind": "concept / hyphenated",
+     "count": 7,
+     "examples": [
+      "snap-prefix",
+      "snap-prefix",
+      "snap-prefix",
+      "snap-prefix",
+      "warm-daemon",
+      "snap-prefix"
+     ]
+    },
+    {
+     "kind": "file / lowercase word",
+     "count": 6,
+     "examples": [
+      ".axil",
+      ".axil",
+      ".vec",
+      ".vec",
+      ".axil",
+      ".axil"
+     ]
+    },
+    {
+     "kind": "file / ALL_CAPS word",
+     "count": 5,
+     "examples": [
+      "README",
+      "README",
+      "README",
+      "README",
+      "README"
+     ]
+    },
+    {
+     "kind": "file / hyphenated",
+     "count": 5,
+     "examples": [
+      "phase-28-daemon-plan",
+      "phase-28-step6-open-review-findings",
+      "phase-28-trust-speed-tokens",
+      "phase-29-typed-decisions-laya",
+      "memory.axil.vec.DIRTY-needs-repair-fixture"
+     ]
+    },
+    {
+     "kind": "project / multi-word",
+     "count": 4,
+     "examples": [
+      "M3 Max",
+      "M1 Pro",
+      "M1 Pro",
+      "Claude Code"
+     ]
+    },
+    {
+     "kind": "project / bare file name",
+     "count": 2,
+     "examples": [
+      "crates.io",
+      "crates.io"
+     ]
+    },
+    {
+     "kind": "project / other",
+     "count": 1,
+     "examples": [
+      "C"
+     ]
+    },
+    {
+     "kind": "project / slash path",
+     "count": 1,
+     "examples": [
+      "browser-use/jev-ultrafast"
+     ]
+    },
+    {
+     "kind": "code / qualified path",
+     "count": 1,
+     "examples": [
+      "axil-core::token::TokenEstimator"
+     ]
+    },
+    {
+     "kind": "code / mixed case",
+     "count": 1,
+     "examples": [
+      "DatabaseStats.plugins"
+     ]
+    },
+    {
+     "kind": "code / bare file name",
+     "count": 1,
+     "examples": [
+      "data.type"
+     ]
+    }
+   ],
+   "wrong_by_axil_type": [
+    {
+     "kind": "code / part or superset of a gold name",
+     "count": 68,
+     "examples": [
+      "axil_vector",
+      "read_stored_dimensions",
+      "ScoreWeights",
+      "with_vector_recency_split",
+      "cargo check --target x86_64-pc-windows-msvc",
+      "--no-default-features --features core,graph,timeseries,indexer,scip,deps,checkpo"
+     ]
+    },
+    {
+     "kind": "code / no gold overlap",
+     "count": 19,
+     "examples": [
+      "top_k",
+      "best_chunk",
+      "byte_len",
+      "&combined[..max_chars]",
+      "max_chars",
+      "new(signals, summary)"
+     ]
+    },
+    {
+     "kind": "reference / no gold overlap",
+     "count": 11,
+     "examples": [
+      "failed to probe vector store: Database repair aborted",
+      "make a new core",
+      "looked, found nothing",
+      "no summary available",
+      "s id differs (that",
+      "N files: a, b, c"
+     ]
+    },
+    {
+     "kind": "reference / part or superset of a gold name",
+     "count": 10,
+     "examples": [
+      "## Why Axil?",
+      "not an Axil plugin",
+      "s --files seed. Root cause: Subagent Edit/Write events carry the parent",
+      "s next (dynamic CLI, WASM runtime, capability sandbox). Honest about what is and",
+      "do them all include Codex review",
+      "do them all include Codex review"
+     ]
+    },
+    {
+     "kind": "file / no gold overlap",
+     "count": 3,
+     "examples": [
+      "/1.45",
+      "ceil(byte_len/4.0",
+      "0.53/0.53"
+     ]
+    },
+    {
+     "kind": "file / part or superset of a gold name",
+     "count": 3,
+     "examples": [
+      "claude/CLAUDE.md",
+      "axil:plugin/extension@X.Y.Z",
+      "claude/settings.json"
+     ]
+    },
+    {
+     "kind": "code_symbol / part or superset of a gold name",
+     "count": 1,
+     "examples": [
+      "core::token::TokenEstimator"
+     ]
+    }
+   ]
+  },
+  "regex_refinement_needs": [
+   "Project names: 153 missed gold mentions; there is no project pattern at all. Shape cannot separate redb, ring or Windows from English, so this needs a gazetteer (dependency names from Cargo.lock / _deps, the workspace crates, a curated list of tools, languages, platforms and models), not another regex.",
+   "Long flags (--name): 53 missed; a plain pattern.",
+   "File names without a slash and companion files (db.rs, Cargo.lock, .axil.vec, README): 52 missed; a name.ext pattern over known extensions plus the .axil companion suffixes. Slash paths without an extension or ending in / (24 missed) and git branches (12 missed) need their own rules; the path trimmer also strips a leading dot (.claude/CLAUDE.md becomes claude/CLAUDE.md).",
+   "Commands (axil heal, cargo check): 28 missed; program plus subcommand words up to the first flag, for known programs.",
+   "Hyphenated crate and tool names: 27 code and 28 project mentions missed; the workspace crate list covers the code ones.",
+   "ALL_CAPS constants and env vars: 15 missed; [A-Z][A-Z0-9]*_[A-Z0-9_]+ (an underscore keeps acronyms out).",
+   "Precision: 68 wrong code mentions are parts of a qualified path emitted next to it (axil_vector beside axil_vector::read_stored_dimensions) or a whole backticked command line kept as one entity; quoted strings of three or more words gave 21 wrong mentions and no correct one."
+  ]
+ },
+ "numbers_policy": "Candidate measurements for a feature that is not built; not for README, docs or CLI output. Latency was measured on a shared machine; read it with the load average recorded next to it."
+}

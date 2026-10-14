@@ -1,0 +1,58 @@
+{
+ "annotator": "gemini",
+ "model": "gemini-3.8-flash-high",
+ "items": 160,
+ "items_labeled": 160,
+ "items_empty": 1,
+ "failures": [],
+ "entities_returned": 1093,
+ "entities_kept": 1093,
+ "kept_by_type": {
+  "code": 636,
+  "file": 167,
+  "project": 259,
+  "concept": 31
+ },
+ "dropped_not_substring": 0,
+ "dropped_bad_type": 0,
+ "dropped_duplicate_surface": 0,
+ "batches": {
+  "01": {
+   "attempts": 1,
+   "used_attempt": 1
+  },
+  "02": {
+   "attempts": 1,
+   "used_attempt": 1
+  },
+  "03": {
+   "attempts": 1,
+   "used_attempt": 1
+  },
+  "04": {
+   "attempts": 1,
+   "used_attempt": 1
+  },
+  "05": {
+   "attempts": 1,
+   "used_attempt": 1
+  },
+  "06": {
+   "attempts": 1,
+   "used_attempt": 1
+  },
+  "07": {
+   "attempts": 1,
+   "used_attempt": 1
+  },
+  "08": {
+   "attempts": 1,
+   "used_attempt": 1
+  }
+ },
+ "drops": {
+  "not_substring": [],
+  "bad_type": [],
+  "duplicate_surface": []
+ }
+}

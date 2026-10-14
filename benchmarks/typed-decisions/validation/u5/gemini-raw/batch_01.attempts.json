@@ -1,0 +1,10 @@
+[
+ {
+  "attempt": 1,
+  "rc": 0,
+  "secs": 422.3,
+  "ok_ids": 20,
+  "problems": [],
+  "out": "batch_01.attempt1.out"
+ }
+]

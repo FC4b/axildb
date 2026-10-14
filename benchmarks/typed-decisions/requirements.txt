@@ -5,5 +5,9 @@ numpy>=1.26
 laya==0.3.20
 gliner2==2.0.0
 peft
+# U5 entity arm (run_u5_bakeoff.py):
+gliner==0.2.29
+sentencepiece
+psutil
 # optional, hosted Jev arm only:
 # typesafe-sdk==0.7.2
