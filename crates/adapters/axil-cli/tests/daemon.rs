@@ -50,8 +50,8 @@ fn model_available() -> bool {
 
 /// A project with a database holding a few records.
 fn fixture() -> Fixture {
-    let tmp = tempfile::tempdir().unwrap();
     // Short enough for the socket to sit in the run directory.
+    let tmp = tempfile::Builder::new().prefix("d").tempdir().unwrap();
     let proj = tmp.path().canonicalize().unwrap().join("p");
     std::fs::create_dir_all(proj.join("src")).unwrap();
     std::fs::create_dir_all(proj.join(".axil")).unwrap();
@@ -173,7 +173,7 @@ impl Fixture {
     }
 
     fn run_dir(&self) -> PathBuf {
-        self.proj.join(".axil/run")
+        self.proj.join(".axil/run/memory.axil")
     }
 
     /// Whether a daemon holds the lock.
@@ -541,4 +541,38 @@ fn a_database_whose_open_warns_is_not_served() {
     std::fs::remove_file(fx.proj.join("axil.toml")).unwrap();
     assert_eq!(fx.start()["state"], "ready");
     assert_eq!(fx.status()["blocked"], Value::Null);
+}
+
+/// Two databases in one directory each have a daemon of their own:
+/// starting, stopping and asking about one leaves the other be.
+#[test]
+fn two_databases_in_one_directory_have_a_daemon_each() {
+    let fx = fixture();
+    let other = fx.proj.join(".axil/other.axil");
+    let other = other.to_str().unwrap();
+    let init = fx.axil(&["init", other]);
+    assert!(init.status.success(), "{}", text(&init.stderr));
+    let on_other = |args: &[&str]| {
+        let mut argv = vec!["--db", other];
+        argv.extend_from_slice(args);
+        fx.axil(&argv)
+    };
+
+    let first = fx.start();
+    let status: Value =
+        serde_json::from_slice(&on_other(&["daemon", "status", "--json"]).stdout).unwrap();
+    assert_eq!(status["running"], false, "{status}");
+
+    let out = on_other(&["daemon", "start", "--idle-timeout", "60s"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let second: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(second["started"], true, "{second}");
+    assert_ne!(second["pid"], first["pid"]);
+    assert_ne!(second["socket"], first["socket"]);
+
+    let out = on_other(&["daemon", "stop"]);
+    let stopped: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(stopped["stopped"], true, "{stopped}");
+    assert_eq!(stopped["pid"], second["pid"]);
+    assert_eq!(fx.status()["live"]["pid"], first["pid"]);
 }

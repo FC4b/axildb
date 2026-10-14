@@ -10,7 +10,8 @@
 //!    environment what each request carries itself ([`STRIPPED_ENV`]), and
 //!    handle SIGTERM, SIGINT and SIGHUP by shutting down.
 //! 3. Replace any stale socket and bind it 0600. Clients connecting from
-//!    here on are told the daemon is starting.
+//!    here on are told the daemon is starting. A connection from another
+//!    user is dropped.
 //! 4. Open the database ([`WarmState::open`]), retrying for 10 s while
 //!    another process holds its lock. A database that can't be served (its
 //!    open printed, an engine is missing, or it is read-only) is written to
@@ -54,7 +55,7 @@ use axil_core::GraphState;
 use serde_json::{json, Value};
 
 use super::exec::{self, ReopenError, WarmState};
-use super::paths::{write_atomic, RunDir};
+use super::paths::{self, write_atomic, RunDir};
 use super::proto::{
     self, read_frame, read_json, write_frame, write_json, Ack, ExeId, Hello, Identity, Op,
     RunHeader, RunReply, DAEMON_PROTO, MAX_FRAME, STRIPPED_ENV, VERSION,
@@ -555,7 +556,7 @@ impl Server {
                 continue;
             }
             match listener.accept() {
-                Ok((stream, _)) => self.spawn_connection(stream),
+                Ok((stream, _)) => self.accepted(stream),
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
                 Err(e) => {
                     log(format!("accept failed: {e}"));
@@ -567,9 +568,22 @@ impl Server {
         if listener.set_nonblocking(true).is_ok() {
             while let Ok((stream, _)) = listener.accept() {
                 if stream.set_nonblocking(false).is_ok() {
-                    self.spawn_connection(stream);
+                    self.accepted(stream);
                 }
             }
+        }
+    }
+
+    /// A connection, served when it comes from this user. The socket is
+    /// 0600 in a directory only this user can enter; this holds even when
+    /// someone changed that.
+    fn accepted(self: &Arc<Self>, stream: UnixStream) {
+        match proto::peer_uid(&stream) {
+            Ok(peer) if peer == paths::uid() => self.spawn_connection(stream),
+            Ok(peer) => log(format!("refused a connection from uid {peer}")),
+            Err(e) => log(format!(
+                "refused a connection that can't be told apart: {e}"
+            )),
         }
     }
 
@@ -902,6 +916,7 @@ impl Server {
             version: VERSION.into(),
             pid: std::process::id(),
             state: self.phase.get().name().into(),
+            db: self.key.display().to_string(),
         }
     }
 
@@ -1409,6 +1424,7 @@ mod tests {
             (hello.op.as_str(), hello.proto, hello.state.as_str()),
             ("hello", DAEMON_PROTO, "ready")
         );
+        assert_eq!(Path::new(&hello.db), server.key);
         assert_eq!(hello.build_id, id.build_id);
         assert_eq!(hello.pid, std::process::id());
         let status: Value = proto::call(&socket, &Op::Status, Duration::from_secs(5)).unwrap();

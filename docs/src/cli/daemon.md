@@ -32,13 +32,15 @@ graph.
 
 ## Files
 
-Everything sits in `run/` beside the database (`.axil/run/`), created `0700`
-and refused if another user owns it:
+Everything sits in a directory of the database's own under `run/` beside it
+(`.axil/run/memory.axil/`), so two databases in one directory, such as a
+branch beside its trunk, each have their own daemon. Both directories are
+created `0700` and refused if another user owns them:
 
 | File | What it is |
 |------|------------|
 | `daemon.lock` | Held by the daemon for its whole life. Of several started at once, one gets it; the others exit. |
-| `axil.sock` | The socket (`0600`). When its path would be 100 bytes or more, too long for a socket address, it moves to `$TMPDIR/axil-<uid>/<hash>.sock`. |
+| `axil.sock` | The socket (`0600`). When its path would be 100 bytes or more, too long for a socket address, it moves to `axil-<uid>/<hash>.sock` in this user's own temporary directory on macOS (the one `getconf DARWIN_USER_TEMP_DIR` prints), in `/run/user/<uid>` on Linux when that is the user's and private, and in `/tmp` otherwise. None of it comes from the environment, so every client finds the same socket. |
 | `daemon.json` | What the daemon last recorded about itself: pid, build, state, and why it stopped. |
 | `daemon.log` | Its own output, rotated to `daemon.log.1` at 1 MiB. A command's output goes to the client that sent it; only the few warnings printed inside recall's ranking (such as `recall ran without vector search`) land here instead. |
 | `daemon.blocked` | Why it would not serve the database. `start` clears it and tries again. |
@@ -46,7 +48,9 @@ and refused if another user owns it:
 
 ## What it serves, and to whom
 
-A command is served only to a client of the exact same binary (path, inode,
+A client connects only to a socket in a directory of its own user's that no
+one else can enter, and only to a daemon running as that user; the daemon
+drops a connection from anyone else. A command is served only to a client of the exact same binary (path, inode,
 size and modification time), with the same compiled features and the same
 values of the environment variables that change what a command prints or
 reads: `AXIL_ENC_KEY`, `AXIL_ENC_KEY_FILE` (and the key file's size and

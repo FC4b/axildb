@@ -16,6 +16,7 @@
 use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::io::{self, Read, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::net::UnixStream;
@@ -26,7 +27,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use super::exec::{self, NotServed};
-use super::paths::fnv1a64;
+use super::paths::{fnv1a64, trusted_socket, uid};
 
 /// The protocol version a run header must carry.
 pub const DAEMON_PROTO: u32 = 1;
@@ -118,6 +119,9 @@ pub struct Hello {
     pub pid: u32,
     /// `starting`, `ready`, `reloading` or `stopping`.
     pub state: String,
+    /// The database it serves ([`crate::cli_io::db_key`]).
+    #[serde(default)]
+    pub db: String,
 }
 
 /// The frozen answer to `shutdown`, and the answer to the debug ops.
@@ -416,12 +420,84 @@ pub fn compiled_features() -> Vec<String> {
         .collect()
 }
 
-/// Connect to the daemon's socket, with `timeout` on each read and write.
+/// Connect to the daemon's socket, with `timeout` on each read and write:
+/// only to a socket [`trusted_socket`] accepts, and only to a daemon that
+/// runs as this user. Fails with [`io::ErrorKind::PermissionDenied`]
+/// otherwise.
 pub fn connect(socket: &Path, timeout: Duration) -> io::Result<UnixStream> {
+    trusted_socket(socket)?;
     let stream = UnixStream::connect(socket)?;
+    let peer = peer_uid(&stream)?;
+    if peer != uid() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "{} is answered by uid {peer}, not by this user",
+                socket.display()
+            ),
+        ));
+    }
     stream.set_read_timeout(Some(timeout))?;
     stream.set_write_timeout(Some(timeout))?;
     Ok(stream)
+}
+
+/// The effective user id of the process at the other end of `stream`.
+#[cfg(any(
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd",
+    target_os = "dragonfly"
+))]
+pub fn peer_uid(stream: &UnixStream) -> io::Result<u32> {
+    let (mut euid, mut egid) = (0, 0);
+    // SAFETY: a connected socket's descriptor, and two out-parameters.
+    if unsafe { libc::getpeereid(stream.as_raw_fd(), &mut euid, &mut egid) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(euid)
+}
+
+/// The effective user id of the process at the other end of `stream`.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+pub fn peer_uid(stream: &UnixStream) -> io::Result<u32> {
+    // SAFETY: ucred is plain data; getsockopt fills at most `len` bytes of
+    // it from a connected socket's descriptor.
+    unsafe {
+        let mut cred: libc::ucred = std::mem::zeroed();
+        let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+        if libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            (&mut cred as *mut libc::ucred).cast(),
+            &mut len,
+        ) != 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(cred.uid)
+    }
+}
+
+/// Where the peer can't be asked for, no daemon is trusted.
+#[cfg(not(any(
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd",
+    target_os = "dragonfly",
+    target_os = "linux",
+    target_os = "android"
+)))]
+pub fn peer_uid(_stream: &UnixStream) -> io::Result<u32> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "can't tell who answers on the socket",
+    ))
 }
 
 /// Send `op` and read the JSON answer.
@@ -500,11 +576,18 @@ mod tests {
             version: "2.3.0".into(),
             pid: 42,
             state: "ready".into(),
+            db: "/p/.axil/memory.axil".into(),
         };
         assert_eq!(
             serde_json::to_string(&hello).unwrap(),
-            r#"{"op":"hello","proto":1,"build_id":"00ff","version":"2.3.0","pid":42,"state":"ready"}"#
+            r#"{"op":"hello","proto":1,"build_id":"00ff","version":"2.3.0","pid":42,"state":"ready","db":"/p/.axil/memory.axil"}"#
         );
+        // A hello from a daemon that does not say which database it serves.
+        let bare: Hello = serde_json::from_str(
+            r#"{"op":"hello","proto":1,"build_id":"00ff","version":"2.3.0","pid":42,"state":"ready"}"#,
+        )
+        .unwrap();
+        assert_eq!(bare.db, "");
 
         let shutdown = Op::Shutdown {
             reason: "stop".into(),
@@ -810,6 +893,27 @@ mod tests {
         ("USER", "the scheduled maintenance's log directory"),
         ("SystemRoot", "Windows only, where there is no daemon"),
     ];
+
+    /// The socket checks pass for a daemon of this user's, and the peer's
+    /// uid is the one the kernel reports for it.
+    #[test]
+    fn a_daemon_of_this_users_is_trusted() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("run");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let socket = dir.join("axil.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let stream = connect(&socket, Duration::from_secs(1)).unwrap();
+        let (accepted, _) = listener.accept().unwrap();
+        assert_eq!(peer_uid(&stream).unwrap(), uid());
+        assert_eq!(peer_uid(&accepted).unwrap(), uid());
+
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let err = connect(&socket, Duration::from_secs(1)).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied, "{err}");
+    }
 
     #[test]
     fn the_build_id_follows_the_binary_on_disk() {
