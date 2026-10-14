@@ -95,6 +95,9 @@ pub enum NotServed {
     /// The open handle lacks what the command needs: the command's own open
     /// would attach or create it.
     Lacks(Need),
+    /// The command reads stdin and the client's is a terminal: the one-shot
+    /// binary would wait there for the user to type the input.
+    Terminal,
     /// The host has no handle to run it on: a reopen is running or failed,
     /// a request panicked ([`WarmState::poisoned`]), or the request's thread
     /// couldn't start.
@@ -108,6 +111,7 @@ impl fmt::Display for NotServed {
             NotServed::WrongDb => f.write_str("the command is for another database"),
             NotServed::Command => f.write_str("the command is not run in-process"),
             NotServed::Lacks(need) => WarmLacks(*need).fmt(f),
+            NotServed::Terminal => f.write_str("the command reads stdin from a terminal"),
             NotServed::Unavailable => f.write_str("the database is not open"),
         }
     }
@@ -299,6 +303,9 @@ fn execute(req: Request, state: &WarmState) -> Result<Response, NotServed> {
         Parsed::Run(cli) => cli,
         Parsed::Printed(response) => return Ok(response),
     };
+    if req.stdin.is_none() && reads_stdin(&cli.command) {
+        return Err(NotServed::Terminal);
+    }
     let db_path = request_db(cli.db.as_deref(), &req.cwd).ok_or(NotServed::WrongDb)?;
     let warm = state.current()?;
     if cli_io::db_key(&db_path).ok().as_deref() != Some(warm.key()) {
@@ -423,6 +430,12 @@ fn writes(command: &Command) -> bool {
         Command::Recall { fresh_only, .. } => *fresh_only,
         _ => false,
     }
+}
+
+/// Whether `command` reads stdin whatever stdin is: `store <table> -`. A
+/// `checkpoint -` reads it only when it is not a terminal.
+fn reads_stdin(command: &Command) -> bool {
+    matches!(command, Command::Store { json_data, .. } if json_data == "-")
 }
 
 /// The database a command line runs on in the client's process: its `--db`
@@ -843,6 +856,42 @@ mod tests {
                 !companion(suffix).exists(),
                 "a refused command made {suffix}"
             );
+        }
+    }
+
+    /// A record to read from a terminal is not served, before anything is
+    /// written; piped, it is. A checkpoint at a terminal reads nothing, as
+    /// in the one-shot binary, and is served.
+    #[test]
+    fn a_store_from_a_terminal_is_not_served() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = build_fixture(tmp.path());
+        let state = WarmState::open(&proj.join(".axil/memory.axil")).unwrap();
+        let at_terminal = |args: &[&str]| Request {
+            stdin: None,
+            ..request(args, &proj, None, None)
+        };
+        let decisions = || {
+            state
+                .handle()
+                .unwrap()
+                .db()
+                .list("decisions")
+                .unwrap()
+                .len()
+        };
+        let before = decisions();
+        let store = ["store", "decisions", "-"];
+        assert_eq!(
+            execute_captured(at_terminal(&store), &state),
+            Err(NotServed::Terminal)
+        );
+        assert_eq!(decisions(), before);
+        let piped = request(&store, &proj, None, Some(br#"{"summary":"piped"}"#));
+        assert_eq!(execute_captured(piped, &state).unwrap().exit, 0);
+        assert_eq!(decisions(), before + 1);
+        if cfg!(feature = "checkpoint") {
+            assert!(execute_captured(at_terminal(&["checkpoint", "-"]), &state).is_ok());
         }
     }
 
