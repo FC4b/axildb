@@ -27,6 +27,7 @@ The plan and the go/no-go rules are in `tasks/phase-29-typed-decisions-laya.md`.
 | `u1_repo.jsonl` | 40 | This repo's own `.axil` decisions / errors / context, shortened (`repo_sets.py`) | Written by Claude, then blind-validated (see below) |
 | `u2_repo.jsonl` | 31 | Same (`repo_sets.py`) | Same. The negatives are deliberate traps: still broken, only planned, merged but not published, a fix for something else |
 | `u2_github.jsonl` | 170 | Bug issues + PR titles from redb, tantivy, ort, ripgrep, uv and tokio (`build_u2_github.py`; needs `gh`) | From GitHub links: **fixed** = the merged PR that closed the issue (94). The 76 negatives are three kinds: **other_fix** = the closing PR of a different bug in the same repo, picked for word overlap; **mentioned_not_fix** = a merged same-repo PR that references the issue but didn't close it; **downstream_workaround** = a merged PR in another repo that references it. Issue numbers, URLs and closing keywords are stripped from the titles. 9 pairs were dropped after validation (`validation/u2_github_drops.json`) |
+| `u5_repo.jsonl` | 160 texts, 1,138 entity mentions | This repo's own `.axil` decisions, errors, context, rules, checkpoints and commits, shortened (`repo_sets_u5.py`, which writes the unlabeled `u5_texts.jsonl`). Five strata: code_heavy 44, mixed 38, junk_trap 33 (prose that pattern extractors turn into junk), markdown 24, prose 21 | Entity spans typed `file` / `code` / `project` / `concept` per `validation/u5-guidelines.md`. Written by Claude, then blind-labeled by two other models; gold is the 2-of-3 majority (`adjudicate_u5.py`, see below) |
 
 ### Label validation (`validation/2026-09-27-labels.json`)
 
@@ -53,6 +54,20 @@ The same two models also re-annotated **all 179 GitHub pairs** blind, before any
 - The two agreed with each other on 163/179 (κ 0.82).
 
 Pairs where **both** rejected the link label were dropped: 5 "fixed" pairs whose titles don't show the connection, and 4 "other_fix" negatives that were really near-duplicate fixes. Split votes keep the link label.
+
+**U5 entities** (`validation/2026-10-14-u5-labels.json`). Claude labeled all 160 texts from the guidelines (1,150 mentions). Two models then labeled them **blind**, from the guidelines and the item text only, under neutral ids in shuffled order:
+- GLM `zai-coding-plan/glm-5.3` via OpenCode (1,179 mentions);
+- Gemini `gemini-3.8-flash-high` via `agy` (1,093 mentions).
+
+The Codex relabel used for U1/U2 is still pending: Codex was paused by the user. Mentions are compared as normalized surface forms (case-insensitive; outer backticks, quotes and trailing punctuation stripped), micro-averaged:
+
+| Pair | Span F1 | Span + type F1 | Type agreement on matched spans | Lowest stratum (span F1) | `concept` F1 |
+|---|---|---|---|---|---|
+| Claude vs GLM | 0.951 | 0.941 | 1,093/1,105, κ 0.98 | prose 0.896 | 0.753 |
+| Claude vs Gemini | 0.950 | 0.944 | 1,057/1,063, κ 0.99 | markdown 0.916 | 0.870 |
+| GLM vs Gemini | 0.944 | 0.936 | 1,061/1,069, κ 0.99 | markdown 0.922 | 0.721 |
+
+Gold is every form at least two of the three listed (1,051 unanimous, 84 two-vote; 93 single-vote forms left out), typed by majority. The majority was overridden 7 times, each by a named guideline rule (5 additions, 2 removals of the unmarked plain word `heal`), and 6 even type splits were broken by the guidelines; every case is logged with its reason. No item was dropped. The result: 1,138 mentions (code 663, project 266, file 173, concept 36), 690 of them in the 97 test texts. `concept` is the least reliable type, as the agreement shows.
 
 Remaining caveat: the annotators are models, not people.
 

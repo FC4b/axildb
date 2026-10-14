@@ -1,0 +1,497 @@
+# U5 entity labeling guidelines
+
+These rules define the gold entities for `sets/u5_texts.jsonl`. Each item is a
+short note an AI coding agent stored in its project memory (a decision, an
+error and its fix, a how-it-works note, a rule, a session checkpoint, or a
+commit message), about a Rust project named Axil. Notes were shortened, so an
+item can end mid-thought. Every annotator, model or human, labels from these
+rules alone, using only the item's own text; items are independent.
+
+## 1. What an entity is for
+
+The memory system turns every entity into a graph node and links each note to
+the entities it mentions. Two notes that share an entity get connected; the
+most-linked entities are shown to the agent at the start of every session.
+
+So an entity is worth labeling only if it passes the **linking test**:
+
+> If every stored note containing this exact string were linked together,
+> would those notes be about the same specific thing?
+
+`crates/axil-core/src/entity.rs`, `Axil::auto_link`, `redb` and `LongMemEval`
+pass: every note that names them is about them. `with`, `database`, `test`,
+`recall` and `31/31` fail: they occur in notes about anything, and linking on
+them joins unrelated notes into one useless hub. A wrong entity costs more than
+a missed one. When the rules below leave you unsure, apply the linking test.
+
+## 2. Output format
+
+For each item, list its entity mentions as `{"text": ..., "type": ...}`:
+
+- `text` is copied **verbatim** from the item: an exact, case-sensitive
+  substring. Never fix, normalize, shorten or complete it.
+- `type` is one of `file`, `code`, `project`, `concept` (section 4).
+- List each distinct surface form **once**, in order of first appearance, even
+  if it occurs several times. Two different strings (`Axil` and `axil`,
+  `db.rs` and `crates/axil-core/src/db.rs`) are two surface forms.
+- An item with no entities gets `[]`. That is a common, correct answer.
+
+Return only a JSON array, no prose and no markdown fence, one object per item
+in the order given:
+
+```json
+[{"id": "u5-001", "entities": [{"text": "Axil::auto_link", "type": "code"}], "unsure": []}]
+```
+
+`unsure` lists the surface forms you hesitated over (labeled or not), so the
+adjudicator can look at them; use `[]` when there were none.
+
+## 3. Span rules
+
+1. **Trim to the name.** Leave out backticks, quotes, brackets, sentence
+   punctuation, a trailing `:` or `,`, the possessive `'s`
+   (`axil-vector's open_err` gives `axil-vector` and `open_err`), call
+   parentheses and arguments (`code_segments()` gives `code_segments`), a
+   `:line` or `:line-line` suffix (`db.rs:611` gives `db.rs`), and a `$` sigil
+   (`$GOMODCACHE` gives `GOMODCACHE`). Keep characters that belong to the name:
+   hyphens, underscores, dots, `::`, `~/`, a leading `.` (`.axil/memory.axil`),
+   a directory's trailing `/` (`benchmarks/results/`), a macro's `!`
+   (`export_plugin!`).
+2. **Backticks.** Label what is inside, never the backticks. If the backticked
+   text is one name (an identifier, path, command, flag or key), it is one
+   span. If it is a longer fragment (a command line with arguments, an
+   expression, a signature), label the names inside it by the rules below, not
+   the whole fragment. Skip backticked literals and examples that name nothing
+   (`with`, `true`, `0`, `[]`, `- [ ]`).
+3. **Longest meaningful name.** When candidates overlap, keep the longest span
+   that is still one name, and do not also label its parts at that spot:
+   `crates/axil-core/src/db.rs` (not also `axil-core` or `db.rs`),
+   `Axil::register_extension` (not also `Axil`), `Claude Code` (not
+   `Claude`), `ONNX Runtime`. "Meaningful" stops at the name: do not extend a
+   span over descriptive words (`HNSW graph build` gives `HNSW`). If a part
+   also occurs on its own elsewhere in the item, list it as its own surface
+   form too.
+4. **Qualified paths** (`a::b::c`, `Type.method`) are labeled whole, once. A
+   method called on a local variable keeps only the method:
+   `model.predict_entities(...)` gives `predict_entities`, `e.exit_code()`
+   gives `exit_code`. A receiver that is itself a type or module stays:
+   `GLiNER.from_pretrained`, `cli_io::capture`.
+5. **Lists.** Split slash, comma or arrow lists into their complete names:
+   `with_graph_plugin/with_fts_plugin` gives two spans, `VectorPlugin->VectorEngine`
+   gives two. Skip fragments that are not names on their own
+   (`axil-core/bundle/vector` gives only `axil-core`; `Cargo.toml/lock` gives
+   only `Cargo.toml`). A slash list is not a path: `decisions/errors/context`
+   is three words, not a file.
+6. **Derived words.** Label the name inside a hyphenated adjective
+   (`SQLite-style` gives `SQLite`, `redb-backed` gives `redb`,
+   `Storage::delete-style` gives `Storage::delete`), and drop a plural `s`
+   added to a name (`Extension`s, written `Extensions`, gives `Extension`).
+   Hyphens that are part of a name stay (`release-plz`, `recall-for-file`).
+7. **Versions** are not part of a name unless they are joined to it in its
+   official spelling: `redb 3.1.3` gives `redb`, `ort 2.0.0-rc.10` gives `ort`,
+   `onnxruntime==1.22.0` gives `onnxruntime`; but `bge-small-en-v1.5`,
+   `glm-5.3-flash`, `GPT-4o` and `FTS5` are whole names.
+
+## 4. Types
+
+### `file`: something on disk
+
+Paths, file names and directories, absolute or relative: `src/main.rs`,
+`../hooks`, `~/.cargo/bin/axil`, `.github/workflows/ci.yml`, `Cargo.toml`,
+`README.md`, `tasks/archive/`. Also globs and path templates
+(`crates/*/benches/*_benchmarks.rs`, `benchmarks/results/hubness-<date>.json`),
+URLs, and a bare extension only when it stands for a specific file of the
+system (`.axil.vec`, `the .vec store`, `.axil.graph`). A generic extension
+(`all .rs files`) is not an entity.
+
+Not `file`: git branches and refs (`feat/open-backlog`, `origin/main`) are
+`code`; repository slugs (`DietrichGebert/ponytail`, `Xenova/bge-small-en-v1.5`)
+are `project`; slash lists (rule 3.5) are not entities.
+
+### `code`: identifiers inside a software system
+
+- Functions, methods, types, traits, structs, enums and variants, macros,
+  modules, constants, fields, test names: `extract_entities`,
+  `AutoLinkReport`, `AxilError::Busy`, `bindgen!`, `BRUTE_FORCE_MAX`,
+  `searchable_text`, `pipeline_overhead_under_5ms`.
+- This repository's own crates and packages: `axil-core`, `axil-vector`,
+  `axil-decide`, `axildb`, `axil_core`.
+- Commands, subcommands and long flags (section 6): `axil recall`,
+  `cargo test`, `git stash`, `recall-for-file`, `--dry-run`, `--top-k`.
+- Config keys and env vars: `slow_query_threshold_ms`, `embedding_model`,
+  `workspace.dependencies`, `CARGO_REGISTRY_TOKEN`, `AXIL_DB`, `TMPDIR`,
+  `HOME`.
+- Database tables and record fields: `_entities`, `_scip_aliases`,
+  `_idx_code_proxies`, `data.type`.
+- Hook events, MCP tool names, Cargo feature names, target triples, git
+  branches: `PreToolUse`, `recall_for_file`, `wasm-host`,
+  `x86_64-apple-darwin`, `feat/phase-x-daemon`.
+- Other projects' identifiers when written as code: `redb::Builder`,
+  `wasmtime::component::bindgen!`, `useGraphData`, `GLiNER.from_pretrained`,
+  `http.ResponseWriter`, `ENOENT`.
+
+### `project`: named products and what they are built from
+
+Libraries, frameworks, tools, services, platforms, operating systems,
+programming languages, protocol and format ecosystems, models, datasets,
+benchmarks, companies and their hardware. Protocols and formats count only
+when they are specific ecosystems (`MCP`, `SCIP`, `ONNX`, `WASM`), not
+everyday ones such as JSON or HTTP (section 5.1).
+
+Examples: `redb`, `tantivy`, `ort`, `ONNX Runtime`, `wasmtime`, `SQLite`,
+`Claude Code`, `Codex`, `GLM`, `Gemini`, `OpenCode`, `GitHub`, `crates.io`,
+`npm`, `HuggingFace`, `HF`, `release-plz`, `rustfmt`, `clippy`, `macOS`,
+`Windows`, `APFS`, `Rust`, `Python`, `Go`, `MCP`, `SCIP`, `ONNX`, `WASM`,
+`WASI`, `bge-small`, `nli-deberta-v3-xsmall`, `GLiNER`, `Haiku`,
+`LongMemEval`, `LoCoMo`, `M1 Pro`. The product itself, `Axil`, is `project`.
+A repository slug (`colbymchenry/codegraph`) is one `project` span.
+
+### `concept`: named domain terms, kept narrow
+
+A `concept` is the name of one specific mechanism, component, technique,
+snapshot or artifact that notes would link on. Label a phrase as `concept`
+only if all three tests hold:
+
+1. **Name test.** It names one specific thing. It is not a description, an
+   action, a property or a measurement.
+2. **Distinctive test.** At least one of its words is an acronym, a coined or
+   metaphorical word, or a proper noun: `QTC window`, `warm daemon`,
+   `needle gate`, `Resume Here`, `snap-prefix`, `dogfood eval`, `HNSW`,
+   `RRF`, `BM25`, `Platt scaling`. A phrase of plain words in their literal
+   sense fails, even if the project uses it often: `vector store`,
+   `graph boost`, `recall core`, `exact scan`, `freshness scan`, `hook block`,
+   `review edge`, `boot budget`, `release job`.
+3. **Linking test.** Another note about the same thing would use the same
+   phrase, and the phrase would not match notes about other things.
+
+A single plain word is never a `concept` (`daemon`, `gate`, `window`,
+`scan`). Named algorithms and techniques are `concept`; metric names are not
+entities at all (section 5). **If you are unsure whether something is a
+`concept`, leave it out** and add it to `unsure`.
+
+### Choosing between types
+
+- Inside a command line, a tool's name is part of a `code` command
+  (`cargo build`, `python3`, `npm run build`); named in prose, the same tool is
+  `project` (`cargo resolves the lockfile`, `git has those`). This holds for
+  `axil` too: `axil boot` is `code`, `the axil binary` gives `axil` as
+  `project`.
+- A third-party crate or library is `project` (`redb`, `tantivy`); this
+  repository's own crates are `code` (`axil-core`); any crate inside a
+  qualified path is part of that `code` span (`redb::Builder`).
+- Product, library, model, dataset or format: `project`. Mechanism, technique
+  or internal component: `concept`.
+- If one surface form plays two roles in the same item, give it the type of
+  its first occurrence.
+
+## 5. Never label
+
+1. **Common English words and generic technical nouns**, whatever their case:
+   database, DB, file, test, index, recall, graph, vector, search, hook,
+   daemon, store, cache, lock, query, model, embedding, agent, user, release,
+   branch, CLI, API, CI, PR, FTS, LLM, NLI, JSON, YAML, TOML, CSV, HTTP,
+   regex, CPU, GPU, RSS, OOM, TTY, ABI, SDK, UTF-8, sha256. ALL-CAPS emphasis
+   is not a name either (NOT FIXED, VERDICT, DONE, CRITICAL); env vars and
+   constants are (`HOME`, `TMPDIR`, `BRUTE_FORCE_MAX`).
+2. **Numbers and measurements**: counts, versions, sizes, durations,
+   percentages, ratios (`31/31`, `5/17`), dates, times, scores, and metric
+   names (NDCG, NDCG@10, MRR, AUROC, ECE, FPR, hit@5, p50, p95, kappa).
+3. **Bookkeeping ids**: commit shas (`4f7e5f3`), record ids
+   (`01M3GEF5V7JH4Z9RESFVPJM7KZ`), CI run ids, PR and issue numbers
+   (`#36`, `PR #5`), and plan labels: phase, step, increment, task, bug, item
+   and review labels (`Phase 7`, `12.10a`, `4/12.9`, `Step 6`, `BUG-9`,
+   `D2`, `U1`, `P2`, `Tier-1`). A slash list of these numbers is not a path.
+4. **Markup and punctuation**: heading markers, bullets, checkboxes (`- [ ]`,
+   `- [x]`), bold labels (`**Goal:**`, `**Next:**`), code fences, arrows,
+   `[REDACTED]`, and conventional-commit prefixes (`feat(cli):`, `fix:`,
+   `docs:`). A heading's words follow the normal rules (`## Resume Here`
+   gives `Resume Here`).
+5. **Language keywords and basic types**: `fn`, `impl`, `struct`, `trait`,
+   `enum`, `pub`, `dyn`, `async`, `mod`, `def`, `class`, `func`, `function`,
+   `let`, `self`, `Self`, `true`, `false`, `None`, `Some`, `Ok`, `Err`,
+   `bool`, `str`, `String`, `usize` and the other number types, `Option`,
+   `Result`, `Vec`, `Box`, `Arc`, and type parameters such as `T` and `E`.
+6. **Values and placeholders**: quoted error messages and example strings
+   (a quoted string that is itself a name, such as a model id or a path, is
+   still labeled),
+   flag values (`--recall-format table` gives only `--recall-format`),
+   placeholders (`<id>`, `<path>`, `X.Y.Z`), short flags (`-p`, `-f`), and
+   local variables or arguments (`s`, `e`, `ctx`, `text`, `threshold=0.5`).
+7. **Unqualified generic method names**, even as code: `new`, `open`, `get`,
+   `set`, `run`, `build`, `parse`, `default`, `main`. Qualified, they are
+   names (`Axil::open`, `WarmDb::open`).
+8. **People**: the user, reviewers, authors and personal accounts, except
+   inside a repository slug.
+
+## 6. The traps: plain words, keywords and commands
+
+Most junk from pattern extractors comes from text that looks like code but is
+English. These rules decide those cases.
+
+**Plain words.** A candidate that is one ordinary lowercase English word
+(`core`, `rules`, `summary`, `resolved`, `heal`, `decide`, `deps`) is labeled
+only when the text marks it as code: it fills a backtick span by itself, or it
+is joined without a space to code syntax (`data.type`, `x::core`,
+`render()`, `vec!`). A kind word next to it is not enough: `the rules table`
+and `the decide feature` give nothing, `` the `rules` table `` gives `rules`.
+Section 5.7 still applies to marked plain words.
+
+**Capitalized words.** An ordinary word written with a capital (`Engine`,
+`Extension`, `Storage`, `Linker`) is a `code` type name when it is code-marked,
+followed by a kind word (`the Extension trait`, `a Plugin enum`), or
+capitalized mid-sentence where English would not capitalize it
+(`registers an Extension at runtime`). At the start of a sentence or in a
+title it is just a word.
+
+**Keywords in prose.** `a trait with defaults`, `the struct is built once`,
+`impl details`, `class of bugs`, `a pure function of token lengths`, `the fn
+keyword`: none of these words is an entity. In real code, the declared name
+is: `pub fn parse_token(` gives `parse_token`, `func (s *Server) Handle(`
+gives `Server` and `Handle`, `def login(u)` gives `login`.
+
+**Look-alikes.** Plural or mixed-case acronyms (`PRs`, `IDs`, `DTOs`, `GiB`)
+are not CamelCase identifiers; `macOS` is a `project`. Apostrophes do not
+quote anything (`Axil's ... doesn't` is not a quoted string). Numbers with
+slashes and dots (`3.1/3.2`) are not paths.
+
+**Commands.** In a command line (backticked, or starting with a program such
+as `axil`, `cargo`, `git`, `gh`, `npm`, `python3`, `uv`), label:
+
+- the command: the program plus its subcommand words, up to the first flag,
+  argument or placeholder (`cargo test`, `gh run rerun`, `git worktree add`,
+  `axil ext upgrade`). Subcommand words count even when they are plain words.
+  If a global flag separates program and subcommand, they are two spans:
+  `axil --db x.axil heal` gives `axil`, `--db`, `x.axil`, `heal`;
+- each long flag (`--no-default-features`, `--features`), without its value;
+- arguments that are entities by the other rules (paths, crate names, test
+  names): `cargo test -p axil-tests --test mcp_server` gives `cargo test`,
+  `axil-tests`, `--test`, `mcp_server`.
+
+A subcommand named outside a command line is labeled if it is hyphenated or
+otherwise not a plain word (`recall-for-file`, `code-search`,
+`detect-conflicts`), or if it is a plain word marked as code (rule above).
+
+## 7. Worked examples
+
+These are written in the style of the set but are not taken from it.
+
+**Example 1: Rust, code-heavy**
+
+> Fixed `Axil::auto_link` minting junk: extract_code_symbols ran
+> DECLARATION_PATTERNS over prose. Root cause: crates/axil-core/src/entity.rs:340
+> had no code-segment gate. Fix: gate on code_segments(); the new test
+> prose_never_mints_symbols passes under cargo test -p axil-core.
+
+```json
+[{"text": "Axil::auto_link", "type": "code"},
+ {"text": "extract_code_symbols", "type": "code"},
+ {"text": "DECLARATION_PATTERNS", "type": "code"},
+ {"text": "crates/axil-core/src/entity.rs", "type": "file"},
+ {"text": "code_segments", "type": "code"},
+ {"text": "prose_never_mints_symbols", "type": "code"},
+ {"text": "cargo test", "type": "code"},
+ {"text": "axil-core", "type": "code"}]
+```
+
+`:340`, `()` and `-p` are dropped. `axil-core` is listed because it also
+occurs on its own after `-p`, not because of the path. "code-segment gate" is
+a description, not a name.
+
+**Example 2: prose with names only**
+
+> We kept redb instead of moving to SurrealKV: the user wants the SQLite-style
+> single file, and Claude Code users should never have to start a server.
+> GitHub issue triage can wait until after the release.
+
+```json
+[{"text": "redb", "type": "project"},
+ {"text": "SurrealKV", "type": "project"},
+ {"text": "SQLite", "type": "project"},
+ {"text": "Claude Code", "type": "project"},
+ {"text": "GitHub", "type": "project"}]
+```
+
+**Example 3: junk traps, no entities**
+
+> Each engine exposes a trait with a lazy open, and the struct is only built
+> once; impl details stay private. The old regex read "fn" in prose as code and
+> turned PRs, IDs and 3.1/3.2 into entities. The team's notes don't say which
+> fix shipped.
+
+```json
+[]
+```
+
+Keywords used as English, plural acronyms, a list of plan numbers and two
+apostrophes. `regex` is a generic noun.
+
+**Example 4: Python**
+
+> scripts/eval_ner.py loads gliner and calls
+> `GLiNER.from_pretrained("urchade/gliner_small-v2.1")`, then
+> model.predict_entities(text, labels, threshold=0.5). Pin onnxruntime==1.22.0
+> in requirements.txt: the spans drift on 1.23. Run it with
+> python3 scripts/eval_ner.py --split test.
+
+```json
+[{"text": "scripts/eval_ner.py", "type": "file"},
+ {"text": "gliner", "type": "project"},
+ {"text": "GLiNER.from_pretrained", "type": "code"},
+ {"text": "urchade/gliner_small-v2.1", "type": "project"},
+ {"text": "predict_entities", "type": "code"},
+ {"text": "onnxruntime", "type": "project"},
+ {"text": "requirements.txt", "type": "file"},
+ {"text": "python3", "type": "code"},
+ {"text": "--split", "type": "code"}]
+```
+
+The local receiver `model.`, the arguments, the versions and the flag value
+`test` are left out. The script path occurs twice and is listed once.
+
+**Example 5: TypeScript**
+
+> The web UI build broke: crates/axil-ui/src/pages/Graph.tsx imported
+> useGraphData from ../hooks before `npm run build` regenerated vite.config.ts.
+> Fixed by exporting the hook from hooks/index.ts; React 19 and Vite 6 are
+> unchanged.
+
+```json
+[{"text": "crates/axil-ui/src/pages/Graph.tsx", "type": "file"},
+ {"text": "useGraphData", "type": "code"},
+ {"text": "../hooks", "type": "file"},
+ {"text": "npm run build", "type": "code"},
+ {"text": "vite.config.ts", "type": "file"},
+ {"text": "hooks/index.ts", "type": "file"},
+ {"text": "React", "type": "project"},
+ {"text": "Vite", "type": "project"}]
+```
+
+**Example 6: Go**
+
+> Go modules resolve from go.mod and read docs from $GOMODCACHE. scip-go wrote
+> .axil/index-go-backend-3f2a.scip when run from backend/, but
+> `func (s *Server) Handle(w http.ResponseWriter)` was skipped: the old pattern
+> expected a name right after func.
+
+```json
+[{"text": "Go", "type": "project"},
+ {"text": "go.mod", "type": "file"},
+ {"text": "GOMODCACHE", "type": "code"},
+ {"text": "scip-go", "type": "project"},
+ {"text": ".axil/index-go-backend-3f2a.scip", "type": "file"},
+ {"text": "backend/", "type": "file"},
+ {"text": "Server", "type": "code"},
+ {"text": "Handle", "type": "code"},
+ {"text": "http.ResponseWriter", "type": "code"}]
+```
+
+`func` is a keyword; `s` and `w` are local variables.
+
+**Example 7: markdown checklist**
+
+> ## Next
+> - [ ] Wire `TypedDecider` behind the `decide` feature
+> - [x] Pin bge-small-en-v1.5 by revision + sha256
+> - **Blocked:** ort 2.0.0-rc.13 upgrade (needs user review)
+
+```json
+[{"text": "TypedDecider", "type": "code"},
+ {"text": "decide", "type": "code"},
+ {"text": "bge-small-en-v1.5", "type": "project"},
+ {"text": "ort", "type": "project"}]
+```
+
+`decide` is a plain word, labeled because it fills a backtick span. `Next` is
+a heading made of a plain word, so it is not labeled. The checkboxes, the bold
+label, `sha256` and the version are not entities.
+
+**Example 8: bookkeeping traps**
+
+> Merged feat/entity-gate into dev as 9c1e2ab (PR #52) after the needle gate
+> stayed at 31/31 and LongMemEval-S held NDCG@10 0.857 on 2026-10-12; error
+> 01M3GEF5V7JH4Z9RESFVPJM7KZ is resolved per plan item 31.4 (BUG-12).
+
+```json
+[{"text": "feat/entity-gate", "type": "code"},
+ {"text": "needle gate", "type": "concept"},
+ {"text": "LongMemEval-S", "type": "project"}]
+```
+
+`dev` is a plain word; the sha, PR number, ratio, metric, score, date, record
+id and plan labels are bookkeeping.
+
+**Example 9: CLI and config**
+
+> Run `axil --db .axil/memory.axil heal --reindex --dry-run`; with AXIL_DB
+> unset, recall-for-file falls back to the DB directory. Set [debug]
+> slow_query_threshold_ms = 0 in axil.toml to log every query, and keep the
+> `rules` table pinned.
+
+```json
+[{"text": "axil", "type": "code"},
+ {"text": "--db", "type": "code"},
+ {"text": ".axil/memory.axil", "type": "file"},
+ {"text": "heal", "type": "code"},
+ {"text": "--reindex", "type": "code"},
+ {"text": "--dry-run", "type": "code"},
+ {"text": "AXIL_DB", "type": "code"},
+ {"text": "recall-for-file", "type": "code"},
+ {"text": "slow_query_threshold_ms", "type": "code"},
+ {"text": "axil.toml", "type": "file"},
+ {"text": "rules", "type": "code"}]
+```
+
+`heal` counts because it is a subcommand in a command line. `[debug]` is a
+plain-word section name and `0` a value.
+
+**Example 10: concepts and type names**
+
+> The warm daemon keeps one WarmDb per database, so prompt hooks no longer pay
+> the 1.2 s HNSW graph build. Resume Here rows and the QTC window read from the
+> same handle; a plugin registers an Extension at runtime through
+> Axil::register_extension. The vector store and recall quality are unchanged.
+
+```json
+[{"text": "warm daemon", "type": "concept"},
+ {"text": "WarmDb", "type": "code"},
+ {"text": "HNSW", "type": "concept"},
+ {"text": "Resume Here", "type": "concept"},
+ {"text": "QTC window", "type": "concept"},
+ {"text": "Extension", "type": "code"},
+ {"text": "Axil::register_extension", "type": "code"}]
+```
+
+`Extension` is capitalized mid-sentence, so it is the type. `vector store` and
+`recall quality` are plain literal phrases, so they fail the distinctive test.
+
+## 8. Checklist before you answer
+
+- Every `text` is an exact substring of its item, with the same case.
+- No span includes backticks, quotes, brackets, trailing punctuation, `'s`,
+  `$`, call parentheses or a `:line` suffix.
+- No plain English word is labeled unless the text marks it as code.
+- No number, version, id, plan label, metric or markup is labeled.
+- Each surface form appears once per item; parts of a longer span are listed
+  only if they also occur on their own.
+- Every `concept` passes all three tests; doubtful ones are in `unsure`
+  instead.
+- The output is one JSON array with one object per item, in order, and
+  nothing else.
+
+
+---
+
+You are an annotator. Label the items below by the guidelines above, using only each item's own text. Do not use tools, read files or run commands. Each item is wrapped in <item id="..."> ... </item>; the tags are not part of its text.
+
+<item id="b-001">
+Indexer module summary cut `&combined[..max_chars]` could panic on a multibyte char (doc comments are full of em dashes). Root cause: Raw byte slice in index_modules truncation, same bug class as the boot narrative cut. Fix: combine_summaries floors the cut to a char boundary before looking for a sentence boundary (indexer.rs)
+</item>
+
+<item id="b-002">
+Boot budget: default 1000 tokens (ceil(bytes/4)) for every boot surface (axil_core::DEFAULT_TOKEN_BUDGET, CLI json/compact/narrative, --schema v1, MCP boot). --schema v1 overshot its own 2000 budget (5693 by its own token_budget_used on the dogfood snapshot) because never-dropped sections were never trimmed and rows carried full data; the flat JSON had no default budget and dropped whole keys. Measured in benchmarks/results/boot-tokens-2026-09-30.json.
+</item>
+
+---
+
+There are 2 items: b-001, b-002.
+Return ONLY a JSON array of {id, entities:[{text,type}]} for every item, one object per item in the order given, using the ids above. No prose, no markdown fence.

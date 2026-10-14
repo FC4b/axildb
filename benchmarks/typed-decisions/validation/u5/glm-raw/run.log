@@ -1,0 +1,19 @@
+2026-10-14T04:41:03Z [A] batch 01 attempt 1 start
+2026-10-14T04:46:55Z [A] batch 01 attempt 1 exit=0 secs=352 check=0 ok: 20 objects
+2026-10-14T04:46:55Z [A] DONE
+2026-10-14T04:47:16Z [A] batch 02 attempt 1 start
+2026-10-14T04:47:17Z [B] batch 03 attempt 1 start
+2026-10-14T04:52:40Z [B] batch 03 attempt 1 exit=0 secs=323 check=0 ok: 20 objects
+2026-10-14T04:52:40Z [B] batch 05 attempt 1 start
+2026-10-14T04:52:42Z [A] batch 02 attempt 1 exit=0 secs=326 check=0 ok: 20 objects
+2026-10-14T04:52:42Z [A] batch 04 attempt 1 start
+2026-10-14T04:58:33Z [B] batch 05 attempt 1 exit=0 secs=353 check=0 ok: 20 objects
+2026-10-14T04:58:33Z [B] batch 07 attempt 1 start
+2026-10-14T04:58:42Z [A] batch 04 attempt 1 exit=0 secs=360 check=0 ok: 20 objects
+2026-10-14T04:58:42Z [A] batch 06 attempt 1 start
+2026-10-14T05:04:09Z [A] batch 06 attempt 1 exit=0 secs=327 check=0 ok: 20 objects
+2026-10-14T05:04:09Z [A] batch 08 attempt 1 start
+2026-10-14T05:04:34Z [B] batch 07 attempt 1 exit=0 secs=362 check=0 ok: 20 objects
+2026-10-14T05:04:35Z [B] DONE
+2026-10-14T05:09:21Z [A] batch 08 attempt 1 exit=0 secs=312 check=0 ok: 20 objects
+2026-10-14T05:09:21Z [A] DONE

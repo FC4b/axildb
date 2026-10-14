@@ -1,0 +1,247 @@
+[
+  {
+    "id": "b-021",
+    "entities": [
+      {"text": "axil-decide", "type": "code"},
+      {"text": "MCP", "type": "project"},
+      {"text": "Codex", "type": "project"},
+      {"text": "review/recall-core", "type": "code"}
+    ]
+  },
+  {
+    "id": "b-022",
+    "entities": [
+      {"text": "feat/phase-28-qtc-batch", "type": "code"},
+      {"text": "tasks/phase-28-step6-open-review-findings.md", "type": "file"},
+      {"text": "embed_batch_within", "type": "code"},
+      {"text": "ONNX", "type": "project"},
+      {"text": "plan_batches", "type": "code"},
+      {"text": "axil-vector", "type": "code"},
+      {"text": "embed.rs", "type": "file"}
+    ]
+  },
+  {
+    "id": "b-023",
+    "entities": [
+      {"text": "laya-ultrafast", "type": "project"},
+      {"text": "Axil", "type": "project"},
+      {"text": "Python", "type": "project"},
+      {"text": "browser-use/jev-ultrafast", "type": "project"},
+      {"text": "Apple-MLX", "type": "project"},
+      {"text": "README", "type": "file"},
+      {"text": "M3 Max", "type": "project"}
+    ]
+  },
+  {
+    "id": "b-024",
+    "entities": [
+      {"text": "Axil", "type": "project"},
+      {"text": "Claude Code", "type": "project"},
+      {"text": "auto-memory", "type": "concept"},
+      {"text": "axil-learn", "type": "code"}
+    ]
+  },
+  {
+    "id": "b-025",
+    "entities": [
+      {"text": "README", "type": "file"},
+      {"text": "axildb", "type": "code"},
+      {"text": "axil-cli", "type": "code"},
+      {"text": "cargo install", "type": "code"},
+      {"text": "axil", "type": "project"},
+      {"text": "crates.io", "type": "project"},
+      {"text": "axildb-umbrella", "type": "code"}
+    ]
+  },
+  {
+    "id": "b-026",
+    "entities": [
+      {"text": "axil-core::brain::MemoryType", "type": "code"},
+      {"text": "memory_type_to_table", "type": "code"},
+      {"text": "main.rs", "type": "file"},
+      {"text": "brain::MemoryType", "type": "code"},
+      {"text": "rg", "type": "project"},
+      {"text": "lib.rs", "type": "file"},
+      {"text": "remember", "type": "code"},
+      {"text": "Command::Remember", "type": "code"}
+    ]
+  },
+  {
+    "id": "b-027",
+    "entities": [
+      {"text": "Codex", "type": "project"},
+      {"text": "gpt-6-sol", "type": "project"},
+      {"text": "GLM", "type": "project"},
+      {"text": "glm-5.3-flash", "type": "project"},
+      {"text": "LongMemEval", "type": "project"},
+      {"text": "LME", "type": "project"}
+    ]
+  },
+  {
+    "id": "b-028",
+    "entities": [
+      {"text": "axildb", "type": "code"},
+      {"text": "crates.io", "type": "project"},
+      {"text": "release-plz", "type": "project"},
+      {"text": "axil-core", "type": "code"},
+      {"text": "GitHub", "type": "project"}
+    ]
+  },
+  {
+    "id": "b-029",
+    "entities": [
+      {"text": "Axil", "type": "project"},
+      {"text": "axil boot", "type": "code"},
+      {"text": "axil recall", "type": "code"},
+      {"text": "axil code-search", "type": "code"},
+      {"text": "axil fts", "type": "code"},
+      {"text": "axil recall-for-file", "type": "code"},
+      {"text": "axil store", "type": "code"},
+      {".claude/CLAUDE.md": "file", "text": ".claude/CLAUDE.md", "type": "file"}
+    ]
+  },
+  {
+    "id": "b-030",
+    "entities": [
+      {"text": "axildb", "type": "code"},
+      {"text": "Windows", "type": "project"},
+      {"text": "macOS", "type": "project"},
+      {"text": "cargo check", "type": "code"},
+      {"text": "--target", "type": "code"},
+      {"text": "x86_64-pc-windows-msvc", "type": "code"},
+      {"text": "MSVC", "type": "project"},
+      {"text": "ring", "type": "project"},
+      {"text": "assert.h", "type": "file"},
+      {"text": "ureq", "type": "project"},
+      {"text": "rustls", "type": "project"},
+      {"text": "ort-sys", "type": "project"},
+      {"text": "onig_sys", "type": "project"},
+      {"text": "llm-http", "type": "code"},
+      {"text": "axil-core", "type": "code"},
+      {"text": "tantivy", "type": "project"},
+      {"text": "zstd-sys", "type": "project"},
+      {"text": "--no-default-features", "type": "code"},
+      {"text": "--features", "type": "code"},
+      {"text": "--profile", "type": "code"},
+      {"text": "hook_brain.rs", "type": "file"}
+    ]
+  },
+  {
+    "id": "b-031",
+    "entities": [
+      {"text": "orphaned_vectors", "type": "code"},
+      {"text": "index_size_mismatch", "type": "code"},
+      {"text": "Storage::delete", "type": "code"},
+      {"text": "on_record_delete", "type": "code"},
+      {"text": "axil heal", "type": "code"},
+      {"text": "--orphans", "type": "code"}
+    ]
+  },
+  {
+    "id": "b-032",
+    "entities": [
+      {"text": "AbiVersion::parse", "type": "code"},
+      {"text": "Axil", "type": "project"},
+      {"text": "atomic_write", "type": "code"},
+      {"text": "Capabilities", "type": "code"},
+      {"text": "from_names", "type": "code"},
+      {"text": "granted_names", "type": "code"},
+      {"text": "ALL_NAMES", "type": "code"}
+    ]
+  },
+  {
+    "id": "b-033",
+    "entities": [
+      {"text": "Codex", "type": "project"}
+    ]
+  },
+  {
+    "id": "b-034",
+    "entities": [
+      {"text": "origin/main", "type": "code"},
+      {"text": "axil-runtime::atomic_write", "type": "code"},
+      {"text": "Windows", "type": "project"},
+      {"text": "Codex", "type": "project"},
+      {"text": "origin/dev", "type": "code"},
+      {"text": "axil deps", "type": "code"},
+      {"text": "--help", "type": "code"},
+      {"text": "--format", "type": "code"},
+      {"text": "axil-runtime", "type": "code"},
+      {"text": "wasm-host", "type": "code"}
+    ]
+  },
+  {
+    "id": "b-035",
+    "entities": [
+      {"text": "boot::fill_by_priority", "type": "code"},
+      {"text": "Resume Here", "type": "concept"},
+      {"text": "active_failures", "type": "code"},
+      {"text": "recent_decisions", "type": "code"},
+      {"text": "open_threads", "type": "code"},
+      {"text": "confidence_notes", "type": "code"},
+      {"text": "--budget", "type": "code"},
+      {"text": "feat/phase-28-boot-budget", "type": "code"}
+    ]
+  },
+  {
+    "id": "b-036",
+    "entities": [
+      {"text": "Resume Here", "type": "concept"},
+      {"text": "tasks/remaining.md", "type": "file"},
+      {"text": "origin/dev", "type": "code"},
+      {"text": "tasks/archive/2026-10-04/", "type": "file"},
+      {"text": "Axil", "type": "project"}
+    ]
+  },
+  {
+    "id": "b-037",
+    "entities": [
+      {"text": "Criterion", "type": "project"},
+      {"text": "crates/axil-core/benches/core_benchmarks.rs", "type": "file"},
+      {"text": "crates/engines/axil-{vector,graph,fts}/benches/*_benchmarks.rs", "type": "file"},
+      {"text": "scripts/bench-check.sh", "type": "file"},
+      {"text": "THRESHOLD", "type": "code"},
+      {"text": "--save", "type": "code"},
+      {"text": "--compare", "type": "code"},
+      {"text": "cargo bench", "type": "code"},
+      {"text": "axil-vector", "type": "code"},
+      {"text": "--bench", "type": "code"},
+      {"text": "vector_benchmarks", "type": "code"},
+      {"text": "--no-run", "type": "code"}
+    ]
+  },
+  {
+    "id": "b-038",
+    "entities": [
+      {"text": "--drop-engine", "type": "code"},
+      {"text": "Engine", "type": "code"},
+      {"text": "axil_core::drop_engine_companion", "type": "code"},
+      {"text": ".axil", "type": "file"},
+      {"text": "DropEngineReport", "type": "code"},
+      {"text": "axil compact", "type": "code"}
+    ]
+  },
+  {
+    "id": "b-039",
+    "entities": [
+      {"text": "Embedder::embed_batch_impl", "type": "code"},
+      {"text": "ORT", "type": "project"},
+      {"text": "nomic", "type": "project"},
+      {"text": "bge-m3", "type": "project"},
+      {"text": "gte-modernbert", "type": "project"},
+      {"text": "embed_batch_impl", "type": "code"}
+    ]
+  },
+  {
+    "id": "b-040",
+    "entities": [
+      {"text": "WIT", "type": "project"},
+      {"text": "axil_runtime::bindings", "type": "code"},
+      {"text": "wasmtime::component::bindgen!", "type": "code"},
+      {"text": "wit/axil-plugin.wit", "type": "file"},
+      {"text": "wasm-tools", "type": "project"},
+      {"text": "Axil", "type": "project"},
+      {"text": "WasmExtension", "type": "code"}
+    ]
+  }
+]
