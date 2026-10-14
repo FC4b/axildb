@@ -1068,6 +1068,7 @@ fn maybe_rerank_recall_results(
         enabled: true,
         model: args.rerank_model.clone(),
         top_k_rerank: args.rerank_top_k,
+        ..Default::default()
     };
 
     if let Err(err) = axil_indexer::rerank::rerank(query, &mut values, &config) {

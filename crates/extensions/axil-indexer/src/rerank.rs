@@ -51,6 +51,12 @@ pub struct RerankConfig {
     pub model: String,
     /// Only rerank the top K candidates (reduces latency).
     pub top_k_rerank: usize,
+    /// Share of the cross-encoder in the final order, in `[0, 1]`. At 1.0
+    /// (the default) the cross-encoder's order replaces the incoming one.
+    /// Below it, each scored candidate is ranked by
+    /// `w · cross-encoder + (1 − w) · incoming score`, both min-max
+    /// normalized over the scored candidates; 0.0 keeps the incoming order.
+    pub blend_weight: f32,
 }
 
 impl Default for RerankConfig {
@@ -59,6 +65,7 @@ impl Default for RerankConfig {
             enabled: false,
             model: "models/cross-encoder.onnx".to_string(),
             top_k_rerank: 20,
+            blend_weight: 1.0,
         }
     }
 }
@@ -103,10 +110,65 @@ fn passage_text(candidate: &Value) -> String {
     }
 }
 
+/// The score each candidate arrived with (its `score` field), which a blend
+/// weighs the cross-encoder against. When any candidate lacks one, the
+/// incoming order stands in for it: position `i` scores `-i`.
+fn incoming_scores(candidates: &[Value]) -> Vec<f32> {
+    let scores: Option<Vec<f32>> = candidates
+        .iter()
+        .map(|c| c.get("score").and_then(Value::as_f64).map(|s| s as f32))
+        .collect();
+    scores.unwrap_or_else(|| (0..candidates.len()).map(|i| -(i as f32)).collect())
+}
+
+/// Min-max normalize into `[0, 1]`. Equal values all map to 0, leaving the
+/// order to the other signal.
+fn min_max(values: &[f32]) -> Vec<f32> {
+    let lo = values.iter().copied().fold(f32::INFINITY, f32::min);
+    let hi = values.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let span = hi - lo;
+    values
+        .iter()
+        .map(|v| if span > 0.0 { (v - lo) / span } else { 0.0 })
+        .collect()
+}
+
+/// Order the scored candidates best-first, each with its sort key: the
+/// cross-encoder score when `blend_weight` is 1 or more (or not a number),
+/// else `w · ce + (1 − w) · incoming` over min-max normalized scores.
+/// `incoming` is indexed by candidate index. Ties keep the incoming order.
+fn order_scored(
+    scores: &[RerankScore],
+    incoming: &[f32],
+    blend_weight: f32,
+) -> Vec<(RerankScore, f32)> {
+    let mut keyed: Vec<(RerankScore, f32)> = if blend_weight < 1.0 {
+        let w = blend_weight.max(0.0);
+        let ce: Vec<f32> = scores.iter().map(|rs| rs.score).collect();
+        let fused: Vec<f32> = scores.iter().map(|rs| incoming[rs.index]).collect();
+        let (ce, fused) = (min_max(&ce), min_max(&fused));
+        scores
+            .iter()
+            .zip(ce.iter().zip(&fused))
+            .map(|(rs, (c, f))| (rs.clone(), w * c + (1.0 - w) * f))
+            .collect()
+    } else {
+        scores.iter().map(|rs| (rs.clone(), rs.score)).collect()
+    };
+    keyed.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.0.index.cmp(&b.0.index))
+    });
+    keyed
+}
+
 /// Rerank a set of candidate results using a cross-encoder model.
 ///
 /// Takes the top `config.top_k_rerank` candidates, scores each (query, passage)
-/// pair with the cross-encoder, and returns results sorted by cross-encoder score.
+/// pair with the cross-encoder, and returns results sorted by cross-encoder
+/// score, or by its blend with their incoming `score` when
+/// `config.blend_weight` is below 1.
 ///
 /// When the `rerank` feature is not enabled, returns results unchanged.
 #[cfg(feature = "rerank")]
@@ -114,7 +176,22 @@ pub fn rerank(query: &str, results: &mut Vec<Value>, config: &RerankConfig) -> R
     if !config.enabled || results.is_empty() {
         return Ok(());
     }
+    let scores = cross_encoder_scores(query, results, config)?;
+    apply_scores(results, &scores, config);
+    Ok(())
+}
 
+/// Score the first `config.top_k_rerank` candidates against `query` with the
+/// cross-encoder, one [`RerankScore`] per candidate that has text (a long
+/// passage scores as its best window). [`apply_scores`] orders the list by
+/// them; scoring once and applying several blend weights compares the
+/// weights on one set of scores.
+#[cfg(feature = "rerank")]
+pub fn cross_encoder_scores(
+    query: &str,
+    results: &[Value],
+    config: &RerankConfig,
+) -> Result<Vec<RerankScore>, String> {
     let model_path = std::path::Path::new(&config.model);
     if !model_path.exists() {
         return Err(format!(
@@ -166,21 +243,29 @@ pub fn rerank(query: &str, results: &mut Vec<Value>, config: &RerankConfig) -> R
 
         Ok(())
     })?;
+    Ok(scores)
+}
 
-    // Sort by cross-encoder score descending.
-    scores.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+/// Reorder `results` by `scores` from [`cross_encoder_scores`] over the same
+/// list and `config`: the scored candidates best-first (by cross-encoder
+/// score, or by its blend with their incoming `score` when
+/// `config.blend_weight` is below 1), then the unscorable ones (no text) in
+/// their original order, then the candidates past `config.top_k_rerank`.
+/// Each scored candidate gains `rerank_score`, and `rerank_blend` when blended.
+pub fn apply_scores(results: &mut Vec<Value>, scores: &[RerankScore], config: &RerankConfig) {
+    let rerank_count = results.len().min(config.top_k_rerank);
+    let incoming = incoming_scores(&results[..rerank_count]);
+    let ordered = order_scored(scores, &incoming, config.blend_weight);
+    let blending = config.blend_weight < 1.0;
 
-    // Rebuild the results: the scored candidates by score, then the
-    // unscorable ones (no text) in their original order, then the rest.
     let mut reranked: Vec<Value> = Vec::with_capacity(results.len());
-    for rs in &scores {
+    for (rs, key) in &ordered {
         let mut item = results[rs.index].clone();
         if let Some(obj) = item.as_object_mut() {
             obj.insert("rerank_score".to_string(), serde_json::json!(rs.score));
+            if blending {
+                obj.insert("rerank_blend".to_string(), serde_json::json!(key));
+            }
         }
         reranked.push(item);
     }
@@ -196,7 +281,6 @@ pub fn rerank(query: &str, results: &mut Vec<Value>, config: &RerankConfig) -> R
     }
 
     *results = reranked;
-    Ok(())
 }
 
 /// Split a passage into overlapping byte-safe windows. Each window is sized so
@@ -384,6 +468,86 @@ mod tests {
         assert!(!config.enabled);
         assert_eq!(config.top_k_rerank, 20);
         assert_eq!(config.model, "models/cross-encoder.onnx");
+        assert_eq!(config.blend_weight, 1.0);
+    }
+
+    fn ce(scores: &[(usize, f32)]) -> Vec<RerankScore> {
+        scores
+            .iter()
+            .map(|&(index, score)| RerankScore { index, score })
+            .collect()
+    }
+
+    fn order(ranked: &[(RerankScore, f32)]) -> Vec<usize> {
+        ranked.iter().map(|(rs, _)| rs.index).collect()
+    }
+
+    // Recall order 0, 1, 2; the cross-encoder prefers 2, then 0, then 1.
+    const INCOMING: [f32; 3] = [0.9, 0.8, 0.1];
+    const CE: [(usize, f32); 3] = [(0, 1.0), (1, -4.0), (2, 6.0)];
+
+    #[test]
+    fn full_weight_is_the_cross_encoder_order() {
+        let ranked = order_scored(&ce(&CE), &INCOMING, 1.0);
+        assert_eq!(order(&ranked), vec![2, 0, 1]);
+        // The key is the raw cross-encoder score, as before blending existed.
+        assert_eq!(ranked[0].1, 6.0);
+    }
+
+    #[test]
+    fn zero_weight_is_the_incoming_order() {
+        assert_eq!(
+            order(&order_scored(&ce(&CE), &INCOMING, 0.0)),
+            vec![0, 1, 2]
+        );
+    }
+
+    #[test]
+    fn a_blend_weighs_both_normalized_scores() {
+        // Normalized: ce = [0.5, 0.0, 1.0], incoming = [1.0, 0.875, 0.0].
+        // w = 0.5 → [0.75, 0.4375, 0.5]: candidate 0 keeps first place, and
+        // the cross-encoder lifts 2 over 1.
+        let ranked = order_scored(&ce(&CE), &INCOMING, 0.5);
+        assert_eq!(order(&ranked), vec![0, 2, 1]);
+        assert!((ranked[0].1 - 0.75).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_flat_signal_leaves_the_order_to_the_other_one() {
+        let flat = ce(&[(0, 3.0), (1, 3.0), (2, 3.0)]);
+        assert_eq!(order(&order_scored(&flat, &INCOMING, 0.9)), vec![0, 1, 2]);
+        // Ties keep the incoming order.
+        assert_eq!(order(&order_scored(&flat, &INCOMING, 1.0)), vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn apply_scores_orders_the_window_then_the_unscored_then_the_rest() {
+        let mut results = vec![
+            json!({"id": "a", "score": 0.9}),
+            json!({"id": "b", "score": 0.8}),
+            json!({"id": "c", "score": 0.7}),
+            json!({"id": "d", "score": 0.6}),
+        ];
+        // A window of three; "b" had no text to score.
+        let config = RerankConfig {
+            top_k_rerank: 3,
+            ..Default::default()
+        };
+        let scores = ce(&[(0, -2.0), (2, 5.0)]);
+        apply_scores(&mut results, &scores, &config);
+        let ids: Vec<&str> = results.iter().map(|r| r["id"].as_str().unwrap()).collect();
+        assert_eq!(ids, vec!["c", "a", "b", "d"]);
+        assert_eq!(results[0]["rerank_score"], json!(5.0));
+        assert!(results[0].get("rerank_blend").is_none());
+        assert!(results[2].get("rerank_score").is_none());
+    }
+
+    #[test]
+    fn incoming_scores_fall_back_to_position() {
+        let scored = [json!({"score": 0.5}), json!({"score": 0.25})];
+        assert_eq!(incoming_scores(&scored), vec![0.5, 0.25]);
+        let partly = [json!({"score": 0.5}), json!({"id": "b"})];
+        assert_eq!(incoming_scores(&partly), vec![0.0, -1.0]);
     }
 
     #[test]
@@ -431,6 +595,7 @@ mod tests {
             enabled: true,
             model: "/nonexistent/model.onnx".to_string(),
             top_k_rerank: 5,
+            ..Default::default()
         };
         let mut results = vec![json!({"id": "a", "summary": "test"})];
         let err = rerank("query", &mut results, &config);
