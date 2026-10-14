@@ -6510,6 +6510,25 @@ impl Axil {
         Ok(report)
     }
 
+    /// Load now what the first commands would otherwise load on use: the
+    /// embedding model, through one embed, and the graph's query backend.
+    /// For a process that keeps the database open across many commands
+    /// ([`Axil::warm_up`] does neither). Each part reports its own outcome.
+    pub fn prewarm(&self) -> PrewarmReport {
+        let embedder = self.embedder.as_ref().map(|embedder| {
+            embedder
+                .embed_query("warm")
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        });
+        let graph = self.graph_index.as_ref().map(|graph| {
+            // A failure is kept in the graph's state, reported below.
+            let _ = graph.ensure_loaded();
+            graph.load_state()
+        });
+        PrewarmReport { embedder, graph }
+    }
+
     /// Get the embedder reference (for external use like feedback).
     pub fn embedder(&self) -> Option<&dyn crate::plugin::TextEmbedder> {
         self.embedder.as_ref().map(|a| a.as_ref())
@@ -7100,6 +7119,16 @@ pub struct WarmUpReport {
     pub warmed_up: bool,
     /// Whether the vector index was rebuilt.
     pub vector_rebuilt: bool,
+}
+
+/// What [`Axil::prewarm`] loaded.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PrewarmReport {
+    /// The embed that loads the model: `None` without an embedder, the
+    /// error when it failed.
+    pub embedder: Option<std::result::Result<(), String>>,
+    /// The graph's state afterwards; `None` without a graph.
+    pub graph: Option<crate::plugin::GraphState>,
 }
 
 /// Compute graph proximity scores for a set of candidate records.

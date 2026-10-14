@@ -16,7 +16,9 @@ use redb::{
 };
 use serde_json::Value;
 
-use axil_core::plugin::{Capability, Direction, EdgeInfo, Engine, GraphIndex, TraversalStep};
+use axil_core::plugin::{
+    Capability, Direction, EdgeInfo, Engine, GraphIndex, GraphState, TraversalStep,
+};
 use axil_core::record::{Record, RecordId};
 use axil_core::{companion_path, AxilBuilder, AxilError, Result};
 
@@ -1009,6 +1011,23 @@ impl GraphEngine {
         })
     }
 
+    /// How far the query backend has settled: nothing yet, the adjacency
+    /// tables, every edge in memory, or a failed setup.
+    pub fn index_state(&self) -> GraphState {
+        match self.store.get() {
+            None => GraphState::Unloaded,
+            Some(Ok(Store::Disk)) => GraphState::Disk,
+            Some(Ok(Store::Memory(_))) => GraphState::Memory,
+            Some(Err(e)) => GraphState::Failed(e.clone()),
+        }
+    }
+
+    /// Settle the query backend now (see [`Self::prepare`]), as the first
+    /// graph operation otherwise would.
+    pub fn ensure_loaded(&self) -> Result<()> {
+        self.store().map(|_| ())
+    }
+
     /// The query backend, settling it on first use.
     fn store(&self) -> Result<&Store> {
         self.store
@@ -1720,6 +1739,14 @@ impl Engine for GraphEngine {
 // ── GraphIndex trait ────────────────────────────────────────────────
 
 impl GraphIndex for GraphEngine {
+    fn ensure_loaded(&self) -> Result<()> {
+        GraphEngine::ensure_loaded(self)
+    }
+
+    fn load_state(&self) -> GraphState {
+        self.index_state()
+    }
+
     fn relate(
         &self,
         from: RecordId,
@@ -1966,6 +1993,21 @@ mod tests {
         let path = dir.path().join("test.axil");
         let plugin = GraphEngine::open(&path).unwrap();
         (plugin, dir)
+    }
+
+    /// The backend settles on the first operation or on `ensure_loaded`,
+    /// whichever comes first, and its state says which backend it is.
+    #[test]
+    fn the_index_state_follows_the_backend_settling() {
+        let (g, _dir) = temp_graph();
+        assert_eq!(g.index_state(), GraphState::Unloaded);
+        g.ensure_loaded().unwrap();
+        assert_eq!(g.index_state(), GraphState::Disk);
+
+        let (g, _dir) = temp_graph();
+        g.create_edge(RecordId::new(), "knows", RecordId::new(), json!({}))
+            .unwrap();
+        assert_eq!(GraphIndex::load_state(&g), GraphState::Disk);
     }
 
     #[test]
