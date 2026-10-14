@@ -136,6 +136,12 @@ pub fn list_snapshots(db_path: &Path) -> io::Result<Vec<SnapshotMeta>> {
 /// Restore a snapshot by copying files back to the database location.
 ///
 /// Validates checksums before overwriting to prevent restoring corrupt snapshots.
+///
+/// The files are copied over in place, so no process may have the database
+/// open meanwhile (a warm `axil daemon`, say): it would go on with its own
+/// view of the files and write it back over the copy. A database another
+/// handle holds is refused with [`io::ErrorKind::ResourceBusy`], and the
+/// database is held locked while it is restored.
 #[deprecated(
     note = "unwired and redundant with the branch API; use that instead. \
             Slated for removal in a future major version."
@@ -172,6 +178,26 @@ pub fn restore_snapshot(db_path: &Path, snapshot_id: &str) -> io::Result<Snapsho
             }
         }
     }
+
+    // redb locks the file while a handle has it open.
+    let _held = match fs::File::open(db_path) {
+        Ok(file) => match file.try_lock() {
+            Ok(()) => Some(file),
+            Err(fs::TryLockError::WouldBlock) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::ResourceBusy,
+                    format!(
+                        "{} is open in another process, such as a running `axil daemon`: \
+                         stop it before restoring",
+                        db_path.display()
+                    ),
+                ))
+            }
+            Err(fs::TryLockError::Error(e)) => return Err(e),
+        },
+        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e),
+    };
 
     // Remove current companion files that may not exist in the snapshot.
     // This prevents stale indexes from persisting after restore.
@@ -320,6 +346,24 @@ mod tests {
         // Restore
         restore_snapshot(&db_path, &meta.id).unwrap();
         assert_eq!(fs::read(&db_path).unwrap(), original_content);
+    }
+
+    #[test]
+    fn restoring_a_database_held_open_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.axil");
+        fs::write(&db_path, b"snapshotted").unwrap();
+        let meta = create_snapshot(&db_path, "before").unwrap();
+        fs::write(&db_path, b"current").unwrap();
+
+        let holder = fs::File::open(&db_path).unwrap();
+        holder.lock().unwrap();
+        let err = restore_snapshot(&db_path, &meta.id).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::ResourceBusy, "{err}");
+        assert_eq!(fs::read(&db_path).unwrap(), b"current");
+        drop(holder);
+        restore_snapshot(&db_path, &meta.id).unwrap();
+        assert_eq!(fs::read(&db_path).unwrap(), b"snapshotted");
     }
 
     #[test]

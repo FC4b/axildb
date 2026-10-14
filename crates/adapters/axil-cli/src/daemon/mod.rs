@@ -2,12 +2,24 @@
 //! runs the hot commands against it in-process, so a client neither opens the
 //! database nor loads its engines on each call.
 //!
-//! [`exec`] runs one request against the open database.
+//! - [`exec`] runs one request against the open database.
+//! - [`paths`] names the files a database's daemon keeps in `run/`.
+//! - [`proto`] is the wire format and the identities a client and a daemon
+//!   compare.
+//! - [`state`] is what the daemon records about itself.
+//! - [`server`] is the daemon process.
+//! - [`control`] is `axil daemon {start, stop, status, logs}`.
 
-// The socket server is the first caller outside tests.
+// Clients that forward to the daemon come later; until then some of the
+// protocol is used only by tests.
 #![cfg_attr(not(test), allow(dead_code))]
 
+pub mod control;
 pub mod exec;
+pub mod paths;
+pub mod proto;
+pub mod server;
+pub mod state;
 
 // The host catches a request's panic and keeps serving.
 #[cfg(not(panic = "unwind"))]

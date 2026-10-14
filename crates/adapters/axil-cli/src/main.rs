@@ -2749,6 +2749,16 @@ enum Command {
         id: String,
     },
 
+    // ── Warm daemon ─────────────────────────────────────────
+    /// The warm daemon: one process that keeps this database open, with its
+    /// embedder and graph loaded, and runs the hot commands sent to it.
+    /// Started by hand only (`axil daemon start`).
+    #[cfg(unix)]
+    Daemon {
+        #[command(subcommand)]
+        command: daemon::control::DaemonCommand,
+    },
+
     // ── Worker & Branching ──────────────────────────────────
     /// Run background worker tasks (consolidation, connection strengthening, stale detection).
     Worker {
@@ -6502,6 +6512,15 @@ fn is_busy_chain(err: &anyhow::Error) -> bool {
         .any(|c| matches!(c.downcast_ref::<axil_core::AxilError>(), Some(e) if e.is_busy()))
 }
 
+/// True if an open failed only because another process holds a lock the
+/// open needs: the single-writer lock ([`is_busy_chain`]) or the full-text
+/// index's writer lock, which tantivy reports as `LockBusy` and the FTS
+/// engine passes on as text. Waiting may clear either.
+#[cfg_attr(not(unix), allow(dead_code))] // the daemon, unix-only, is its caller
+fn is_lock_contention(err: &anyhow::Error) -> bool {
+    is_busy_chain(err) || err.chain().any(|c| c.to_string().contains("LockBusy"))
+}
+
 /// Retry a database open that may hit the single-writer lock.
 ///
 /// Runs `open` up to [`BUSY_RETRY_ATTEMPTS`] times, sleeping a short linear
@@ -7163,6 +7182,12 @@ impl axil_core::Adapter for CliAdapter {
 
 /// Whether a command serves many searches from one process (the MCP and HTTP
 /// servers, the worker), which amortizes building the vector graph.
+///
+/// The warm daemon serves many searches too, but is left out on purpose: a
+/// command it runs must rank as the one-shot command the client would
+/// otherwise run, and the one-shot ceiling scans exactly where the graph
+/// would answer approximately. Up to that ceiling the daemon pays the exact
+/// scan on each search instead of building the graph once.
 #[cfg(feature = "vector")]
 fn is_long_lived(command: &Command) -> bool {
     match command {
@@ -15864,6 +15889,9 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
         }
 
         // ── Worker ─────────────────────────────────────────────────
+        #[cfg(unix)]
+        Command::Daemon { command } => daemon::control::dispatch(&db_opt, command, out),
+
         Command::Worker { command } => {
             let db_path = require_db(&db_opt)?;
             let db = open_with_all_detected(&db_path)?;

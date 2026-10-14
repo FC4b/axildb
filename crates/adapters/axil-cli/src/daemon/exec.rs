@@ -23,6 +23,9 @@
 //!   Replaying the lines into each response instead would not match: each
 //!   command's one-shot open attaches only the engines it needs, and prints
 //!   only theirs.
+//! - A vector store a killed writer left needing repair is repaired by the
+//!   host's open, which says so on the host's stderr; the one-shot binary
+//!   says so in the first command after the crash.
 //! - A line an engine prints the first time a handle uses something (the
 //!   graph store when its adjacency tables can't be used, say) prints in
 //!   the first request that does, not in every one.
@@ -129,9 +132,11 @@ pub enum NotServed {
     /// binary would wait there for the user to type the input.
     Terminal,
     /// The host has no handle to run it on: a reopen is running or failed,
-    /// a request panicked ([`WarmState::poisoned`]), or the request's thread
-    /// couldn't start.
+    /// a request panicked ([`WarmState::poisoned`]), the host's gate found
+    /// the handle stale, or the request's thread couldn't start.
     Unavailable,
+    /// The request's deadline passed before the command could start.
+    Expired,
 }
 
 impl fmt::Display for NotServed {
@@ -143,6 +148,7 @@ impl fmt::Display for NotServed {
             NotServed::Lacks(need) => WarmLacks(*need).fmt(f),
             NotServed::Terminal => f.write_str("the command reads stdin from a terminal"),
             NotServed::Unavailable => f.write_str("the database is not open"),
+            NotServed::Expired => f.write_str("the request's deadline passed before it ran"),
         }
     }
 }
@@ -187,7 +193,13 @@ impl std::error::Error for OpenPrinted {}
 
 /// [`WarmDb::open`], as long as the open prints nothing; [`OpenPrinted`]
 /// otherwise, with the handle closed again.
+///
+/// A vector store a killed writer left needing repair is repaired first,
+/// and said so on the host's own stderr. The open would repair it too and
+/// print that it did, which would keep the database from being served for
+/// a line a one-shot run prints once, in the first command after the crash.
 fn open_warm(path: &Path) -> anyhow::Result<WarmDb> {
+    repair_vector_store(path);
     let (stdout, stderr, warm) = cli_io::capture(ReqCtx::default(), || WarmDb::open(path));
     let warm = warm?;
     if stdout.is_empty() && stderr.is_empty() {
@@ -196,6 +208,32 @@ fn open_warm(path: &Path) -> anyhow::Result<WarmDb> {
     drop(warm);
     let printed = [stdout, stderr].concat();
     Err(OpenPrinted(String::from_utf8_lossy(&printed).into_owned()).into())
+}
+
+/// Repair the default vector store at `path` if a killed writer left it
+/// needing it, as the open's probe would; see [`open_warm`]. A store that
+/// can't be probed is left for the open to report.
+fn repair_vector_store(path: &Path) {
+    #[cfg(feature = "vector")]
+    {
+        let disabled = path
+            .parent()
+            .and_then(|dir| axil_core::load_config_from(dir).ok())
+            .is_some_and(|config| config.is_engine_disabled("vec"));
+        if disabled {
+            return;
+        }
+        if let Ok(axil_vector::VectorStoreProbe::Ready { repaired: true, .. }) =
+            axil_vector::probe_vector_store(path)
+        {
+            errln!(
+                "axil: vector store {} was not closed cleanly; repaired it",
+                axil_vector::vector_db_path(path).display()
+            );
+        }
+    }
+    #[cfg(not(feature = "vector"))]
+    let _ = path;
 }
 
 /// Why [`WarmState::reopen`] did not reopen the database.
@@ -313,6 +351,50 @@ impl WarmState {
         Ok(())
     }
 
+    /// Close the database, for a host that is shutting down: wait up to
+    /// `timeout` for a reopen that is running and for the requests still
+    /// using the handle (see [`WarmDb::release`]), then close it. Requests
+    /// are [`NotServed::Unavailable`] from then on.
+    ///
+    /// A poisoned handle is never closed ([`ReopenError::Poisoned`]; see
+    /// [`WarmState::poisoned`]). One still in use when the time runs out is
+    /// kept ([`ReopenError::InUse`]), and so is everything while a reopen
+    /// still runs ([`ReopenError::Running`]).
+    pub fn release(&self, timeout: Duration) -> Result<(), ReopenError> {
+        let deadline = std::time::Instant::now() + timeout;
+        // A reopen that is running would put a handle back.
+        while self
+            .reopening
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            if std::time::Instant::now() >= deadline {
+                return Err(ReopenError::Running);
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let result = self.release_claimed(deadline);
+        self.reopening.store(false, Ordering::Release);
+        result
+    }
+
+    fn release_claimed(&self, deadline: std::time::Instant) -> Result<(), ReopenError> {
+        if self.poisoned() {
+            return Err(ReopenError::Poisoned);
+        }
+        let Some(old) = self.slot_write().take() else {
+            return Ok(());
+        };
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        match old.release(left) {
+            Ok(_) => Ok(()),
+            Err(old) => {
+                *self.slot_write() = Some(old);
+                Err(ReopenError::InUse)
+            }
+        }
+    }
+
     /// The handle a request runs on.
     fn current(&self) -> Result<WarmDb, NotServed> {
         if self.poisoned() {
@@ -323,9 +405,20 @@ impl WarmState {
 
     /// Record that a request panicked on `warm`, and leak it so the
     /// database is never closed cleanly (see [`WarmState::poisoned`]).
-    fn poison(&self, warm: WarmDb) {
+    pub fn poison(&self, warm: WarmDb) {
         self.poisoned.store(true, Ordering::Release);
         std::mem::forget(warm);
+    }
+
+    /// Never serve or close the handle again, as after a panic (see
+    /// [`WarmState::poisoned`]): for a host that found the database's files
+    /// written by someone else under the open handle. Closing it would write
+    /// the handle's view of the file over theirs.
+    pub fn abandon(&self) {
+        match self.handle() {
+            Some(warm) => self.poison(warm),
+            None => self.poisoned.store(true, Ordering::Release),
+        }
     }
 
     fn slot_read(&self) -> std::sync::RwLockReadGuard<'_, Option<WarmDb>> {
@@ -347,11 +440,25 @@ impl WarmState {
 /// prints as the one-shot binary prints it and exits 1. A panic exits 1 too,
 /// and poisons `state` ([`WarmState::poisoned`]).
 pub fn execute_captured(req: Request, state: &WarmState) -> Result<Response, NotServed> {
+    execute_gated(req, state, &|_| Ok(()))
+}
+
+/// [`execute_captured`], with `gate` asked last before the command runs:
+/// after a write has taken the writer lock and before the request takes the
+/// handle, with whether the command writes. A [`NotServed`] it returns is
+/// the request's answer, with nothing run. A host checks there what may
+/// have changed while the request waited: its deadline, and whether the
+/// handle is still the database's.
+pub fn execute_gated(
+    req: Request,
+    state: &WarmState,
+    gate: &(dyn Fn(bool) -> Result<(), NotServed> + Sync),
+) -> Result<Response, NotServed> {
     std::thread::scope(|scope| {
         let request = std::thread::Builder::new()
             .name("axil-request".into())
             .stack_size(REQUEST_STACK)
-            .spawn_scoped(scope, move || execute(req, state));
+            .spawn_scoped(scope, move || execute(req, state, gate));
         match request {
             // A panic outside the command itself (parsing, say) leaves the
             // handle as it was.
@@ -363,7 +470,11 @@ pub fn execute_captured(req: Request, state: &WarmState) -> Result<Response, Not
     })
 }
 
-fn execute(req: Request, state: &WarmState) -> Result<Response, NotServed> {
+fn execute(
+    req: Request,
+    state: &WarmState,
+    gate: &(dyn Fn(bool) -> Result<(), NotServed> + Sync),
+) -> Result<Response, NotServed> {
     let mut cli = match parse(&req)? {
         Parsed::Run(cli) => cli,
         Parsed::Printed(response) => return Ok(response),
@@ -372,19 +483,21 @@ fn execute(req: Request, state: &WarmState) -> Result<Response, NotServed> {
         return Err(NotServed::Terminal);
     }
     let db_path = request_db(cli.db.as_deref(), &req.cwd).ok_or(NotServed::WrongDb)?;
+    let writes = writes(&cli.command);
+    // A write waits for the writes before it without holding the handle,
+    // so a queue of writes never keeps a reopen waiting on it.
+    let _writing = writes.then(|| state.writer.lock().unwrap_or_else(PoisonError::into_inner));
+    // A write that waited on the lock behind one that panicked.
+    if state.poisoned() {
+        return Err(NotServed::Unavailable);
+    }
+    gate(writes)?;
     let warm = state.current()?;
     if cli_io::db_key(&db_path).ok().as_deref() != Some(warm.key()) {
         return Err(NotServed::WrongDb);
     }
     warm_route(&cli.command, warm.db())?;
     cli.db = Some(db_path);
-
-    let _writing =
-        writes(&cli.command).then(|| state.writer.lock().unwrap_or_else(PoisonError::into_inner));
-    // A write that waited on the lock behind one that panicked.
-    if state.poisoned() {
-        return Err(NotServed::Unavailable);
-    }
     let held = warm.clone();
     let ctx = ReqCtx {
         stdin: req.stdin,

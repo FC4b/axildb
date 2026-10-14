@@ -278,7 +278,7 @@ pub fn catalog_json() -> Vec<Value> {
         .collect()
 }
 
-fn compiled_set() -> BTreeSet<&'static str> {
+pub(crate) fn compiled_set() -> BTreeSet<&'static str> {
     CATALOG
         .iter()
         .filter(|f| is_compiled(f.name))

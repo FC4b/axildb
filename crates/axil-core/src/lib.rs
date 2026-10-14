@@ -98,8 +98,8 @@ pub use contradiction::{
 pub use db::{
     companion_path, drop_engine_companion, is_database_file_name, is_expired_record,
     is_superseded_record, is_valid_space_name, AutoLinkReport, Axil, AxilBuilder,
-    CanonicalPublisher, DatabaseInfo, HealReport, VectorSpaceFactory, VectorSpaceInfo,
-    WarmUpReport, SCIP_ALIAS_TABLE,
+    CanonicalPublisher, DatabaseInfo, HealReport, PrewarmReport, VectorSpaceFactory,
+    VectorSpaceInfo, WarmUpReport, SCIP_ALIAS_TABLE,
 };
 pub use decide::{PairJudge, PairVerdict};
 pub use diagnostics::{
@@ -118,8 +118,8 @@ pub use portable::{
     ImportOptions, ImportReport,
 };
 pub use plugin::{
-    parse_path, Capability, Direction, EdgeInfo, GraphIndex, Engine, SearchIndex, TextEmbedder,
-    TimeBucket, TimeSeriesIndex, TraversalStep, VectorIndex,
+    parse_path, Capability, Direction, EdgeInfo, GraphIndex, GraphState, Engine, SearchIndex,
+    TextEmbedder, TimeBucket, TimeSeriesIndex, TraversalStep, VectorIndex,
 };
 
 // extensibility contracts (Tier 2 + Tier 3).

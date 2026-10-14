@@ -841,7 +841,7 @@ pub(crate) mod tests {
     /// `src` with comments and the contents of string and char literals
     /// replaced by spaces. Newlines are kept, so byte offsets still map to
     /// the original lines.
-    fn code_only(src: &str) -> Vec<u8> {
+    pub(crate) fn code_only(src: &str) -> Vec<u8> {
         let b = src.as_bytes();
         let mut out = b.to_vec();
         let is_ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
@@ -923,7 +923,7 @@ pub(crate) mod tests {
 
     /// Blank every `#[cfg(test)]` / `#[cfg(all(test, ...))]` module: from its
     /// attribute to the first unindented `}` after it.
-    fn without_test_modules(code: &mut [u8]) {
+    pub(crate) fn without_test_modules(code: &mut [u8]) {
         let text = String::from_utf8_lossy(code).into_owned();
         let mut offset = 0;
         let mut test_mod_start = None;
@@ -942,7 +942,10 @@ pub(crate) mod tests {
             } else if line.starts_with("#[cfg(test)]") || line.starts_with("#[cfg(all(test") {
                 pending_attr = Some(offset);
             } else if let Some(attr) = pending_attr.take() {
-                if line.starts_with("mod ") {
+                if ["mod ", "pub mod ", "pub(crate) mod "]
+                    .iter()
+                    .any(|m| line.starts_with(m))
+                {
                     test_mod_start = Some(attr);
                 }
             }
@@ -983,6 +986,11 @@ pub(crate) mod tests {
             ("main.rs", include_str!("main.rs")),
             ("daemon/mod.rs", include_str!("daemon/mod.rs")),
             ("daemon/exec.rs", include_str!("daemon/exec.rs")),
+            ("daemon/control.rs", include_str!("daemon/control.rs")),
+            ("daemon/paths.rs", include_str!("daemon/paths.rs")),
+            ("daemon/proto.rs", include_str!("daemon/proto.rs")),
+            ("daemon/server.rs", include_str!("daemon/server.rs")),
+            ("daemon/state.rs", include_str!("daemon/state.rs")),
         ];
         let banned = [
             &PRINTS[..],

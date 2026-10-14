@@ -14,6 +14,7 @@
 
 use crate::error::Result;
 use crate::record::{Record, RecordId};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// Describes the capabilities a plugin provides.
@@ -310,6 +311,36 @@ pub trait GraphIndex: Engine {
     fn all_edge_ids(&self) -> Result<Vec<(RecordId, RecordId, RecordId)>> {
         Ok(Vec::new())
     }
+
+    /// Settle the query backend now, as the first graph operation otherwise
+    /// would, so a long-lived process pays for it before its first request.
+    /// An index with nothing to settle does nothing.
+    fn ensure_loaded(&self) -> Result<()> {
+        Ok(())
+    }
+
+    /// How far the query backend has settled; see [`GraphState`]. An index
+    /// with nothing to settle reports [`GraphState::Disk`].
+    fn load_state(&self) -> GraphState {
+        GraphState::Disk
+    }
+}
+
+/// How far a graph index has settled the backend its queries run on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "state", content = "error")]
+#[non_exhaustive]
+pub enum GraphState {
+    /// No graph operation has run yet.
+    Unloaded,
+    /// Queries read the on-disk adjacency tables.
+    Disk,
+    /// The adjacency tables could not be brought up to date, so every edge
+    /// is held in memory instead. Queries work.
+    Memory,
+    /// The store could not be set up, and every graph operation reports the
+    /// error kept here.
+    Failed(String),
 }
 
 /// Maximum traversal depth to prevent infinite loops.
