@@ -34,6 +34,7 @@
 - [Export & Import](./cli/export-import.md)
 - [Memory Commands](./cli/memory.md)
 - [Diagnostics](./cli/diagnostics.md)
+- [Warm Daemon](./cli/daemon.md)
 - [Code Search](./cli/code-search.md)
 - [AxilQL](./cli/axilql.md)
 - [Dependency Docs](./cli/dependency-docs.md)

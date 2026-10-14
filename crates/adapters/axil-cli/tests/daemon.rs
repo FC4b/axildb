@@ -511,3 +511,34 @@ fn the_kill_switch_keeps_the_daemon_from_starting() {
     );
     assert!(!fx.locked());
 }
+
+/// A database whose open prints a warning is not served: `start` says
+/// why and fails, and so does `status`, and the next `start` tries again.
+#[test]
+fn a_database_whose_open_warns_is_not_served() {
+    let fx = fixture();
+    std::fs::write(fx.proj.join("axil.toml"), "[healing\nevent_log = true\n").unwrap();
+    let out = fx.axil(&["daemon", "start", "--idle-timeout", "60s"]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["started"], false);
+    assert!(
+        report["blocked"]
+            .as_str()
+            .unwrap()
+            .contains("invalid config"),
+        "{report}"
+    );
+    assert!(!fx.locked());
+    let status = fx.status();
+    assert_eq!(status["running"], false);
+    assert!(status["blocked"]["reason"]
+        .as_str()
+        .unwrap()
+        .contains("invalid config"));
+    assert!(text(&fx.axil(&["daemon", "status"]).stdout).contains("not served: "));
+
+    std::fs::remove_file(fx.proj.join("axil.toml")).unwrap();
+    assert_eq!(fx.start()["state"], "ready");
+    assert_eq!(fx.status()["blocked"], Value::Null);
+}

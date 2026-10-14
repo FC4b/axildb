@@ -139,12 +139,14 @@ fn start(db: &Path, idle_timeout: Duration, wait: Duration, out: &Output) -> Res
     let own = proto::ExeId::current()?.build_id();
     // One that is starting or reloading is waited for, not replaced.
     let running = proto::hello(run.socket(), Duration::from_secs(1))
-        .is_ok_and(|hello| hello.state != "stopping");
-    let mut child = if running {
-        None
-    } else {
-        Some(spawn(&key, &run, idle_timeout)?)
+        .ok()
+        .filter(|hello| hello.state != "stopping")
+        .map(|hello| hello.pid);
+    let mut child = match running {
+        Some(_) => None,
+        None => Some(spawn(&key, &run, idle_timeout)?),
     };
+    let waited_for = running.or(child.as_ref().map(|c| c.id()));
 
     let deadline = Instant::now() + wait;
     let mut exited = false;
@@ -166,10 +168,11 @@ fn start(db: &Path, idle_timeout: Duration, wait: Duration, out: &Output) -> Res
         if let Some(child) = child.as_mut() {
             exited = exited || child.try_wait()?.is_some();
         }
-        // Exited without a daemon to wait for: it would not serve, or lost
-        // to one that is gone again.
+        // The daemon waited for would not serve: it said why, and stopped.
         if exited || child.is_none() {
-            if let Some(blocked) = read_json_file::<Value>(&run.blocked()) {
+            let blocked = read_json_file::<Value>(&run.blocked())
+                .filter(|b| b["pid"].as_u64() == waited_for.map(u64::from));
+            if let Some(blocked) = blocked {
                 let reason = blocked["reason"].as_str().unwrap_or("unknown").to_string();
                 out.print(&json!({"started": false, "running": false, "blocked": reason}));
                 return Ok(EXIT_ERROR);
