@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use parking_lot::Mutex;
+use parking_lot::{MappedMutexGuard, Mutex, MutexGuard};
 use tantivy::collector::TopDocs;
 use tantivy::directory::MmapDirectory;
 use tantivy::query::{BooleanQuery, Occur, QueryParser, TermQuery};
@@ -32,6 +32,9 @@ const BOOST_FACTOR: f32 = 2.0;
 /// v2: added field_name. v3: body STORED for snippet generation.
 const SCHEMA_VERSION: &str = "3";
 
+/// Memory budget for the tantivy writer, shared by its indexing threads.
+const WRITER_HEAP_BYTES: usize = 15_000_000;
+
 /// Low-level full-text search index backed by tantivy.
 ///
 /// Each record field is indexed as a separate tantivy document with:
@@ -45,7 +48,8 @@ pub struct FtsIndex {
     field_name_field: Field,
     body_field: Field,
     index: Index,
-    writer: Mutex<IndexWriter>,
+    /// `None` only if [`Self::wait_for_merges`] failed to open a new writer.
+    writer: Mutex<Option<IndexWriter>>,
     reader: IndexReader,
     /// True if the index was rebuilt during open (schema migration).
     rebuilt: bool,
@@ -88,9 +92,7 @@ impl FtsIndex {
         let index = Index::open_or_create(dir, schema)
             .map_err(|e| AxilError::plugin(format!("failed to open/create FTS index: {e}")))?;
 
-        let writer = index
-            .writer(15_000_000)
-            .map_err(|e| AxilError::plugin(format!("failed to create FTS writer: {e}")))?;
+        let writer = Self::open_writer(&index)?;
 
         let reader = index
             .reader_builder()
@@ -113,9 +115,22 @@ impl FtsIndex {
             field_name_field,
             body_field,
             index,
-            writer: Mutex::new(writer),
+            writer: Mutex::new(Some(writer)),
             reader,
             rebuilt: needs_rebuild,
+        })
+    }
+
+    fn open_writer(index: &Index) -> axil_core::Result<IndexWriter> {
+        index
+            .writer(WRITER_HEAP_BYTES)
+            .map_err(|e| AxilError::plugin(format!("failed to create FTS writer: {e}")))
+    }
+
+    /// The writer, locked.
+    fn writer(&self) -> axil_core::Result<MappedMutexGuard<'_, IndexWriter>> {
+        MutexGuard::try_map(self.writer.lock(), Option::as_mut).map_err(|_| {
+            AxilError::plugin("FTS writer unavailable: reopening it after a merge wait failed")
         })
     }
 
@@ -196,7 +211,7 @@ impl FtsIndex {
         fields: &HashMap<String, String>,
         do_commit: bool,
     ) -> axil_core::Result<()> {
-        let mut writer = self.writer.lock();
+        let mut writer = self.writer()?;
         let term = Term::from_field_text(self.id_field, id.as_str());
         writer.delete_term(term);
         for (field_name, text) in fields {
@@ -238,7 +253,7 @@ impl FtsIndex {
         text: &str,
         do_commit: bool,
     ) -> axil_core::Result<()> {
-        let mut writer = self.writer.lock();
+        let mut writer = self.writer()?;
         let key = Self::doc_key(id, field);
         let key_term = Term::from_field_text(self.doc_key_field, &key);
         writer.delete_term(key_term);
@@ -259,7 +274,7 @@ impl FtsIndex {
 
     /// Remove all indexed documents for a record ID.
     pub fn remove_document(&self, id: &RecordId) -> axil_core::Result<()> {
-        let mut writer = self.writer.lock();
+        let mut writer = self.writer()?;
         let term = Term::from_field_text(self.id_field, id.as_str());
         writer.delete_term(term);
         Self::commit_writer(&mut writer, &self.reader)
@@ -513,8 +528,37 @@ impl FtsIndex {
 
     /// Commit any pending writes to disk.
     pub fn commit(&self) -> axil_core::Result<()> {
-        let mut writer = self.writer.lock();
+        let mut writer = self.writer()?;
         Self::commit_writer(&mut writer, &self.reader)
+    }
+
+    /// Commit pending writes, then wait until no segment merge is running.
+    ///
+    /// A commit can start merges on tantivy's merge threads, and a merge that
+    /// finishes rewrites `meta.json` and deletes the segment files it
+    /// replaced. Dropping the writer does not wait for them, so a caller that
+    /// copies the index directory once this index is closed calls this first:
+    /// otherwise a file it lists can be deleted before it is copied, or the
+    /// copied `meta.json` can name segments the copy lacks. Waiting consumes
+    /// the writer, so a new one takes its place.
+    pub fn wait_for_merges(&self) -> axil_core::Result<()> {
+        let mut slot = self.writer.lock();
+        let Some(writer) = slot.as_mut() else {
+            return Err(AxilError::plugin(
+                "FTS writer unavailable: reopening it after a merge wait failed",
+            ));
+        };
+        Self::commit_writer(writer, &self.reader)?;
+        let writer = slot.take().expect("checked above");
+        let waited = writer
+            .wait_merging_threads()
+            .map_err(|e| AxilError::plugin(format!("failed waiting for FTS merges: {e}")));
+        *slot = Some(Self::open_writer(&self.index)?);
+        waited?;
+        // Merges replaced segments; read the index as it now stands.
+        self.reader
+            .reload()
+            .map_err(|e| AxilError::plugin(format!("failed to reload FTS reader: {e}")))
     }
 
     fn commit_writer(writer: &mut IndexWriter, reader: &IndexReader) -> axil_core::Result<()> {
@@ -549,6 +593,47 @@ mod tests {
         let idx_path = dir.path().join("fts");
         let index = FtsIndex::new(&idx_path).unwrap();
         (index, dir)
+    }
+
+    /// Every per-record write commits, and enough commits start segment
+    /// merges in the background. Once `wait_for_merges` returns nothing
+    /// changes the directory any more, and the index still takes writes.
+    #[test]
+    fn wait_for_merges_leaves_the_directory_still() {
+        let (index, dir) = temp_index();
+        const N: usize = 16;
+        for i in 0..N {
+            let mut fields = HashMap::new();
+            fields.insert("summary".to_string(), format!("mergeterm doc{i}"));
+            index.add_document(&RecordId::new(), &fields).unwrap();
+        }
+        index.wait_for_merges().unwrap();
+
+        let fts = dir.path().join("fts");
+        let files = || {
+            let mut files: Vec<(std::ffi::OsString, u64)> = std::fs::read_dir(&fts)
+                .unwrap()
+                .map(|e| {
+                    let e = e.unwrap();
+                    (e.file_name(), e.metadata().unwrap().len())
+                })
+                .collect();
+            files.sort();
+            files
+        };
+        let before = files();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert_eq!(files(), before, "a merge changed the index after the wait");
+        let segments = index.index.searchable_segment_ids().unwrap().len();
+        assert!(segments < N, "{segments} segments: no merge ran");
+        assert_eq!(index.search("mergeterm", 2 * N).unwrap().len(), N);
+
+        // The writer the wait consumed was replaced.
+        let id = RecordId::new();
+        let mut fields = HashMap::new();
+        fields.insert("summary".to_string(), "afterwait".to_string());
+        index.add_document(&id, &fields).unwrap();
+        assert_eq!(index.search("afterwait", 10).unwrap()[0].0, id);
     }
 
     #[test]

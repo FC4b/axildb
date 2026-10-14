@@ -52,6 +52,67 @@ pub fn companion_path(base: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(p)
 }
 
+/// Suffixes of the other files Axil derives from a database path: the FTS
+/// rebuild's swap directories, the mmap vector file, the branch lock,
+/// snapshots, the prefetch cache, and the re-embed backup of the vector store.
+const DERIVED_SUFFIXES: &[&str] = &[
+    ".fts.old",
+    ".fts.new",
+    ".mmap",
+    ".branch-lock",
+    ".snapshots",
+    ".prefetch-cache",
+    ".reembed-bak",
+];
+
+/// Whether `name` is a file or directory Axil keeps beside the database whose
+/// core file is named `db_name`: the core file, its engine companions, the
+/// other files derived from its path, named vector spaces
+/// (`<db>.vec.<space>`), and branches (`<db>.branch.<name>`, staged as
+/// `<db>.branch.<name>.staging-<pid>-<nonce>` while being created) with all
+/// of theirs. A file that merely starts with the name, like
+/// `memory.axil.helpers.ts`, is not.
+pub fn is_database_file_name(db_name: &str, name: &str) -> bool {
+    if name == db_name {
+        return true;
+    }
+    let Some(rest) = name.strip_prefix(db_name) else {
+        return false;
+    };
+    let mut suffixes = COMPANION_SUFFIXES
+        .iter()
+        .map(|(suffix, _)| *suffix)
+        .chain(DERIVED_SUFFIXES.iter().copied());
+    if suffixes.any(|suffix| suffix == rest) {
+        return true;
+    }
+    if let Some(space) = rest.strip_prefix(".vec.") {
+        return is_valid_space_name(space);
+    }
+    if let Some(branch) = rest.strip_prefix(".branch.") {
+        let branch_name = branch.split('.').next().unwrap_or_default();
+        if crate::branch::validate_branch_name(branch_name).is_err() {
+            return false;
+        }
+        let base = format!("{db_name}.branch.{branch_name}");
+        let staging = name
+            .strip_prefix(&base)
+            .and_then(|rest| rest.strip_prefix(".staging-"))
+            .and_then(|rest| rest.split('.').next())
+            .filter(|token| {
+                !token.is_empty()
+                    && token
+                        .bytes()
+                        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+            });
+        return is_database_file_name(&base, name)
+            || staging.is_some_and(|token| {
+                is_database_file_name(&format!("{base}.staging-{token}"), name)
+            });
+    }
+    false
+}
+
 /// Map an Engine role or bare companion suffix to its canonical `(role, suffix)`.
 ///
 /// Accepts the role (`vector`/`graph`/`timeseries`/`fts`) or the suffix with or
@@ -175,6 +236,10 @@ pub struct AxilBuilder {
     read_only: bool,
     /// Engines the adapter found on disk but could not attach.
     degraded_engines: Vec<crate::diagnostics::DegradedEngine>,
+    /// Leave notes of deletes made while the vector store was detached for a
+    /// later open instead of applying them at build; see
+    /// [`AxilBuilder::defer_vector_delete_notes`].
+    defer_vector_delete_notes: bool,
     /// Optional encryption-at-rest cipher for core record bodies, applied to the
     /// `Storage` handle at [`AxilBuilder::build`] time. `None` means cleartext
     /// bodies — the default. Available only under the off-by-default
@@ -460,6 +525,15 @@ impl AxilBuilder {
         self
     }
 
+    /// Leave notes of deletes made while the vector store was detached (see
+    /// [`Axil::delete`]) for a later open, instead of applying them when this
+    /// handle is built. Applying them writes to the vector store, so opens
+    /// that must not change the database (diagnostics, dry runs) set this.
+    pub fn defer_vector_delete_notes(mut self, defer: bool) -> Self {
+        self.defer_vector_delete_notes = defer;
+        self
+    }
+
     /// Record that an Engine's companion file exists but could not be attached.
     ///
     /// Adapters call this instead of silently skipping the Engine, so the
@@ -501,6 +575,7 @@ impl AxilBuilder {
     /// Open the database and return the handle.
     pub fn build(self) -> Result<Axil> {
         let needs_fts_reindex = self.needs_fts_reindex;
+        let defer_vector_delete_notes = self.defer_vector_delete_notes;
         let storage = if self.read_only {
             Storage::open_read_only(&self.path)?
         } else {
@@ -566,6 +641,8 @@ impl AxilBuilder {
             };
         #[cfg(feature = "event-log")]
         let event_log_enabled = file_config.healing.event_log;
+        let vector_store_detached =
+            self.vector_index.is_none() && companion_path(&self.path, ".vec").exists();
         let db = Axil {
             path: self.path,
             storage,
@@ -590,6 +667,7 @@ impl AxilBuilder {
             lifecycle,
             lifecycle_warnings,
             degraded_engines: self.degraded_engines,
+            vector_store_detached,
             supersede_threshold,
             #[cfg(feature = "event-log")]
             event_log_enabled: std::sync::atomic::AtomicBool::new(event_log_enabled),
@@ -610,6 +688,19 @@ impl AxilBuilder {
             let _ = db
                 .migrate_entity_canonical_id()
                 .and_then(|_| db.mark_entity_migration_done());
+        }
+
+        // Vectors of records deleted while the store was detached. Reading the
+        // (normally absent) note table is the whole cost of an open with
+        // nothing pending. A read-only handle leaves them to the writer, and
+        // an inspection open to a later one.
+        if db.vector_index.is_some() && !db.storage.is_read_only() && !defer_vector_delete_notes {
+            if let Err(e) = db.apply_pending_vector_deletes() {
+                eprintln!(
+                    "axil: warning: removing the vectors of records deleted while the \
+                     vector store was unavailable failed: {e}. The next open retries."
+                );
+            }
         }
 
         // Auto-reindex FTS if schema migration rebuilt the index. Never on a
@@ -677,6 +768,98 @@ fn prefix_overlaps(a: &str, b: &str) -> bool {
 /// `detect_problems` report an error rather than a warning.
 const EMBEDDING_GAP_ERROR_RATIO: f64 = 0.10;
 
+/// Internal tables whose writers embed one text field of every row into the
+/// default vector index, with that field.
+///
+/// `_` tables skip the insert-time auto-embed, so their writers embed rows
+/// themselves and ignore a failure. A row written while the vector store was
+/// unavailable therefore never gets a vector, unless reconciliation knows
+/// which text its writer embeds. Each entry must match its writer: the
+/// indexer (proxies, file / module / project summaries), dep-docs ingest,
+/// recall chunking in this file, and checkpoints.
+const EMBEDDED_INTERNAL_FIELDS: &[(&str, &str)] = &[
+    ("_idx_code_proxies", "proxy_text"),
+    ("_idx_files", "summary"),
+    ("_idx_modules", "summary"),
+    ("_idx_project", "summary"),
+    ("_dep_docs", "content"),
+    (RECALL_CHUNKS_TABLE, "content"),
+    ("_checkpoint_records", "summary"),
+];
+
+/// Why rows of [`EMBEDDED_INTERNAL_FIELDS`] tables without a vector are
+/// left alone, said wherever `doctor` and `detect_problems` report them so
+/// nobody backfills them blindly. The figures are the dogfood eval in
+/// `benchmarks/results/dogfood-recall-2026-10-04-snap-prefix-orphans-removed.json`
+/// and `…-internal-embedded.json`.
+const INTERNAL_EMBED_COST: &str = "embedding them currently lowers memory recall: on the \
+     dogfood eval (snap-prefix, 2026-10-04) restoring 2,962 code-index vectors took hit@1 \
+     from 0.70 to 0.51";
+
+/// Rows of [`EMBEDDED_INTERNAL_FIELDS`] tables that
+/// [`Axil::reembed_missing_internal`] embeds and commits together.
+const REEMBED_BATCH: usize = 32;
+
+/// Rows missing from the default vector index, from one scan
+/// ([`Axil::embedding_gap`]). Memory records and the embedded internal tables
+/// are counted apart: they fail for different reasons and a share of one says
+/// nothing about the other.
+#[derive(Debug, Default)]
+struct EmbeddingGap {
+    /// Memory records (the insert gate, [`Axil::is_embeddable`]) without a
+    /// vector.
+    missing: usize,
+    /// Memory records the insert gate embeds.
+    embeddable: usize,
+    /// `(table, missing, rows)` for each [`EMBEDDED_INTERNAL_FIELDS`] table
+    /// with at least one row without a vector.
+    internal: Vec<(&'static str, usize, usize)>,
+}
+
+impl EmbeddingGap {
+    fn is_empty(&self) -> bool {
+        self.missing == 0 && self.internal.is_empty()
+    }
+
+    /// How bad the gap is. Memory records follow
+    /// [`Axil::embedding_gap_severity`]. Internal rows alone are a warning:
+    /// they stay findable by keyword, and restoring them moves recall
+    /// rankings (see [`Axil::reembed_missing_internal`]), so it is a call to
+    /// make, not an error to clear.
+    fn severity(&self) -> Severity {
+        if self.missing > 0 {
+            Axil::embedding_gap_severity(self.missing, self.embeddable)
+        } else {
+            Severity::Warning
+        }
+    }
+
+    /// The `heal` that closes this gap.
+    fn fix(&self) -> &'static str {
+        match (self.missing > 0, !self.internal.is_empty()) {
+            (true, true) => "axil heal --reindex --embed-internal",
+            (false, true) => "axil heal --embed-internal",
+            _ => "axil heal --reindex",
+        }
+    }
+
+    /// `"3 of 40 _idx_code_proxies row(s), 1 of 9 _dep_docs row(s)"`, or
+    /// `None` when every internal row has its vector.
+    fn internal_summary(&self) -> Option<String> {
+        (!self.internal.is_empty()).then(|| {
+            self.internal
+                .iter()
+                .map(|(table, missing, rows)| format!("{missing} of {rows} {table} row(s)"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+    }
+}
+
+/// Share of the default vector index belonging to no record above which
+/// `doctor` and `detect_problems` report an error rather than a warning.
+const ORPHANED_VECTOR_ERROR_RATIO: f64 = 0.10;
+
 /// Maximum audit log entries before auto-rotation.
 const MAX_AUDIT_ENTRIES: usize = 10_000;
 
@@ -728,6 +911,11 @@ pub struct Axil {
     lifecycle_warnings: Vec<String>,
     /// Engines found on disk that the adapter could not attach.
     degraded_engines: Vec<crate::diagnostics::DegradedEngine>,
+    /// The default vector store (`<db>.vec`) exists but no vector index is
+    /// attached: it failed to open, `[engines] disabled` lists it, or the
+    /// caller opened without it. A delete cannot reach that store, so it
+    /// notes the id for the next handle that attaches it.
+    vector_store_detached: bool,
     /// Auto-supersede similarity threshold, resolved at build time from
     /// `healing.supersede_similarity_threshold` (default 0.92).
     supersede_threshold: f32,
@@ -764,6 +952,7 @@ impl Axil {
             needs_fts_reindex: false,
             read_only: false,
             degraded_engines: Vec::new(),
+            defer_vector_delete_notes: false,
             #[cfg(feature = "encryption")]
             cipher: None,
         }
@@ -979,32 +1168,51 @@ impl Axil {
         !record.table.starts_with('_')
     }
 
-    /// Records that should have a vector embedding but don't, as
-    /// `(missing, embeddable)`.
+    /// The [`EMBEDDED_INTERNAL_FIELDS`] entry for a row of an internal table
+    /// whose writer embeds it, as `(table, text)`: `None` for any other table,
+    /// or when the field is absent or empty (the writer embedded nothing).
+    fn embedded_internal_text(record: &Record) -> Option<(&'static str, &str)> {
+        let (table, field) = EMBEDDED_INTERNAL_FIELDS
+            .iter()
+            .find(|(table, _)| *table == record.table)?;
+        let text = record.data.get(*field)?.as_str()?;
+        (!text.is_empty()).then_some((*table, text))
+    }
+
+    /// Rows that should have a vector embedding but don't.
     ///
     /// Takes an already-scanned record slice so the caller can share one full
-    /// scan across reconciliation checks. Returns `(0, 0)` unless both a vector
-    /// index and an embedder are configured — a user who only ever calls
-    /// `add_vector` manually (no embedder) must not be flagged as missing
-    /// embeddings.
-    fn embedding_gap(&self, records: &[Record]) -> (usize, usize) {
+    /// scan across reconciliation checks. Empty unless both a vector index and
+    /// an embedder are configured — a user who only ever calls `add_vector`
+    /// manually (no embedder) must not be flagged as missing embeddings.
+    fn embedding_gap(&self, records: &[Record]) -> EmbeddingGap {
+        let mut gap = EmbeddingGap::default();
         if !self.has_vector_index() || self.embedder.is_none() {
-            return (0, 0);
+            return gap;
         }
         let Some(ref vi) = self.vector_index else {
-            return (0, 0);
+            return gap;
         };
         let indexed: std::collections::HashSet<RecordId> =
             vi.all_ids().unwrap_or_default().into_iter().collect();
-        records.iter().filter(|r| Self::is_embeddable(r)).fold(
-            (0, 0),
-            |(missing, embeddable), r| {
-                (
-                    missing + usize::from(!indexed.contains(&r.id)),
-                    embeddable + 1,
-                )
-            },
-        )
+        let mut internal: BTreeMap<&'static str, (usize, usize)> = BTreeMap::new();
+        for record in records {
+            let missing = usize::from(!indexed.contains(&record.id));
+            if Self::is_embeddable(record) {
+                gap.missing += missing;
+                gap.embeddable += 1;
+            } else if let Some((table, _)) = Self::embedded_internal_text(record) {
+                let (table_missing, rows) = internal.entry(table).or_default();
+                *table_missing += missing;
+                *rows += 1;
+            }
+        }
+        gap.internal = internal
+            .into_iter()
+            .filter(|(_, (missing, _))| *missing > 0)
+            .map(|(table, (missing, rows))| (table, missing, rows))
+            .collect();
+        gap
     }
 
     /// How bad an embedding gap is. A torn insert here and there is a warning;
@@ -1012,6 +1220,19 @@ impl Axil {
     /// to find a real share of what the agent stored, which is an error.
     fn embedding_gap_severity(missing: usize, embeddable: usize) -> Severity {
         if missing as f64 > embeddable as f64 * EMBEDDING_GAP_ERROR_RATIO {
+            Severity::Error
+        } else {
+            Severity::Warning
+        }
+    }
+
+    /// How bad a share of orphaned vectors is. Recall fetches a fixed pool of
+    /// nearest vectors and drops the orphans only after the fetch, so every
+    /// orphan in the pool costs a live record its slot; past
+    /// [`ORPHANED_VECTOR_ERROR_RATIO`] of the index that is a real share of
+    /// the pool, which is an error.
+    fn orphaned_vectors_severity(orphaned: usize, vectors: usize) -> Severity {
+        if orphaned as f64 > vectors as f64 * ORPHANED_VECTOR_ERROR_RATIO {
             Severity::Error
         } else {
             Severity::Warning
@@ -1056,7 +1277,8 @@ impl Axil {
     /// embed/index failures. A torn insert can therefore leave a stored memory
     /// permanently invisible to recall. `reembed_missing` reconciles the live
     /// records against the vector and FTS indexes and regenerates the missing
-    /// entries.
+    /// entries. Internal tables are left alone; see
+    /// [`Axil::reembed_missing_internal`].
     ///
     /// Returns `(embeddings_restored, fts_docs_restored)`. Best-effort per
     /// record — a single failure does not abort the sweep. A no-op (returns
@@ -1108,6 +1330,64 @@ impl Axil {
         }
 
         Ok((embeddings_restored, fts_restored))
+    }
+
+    /// Embed the rows of internal tables whose writers embed them (code
+    /// proxies, file / module / project summaries, dep docs, recall chunks,
+    /// checkpoints; see [`EMBEDDED_INTERNAL_FIELDS`]) that have no vector,
+    /// with the text their writer embeds. Returns `(embedded, failed)`: rows
+    /// that got a vector, and rows that still have none because embedding
+    /// them failed.
+    ///
+    /// Those writers ignore a failed embed, so rows written while the vector
+    /// store was unavailable have none. Restoring them is not automatic:
+    /// [`Axil::reembed_missing`], `heal_all`, the end-of-session heal and the
+    /// indexer all leave them alone, because once embedded these rows compete
+    /// with memories in recall's vector channel and lower memory recall (see
+    /// [`INTERNAL_EMBED_COST`]). Callers opt in (`axil heal --embed-internal`).
+    ///
+    /// Rows are embedded in micro-batches with one `.vec` commit each, as
+    /// their writers' bulk paths do. A batch that fails is retried row by
+    /// row, so only the rows that cannot be embedded count as failed.
+    /// A no-op without a vector index and an embedder.
+    pub fn reembed_missing_internal(&self) -> Result<(usize, usize)> {
+        if !self.has_vector_index() || self.embedder.is_none() {
+            return Ok((0, 0));
+        }
+        let Some(ref vi) = self.vector_index else {
+            return Ok((0, 0));
+        };
+        let records = self.storage.scan_all_records()?;
+        let indexed: std::collections::HashSet<RecordId> =
+            vi.all_ids().unwrap_or_default().into_iter().collect();
+        let missing: Vec<(&RecordId, &str)> = records
+            .iter()
+            .filter(|r| !indexed.contains(&r.id))
+            .filter_map(|r| Self::embedded_internal_text(r).map(|(_, text)| (&r.id, text)))
+            .collect();
+        let (mut embedded, mut failed) = (0usize, 0usize);
+        for batch in missing.chunks(REEMBED_BATCH) {
+            if self.embed_fields_batch(batch).is_ok() {
+                embedded += batch.len();
+                continue;
+            }
+            for (id, text) in batch {
+                if self.embed_text(id, text).is_ok() {
+                    embedded += 1;
+                } else {
+                    failed += 1;
+                }
+            }
+        }
+        if embedded + failed > 0 {
+            self.audit_heal_action(
+                "reembed_missing_internal",
+                &format!(
+                    "embedded {embedded} internal-table rows that had no vector, {failed} failed"
+                ),
+            );
+        }
+        Ok((embedded, failed))
     }
 
     /// Insert a new record into the given table.
@@ -1515,6 +1795,10 @@ impl Axil {
     ///
     /// Engine hooks run after the storage write commits. See `insert` for
     /// the rationale on swallowing plugin errors.
+    ///
+    /// When the default vector store exists on disk but this handle has no
+    /// vector index attached, the delete commits a note of the id with it,
+    /// and the next handle that attaches the store removes the vector.
     pub fn delete(&self, id: &RecordId) -> Result<bool> {
         let _span = crate::otel::span("axil.delete", &[]);
         let timer = self.metrics.start_timer(OpType::Delete);
@@ -1526,7 +1810,9 @@ impl Axil {
             .map(|r| r.table.clone())
             .unwrap_or_default();
 
-        let deleted = self.storage.delete(id)?;
+        let deleted = self
+            .storage
+            .delete_noting_vector(id, self.vector_store_detached)?;
 
         if deleted {
             if table_name != RECALL_CHUNKS_TABLE {
@@ -3156,20 +3442,83 @@ impl Axil {
         cleaned
     }
 
-    /// Remove orphaned vectors. Returns count removed.
+    /// Remove vectors in the default index whose record no longer exists.
+    /// Returns how many were removed.
+    ///
+    /// A vector whose record cannot be read (an I/O error, a body sealed
+    /// under another key) is kept: only a record that is certainly gone loses
+    /// its vector.
     pub fn clean_orphaned_vectors(&self) -> usize {
-        let mut cleaned = 0;
-        if let Some(ref vi) = self.vector_index {
-            if let Ok(vec_ids) = vi.all_ids() {
-                for vid in &vec_ids {
-                    if self.storage.get(vid).ok().flatten().is_none() {
-                        let _ = vi.on_record_delete(vid);
-                        cleaned += 1;
-                    }
-                }
+        let Some(ref vi) = self.vector_index else {
+            return 0;
+        };
+        let Ok(vec_ids) = vi.all_ids() else {
+            return 0;
+        };
+        let is_orphan = |vid: &RecordId| matches!(self.storage.get(vid), Ok(None));
+        let orphans: Vec<RecordId> = vec_ids.into_iter().filter(|vid| is_orphan(vid)).collect();
+        // One commit for the lot: a store holding hundreds of orphans would
+        // otherwise pay a durable write per vector. The check is repeated as
+        // each vector is removed: a record re-inserted under one of these ids
+        // since the scan above keeps the vector it was embedded with.
+        match vi.remove_batch_if(&orphans, &is_orphan) {
+            Ok(removed) => removed,
+            Err(e) => {
+                eprintln!(
+                    "warning: removing {} orphaned vector(s) failed: {e}",
+                    orphans.len()
+                );
+                0
             }
         }
-        cleaned
+    }
+
+    /// Remove the vectors of records deleted while the default vector store
+    /// was detached (see [`Axil::delete`]) and clear their notes. Returns how
+    /// many vectors were removed.
+    ///
+    /// Every noted id loses its vector: it was embedded from the deleted
+    /// record. An id whose record exists again, re-inserted while the store
+    /// was detached and possibly with other text, is then embedded afresh
+    /// from that record: a memory record always (the insert gate embeds it),
+    /// an internal-table row only when it held a vector, so this replaces
+    /// vectors and never adds a code-index one. A failed embed leaves the
+    /// record without a vector, which `doctor` reports and heal repairs.
+    fn apply_pending_vector_deletes(&self) -> Result<usize> {
+        let Some(ref vi) = self.vector_index else {
+            return Ok(0);
+        };
+        let pending = self.storage.pending_vector_deletes()?;
+        if pending.is_empty() {
+            return Ok(0);
+        }
+        let back: Vec<(Record, bool)> = pending
+            .iter()
+            .filter_map(|id| match self.storage.get(id) {
+                Ok(Some(record)) => {
+                    let had_vector = matches!(vi.get_vector(id), Ok(Some(_)));
+                    Some((record, had_vector))
+                }
+                _ => None,
+            })
+            .collect();
+        let removed = vi.remove_batch(&pending)?;
+        for (record, had_vector) in &back {
+            let text = if Self::is_embeddable(record) {
+                Some(crate::util::searchable_text(&record.data))
+            } else if *had_vector {
+                Self::embedded_internal_text(record).map(|(_, text)| text.to_string())
+            } else {
+                None
+            };
+            if let Some(text) = text {
+                let _ = self.embed_text(&record.id, &text);
+            }
+        }
+        // Cleared only once the vectors are gone, so a failure above leaves
+        // the notes for the next open.
+        self.storage.clear_pending_vector_deletes(&pending)?;
+        Ok(removed)
     }
 
     /// Remove orphaned FTS entries (indexed docs whose records no longer exist).
@@ -3545,20 +3894,34 @@ impl Axil {
         // One scan feeds both the embedding and FTS reconciliation.
         if self.vector_index.is_some() || self.fts_index.is_some() {
             if let Ok(records) = self.storage.scan_all_records() {
-                let (missing_embeddings, embeddable) = self.embedding_gap(&records);
-                if missing_embeddings > 0 {
+                let gap = self.embedding_gap(&records);
+                if gap.missing > 0 {
                     // Only auto-fixable when an embedder can regenerate them; a
                     // manual `add_vector` user with no embedder is already gated
                     // out by `embedding_gap`, but guard the flag too.
                     problems.push(crate::diagnostics::ProblemDetection {
                         detector: "missing_embeddings".to_string(),
-                        severity: Self::embedding_gap_severity(missing_embeddings, embeddable),
+                        severity: Self::embedding_gap_severity(gap.missing, gap.embeddable),
                         message: format!(
-                            "{missing_embeddings} of {embeddable} record(s) committed without \
-                             a vector embedding"
+                            "{} of {} record(s) committed without a vector embedding",
+                            gap.missing, gap.embeddable
                         ),
                         recommendation: "Re-embed missing records: axil heal --reindex".to_string(),
                         auto_fixable: self.embedder.is_some(),
+                    });
+                }
+                // Not auto-fixable on purpose: embedding these rows moves
+                // memory recall rankings, so automatic heals must not do it.
+                if let Some(internal) = gap.internal_summary() {
+                    problems.push(crate::diagnostics::ProblemDetection {
+                        detector: "missing_internal_embeddings".to_string(),
+                        severity: Severity::Warning,
+                        message: format!("{internal} have no vector embedding"),
+                        recommendation: format!(
+                            "Leave them unless the cost is acceptable; {INTERNAL_EMBED_COST}. \
+                             To embed them anyway: axil heal --embed-internal"
+                        ),
+                        auto_fixable: false,
                     });
                 }
 
@@ -3568,9 +3931,10 @@ impl Axil {
                 // proxies, dep docs) are.
                 let orphaned_vectors = self.count_orphaned_vectors(&records);
                 if orphaned_vectors > 0 {
+                    let vectors = self.vector_index.as_ref().map_or(0, |vi| vi.count());
                     problems.push(crate::diagnostics::ProblemDetection {
                         detector: "orphaned_vectors".to_string(),
-                        severity: Severity::Warning,
+                        severity: Self::orphaned_vectors_severity(orphaned_vectors, vectors),
                         message: format!(
                             "{orphaned_vectors} vector(s) belong to records that no longer exist"
                         ),
@@ -4182,7 +4546,10 @@ impl Axil {
     /// 1. While this handle is open it holds redb's **exclusive** OS write lock,
     ///    so no other process can mutate the database.
     /// 2. [`flush_engines`](Self::flush_engines) commits any buffered engine
-    ///    state (notably the FTS index) so every companion file is current.
+    ///    state (notably the FTS index) so every companion file is current,
+    ///    and waits for the FTS index's background segment merges, which
+    ///    would otherwise go on rewriting and deleting its files after the
+    ///    handle is dropped.
     /// 3. The handle is then **dropped**, releasing the OS lock, and only then
     ///    are the files copied. On Windows, redb holds a byte-range lock on the
     ///    core file for the lifetime of the [`Database`], so an open file cannot
@@ -4510,11 +4877,11 @@ impl Axil {
         // 3. Vector index sync
         if let Some(ref vi) = self.vector_index {
             let vec_count = vi.count();
-            let (missing, embeddable) = index_scan
+            let gap = index_scan
                 .as_ref()
                 .map(|recs| self.embedding_gap(recs))
-                .unwrap_or((0, 0));
-            if missing == 0 {
+                .unwrap_or_default();
+            if gap.is_empty() {
                 checks.push(CheckResult {
                     name: "vector_index".to_string(),
                     status: Severity::Ok,
@@ -4525,15 +4892,66 @@ impl Axil {
                     fix: None,
                 });
             } else {
+                let mut detail = format!(
+                    "{vec_count} vectors indexed, dimensions={}",
+                    vi.dimensions()
+                );
+                if gap.missing > 0 {
+                    detail.push_str(&format!(
+                        "; {} of {} record(s) missing an embedding, so recall can find them \
+                         only by keyword",
+                        gap.missing, gap.embeddable
+                    ));
+                }
+                if let Some(internal) = gap.internal_summary() {
+                    detail.push_str(&format!(
+                        "; {internal} missing an embedding, so code search, dep docs and \
+                         recall match them only by keyword. Do not backfill them blindly: \
+                         {INTERNAL_EMBED_COST}"
+                    ));
+                }
                 checks.push(CheckResult {
                     name: "vector_index".to_string(),
-                    status: Self::embedding_gap_severity(missing, embeddable),
-                    detail: format!(
-                        "{vec_count} vectors indexed, dimensions={}; {missing} of {embeddable} \
-                         record(s) missing an embedding, so recall can find them only by keyword",
-                        vi.dimensions()
-                    ),
-                    fix: Some("axil heal --reindex".to_string()),
+                    status: gap.severity(),
+                    detail,
+                    fix: Some(gap.fix().to_string()),
+                });
+            }
+
+            // The forward direction: vectors whose record is gone, and notes
+            // of deletes this handle was opened not to apply.
+            let orphaned = index_scan
+                .as_ref()
+                .map(|recs| self.count_orphaned_vectors(recs))
+                .unwrap_or(0);
+            let noted = self
+                .storage
+                .pending_vector_deletes()
+                .map_or(0, |ids| ids.len());
+            if orphaned == 0 && noted == 0 {
+                checks.push(CheckResult {
+                    name: "orphaned_vectors".to_string(),
+                    status: Severity::Ok,
+                    detail: format!("{vec_count} vectors, no orphans"),
+                    fix: None,
+                });
+            } else {
+                let mut detail = format!(
+                    "{orphaned} of {vec_count} vectors belong to records that no longer \
+                     exist; recall fetches them and then drops them, so each one takes a \
+                     live record's candidate slot"
+                );
+                if noted > 0 {
+                    detail.push_str(&format!(
+                        "; {noted} delete(s) made while the vector store was detached are \
+                         not applied yet (the next writable open applies them)"
+                    ));
+                }
+                checks.push(CheckResult {
+                    name: "orphaned_vectors".to_string(),
+                    status: Self::orphaned_vectors_severity(orphaned, vec_count),
+                    detail,
+                    fix: Some("axil heal --orphans".to_string()),
                 });
             }
         }
@@ -7458,6 +7876,52 @@ pub(crate) fn entity_canonical_id(
             crate::entity::provisional_canonical_id(&entity.name, lang_hint.as_deref(), file_hint)
         }
         _ => crate::entity::natural_canonical_id(&entity.name),
+    }
+}
+
+#[cfg(test)]
+mod database_file_name_tests {
+    use super::is_database_file_name;
+
+    #[test]
+    fn the_database_and_everything_derived_from_its_path() {
+        for name in [
+            "memory.axil",
+            "memory.axil.vec",
+            "memory.axil.graph",
+            "memory.axil.ts",
+            "memory.axil.fts",
+            "memory.axil.fts.old",
+            "memory.axil.vec.code",
+            "memory.axil.mmap",
+            "memory.axil.branch-lock",
+            "memory.axil.snapshots",
+            "memory.axil.prefetch-cache",
+            "memory.axil.reembed-bak",
+            "memory.axil.branch.try-1",
+            "memory.axil.branch.try-1.ts",
+            "memory.axil.branch.try-1.vec.code",
+            "memory.axil.branch.try-1.staging-4242-1f3a0",
+            "memory.axil.branch.try-1.staging-4242-1f3a0.fts",
+        ] {
+            assert!(is_database_file_name("memory.axil", name), "{name}");
+        }
+    }
+
+    #[test]
+    fn not_a_source_file_that_shares_the_name() {
+        for name in [
+            "memory.axil.helpers.ts",
+            "memory.axil.vec.helpers.ts",
+            "memory.axil.branch.try-1.helpers.ts",
+            "memory.axil.branch.try-1.staging-4242.helpers.ts",
+            "memory.axil.branch.has.dot",
+            "memory.axilx.ts",
+            "memory.ax",
+            "other.axil.ts",
+        ] {
+            assert!(!is_database_file_name("memory.axil", name), "{name}");
+        }
     }
 }
 

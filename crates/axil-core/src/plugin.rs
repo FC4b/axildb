@@ -57,14 +57,16 @@ pub trait Engine: Send + Sync {
     fn on_record_delete(&self, id: &RecordId) -> Result<()>;
 
     /// Durably persist any buffered state so the engine's on-disk files reflect
-    /// every write accepted so far.
+    /// every write accepted so far, and finish any background work that would
+    /// still change those files.
     ///
     /// Default is a no-op, which is correct for engines that commit each write
     /// to their backing store synchronously (e.g. the redb-backed vector and
     /// graph engines). Engines that buffer writes before committing — notably
-    /// the Tantivy FTS engine — override this to flush the buffer. Used when a
-    /// caller needs the companion files to be self-consistent for an external
-    /// copy (e.g. `Axil::branch_create`).
+    /// the Tantivy FTS engine — override this to flush the buffer (and, for
+    /// Tantivy, to wait for segment merges). Used when a caller needs the
+    /// companion files to be self-consistent for an external copy (e.g.
+    /// `Axil::branch_create`).
     fn flush(&self) -> Result<()> {
         Ok(())
     }
@@ -111,6 +113,39 @@ pub trait VectorIndex: Engine {
             self.add(id.clone(), vector)?;
         }
         Ok(())
+    }
+
+    /// Remove the vectors of many records in one call. Returns how many
+    /// vectors were removed.
+    ///
+    /// The default loops over [`Engine::on_record_delete`] and, having no way
+    /// to tell which ids held a vector, counts every id. Backends with an
+    /// independent durable store should override it to commit the whole batch
+    /// under one write transaction, as [`add_batch`](Self::add_batch) does for
+    /// inserts, and count only the ids they actually held.
+    fn remove_batch(&self, ids: &[RecordId]) -> Result<usize> {
+        for id in ids {
+            self.on_record_delete(id)?;
+        }
+        Ok(ids.len())
+    }
+
+    /// Like [`remove_batch`](Self::remove_batch), for the ids for which
+    /// `doomed` still holds when they are removed. A repair that found a
+    /// vector's record gone passes the same check here, so a record
+    /// re-inserted and re-embedded since keeps its new vector.
+    ///
+    /// Backends that serialize their mutations should run `doomed` under
+    /// that serialization, so an add for one of these ids lands either
+    /// before the check (which then sees its record) or after the removal.
+    /// The default checks first and removes after, without that guarantee.
+    fn remove_batch_if(
+        &self,
+        ids: &[RecordId],
+        doomed: &dyn Fn(&RecordId) -> bool,
+    ) -> Result<usize> {
+        let ids: Vec<RecordId> = ids.iter().filter(|id| doomed(id)).cloned().collect();
+        self.remove_batch(&ids)
     }
 
     /// Search for the top-k most similar vectors.

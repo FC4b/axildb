@@ -1,0 +1,136 @@
+{
+  "what": "entity extraction reads declaration keywords (fn/struct/impl/trait/enum, def/class, function, func, Java visibility) only where the text is code",
+  "date": "2026-10-04",
+  "commits": [
+    "22638b8",
+    "cb8c7a7",
+    "1c7f12d"
+  ],
+  "note": "Entity extraction runs when a record is inserted (auto-linking to _entities, the importance entity bonus) and for `recall --expand`. A recall eval over a fixed snapshot reads the entities stored when the snapshot was written, so it cannot show the change; it is recorded to show that nothing else moved. The re-extraction counts and the rebuilt-database eval are the measurements of the change itself.",
+  "fixed_snapshot_dogfood": {
+    "snapshot": "benchmarks/dogfood-recall/data/snap-prefix",
+    "harness": "python3 benchmarks/dogfood-recall/run.py --snapshot <snap-prefix> --fetch 10",
+    "before": {
+      "binary": "axil 2.3.1 (axildb-v2.3.1-83-g2108d82-dirty)",
+      "source": "2108d82 + the MCP tool-profile change (no extraction change)",
+      "overall": {
+        "hit@1": 0.6842,
+        "hit@5": 0.9123,
+        "hit@10": 0.9474,
+        "mrr@10": 0.7896,
+        "recall_all@10": 0.9298,
+        "ndcg@10": 0.8116,
+        "hook_hit": 0.8947,
+        "hook_tokens": 304.3158,
+        "hook_hits_per_1k_tokens": 2.9402,
+        "n": 57
+      }
+    },
+    "after": {
+      "binary": "axil 2.3.1 (axildb-v2.3.1-85-g4327408-dirty)",
+      "source": "22638b8 (extraction change, before the cb8c7a7/1c7f12d refinements)",
+      "overall": {
+        "hit@1": 0.6842,
+        "hit@5": 0.9123,
+        "hit@10": 0.9474,
+        "mrr@10": 0.7896,
+        "recall_all@10": 0.9298,
+        "ndcg@10": 0.8116,
+        "hook_hit": 0.8947,
+        "hook_tokens": 304.3158,
+        "hook_hits_per_1k_tokens": 2.9402,
+        "n": 57
+      }
+    },
+    "per_question_identical": true
+  },
+  "re_extraction": {
+    "corpus": "the 232 user records (commits 100, context 40, decisions 63, errors 27, rules 2) of snap-prefix, text as auto-linking reads it (searchable_text), at most 50 entities per record as auto-linking keeps",
+    "method": "a scratch program linking entity.rs at 2108d82 (before) and at 1c7f12d (after)",
+    "before": {
+      "mentions": 1365,
+      "distinct_entities": 819,
+      "distinct_code_symbols": 119
+    },
+    "after": {
+      "mentions": 1320,
+      "distinct_entities": 783,
+      "distinct_code_symbols": 85
+    },
+    "code_symbols_no_longer_minted": [
+      "go:named",
+      "java:crates",
+      "java:structs",
+      "python:as",
+      "python:second",
+      "rust:bindgen",
+      "rust:bindings",
+      "rust:break",
+      "rust:carried",
+      "rust:change",
+      "rust:forces",
+      "rust:forwarding",
+      "rust:impl",
+      "rust:is",
+      "rust:method",
+      "rust:methods",
+      "rust:migration",
+      "rust:must",
+      "rust:pub",
+      "rust:remains",
+      "rust:rename",
+      "rust:returns",
+      "rust:so",
+      "rust:spans",
+      "rust:to",
+      "rust:variant",
+      "rust:via",
+      "rust:was",
+      "rust:where",
+      "rust:with",
+      "rust:without",
+      "ts:as",
+      "ts:scope",
+      "ts:second"
+    ],
+    "code_symbols_newly_minted": []
+  },
+  "rebuilt_db_dogfood": {
+    "method": "`axil export` the same 232 user records (ids and timestamps kept; stored _importance stripped so it is recomputed, pinned importance kept), `axil import` each into a fresh `axil init` database with the before and the after binary (insert-time importance and auto-linking run with that binary's extraction), then run the dogfood eval on each without --snapshot. The rebuilt databases hold no code index or SCIP entities, so their absolute numbers are not comparable with the snapshot eval; only before vs after is.",
+    "before": {
+      "binary": "axil 2.3.1 (axildb-v2.3.1-83-g2108d82-dirty)",
+      "source": "2108d82 + the MCP tool-profile change",
+      "entities_rows": 853,
+      "overall": {
+        "hit@1": 0.6842,
+        "hit@5": 0.9123,
+        "hit@10": 0.9474,
+        "mrr@10": 0.7978,
+        "recall_all@10": 0.9298,
+        "ndcg@10": 0.8193,
+        "hook_hit": 0.9123,
+        "hook_tokens": 307.8816,
+        "hook_hits_per_1k_tokens": 2.9631,
+        "n": 57
+      }
+    },
+    "after": {
+      "binary": "axil 2.3.1 (axildb-v2.3.1-90-g8158f8b)",
+      "source": "the tree committed as 1c7f12d",
+      "entities_rows": 814,
+      "overall": {
+        "hit@1": 0.6842,
+        "hit@5": 0.9123,
+        "hit@10": 0.9474,
+        "mrr@10": 0.7978,
+        "recall_all@10": 0.9298,
+        "ndcg@10": 0.8193,
+        "hook_hit": 0.9123,
+        "hook_tokens": 307.8816,
+        "hook_hits_per_1k_tokens": 2.9631,
+        "n": 57
+      }
+    },
+    "per_question_identical": true
+  }
+}

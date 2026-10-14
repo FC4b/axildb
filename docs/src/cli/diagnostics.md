@@ -22,10 +22,15 @@ axil doctor
 ```
 
 Checks: companion-file presence/consistency, vector dimension mismatch, memory
-records missing an embedding (an error once more than 10% of them are), SCIP
-freshness, indexer staleness, orphaned edges/vectors/FTS, the state of the
-`_entities` key index, recent error/healing history. Exit code: 0 all ok,
-1 warnings, 2 errors.
+records missing an embedding (an error once more than 10% of them are), rows
+missing an embedding in the internal tables whose writers embed them (code
+proxies, file / module / project summaries, dependency docs, recall chunks,
+checkpoints; counted per table, a warning, fixed only by
+`heal --embed-internal`), SCIP freshness, indexer staleness, orphaned edges,
+orphaned vectors (vectors whose record is gone; an error once they are more
+than 10% of the index, since recall fetches them and then drops them), the
+state of the `_entities` key index, recent error/healing history. Exit code:
+0 all ok, 1 warnings, 2 errors.
 
 #### A damaged vector store
 
@@ -50,6 +55,15 @@ To rebuild the store, move the file to another directory (a
 space), then run `axil init <db>` and `axil heal --reindex`. `init` sizes the
 new store for the embedding model set in `axil.toml`
 (`[database] embedding_model`, bge-small when unset).
+
+A record deleted while the store can't be opened, or while `[engines]
+disabled` lists `vec`, keeps its vector until the store is back: the delete
+leaves a note in the core file, and the next command that opens the database
+with the store attached removes those vectors. A memory record re-inserted
+under the same id in the meantime is embedded afresh from its new text.
+Inspection commands (`doctor`, `detect`, `health-report`, `stats`, `info`,
+`heal --dry-run` and `session-heal --dry-run`) leave the notes alone; `doctor`
+lists them under `orphaned_vectors`.
 
 `heal` never creates or resizes a vector store. With no store, `heal --reindex`
 reports `vector_store: {"status": "missing"}` and the `init` command to run
@@ -158,11 +172,27 @@ Rebuild drifted indexes or roll up old data. Run deliberately — check
 
 ```bash
 axil heal --compact     # `axil compact`'s purge, without the graph file
-axil heal --reindex     # rebuild all indexes from the canonical records (slow)
-axil heal --orphans     # clean orphaned companion entries only
+axil heal --reindex     # rebuild all indexes from the canonical records (slow);
+                        # also drops vectors whose record is gone
+axil heal --orphans     # clean orphaned edges and vectors only
+axil heal --embed-internal  # embed code-index / dep-doc / chunk rows left
+                        # without a vector (opt-in, see below)
 axil heal --dry-run     # print what would be fixed, change nothing
 axil heal               # also DOWNSAMPLES (see warning below)
 ```
+
+Rows of the internal tables written while the vector store was unavailable
+(a code index built then, for example) have no vector; `doctor` counts them per
+table. Nothing embeds them implicitly: not `heal --reindex`, a bare `heal`, the
+end-of-session heal, or an incremental `axil index`. Embedded, those rows
+compete with memories in recall's vector channel, and that currently lowers
+memory recall. On the dogfood eval (snap-prefix, 2026-10-04), restoring 2,962
+code-index vectors took hit@1 from 0.70 to 0.51, MRR@10 from 0.80 to 0.66 and
+the prompt hook's hit rate from 0.89 to 0.82
+(`benchmarks/results/dogfood-recall-2026-10-04-snap-prefix-orphans-removed.json`
+against `…-internal-embedded.json`). `axil heal --embed-internal` embeds them
+anyway, for when code search by meaning matters more. So does
+`axil index --full`, which rebuilds the code index with vectors.
 
 > ⚠️ A bare `axil heal` **downsamples**: it deletes records older than
 > `full_retention_days` (default 90d), replacing each day's rows with a single

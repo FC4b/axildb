@@ -186,15 +186,15 @@ The wizard seeds its selection from the current binary, enforces feature depende
 
 ## Embedding models
 
-On first use with vector search, Axil downloads the default embedding model (`bge-small-en-v1.5`, ~33MB). Models are cached in `~/.axil/models/`.
+On first use with vector search, Axil downloads the default embedding model (`bge-small-en-v1.5`, ~128 MB). Models are cached in `~/.axil/models/`, and every file is checked against a pinned sha256 before it is installed.
 
 Available models:
 
-| Model | Dimensions | Size | Quality |
+| Model | Dimensions | Download (approx.) | Quality |
 |-------|-----------|------|---------|
-| `bge-small-en-v1.5` | 384 | 33MB | Good (default) |
-| `bge-base-en-v1.5` | 768 | 130MB | Better |
-| `nomic-embed-text-v1.5` | 768 | 130MB | Best |
+| `bge-small-en-v1.5` | 384 | 128 MB | Good (default) |
+| `bge-base-en-v1.5` | 768 | 416 MB | Better |
+| `nomic-embed-text-v1.5` | 768 | 523 MB | Best |
 
 ## Windows + ONNX
 

@@ -36,7 +36,9 @@ pub mod scanner;
 pub mod token;
 
 // Re-export IndexConfig from core for convenience.
-pub use analytics::{get_analytics, log_query, AnalyticsRecord, TABLE_ANALYTICS};
+pub use analytics::{
+    get_analytics, log_query, AnalyticsRecord, TABLE_ANALYTICS, TOKENS_SERVED_BASIS,
+};
 pub use ask::{
     ask, detect_intent, execute_plan, parse_duration_from_query, plan_query, AskResult,
     QueryIntent, QueryPlan, QueryStep,

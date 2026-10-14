@@ -11,7 +11,7 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
     vec![
         ToolDefinition {
             name: "recall".into(),
-            description: "Semantic search + graph + time-based recall of past context. Returns ranked results combining vector similarity with recency. When `across` is supplied, fans out to sibling project DBs declared in the workspace manifest, applies each sibling's read-consent filter at the remote, and merges with provenance tags.".into(),
+            description: "Semantic + graph + time-based recall of past context, ranked by vector similarity blended with recency. Expand a hit with `get`.".into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -30,12 +30,12 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
                     },
                     "type": {
                         "type": "string",
-                        "description": "Filter by the record's `type` facet (matches data.type, case-insensitive exact). Records without a `type` field are excluded when set."
+                        "description": "Only records whose data.type equals this (case-insensitive)"
                     },
                     "across": {
                         "type": "array",
                         "items": { "type": "string" },
-                        "description": "Optional: member labels to fan out to, or [\"*\"] for every member. Requires a .axil-workspace.toml. When set, each result carries `source_member`, `source_member_id`, and `source_record_id`."
+                        "description": "Fan out to these .axil-workspace.toml members ([\"*\"] = all), applying each one's read consent; hits carry `source_member`, `source_member_id`, `source_record_id`"
                     },
                     "strict_consent": {
                         "type": "boolean",
@@ -453,7 +453,7 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
         ToolDefinition {
             name: "boot".into(),
             description: format!(
-                "Return a stable BootContext (schema_version \"{}\"): current_scope, constraints, recent_decisions, active_failures (open errors), open_threads, preferences, confidence_notes. Every row is one string (`id · age · status · summary`, expand with `get`). Rows fill in strict priority order (scope, constraints, active_failures, recent_decisions, then the rest) until the budget is spent; omitted_by_section names what was cut.",
+                "Start a session here. Returns a BootContext (schema_version \"{}\"): scope, constraints, active_failures (open errors), recent_decisions, then open_threads, preferences, confidence_notes, filled in that order until the budget is spent. Each row is one `id · age · status · summary` string (expand with `get`); omitted_by_section names what was cut.",
                 axil_core::BOOT_SCHEMA_VERSION
             ),
             input_schema: json!({

@@ -352,3 +352,200 @@ fn drain_never_retries_an_interrupted_job() {
     let log = std::fs::read_to_string(queue.join("drain.log")).unwrap();
     assert!(log.contains("not retried"), "{log}");
 }
+
+/// A paired search or a pre-edit lookup injects a record once per session: a
+/// later search that finds it again leaves it out, a search with nothing new
+/// injects nothing, a second edit of a file stays quiet, and a session start
+/// (a compaction, `/clear`) makes the same search and the same file inject
+/// again.
+#[test]
+fn paired_search_injects_each_record_once_per_session() {
+    let p = Project::new(true);
+    // Rebuild the database with its search engines, so `fts` has an index.
+    std::fs::remove_dir_all(p.db.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(p.db.parent().unwrap()).unwrap();
+    let axil = |args: &[&str]| -> Value {
+        let out = Command::new(axil_bin())
+            .arg("--db")
+            .arg(&p.db)
+            .args(args)
+            .env_remove("AXIL_DB")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        serde_json::from_slice(&out.stdout).unwrap_or(Value::Null)
+    };
+    axil(&["init"]);
+    let pool = axil(&[
+        "store",
+        "decisions",
+        r#"{"summary":"kafka broker pool size is 32"}"#,
+    ]);
+    let retry = axil(&[
+        "store",
+        "decisions",
+        r#"{"summary":"the kafka broker retries on timeout"}"#,
+    ]);
+    let ledger = axil(&[
+        "store",
+        "decisions",
+        r#"{"summary":"ledger.rs rounds every amount to cents"}"#,
+    ]);
+    let (pool, retry) = (pool["id"].as_str().unwrap(), retry["id"].as_str().unwrap());
+    let ledger = ledger["id"].as_str().unwrap();
+    std::fs::create_dir_all(p.path().join("src")).unwrap();
+    std::fs::write(p.path().join("src/ledger.rs"), "fn round() {}\n").unwrap();
+
+    let sid = "s-dedup";
+    p.booted(sid);
+    let search = |pattern: &str| -> String {
+        let out = p.hook(json!({
+            "hook_event_name": "PreToolUse",
+            "session_id": sid,
+            "tool_name": "Bash",
+            "tool_input": {"command": format!("grep -rn '{pattern}' .")},
+        }));
+        if out.trim().is_empty() {
+            return String::new();
+        }
+        let v: Value = serde_json::from_str(out.trim()).expect(&out);
+        v["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
+    };
+
+    let edit = || -> String {
+        let out = p.hook(json!({
+            "hook_event_name": "PreToolUse",
+            "session_id": sid,
+            "tool_name": "Edit",
+            "tool_input": {
+                "file_path": p.path().join("src/ledger.rs").to_string_lossy(),
+                "old_string": "fn round() {}",
+                "new_string": "fn round_cents() {}",
+            },
+        }));
+        if out.trim().is_empty() {
+            return String::new();
+        }
+        let v: Value = serde_json::from_str(out.trim()).expect(&out);
+        v["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
+    };
+
+    let first = search("pool size");
+    assert!(
+        first.contains(pool),
+        "the first search injects the pool record: {first}"
+    );
+    let second = search("kafka broker");
+    assert!(second.contains(retry), "a new record is injected: {second}");
+    assert!(
+        !second.contains(pool),
+        "an injected record is left out: {second}"
+    );
+    assert_eq!(search("broker"), "", "nothing new, nothing injected");
+    let edited = edit();
+    assert!(
+        edited.contains(&format!("(id={ledger})")),
+        "the pre-edit memory carries its id: {edited}"
+    );
+    assert_eq!(edit(), "", "a second edit of the file stays quiet");
+
+    p.hook(json!({
+        "hook_event_name": "SessionStart",
+        "session_id": sid,
+        "source": "compact",
+    }));
+    let again = search("pool size");
+    assert!(
+        again.contains(pool),
+        "the same search injects again after a session start: {again}"
+    );
+    let edited = edit();
+    assert!(
+        edited.contains(ledger),
+        "the same file injects again after a session start: {edited}"
+    );
+}
+
+/// A file's own index summary reaches the pre-edit context as a record: it
+/// carries the `_idx_files` id, which `axil get` expands, and a second edit
+/// in the session does not inject it again.
+#[test]
+fn pre_edit_index_summary_carries_its_record_id() {
+    let p = Project::new(true);
+    std::fs::remove_dir_all(p.db.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(p.db.parent().unwrap()).unwrap();
+    let axil = |args: &[&str]| -> Value {
+        let out = Command::new(axil_bin())
+            .arg("--db")
+            .arg(&p.db)
+            .args(args)
+            .current_dir(p.path())
+            .env_remove("AXIL_DB")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        serde_json::from_slice(&out.stdout).unwrap_or(Value::Null)
+    };
+    axil(&["init"]);
+    std::fs::create_dir_all(p.path().join("src")).unwrap();
+    std::fs::write(
+        p.path().join("src/ledger.rs"),
+        "//! Ledger rounding for invoice totals.\n\npub fn round_cents(x: f64) -> f64 {\n    (x * 100.0).round() / 100.0\n}\n",
+    )
+    .unwrap();
+    axil(&["index", "."]);
+
+    let found = axil(&["recall-for-file", "src/ledger.rs", "--top-k", "3"]);
+    let row = found["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["match"] == "file_index")
+        .unwrap_or_else(|| panic!("no file_index row: {found}"))
+        .clone();
+    let id = row["id"]
+        .as_str()
+        .expect("the file_index row names its record");
+    assert_eq!(axil(&["get", id])["table"], "_idx_files");
+
+    let sid = "s-index";
+    p.booted(sid);
+    let edit = || {
+        p.hook(json!({
+            "hook_event_name": "PreToolUse",
+            "session_id": sid,
+            "tool_name": "Edit",
+            "tool_input": {
+                "file_path": p.path().join("src/ledger.rs").to_string_lossy(),
+                "old_string": "round_cents",
+                "new_string": "round_to_cents",
+            },
+        }))
+    };
+    let first = edit();
+    assert!(
+        first.contains(&format!("(id={id})")),
+        "the index summary carries its id: {first}"
+    );
+    assert!(
+        p.state(sid, "injected").exists()
+            && std::fs::read_to_string(p.state(sid, "injected"))
+                .unwrap()
+                .contains(id),
+        "the index summary counts as injected"
+    );
+}

@@ -122,6 +122,9 @@ axil mcp install <target>
 #         | droid | qwen | antigravity | opencode
 ```
 
+The server starts with the core tool profile; `axil mcp install <target> --tools full`
+registers it with every tool instead (see [Tool profiles](mcp.md#tool-profiles)).
+
 ## Keeping it fresh & removing it
 
 ```bash

@@ -945,21 +945,31 @@ mod tests {
 
     /// A warning an engine prints during the command reaches the request's
     /// stderr, where the one-shot binary prints it, not the host's.
-    #[cfg(feature = "indexer")]
+    #[cfg(feature = "graph")]
     #[test]
     fn an_engine_warning_reaches_the_requests_stderr() {
         let tmp = tempfile::tempdir().unwrap();
         let fixture = build_fixture(&tmp.path().join("fixture"));
-        // Over the default size limit: the freshness scan skips it, loudly.
-        let big = format!("// {}\n", "x".repeat(1024)).repeat(1024);
-        std::fs::write(fixture.join("src/generated.rs"), big).unwrap();
+        // An undecodable edge whose id sorts after every real one, as if an
+        // older binary had added it. The graph engine meets it on its first
+        // operation, inside recall, and says it is removing it.
+        {
+            let graph = redb::Database::open(fixture.join(".axil/memory.axil.graph")).unwrap();
+            let txn = graph.begin_write().unwrap();
+            {
+                let edges: redb::TableDefinition<&str, &[u8]> = redb::TableDefinition::new("edges");
+                let mut edges = txn.open_table(edges).unwrap();
+                edges.insert("zzzz", b"garbage".as_slice()).unwrap();
+            }
+            txn.commit().unwrap();
+        }
         let proj = tmp.path().join("work/proj");
         let db_path = proj.join(".axil/memory.axil");
         let cwd = || proj.canonicalize().unwrap();
         let results = check_parity_with(
             &fixture,
             &proj,
-            &[case("boot json", &["boot"])],
+            &[case("recall", &["recall", "auth timeout"])],
             |c, args| {
                 let state = WarmState::open(&db_path).unwrap();
                 served(request(args, &cwd(), None, c.stdin), &state)
@@ -967,6 +977,6 @@ mod tests {
             |c, args| one_shot_at(args, c.stdin, &cwd(), None),
         );
         let err = String::from_utf8_lossy(&results[0].1 .1);
-        assert!(err.contains("[axil-index] skipped 1 file(s)"), "{err}");
+        assert!(err.contains("warning: removing corrupt edge zzzz"), "{err}");
     }
 }

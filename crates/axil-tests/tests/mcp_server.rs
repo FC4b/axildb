@@ -81,8 +81,10 @@ fn mcp_full_lifecycle() {
     // Pre-create DB with all plugins so MCP auto-detects them.
     init_db_with_all_engines(&db_path);
 
+    // The lifecycle walks tools outside the core profile (list, link,
+    // query_history, delete), so it runs the full set.
     let mut child = Command::new(axil_bin())
-        .args(["--db", db_path.to_str().unwrap(), "mcp"])
+        .args(["--db", db_path.to_str().unwrap(), "mcp", "--tools", "full"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -403,4 +405,143 @@ fn mcp_parse_error() {
     // Clean shutdown.
     drop(stdin);
     child.wait().unwrap();
+}
+
+/// Spawn `axil mcp` on `db_path` with `extra` arguments after `mcp`, and the
+/// profile variable set to `env_profile` (or removed).
+fn spawn_mcp(db_path: &Path, extra: &[&str], env_profile: Option<&str>) -> std::process::Child {
+    let mut cmd = Command::new(axil_bin());
+    cmd.args(["--db", db_path.to_str().unwrap(), "mcp"])
+        .args(extra)
+        .env_remove("AXIL_MCP_TOOLS")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    if let Some(profile) = env_profile {
+        cmd.env("AXIL_MCP_TOOLS", profile);
+    }
+    cmd.spawn().expect("failed to spawn axil mcp")
+}
+
+/// The tool names a server lists, plus the result of one `list` call.
+fn listed_tools_and_list_call(mut child: std::process::Child) -> (Vec<String>, Value) {
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    let resp = rpc_call(&mut stdin, &mut stdout, "tools/list", Some(json!(1)), None);
+    let names = resp["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap().to_string())
+        .collect();
+    let resp = rpc_call(
+        &mut stdin,
+        &mut stdout,
+        "tools/call",
+        Some(json!(2)),
+        Some(json!({"name": "list", "arguments": {"table": "notes"}})),
+    );
+    drop(stdin);
+    child.wait().unwrap();
+    (names, resp["result"].clone())
+}
+
+/// By default the server lists only the core profile and refuses other
+/// built-in tools with a pointer to the flag; `--tools full` and
+/// `AXIL_MCP_TOOLS=full` both serve every tool.
+#[test]
+fn mcp_tool_profiles() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db_path = tmp.path().join("profiles.axil");
+    init_db_with_all_engines(&db_path);
+
+    let (core, refused) = listed_tools_and_list_call(spawn_mcp(&db_path, &[], None));
+    for name in [
+        "boot",
+        "recall",
+        "search",
+        "get",
+        "code_search",
+        "store",
+        "checkpoint",
+    ] {
+        assert!(
+            core.iter().any(|n| n == name),
+            "core omits `{name}`: {core:?}"
+        );
+    }
+    for name in [
+        "list",
+        "link",
+        "delete",
+        "query",
+        "code_context",
+        "cache_get",
+    ] {
+        assert!(
+            !core.iter().any(|n| n == name),
+            "core lists `{name}`: {core:?}"
+        );
+    }
+    assert_eq!(
+        refused["isError"], true,
+        "core must refuse `list`: {refused}"
+    );
+    let text = refused["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("--tools full"), "{text}");
+
+    for (extra, env) in [(&["--tools", "full"][..], None), (&[][..], Some("full"))] {
+        let (full, listed) = listed_tools_and_list_call(spawn_mcp(&db_path, extra, env));
+        assert!(full.len() > core.len(), "{extra:?}/{env:?} lists {full:?}");
+        for name in ["list", "link", "delete", "code_context"] {
+            assert!(full.iter().any(|n| n == name), "full omits `{name}`");
+        }
+        assert!(
+            listed.get("isError").is_none(),
+            "full must run `list`: {listed}"
+        );
+    }
+}
+
+/// `axil mcp install --tools <profile>` pins the profile in the entry's
+/// arguments; without it the entry leaves the server on its default.
+#[test]
+fn mcp_install_pins_the_tool_profile() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(tmp.path().join(".axil")).unwrap();
+    init_db_with_all_engines(&tmp.path().join(".axil").join("memory.axil"));
+
+    let args_for = |extra: &[&str]| -> Vec<String> {
+        let out = Command::new(axil_bin())
+            .args(["mcp", "install", "claude-code", "--dry-run"])
+            .args(extra)
+            .current_dir(tmp.path())
+            .env_remove("AXIL_DB")
+            .output()
+            .expect("failed to run axil mcp install");
+        assert!(
+            out.status.success(),
+            "mcp install failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+        v["server"]["entry"]["args"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a.as_str().unwrap().to_string())
+            .collect()
+    };
+
+    let pinned = args_for(&["--tools", "full"]);
+    assert!(
+        pinned.ends_with(&["mcp".to_string(), "--tools".to_string(), "full".to_string()]),
+        "{pinned:?}"
+    );
+    let default = args_for(&[]);
+    assert_eq!(
+        default.last().map(String::as_str),
+        Some("mcp"),
+        "{default:?}"
+    );
 }

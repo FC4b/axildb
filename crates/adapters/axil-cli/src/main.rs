@@ -185,9 +185,10 @@ fn reindex_scip(db_path: &Path, root: &Path, full: bool, wait: bool, quiet: bool
 }
 
 /// SCIP feature compiled out — `reindex` still rebuilds the proxy index and
-/// reports the skip so the combined JSON shape stays stable.
+/// reports the skip so the combined JSON shape stays stable. Same signature as
+/// the real one so the call site needs no gate of its own.
 #[cfg(all(feature = "indexer", not(feature = "scip")))]
-fn reindex_scip(_db_path: &Path, _full: bool, _wait: bool, _quiet: bool) -> Value {
+fn reindex_scip(_db_path: &Path, _root: &Path, _full: bool, _wait: bool, _quiet: bool) -> Value {
     json!({ "status": "skipped", "reason": "scip_feature_disabled" })
 }
 
@@ -1642,12 +1643,22 @@ enum Command {
         /// Just compact (purge expired/superseded).
         #[arg(long)]
         compact: bool,
-        /// Rebuild all indexes from records.
+        /// Rebuild all indexes from records: drop vectors whose record is
+        /// gone, compact the vector index, and re-embed / re-index records
+        /// missing from it.
         #[arg(long)]
         reindex: bool,
-        /// Clean orphaned edges/vectors/FTS.
+        /// Clean orphaned edges and vectors.
         #[arg(long)]
         orphans: bool,
+        /// Embed rows of internal tables (code index, dep docs, recall
+        /// chunks, checkpoints) that have no vector, as rows written while
+        /// the vector store was unavailable. Opt-in, and it currently lowers
+        /// memory recall: embedded, these rows compete with memories, and on
+        /// the dogfood eval (snap-prefix, 2026-10-04) restoring 2,962
+        /// code-index vectors took hit@1 from 0.70 to 0.51.
+        #[arg(long)]
+        embed_internal: bool,
         /// Show what would be fixed without doing it.
         #[arg(long)]
         dry_run: bool,
@@ -2665,6 +2676,11 @@ enum Command {
         /// Example: http://localhost:4317
         #[arg(long)]
         otel_endpoint: Option<String>,
+        /// Tool profile: `core` serves the tools a session needs (boot,
+        /// recall, search, get, code_search, store, remember_*, resolve_error,
+        /// checkpoint); `full` serves every tool.
+        #[arg(long, env = "AXIL_MCP_TOOLS", default_value = "core", value_parser = ["core", "full"])]
+        tools: String,
     },
 
     // ── HTTP API server ────────────────────────────────────
@@ -3409,6 +3425,10 @@ enum McpCommand {
         /// Print the config path and entry without writing.
         #[arg(long)]
         dry_run: bool,
+        /// Pin the server's tool profile in the entry (`--tools <profile>`).
+        /// Omit it to leave the server on its default, `core`.
+        #[arg(long, value_parser = ["core", "full"])]
+        tools: Option<String>,
     },
 }
 
@@ -4510,7 +4530,7 @@ fn install_droid_hooks(cwd: &Path) -> Result<bool> {
 fn mcp_register_soft(cwd: &Path, target: &str) -> Value {
     #[cfg(feature = "mcp")]
     {
-        mcp_register(cwd, target, false).unwrap_or_else(|e| json!({"error": e.to_string()}))
+        mcp_register(cwd, target, false, None).unwrap_or_else(|e| json!({"error": e.to_string()}))
     }
     #[cfg(not(feature = "mcp"))]
     {
@@ -6356,6 +6376,15 @@ fn open_with_all_detected(path: &Path) -> Result<Axil> {
     builder.build().context("failed to open database")
 }
 
+/// Open a database with all detected plugins for a command that only
+/// inspects it (diagnostics, dry runs). Deletes noted while the vector store
+/// was detached are left for a later open rather than applied by this one,
+/// so the command changes nothing.
+fn open_for_inspection(path: &Path) -> Result<Axil> {
+    let builder = attach_detected_engines(Axil::open(path).defer_vector_delete_notes(true))?;
+    builder.build().context("failed to open database")
+}
+
 /// Number of times a hot read command retries the writable open when the
 /// single-writer lock is contended before falling back to a read-only open.
 const BUSY_RETRY_ATTEMPTS: u32 = 3;
@@ -7685,11 +7714,13 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
                         .unwrap_or_default();
                     let index_result = (|| -> anyhow::Result<Value> {
                         let db = open_with_all_detected(&db_path)?;
+                        let max_file_size_kb = index_config.max_file_size_kb;
                         let indexer = axil_indexer::ProjectIndexer::new(&db, index_config)
                             .with_progress(make_index_progress(out.quiet));
                         let report = indexer
                             .index_full(&cwd)
                             .map_err(|e| anyhow::anyhow!("{e}"))?;
+                        warn_skipped_large(&report, max_file_size_kb);
                         Ok(serde_json::to_value(&report)?)
                     })();
                     match index_result {
@@ -7968,7 +7999,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
         // ── Info ────────────────────────────────────────────────────
         Command::Info => {
             let db_path = require_db(&db_opt)?;
-            let db = open_with_all_detected(&db_path)?;
+            let db = open_for_inspection(&db_path)?;
             let info = db.info().context("failed to get database info")?;
 
             let mut features = Vec::new();
@@ -8021,7 +8052,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
         // ── Detect ──────────────────────────────────────────────────
         Command::Detect => {
             let db_path = require_db(&db_opt)?;
-            let db = open_with_all_detected(&db_path)?;
+            let db = open_for_inspection(&db_path)?;
             let results = axil_core::run_all_detectors(&db);
             let triggered: Vec<_> = results.iter().filter(|r| r.triggered).collect();
             out.print(&json!({
@@ -8034,54 +8065,63 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
         // ── Doctor ───────────────────────────────────────────────────
         Command::Doctor => {
             let db_path = require_db(&db_opt)?;
-            let db = open_with_all_detected(&db_path)?;
+            let db = open_for_inspection(&db_path)?;
             let mut report = db.doctor().context("doctor failed")?;
 
-            // Check if downloaded models have checksum sidecar files.
-            // Full SHA256 verification is expensive (17-500MB per model), so doctor
-            // only checks that checksums exist. Use `verify_model()` for full verification.
+            // Check each installed embedding model's files against their
+            // pinned sizes. Re-hashing would read hundreds of MB per model on
+            // every doctor run, so this is the cheap check; `axil
+            // model-download <model>` re-hashes against the pins and repairs.
             #[cfg(feature = "vector")]
             if db.has_vector_index() {
                 use axil_core::diagnostics::{CheckResult, Severity};
+                use axil_vector::models::EmbeddingModel;
                 let models_to_check = [
-                    axil_vector::models::EmbeddingModel::BgeSmall,
-                    axil_vector::models::EmbeddingModel::BgeSmallInt8,
-                    axil_vector::models::EmbeddingModel::BgeBase,
-                    axil_vector::models::EmbeddingModel::Nomic,
+                    EmbeddingModel::BgeSmall,
+                    EmbeddingModel::BgeSmallInt8,
+                    EmbeddingModel::BgeBase,
+                    EmbeddingModel::Nomic,
+                    EmbeddingModel::BgeM3,
+                    EmbeddingModel::GteModernbertBase,
                 ];
                 for model in &models_to_check {
-                    if axil_vector::download::is_model_available(model) {
-                        let check_name = format!("model_integrity_{}", model.name());
-                        match axil_vector::download::has_checksums(model) {
-                            Ok(results) => {
-                                let missing: Vec<_> = results
-                                    .iter()
-                                    .filter(|(_, ok)| !*ok)
-                                    .map(|(f, _)| f.as_str())
-                                    .collect();
-                                if missing.is_empty() {
-                                    report.add_check(CheckResult {
-                                        name: check_name,
-                                        status: Severity::Ok,
-                                        detail: format!("{}: checksums present", model.name()),
-                                        fix: None,
-                                    });
-                                } else {
-                                    report.add_check(CheckResult {
-                                        name: check_name,
-                                        status: Severity::Warning,
-                                        detail: format!(
-                                            "{}: missing checksums for: {}",
-                                            model.name(),
-                                            missing.join(", "),
-                                        ),
-                                        fix: Some(format!("axil model-download {}", model.name())),
-                                    });
-                                }
+                    // A model with no directory was never installed.
+                    if !model.model_dir().is_some_and(|d| d.exists()) {
+                        continue;
+                    }
+                    let check_name = format!("model_integrity_{}", model.name());
+                    match axil_vector::download::check_sizes(model) {
+                        Ok(results) => {
+                            let bad: Vec<_> = results
+                                .iter()
+                                .filter(|(_, ok)| !*ok)
+                                .map(|(f, _)| f.as_str())
+                                .collect();
+                            if bad.is_empty() {
+                                report.add_check(CheckResult {
+                                    name: check_name,
+                                    status: Severity::Ok,
+                                    detail: format!(
+                                        "{}: files at their pinned sizes",
+                                        model.name()
+                                    ),
+                                    fix: None,
+                                });
+                            } else {
+                                report.add_check(CheckResult {
+                                    name: check_name,
+                                    status: Severity::Warning,
+                                    detail: format!(
+                                        "{}: missing or not the pinned size: {}",
+                                        model.name(),
+                                        bad.join(", "),
+                                    ),
+                                    fix: Some(format!("axil model-download {}", model.name())),
+                                });
                             }
-                            Err(e) => {
-                                errln!("  [warn] model check for {}: {e}", model.name());
-                            }
+                        }
+                        Err(e) => {
+                            errln!("  [warn] model check for {}: {e}", model.name());
                         }
                     }
                 }
@@ -8407,7 +8447,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
             activation,
         } => {
             let db_path = require_db(&db_opt)?;
-            let db = open_with_all_detected(&db_path)?;
+            let db = open_for_inspection(&db_path)?;
 
             if activation {
                 let config = axil_core::ActivationConfig::default();
@@ -8425,6 +8465,9 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
                     errp!("\x1B[2J\x1B[H");
                     let stats = db.stats(table.as_deref()).context("stats failed")?;
                     out.print(&serde_json::to_value(&stats).unwrap());
+                    if cli_io::stdout_closed() {
+                        break Ok(EXIT_OK);
+                    }
                     out.status(&format!(
                         "(refreshing every {interval_secs}s — Ctrl+C to stop)"
                     ));
@@ -8604,7 +8647,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
             compare,
         } => {
             let db_path = require_db(&db_opt)?;
-            let db = open_with_all_detected(&db_path)?;
+            let db = open_for_inspection(&db_path)?;
             let report = db.report().context("report generation failed")?;
             let report_json = serde_json::to_value(&report).unwrap();
 
@@ -9425,7 +9468,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
             // Resolve project root and config once for freshness + auto-refresh.
             #[cfg(feature = "indexer")]
             let (resolved_root, resolved_config) = {
-                let root = detect_project_root(&db_path);
+                let root = freshness_root(&db, &db_path);
                 let cfg = root
                     .as_ref()
                     .and_then(|r| axil_core::load_config_from(r).ok());
@@ -10030,15 +10073,14 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
                 );
             } else {
                 for r in &proxies {
-                    let pointer = match (r.path.as_deref(), r.line_start, r.symbol.as_deref()) {
-                        (Some(p), Some(l), Some(s)) => format!("{p}:{l} {s}"),
-                        (Some(p), Some(l), None) => format!("{p}:{l}"),
-                        (Some(p), None, Some(s)) => format!("{p} {s}"),
-                        (Some(p), None, None) => p.to_string(),
-                        _ => r.id.clone(),
-                    };
-                    let why = r.why.as_deref().unwrap_or("matched code proxy");
-                    outln!("{pointer} — {why}");
+                    let line = code_hit_line(
+                        r.path.as_deref(),
+                        r.line_start.map(|l| l as u64),
+                        r.symbol.as_deref(),
+                        &r.id,
+                        r.why.as_deref(),
+                    );
+                    outln!("{line}");
                 }
             }
             Ok(EXIT_OK)
@@ -10704,6 +10746,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
             compact,
             reindex,
             orphans,
+            embed_internal,
             dry_run,
         } => {
             let db_path = require_db(&db_opt)?;
@@ -10712,16 +10755,27 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
             let missing_vector_store = heal_vector_store_check(&db_path, &config)?;
             #[cfg(not(feature = "embed"))]
             let missing_vector_store: Option<String> = None;
-            let db = open_with_all_detected(&db_path)?;
+            let db = if dry_run {
+                open_for_inspection(&db_path)?
+            } else {
+                open_with_all_detected(&db_path)?
+            };
 
+            let mut exit = EXIT_OK;
             // If specific flags are given, run only those actions
-            if compact || reindex || orphans {
+            if compact || reindex || orphans || embed_internal {
                 let mut actions = Vec::new();
 
                 if dry_run {
                     // Dry-run: report what would happen without modifying anything
                     let problems = db.detect_problems();
                     for p in &problems {
+                        if embed_internal && p.detector == "missing_internal_embeddings" {
+                            actions.push(json!({
+                                "action": p.detector,
+                                "result": format!("[dry-run] would fix: {}", p.message),
+                            }));
+                        }
                         if p.auto_fixable {
                             let dominated = match p.detector.as_str() {
                                 "expired_records" | "superseded_records" | "storage_bloat" => {
@@ -10732,7 +10786,8 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
                                 | "missing_fts"
                                 | "vector_load_skips"
                                 | "entity_key_index_drift" => reindex,
-                                "orphaned_edges" | "orphaned_vectors" => orphans,
+                                "orphaned_vectors" => orphans || reindex,
+                                "orphaned_edges" => orphans,
                                 _ => compact || orphans,
                             };
                             if dominated {
@@ -10770,6 +10825,23 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
                                 "action": "clean_orphans",
                                 "result": format!(
                                     "removed {} orphaned edges, {} orphaned vectors", oe, ov
+                                ),
+                            }));
+                        }
+                    }
+
+                    if reindex {
+                        // Rebuilding from the records means dropping vectors
+                        // no record backs: recall would fetch them and throw
+                        // them away. First, so the rebuild below compacts the
+                        // tombstones this leaves. Finds nothing after
+                        // --compact or --orphans.
+                        let ov = db.clean_orphaned_vectors();
+                        if ov > 0 {
+                            actions.push(json!({
+                                "action": "clean_orphaned_vectors",
+                                "result": format!(
+                                    "removed {ov} vectors whose record no longer exists"
                                 ),
                             }));
                         }
@@ -10834,6 +10906,29 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
                             }
                         }
                     }
+
+                    if embed_internal {
+                        let (embedded, failed) = db
+                            .reembed_missing_internal()
+                            .context("embedding internal rows failed")?;
+                        if embedded + failed > 0 {
+                            actions.push(json!({
+                                "action": "reembed_missing_internal",
+                                "result": format!(
+                                    "embedded {embedded} internal-table rows that had no vector, \
+                                     {failed} failed"
+                                ),
+                                "failed": failed,
+                            }));
+                        }
+                        if failed > 0 {
+                            out.status(&format!(
+                                "axil: {failed} internal-table row(s) could not be embedded and \
+                                 still have no vector; `axil doctor` lists them by table"
+                            ));
+                            exit = EXIT_ERROR;
+                        }
+                    }
                 }
 
                 let mut output = json!({
@@ -10870,6 +10965,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
                 && !compact
                 && !reindex
                 && !orphans
+                && !embed_internal
                 && db.has_timeseries_index()
                 && config.timeseries.auto_downsample
             {
@@ -10883,7 +10979,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
                 }
             }
 
-            Ok(EXIT_OK)
+            Ok(exit)
         }
 
         // ── Session-Heal ────────────────────────────────────────────
@@ -10895,7 +10991,11 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
         } => {
             let db_path = require_db(&db_opt)?;
             let config = load_config(&db_path)?;
-            let db = open_with_all_detected(&db_path)?;
+            let db = if dry_run {
+                open_for_inspection(&db_path)?
+            } else {
+                open_with_all_detected(&db_path)?
+            };
 
             let problems = problems_file
                 .as_ref()
@@ -11640,18 +11740,23 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
 
             if dry_run {
                 let project_type = axil_indexer::scanner::detect_project_type(&root);
-                let files = axil_indexer::scanner::scan_files(&root, &config);
+                // No database is needed for a dry run, but when there is one
+                // its files are left out exactly as the real run leaves them.
+                let db_path = require_db(&db_opt).ok();
+                let scan = axil_indexer::scanner::scan_files(&root, &config, db_path.as_deref());
                 out.print(&json!({
                     "dry_run": true,
                     "project_type": project_type.as_str(),
-                    "files_to_index": files.len(),
-                    "files": files.iter().map(|f| &f.rel_path).collect::<Vec<_>>(),
+                    "files_to_index": scan.files.len(),
+                    "files": scan.files.iter().map(|f| &f.rel_path).collect::<Vec<_>>(),
+                    "skipped_large": scan.skipped_large,
                 }));
                 return Ok(EXIT_OK);
             }
 
             let db_path = require_db(&db_opt)?;
             let db = open_with_all_detected(&db_path)?;
+            let max_file_size_kb = config.max_file_size_kb;
             let indexer = axil_indexer::ProjectIndexer::new(&db, config)
                 .with_progress(make_index_progress(out.quiet));
 
@@ -11665,6 +11770,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
                     .map_err(|e| anyhow::anyhow!("{e}"))?
             };
 
+            warn_skipped_large(&result, max_file_size_kb);
             out.print(&serde_json::to_value(&result)?);
             Ok(EXIT_OK)
         }
@@ -11686,6 +11792,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
             let db_path = require_db(&db_opt)?;
             let proxies = {
                 let db = open_with_all_detected(&db_path)?;
+                let max_file_size_kb = config.max_file_size_kb;
                 let indexer = axil_indexer::ProjectIndexer::new(&db, config)
                     .with_progress(make_index_progress(out.quiet));
                 let result = if full || !indexer.has_index() {
@@ -11697,6 +11804,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
                         .index_incremental(&root)
                         .map_err(|e| anyhow::anyhow!("{e}"))?
                 };
+                warn_skipped_large(&result, max_file_size_kb);
                 // Drop the DB handle (end of scope) before spawning the SCIP
                 // child so the worker can take the redb write lock cleanly.
                 serde_json::to_value(&result)?
@@ -11741,7 +11849,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
             let db_path = require_db(&db_opt)?;
             let db = open_with_best_effort(&db_path)?;
 
-            let project_root = detect_project_root(&db_path);
+            let project_root = freshness_root(&db, &db_path);
             let index_config = project_root
                 .as_ref()
                 .and_then(|root| axil_core::load_config_from(root).ok())
@@ -11787,7 +11895,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
         Command::IndexStats => {
             let db_path = require_db(&db_opt)?;
             let db = open_with_all_detected(&db_path)?;
-            let project_root = detect_project_root(&db_path);
+            let project_root = freshness_root(&db, &db_path);
             let index_config = project_root
                 .as_ref()
                 .and_then(|root| axil_core::load_config_from(root).ok())
@@ -12712,6 +12820,9 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
                         Err(e) => {
                             errln!("axil ingest-scip --watch: stat failed: {e}");
                         }
+                    }
+                    if cli_io::stdout_closed() {
+                        break Ok(EXIT_OK);
                     }
                     std::thread::sleep(std::time::Duration::from_secs(2));
                 }
@@ -13926,7 +14037,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
             #[cfg(feature = "indexer")]
             {
                 // Freshness check
-                let project_root = detect_project_root(&db_path);
+                let project_root = freshness_root(&db, &db_path);
                 if let Some(ref root) = project_root {
                     let idx_config = load_config(&db_path).map(|c| c.index).unwrap_or_default();
                     let freshness =
@@ -14830,11 +14941,14 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
                             }
                         }
                     }
-                    // Include the file's own summary from the index
+                    // Include the file's own summary from the index, with the
+                    // index record's id so a hook can dedup it and `axil get`
+                    // can expand it.
                     if let Some(summary) = idx_record.data.get("summary").and_then(|v| v.as_str()) {
                         if !summary.is_empty() {
                             hits.push(json!({
                                 "match": "file_index",
+                                "id": idx_record.id.to_string(),
                                 "file": file,
                                 "summary": summary,
                                 "imports": idx_record.data.get("imports").cloned().unwrap_or(json!([])),
@@ -15558,13 +15672,25 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
         // ── MCP server ─────────────────────────────────────────────
         #[cfg(feature = "mcp")]
         Command::Mcp {
-            command: Some(McpCommand::Install { target, dry_run }),
+            command:
+                Some(McpCommand::Install {
+                    target,
+                    dry_run,
+                    tools,
+                }),
             ..
-        } => mcp_install(&std::env::current_dir()?, &target, dry_run, out),
+        } => mcp_install(
+            &std::env::current_dir()?,
+            &target,
+            dry_run,
+            tools.as_deref(),
+            out,
+        ),
         #[cfg(feature = "mcp")]
         Command::Mcp {
             command: None,
             otel_endpoint,
+            tools,
         } => {
             // Fail loudly if --otel-endpoint is used without the otel feature.
             #[cfg(not(feature = "otel"))]
@@ -15586,6 +15712,8 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
                 None
             };
 
+            let profile: axil_mcp::ToolProfile =
+                tools.parse().map_err(|e: String| anyhow::anyhow!(e))?;
             let db_path = require_db(&db_opt)?;
             // Use embedder so recall/similar_to works over MCP.
             #[cfg(feature = "embed")]
@@ -15601,7 +15729,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
             // shared Axil, then run the blocking serve loop (it owns the tokio
             // runtime internally).
             use axil_core::Adapter as _;
-            let mut adapter = axil_mcp::McpAdapter::new();
+            let mut adapter = axil_mcp::McpAdapter::new().with_tool_profile(profile);
             adapter
                 .bind(db)
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -16058,12 +16186,21 @@ fn run_worker_and_report(db: &axil_core::Axil, out: &Output) {
 /// Walk up from the database path to find the project root.
 /// Looks for Cargo.toml, package.json, pyproject.toml, go.mod, etc.
 ///
+/// `None` when no directory above holds a marker, and when the nearest one
+/// that does is the home directory or the filesystem root (a dotfiles repo
+/// puts `.git` in `$HOME`). Callers walk the root they get, and walking a
+/// home directory on every read is never what a marker meant.
+///
 /// Not feature-gated: pure `std::path` walking with no indexer dependency,
 /// called from ungated handlers (`memory-pressure`, `decay`).
 fn detect_project_root(db_path: &Path) -> Option<PathBuf> {
-    // Walk the absolute path. A relative one (`--db .axil/memory.axil`) runs
-    // out at an empty path, which as a root names no files: every indexed
-    // file would read as deleted.
+    detect_project_root_under(db_path, axil_core::home_dir().as_deref())
+}
+
+/// [`detect_project_root`] with the home directory passed in.
+fn detect_project_root_under(db_path: &Path, home: Option<&Path>) -> Option<PathBuf> {
+    // Walk the absolute path, so a relative `--db .axil/memory.axil` finds
+    // the root its absolute form finds and names it the same way.
     let db_path = std::path::absolute(db_path).unwrap_or_else(|_| db_path.to_path_buf());
     let mut dir = db_path.parent()?.to_path_buf();
     let markers = [
@@ -16076,17 +16213,55 @@ fn detect_project_root(db_path: &Path) -> Option<PathBuf> {
         ".git",
     ];
     loop {
-        for marker in &markers {
-            if dir.join(marker).exists() {
-                return Some(dir);
+        if markers.iter().any(|marker| dir.join(marker).exists()) {
+            if dir.as_os_str().is_empty() {
+                dir = PathBuf::from(".");
             }
+            return (!is_home_or_filesystem_root(&dir, home)).then_some(dir);
         }
         if !dir.pop() {
-            break;
+            return None;
         }
     }
-    // Fallback: db parent directory
-    db_path.parent().map(|p| p.to_path_buf())
+}
+
+/// Whether `dir` is the home directory or the filesystem root.
+fn is_home_or_filesystem_root(dir: &Path, home: Option<&Path>) -> bool {
+    let Ok(dir) = std::fs::canonicalize(dir) else {
+        return false;
+    };
+    dir.parent().is_none()
+        || home
+            .and_then(|home| std::fs::canonicalize(home).ok())
+            .is_some_and(|home| home == dir)
+}
+
+/// The directory a read may walk to check the code index's freshness, or
+/// `None` when no walk is safe.
+///
+/// That is the project root a marker shows ([`detect_project_root`]), or else
+/// the directory the index was last built from: someone ran `axil index` on
+/// it. With neither, the read skips the check. An unmarked directory can be a
+/// whole home directory, and recall and boot would walk and hash all of it
+/// on every call.
+#[cfg(feature = "indexer")]
+fn freshness_root(db: &Axil, db_path: &Path) -> Option<PathBuf> {
+    detect_project_root(db_path).or_else(|| axil_indexer::freshness::indexed_root(db))
+}
+
+/// Warn, on stderr, about the source files an index run left out for size:
+/// their symbols are missing from code-search and fts, and nothing else says
+/// why. Commands run to index call this. The re-index that `recall` and
+/// `code-context` start on their own stays quiet: its stderr reaches agent
+/// hooks on every stale read, and the index records the files for
+/// `axil index-stats` instead.
+#[cfg(feature = "indexer")]
+fn warn_skipped_large(result: &axil_indexer::IndexResult, max_file_size_kb: u64) {
+    if let Some(warning) =
+        axil_indexer::scanner::skipped_large_warning(&result.skipped_large, max_file_size_kb)
+    {
+        errln!("{warning}");
+    }
 }
 
 // ─── dependency documentation memory ──────────────────────────────
@@ -19542,21 +19717,30 @@ fn format_context_block(values: &[Value], budget: Option<usize>, warnings: &[Str
             xml_escape_for_context(id),
         ));
     }
-    // Build the combined `lines` list: code first, then memories — so the
-    // first thing the agent sees is the actionable pointer.
-    let mut lines: Vec<String> = Vec::with_capacity(code_lines.len() + other_lines.len() + 2);
-    if !code_lines.is_empty() {
-        lines.push("  # Relevant code".to_string());
+    // Build the combined list: code first, then memories — so the first
+    // thing the agent sees is the actionable pointer. Each entry is one unit
+    // for the budget below, and a section heading shares a unit with the
+    // section's first hit: packing them separately could keep a heading and
+    // drop every hit under it.
+    let mut lines: Vec<String> = Vec::with_capacity(code_lines.len() + other_lines.len());
+    let mut code_lines = code_lines.into_iter();
+    if let Some(first) = code_lines.next() {
+        lines.push(format!("  # Relevant code\n{first}"));
         lines.extend(code_lines);
     }
-    if !other_lines.is_empty() {
-        if !lines.is_empty() {
-            lines.push("  # Related memories".to_string());
+    let mut other_lines = other_lines.into_iter();
+    if let Some(first) = other_lines.next() {
+        if lines.is_empty() {
+            lines.push(first);
+        } else {
+            lines.push(format!("  # Related memories\n{first}"));
         }
         lines.extend(other_lines);
     }
 
     // Apply token budget (bytes/4 ≈ tokens) packing highest-ranked first.
+    // The first unit is always kept, so a block never comes out empty when
+    // there was a hit to show.
     if let Some(max_tokens) = budget {
         let max_bytes = max_tokens.saturating_mul(4);
         let opener = "<context source=\"axil\">\n";
@@ -19747,6 +19931,26 @@ fn format_code_proxy_line(v: &Value) -> String {
         bc,
         xml_escape_for_context(id),
     )
+}
+
+/// One code-search hit as `axil code-search` prints it:
+/// `path:line symbol — why`, falling back to the record id when the hit has
+/// no path. The pre-tool hook renders the same lines from `--json` output.
+fn code_hit_line(
+    path: Option<&str>,
+    line: Option<u64>,
+    symbol: Option<&str>,
+    id: &str,
+    why: Option<&str>,
+) -> String {
+    let pointer = match (path, line, symbol) {
+        (Some(p), Some(l), Some(s)) => format!("{p}:{l} {s}"),
+        (Some(p), Some(l), None) => format!("{p}:{l}"),
+        (Some(p), None, Some(s)) => format!("{p} {s}"),
+        (Some(p), None, None) => p.to_string(),
+        _ => id.to_string(),
+    };
+    format!("{pointer} — {}", why.unwrap_or("matched code proxy"))
 }
 
 /// Escape XML-special characters so untrusted recalled text cannot
@@ -20599,16 +20803,25 @@ struct McpTarget {
 
 /// CLI wrapper around [`mcp_register`].
 #[cfg(feature = "mcp")]
-fn mcp_install(cwd: &Path, target: &str, dry_run: bool, out: &Output) -> Result<i32> {
-    let result = mcp_register(cwd, target, dry_run)?;
+fn mcp_install(
+    cwd: &Path,
+    target: &str,
+    dry_run: bool,
+    tools: Option<&str>,
+    out: &Output,
+) -> Result<i32> {
+    let result = mcp_register(cwd, target, dry_run, tools)?;
     out.print(&result);
     Ok(EXIT_OK)
 }
 
 /// Register the Axil MCP server in an agent's config. Only the `axil`
 /// entry is written; everything else in the file is preserved.
+///
+/// `tools` pins the server's tool profile in the entry's arguments; `None`
+/// leaves the server on its default profile.
 #[cfg(feature = "mcp")]
-fn mcp_register(cwd: &Path, target: &str, dry_run: bool) -> Result<Value> {
+fn mcp_register(cwd: &Path, target: &str, dry_run: bool, tools: Option<&str>) -> Result<Value> {
     let db_rel = "./.axil/memory.axil";
     let db_abs = cwd.join(".axil").join("memory.axil");
     if !db_abs.is_file() {
@@ -20686,11 +20899,14 @@ fn mcp_register(cwd: &Path, target: &str, dry_run: bool) -> Result<Value> {
     // the server's launch cwd, so one global entry serves every project.
     // Project-scoped configs live in the project, so a relative path is safe.
     let db_arg = db_rel.to_string();
-    let args = if t.global {
+    let mut args = if t.global {
         vec!["mcp".to_string()]
     } else {
         vec!["--db".to_string(), db_arg.clone(), "mcp".to_string()]
     };
+    if let Some(profile) = tools {
+        args.extend(["--tools".to_string(), profile.to_string()]);
+    }
 
     // Per-target entry shape.
     let entry_desc: Value;
@@ -21822,6 +22038,43 @@ mod recall_summary_tests {
             "{block}"
         );
     }
+
+    #[cfg(feature = "indexer")]
+    #[test]
+    fn a_budget_never_keeps_a_section_heading_without_its_first_hit() {
+        let hits = vec![
+            json!({"id": "C", "table": axil_indexer::TABLE_CODE_PROXIES, "data": {
+                "path": "src/auth.rs", "line_start": 42, "symbol": "login"}}),
+            json!({"id": "D", "table": "decisions", "data": {"summary": "use redb"}}),
+        ];
+
+        // A budget too small for anything still shows the first hit, with its
+        // heading.
+        let block = format_context_block(&hits, Some(0), &[]);
+        assert!(
+            block.contains("  # Relevant code\n  [code] src/auth.rs:42 login"),
+            "{block}"
+        );
+        assert!(!block.contains("Related memories"), "{block}");
+
+        // Room for the memories heading but not for its hit: neither prints.
+        let code_only = format_context_block(&hits[..1], None, &[]);
+        let tools = code_only
+            .lines()
+            .find(|l| l.starts_with("  # Tools"))
+            .map_or(0, |l| l.len() + 1);
+        let budget = (code_only.len() - tools + "  # Related memories\n".len()).div_ceil(4);
+        let block = format_context_block(&hits, Some(budget), &[]);
+        assert!(block.contains("(id=C)"), "{block}");
+        assert!(!block.contains("Related memories"), "{block}");
+
+        // With room for both, both sections print.
+        let block = format_context_block(&hits, Some(2000), &[]);
+        assert!(
+            block.contains("  # Related memories\n  [decisions] use redb (id=D)"),
+            "{block}"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -22345,5 +22598,32 @@ mod open_helper_tests {
             #[cfg(feature = "indexer")]
             check("open_with_best_effort", open_with_best_effort(&path));
         }
+    }
+}
+
+#[cfg(test)]
+mod project_root_tests {
+    use super::*;
+
+    #[test]
+    fn only_a_marker_makes_a_project_root_and_never_home() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let proj = home.join("proj");
+        let db = proj.join(".axil").join("memory.axil");
+        std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+        let root = |db: &Path| detect_project_root_under(db, Some(&home));
+
+        // No marker anywhere above: no root, not the directory holding `.axil/`.
+        assert_eq!(root(&db), None);
+
+        // A marker in home (a dotfiles repo) does not make home the root.
+        std::fs::create_dir_all(home.join(".git")).unwrap();
+        assert_eq!(root(&db), None);
+        assert_eq!(root(&home.join(".axil").join("memory.axil")), None);
+
+        // A marker in the project does.
+        std::fs::write(proj.join("Cargo.toml"), "").unwrap();
+        assert_eq!(root(&db), Some(proj));
     }
 }

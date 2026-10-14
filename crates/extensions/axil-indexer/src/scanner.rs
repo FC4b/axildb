@@ -259,11 +259,95 @@ pub fn detect_project_name(root: &Path, project_type: ProjectType) -> String {
         .to_string()
 }
 
+/// A source file [`scan_files`] left out for exceeding `max_file_size_kb`.
+/// Serializes as `{"path", "size_bytes"}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SkippedFile {
+    /// Path relative to the scan root, with `/` separators.
+    #[serde(rename = "path")]
+    pub rel_path: String,
+    /// File size in bytes.
+    pub size_bytes: u64,
+}
+
+/// What [`scan_files`] found under a project root.
+#[derive(Debug, Clone, Default)]
+pub struct Scan {
+    /// Files to index, sorted by relative path.
+    pub files: Vec<ScannedFile>,
+    /// Source files left out for size, largest first. Their symbols are
+    /// missing from code-search and fts and nothing else says why, so a
+    /// caller that indexes should report them: see [`skipped_large_warning`].
+    pub skipped_large: Vec<SkippedFile>,
+}
+
+/// The one-line warning for files a scan left out for size, or `None` when
+/// it left out none. Names the three largest.
+pub fn skipped_large_warning(skipped: &[SkippedFile], max_file_size_kb: u64) -> Option<String> {
+    if skipped.is_empty() {
+        return None;
+    }
+    let shown: Vec<String> = skipped
+        .iter()
+        .take(3)
+        .map(|f| format!("{} ({} KB)", f.rel_path, f.size_bytes / 1024))
+        .collect();
+    let more = skipped.len().saturating_sub(3);
+    let more_note = if more > 0 { format!(", +{more} more") } else { String::new() };
+    Some(format!(
+        "[axil-index] skipped {} file(s) over max_file_size_kb = {} KB: {}{} — their symbols will NOT be searchable; raise [index].max_file_size_kb in axil.toml to include them",
+        skipped.len(),
+        max_file_size_kb,
+        shown.join(", "),
+        more_note,
+    ))
+}
+
+/// A database's own files: its core file and every companion Axil derives
+/// from its path ([`axil_core::is_database_file_name`]). `memory.axil.ts`
+/// would otherwise read as TypeScript.
+struct DatabaseFiles {
+    /// The directory holding the database, canonicalized.
+    dir: PathBuf,
+    /// The core file's name.
+    name: String,
+}
+
+impl DatabaseFiles {
+    fn new(db_path: &Path) -> Option<Self> {
+        let name = db_path.file_name()?.to_string_lossy().into_owned();
+        let parent = db_path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        let dir = std::fs::canonicalize(parent).ok()?;
+        Some(Self { dir, name })
+    }
+
+    fn contains(&self, path: &Path) -> bool {
+        let Some(name) = path.file_name() else {
+            return false;
+        };
+        // Only an entry named like the database pays for a canonicalize.
+        axil_core::is_database_file_name(&self.name, &name.to_string_lossy())
+            && path
+                .parent()
+                .and_then(|p| std::fs::canonicalize(p).ok())
+                .is_some_and(|dir| dir == self.dir)
+    }
+}
+
 /// Scan a project directory for source files.
 ///
 /// Respects `.gitignore` and `.axilignore`. Skips binary files,
-/// generated files, and directories listed in [`SKIP_DIRS`].
-pub fn scan_files(root: &Path, config: &IndexConfig) -> Vec<ScannedFile> {
+/// generated files, and directories listed in [`SKIP_DIRS`]. Given the
+/// database the scan is for, also skips that database's own files, wherever
+/// in the tree it lives.
+///
+/// Files over `max_file_size_kb` are not indexed and not printed about: they
+/// come back in [`Scan::skipped_large`], so a read path that only checks
+/// freshness stays quiet while an index run can warn.
+pub fn scan_files(root: &Path, config: &IndexConfig, db_path: Option<&Path>) -> Scan {
     let skip_dirs: HashSet<&str> = SKIP_DIRS.iter().copied().collect();
     let skip_exts: HashSet<&str> = SKIP_EXTENSIONS.iter().copied().collect();
     let max_size = config.max_file_size_kb * 1024;
@@ -287,8 +371,12 @@ pub fn scan_files(root: &Path, config: &IndexConfig) -> Vec<ScannedFile> {
     // Respect .axilignore files (same syntax as .gitignore)
     walker.add_custom_ignore_filename(".axilignore");
 
+    if let Some(db_files) = db_path.and_then(DatabaseFiles::new) {
+        walker.filter_entry(move |entry| !db_files.contains(entry.path()));
+    }
+
     let mut files = Vec::new();
-    let mut skipped_large: Vec<(String, u64)> = Vec::new();
+    let mut skipped_large: Vec<SkippedFile> = Vec::new();
 
     for entry in walker.build().flatten() {
         let path = entry.path();
@@ -373,8 +461,11 @@ pub fn scan_files(root: &Path, config: &IndexConfig) -> Vec<ScannedFile> {
         let size = metadata.len();
         if size > max_size {
             // A silently missing file poisons recall: queries for its symbols
-            // return nothing and nothing says why. Record it and warn below.
-            skipped_large.push((rel, size));
+            // return nothing and nothing says why. Record it for the caller.
+            skipped_large.push(SkippedFile {
+                rel_path: rel,
+                size_bytes: size,
+            });
             continue;
         }
 
@@ -389,29 +480,14 @@ pub fn scan_files(root: &Path, config: &IndexConfig) -> Vec<ScannedFile> {
         });
     }
 
-    // Skipping a large file must be loud: its symbols simply vanish from
-    // code-search/fts otherwise. One bounded summary line, not per-file spam.
-    if !skipped_large.is_empty() {
-        skipped_large.sort_by(|a, b| b.1.cmp(&a.1)); // largest first
-        let shown: Vec<String> = skipped_large
-            .iter()
-            .take(3)
-            .map(|(p, s)| format!("{} ({} KB)", p, s / 1024))
-            .collect();
-        let more = skipped_large.len().saturating_sub(3);
-        let more_note = if more > 0 { format!(", +{more} more") } else { String::new() };
-        axil_core::diagln!(
-            "[axil-index] skipped {} file(s) over max_file_size_kb = {} KB: {}{} — their symbols will NOT be searchable; raise [index].max_file_size_kb in axil.toml to include them",
-            skipped_large.len(),
-            config.max_file_size_kb,
-            shown.join(", "),
-            more_note,
-        );
-    }
+    skipped_large.sort_by(|a, b| b.size_bytes.cmp(&a.size_bytes));
 
     // Sort by path for deterministic output
     files.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
-    files
+    Scan {
+        files,
+        skipped_large,
+    }
 }
 
 #[cfg(test)]
@@ -450,7 +526,7 @@ mod tests {
         std::fs::write(proj.join("b.py"), "def g():\n    pass\n").unwrap();
 
         let config = IndexConfig::default();
-        let files = scan_files(&proj, &config);
+        let files = scan_files(&proj, &config, None).files;
         let rels: Vec<&str> = files.iter().map(|f| f.rel_path.as_str()).collect();
         assert!(rels.contains(&"models/a.py"), "parent .gitignore leaked: {rels:?}");
         assert!(rels.contains(&"b.py"), "{rels:?}");
@@ -458,7 +534,7 @@ mod tests {
         // The project's OWN .gitignore still applies.
         std::fs::write(proj.join(".gitignore"), "models/\n").unwrap();
         std::fs::create_dir_all(proj.join(".git")).unwrap();
-        let files = scan_files(&proj, &config);
+        let files = scan_files(&proj, &config, None).files;
         let rels: Vec<&str> = files.iter().map(|f| f.rel_path.as_str()).collect();
         assert!(!rels.contains(&"models/a.py"), "own .gitignore ignored: {rels:?}");
         assert!(rels.contains(&"b.py"), "{rels:?}");
@@ -476,9 +552,60 @@ mod tests {
         // not what the shipped default happens to be.
         let mut config = IndexConfig::default();
         config.max_file_size_kb = 100;
-        let files = scan_files(dir.path(), &config);
+        let scan = scan_files(dir.path(), &config, None);
 
-        assert_eq!(files.len(), 1); // big.rs should be skipped
-        assert_eq!(files[0].rel_path, "src/main.rs");
+        assert_eq!(scan.files.len(), 1); // big.rs should be skipped
+        assert_eq!(scan.files[0].rel_path, "src/main.rs");
+        assert_eq!(
+            scan.skipped_large,
+            [SkippedFile {
+                rel_path: "src/big.rs".into(),
+                size_bytes: 200_000,
+            }]
+        );
+        let warning = skipped_large_warning(&scan.skipped_large, 100).unwrap();
+        assert!(
+            warning.starts_with("[axil-index] skipped 1 file(s) over max_file_size_kb = 100 KB: src/big.rs (195 KB)"),
+            "{warning}"
+        );
+        assert_eq!(skipped_large_warning(&[], 100), None);
+    }
+
+    #[test]
+    fn scan_skips_the_database_and_its_companions() {
+        // A database kept in the tree, not under a hidden `.axil/`. Its
+        // timeseries companion ends in `.ts`, so by extension it is
+        // TypeScript; small enough here that only the exclusion keeps it out.
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        std::fs::create_dir_all(data.join("memory.axil.fts")).unwrap();
+        let db = data.join("memory.axil");
+        std::fs::write(&db, "").unwrap();
+        std::fs::write(data.join("memory.axil.ts"), "export const x = 1;\n").unwrap();
+        std::fs::write(data.join("memory.axil.vec.code"), "").unwrap();
+        std::fs::write(data.join("memory.axil.fts/notes.py"), "x = 1\n").unwrap();
+        // Named like the database but not one of its files: still source.
+        std::fs::write(data.join("memory.axilx.ts"), "export const y = 2;\n").unwrap();
+        std::fs::write(data.join("memory.axil.helpers.ts"), "export const z = 3;\n").unwrap();
+        std::fs::write(dir.path().join("lib.rs"), "pub fn f() {}\n").unwrap();
+        let config = IndexConfig::default();
+
+        let rels = |db_path: Option<&Path>| -> Vec<String> {
+            scan_files(dir.path(), &config, db_path)
+                .files
+                .into_iter()
+                .map(|f| f.rel_path)
+                .collect()
+        };
+        let sources = [
+            "data/memory.axil.helpers.ts",
+            "data/memory.axilx.ts",
+            "lib.rs",
+        ];
+        assert_eq!(rels(Some(&db)), sources);
+        // Found by its canonical location, however the path was spelled.
+        let spelled = dir.path().join("data/../data/memory.axil");
+        assert_eq!(rels(Some(&spelled)), sources);
+        assert!(rels(None).contains(&"data/memory.axil.ts".to_string()));
     }
 }

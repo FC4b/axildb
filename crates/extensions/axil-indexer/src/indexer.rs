@@ -23,11 +23,20 @@ use crate::progress::{IndexProgress, NoopProgress};
 use crate::proxy::{
     build_proxy, proxy_to_record, CodeProxy, ProxyInput, ProxyKind, TABLE_CODE_PROXIES,
 };
-use crate::scanner::{self, Language, ProjectType, ScannedFile};
+use crate::scanner::{self, Language, ProjectType, ScannedFile, SkippedFile};
 use crate::token;
 use axil_core::IndexConfig;
 
 // ── Table names ──────────────────────────────────────────────────────
+
+/// The root an index run records, so a later read can check this index's
+/// freshness without guessing a directory to walk.
+fn recorded_root(root: &Path) -> String {
+    std::fs::canonicalize(root)
+        .unwrap_or_else(|_| root.to_path_buf())
+        .to_string_lossy()
+        .into_owned()
+}
 
 pub const TABLE_PROJECT: &str = "_idx_project";
 pub const TABLE_FILES: &str = "_idx_files";
@@ -47,6 +56,11 @@ pub struct IndexResult {
     /// For incremental: how many files were changed vs unchanged.
     pub changed: Option<usize>,
     pub unchanged: Option<usize>,
+    /// Source files left out for exceeding `max_file_size_kb`, largest
+    /// first. Not serialized: a caller reports them, e.g. with
+    /// [`scanner::skipped_large_warning`].
+    #[serde(skip)]
+    pub skipped_large: Vec<SkippedFile>,
 }
 
 /// SCIP definition match for a `(path, symbol)` pair. Carries the
@@ -120,7 +134,10 @@ impl<'a> ProjectIndexer<'a> {
         let project_name = scanner::detect_project_name(root, project_type);
 
         // Scan files
-        let files = scanner::scan_files(root, &self.config);
+        let scanner::Scan {
+            files,
+            skipped_large,
+        } = scanner::scan_files(root, &self.config, Some(self.db.path()));
         self.progress.start(files.len());
 
         // Clear existing index tables
@@ -213,6 +230,8 @@ impl<'a> ProjectIndexer<'a> {
         // Generate and store project overview
         self.progress.phase("project overview");
         self.index_project_overview(
+            root,
+            &skipped_large,
             &project_name,
             project_type,
             files.len(),
@@ -257,6 +276,7 @@ impl<'a> ProjectIndexer<'a> {
             tokens_saved_estimate: format!("~{ratio}:1 compression ({index_tokens} index tokens vs {total_source_tokens} source tokens)"),
             changed: None,
             unchanged: None,
+            skipped_large,
         })
     }
 
@@ -270,7 +290,10 @@ impl<'a> ProjectIndexer<'a> {
         let project_name = scanner::detect_project_name(root, project_type);
 
         // Scan current files on disk
-        let current_files = scanner::scan_files(root, &self.config);
+        let scanner::Scan {
+            files: current_files,
+            skipped_large,
+        } = scanner::scan_files(root, &self.config, Some(self.db.path()));
         self.progress.start(current_files.len());
 
         // Build a map of stored file records: path → (record_id, content_hash)
@@ -321,6 +344,9 @@ impl<'a> ProjectIndexer<'a> {
             .any(|p| !current_paths.contains(p.as_str()));
 
         if changed_count == 0 && !has_deletes {
+            // No indexed file changed, but the run may still have been made
+            // from another root, or found other files too large to index.
+            self.refresh_project_record(root, &skipped_large)?;
             self.progress.finish();
             return Ok(IndexResult {
                 indexed_files: 0,
@@ -331,6 +357,7 @@ impl<'a> ProjectIndexer<'a> {
                 tokens_saved_estimate: "no changes".to_string(),
                 changed: Some(0),
                 unchanged: Some(unchanged_count),
+                skipped_large,
             });
         }
 
@@ -514,6 +541,8 @@ impl<'a> ProjectIndexer<'a> {
             .sum();
 
         self.index_project_overview(
+            root,
+            &skipped_large,
             &project_name,
             project_type,
             all_file_records.len(),
@@ -556,6 +585,7 @@ impl<'a> ProjectIndexer<'a> {
             ),
             changed: Some(changed_count),
             unchanged: Some(unchanged_count),
+            skipped_large,
         })
     }
 
@@ -568,6 +598,25 @@ impl<'a> ProjectIndexer<'a> {
     }
 
     // ── Private helpers ──────────────────────────────────────────────
+
+    /// Update the project record's `root` and `skipped_large` where they
+    /// differ from this run's, without rebuilding the overview.
+    fn refresh_project_record(
+        &self,
+        root: &Path,
+        skipped_large: &[SkippedFile],
+    ) -> axil_core::Result<()> {
+        let Some(record) = self.db.list(TABLE_PROJECT)?.into_iter().next() else {
+            return Ok(());
+        };
+        let mut data = record.data.clone();
+        data["root"] = json!(recorded_root(root));
+        data["skipped_large"] = json!(skipped_large);
+        if data != record.data {
+            self.db.update(&record.id, data)?;
+        }
+        Ok(())
+    }
 
     fn clear_index_tables(&self) -> axil_core::Result<()> {
         for table in &[
@@ -601,6 +650,11 @@ impl<'a> ProjectIndexer<'a> {
     /// removed symbols afterwards. Failures inside embed/index calls are
     /// silently ignored (matches existing `embed_field` style elsewhere
     /// in this file).
+    ///
+    /// An unchanged proxy with no stored vector (written while the vector
+    /// store was unavailable) is deliberately left without one: embedded,
+    /// code-index rows compete with memories in recall and lower memory
+    /// recall, so only `axil heal --embed-internal` adds them, on request.
     fn store_proxy_with_dedupe(
         &self,
         proxy: &CodeProxy,
@@ -1145,8 +1199,11 @@ impl<'a> ProjectIndexer<'a> {
         Ok(count)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn index_project_overview(
         &self,
+        root: &Path,
+        skipped_large: &[SkippedFile],
         name: &str,
         project_type: ProjectType,
         file_count: usize,
@@ -1221,6 +1278,10 @@ impl<'a> ProjectIndexer<'a> {
         let project_data = json!({
             "name": name,
             "type": project_type.as_str(),
+            "root": recorded_root(root),
+            // Kept so a run nobody watched (an automatic re-index) still
+            // leaves a trace: `axil index-stats` lists them.
+            "skipped_large": skipped_large,
             "summary": format!(
                 "{name} — {type} project with {files} files, {modules} modules",
                 name = name,
@@ -1687,6 +1748,77 @@ mod tests {
         assert_eq!(s, "abcdefghi...");
         let s = combine_summaries(&["One — two", "One — two", "Three"], 1000);
         assert_eq!(s, "One — two. Three", "duplicates are dropped");
+    }
+
+    #[test]
+    fn the_project_record_keeps_the_root_and_the_files_left_out() {
+        let db_dir = tempfile::tempdir().unwrap();
+        let db = Axil::open(db_dir.path().join("t.axil")).build().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("small.rs"), "fn a() {}\n").unwrap();
+        std::fs::write(root.path().join("big.rs"), "// pad\n".repeat(300)).unwrap();
+        let mut config = IndexConfig::default();
+        config.max_file_size_kb = 1;
+
+        let result = ProjectIndexer::new(&db, config)
+            .index_full(root.path())
+            .unwrap();
+        assert_eq!(result.skipped_large.len(), 1);
+
+        let project = &db.list(TABLE_PROJECT).unwrap()[0].data;
+        let canonical = std::fs::canonicalize(root.path()).unwrap();
+        assert_eq!(project["root"], canonical.to_string_lossy().as_ref());
+        assert_eq!(
+            project["skipped_large"],
+            json!([{"path": "big.rs", "size_bytes": 2100}])
+        );
+        assert_eq!(
+            crate::freshness::indexed_root(&db).as_deref(),
+            Some(canonical.as_path())
+        );
+        let stats = crate::recall::stats(&db, None, None).unwrap();
+        assert_eq!(stats["index"]["skipped_large"][0]["path"], "big.rs");
+    }
+
+    /// An incremental run that changes no indexed file still records the
+    /// root it ran from and the files it left out for size now.
+    #[test]
+    fn an_unchanged_incremental_run_refreshes_root_and_skipped_files() {
+        let db_dir = tempfile::tempdir().unwrap();
+        let db = Axil::open(db_dir.path().join("t.axil")).build().unwrap();
+        let mut config = IndexConfig::default();
+        config.max_file_size_kb = 1;
+        let indexer = ProjectIndexer::new(&db, config);
+        let project = || db.list(TABLE_PROJECT).unwrap()[0].data.clone();
+
+        let first = tempfile::tempdir().unwrap();
+        std::fs::write(first.path().join("small.rs"), "fn a() {}\n").unwrap();
+        let big = first.path().join("big.rs");
+        std::fs::write(&big, "// pad\n".repeat(300)).unwrap();
+        indexer.index_full(first.path()).unwrap();
+        assert_eq!(project()["skipped_large"][0]["path"], "big.rs");
+
+        // The oversized file goes away; nothing indexed changes.
+        std::fs::remove_file(&big).unwrap();
+        let result = indexer.index_incremental(first.path()).unwrap();
+        assert_eq!(result.changed, Some(0));
+        assert_eq!(project()["skipped_large"], json!([]));
+
+        // Another one appears.
+        std::fs::write(first.path().join("huge.rs"), "// pad\n".repeat(400)).unwrap();
+        indexer.index_incremental(first.path()).unwrap();
+        assert_eq!(project()["skipped_large"][0]["path"], "huge.rs");
+
+        // The same tree at a new root.
+        let second = tempfile::tempdir().unwrap();
+        for entry in std::fs::read_dir(first.path()).unwrap() {
+            let entry = entry.unwrap();
+            std::fs::copy(entry.path(), second.path().join(entry.file_name())).unwrap();
+        }
+        let result = indexer.index_incremental(second.path()).unwrap();
+        assert_eq!(result.changed, Some(0));
+        let canonical = std::fs::canonicalize(second.path()).unwrap();
+        assert_eq!(project()["root"], canonical.to_string_lossy().as_ref());
     }
 
     #[test]

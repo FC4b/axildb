@@ -9,9 +9,13 @@
 //! - Transport: stdin/stdout, newline-delimited JSON-RPC messages
 //! - Lifecycle: `initialize` -> `initialized` notification -> tool calls -> `shutdown`
 //! - Server capabilities: `{"tools": {}}`
+//! - Tool profile: [`ToolProfile::Core`] by default, [`ToolProfile::Full`] on request
 
+pub mod profile;
 pub mod protocol;
 pub mod tools;
+
+pub use profile::{ToolProfile, CORE_TOOLS};
 
 use std::path::Path;
 use std::sync::Arc;
@@ -39,6 +43,34 @@ Axil is the agent's persistent memory + code index for this project. Routing:
 - Memory: past decisions, errors, or context → `recall`; expand one hit with `get <id>`. Time-scoped history → `query_history`.
 - Write knowledge (do this after each unit of work): a decision → `remember_decision`; a bug+fix → `remember_error`, then `resolve_error` once it is fixed; a preference → `set_preference`; anything else → `store`.
 - Resume a session → `boot` (recent decisions, errors, checkpoint). Graph link between records → `link`.";
+
+/// The routing guidance for the core profile: the same map, naming only the
+/// tools that profile serves, plus how to get the rest.
+const CORE_SERVER_INSTRUCTIONS: &str = "\
+Axil is the agent's persistent memory + code index for this project. Routing:
+- Code: \"where/how is X\", or before editing a file/symbol → `code_search`. Prefer it over recall for code.
+- Memory: past decisions, errors, or context → `recall` (exact words: `search`); expand one hit with `get <id>`.
+- Write knowledge (do this after each unit of work): a decision → `remember_decision`; a bug+fix → `remember_error`, then `resolve_error` once it is fixed; anything else → `store`.
+- Resume a session → `boot` (recent decisions, errors, checkpoint).";
+
+/// Closing lines of the core-profile guidance: the checkpoint write (only when
+/// the Extension that serves it is compiled in) and the way to the full set.
+#[cfg(feature = "checkpoint")]
+const CORE_CHECKPOINT_LINE: &str =
+    "\n- End of a task → `checkpoint` (goal, state, next steps), replayed by the next `boot`.";
+#[cfg(not(feature = "checkpoint"))]
+const CORE_CHECKPOINT_LINE: &str = "";
+const CORE_FULL_PROFILE_LINE: &str = "\nThis is the core tool set; the server started with `--tools full` also serves code_context, query_history, link, list, query and the rest.";
+
+/// The `initialize` instructions for `profile`.
+fn server_instructions(profile: ToolProfile) -> String {
+    match profile {
+        ToolProfile::Full => SERVER_INSTRUCTIONS.to_string(),
+        ToolProfile::Core => {
+            format!("{CORE_SERVER_INSTRUCTIONS}{CORE_CHECKPOINT_LINE}{CORE_FULL_PROFILE_LINE}")
+        }
+    }
+}
 
 /// Resolve the embedding model for `db_path` from the project's `axil.toml`,
 /// falling back to BgeSmall when no config is present. Mirrors the CLI's
@@ -184,14 +216,29 @@ pub(crate) fn attach_detected_engines(
 /// Holds an `Arc<Axil>` so the same database can be shared with other Adapters
 /// in-process (the [`Adapter`] contract). [`McpServer::new`] keeps the original
 /// owned-`Axil` constructor working by wrapping it.
+///
+/// Every constructor serves [`ToolProfile::Core`]; call
+/// [`McpServer::with_tool_profile`] for the full tool set.
 pub struct McpServer {
     db: Arc<Axil>,
+    profile: ToolProfile,
 }
 
 impl McpServer {
     /// Create a new MCP server backed by the given Axil database.
     pub fn new(db: Axil) -> Self {
-        Self { db: Arc::new(db) }
+        Self::from_arc(Arc::new(db))
+    }
+
+    /// Serve `profile` instead of the default [`ToolProfile::Core`].
+    pub fn with_tool_profile(mut self, profile: ToolProfile) -> Self {
+        self.profile = profile;
+        self
+    }
+
+    /// The tool profile this server lists and accepts.
+    pub fn tool_profile(&self) -> ToolProfile {
+        self.profile
     }
 
     /// Create an MCP server over an already-shared database handle — the path
@@ -204,7 +251,10 @@ impl McpServer {
     /// before binding) — otherwise tools that need a missing engine/extension
     /// return errors and plugin tools are absent from `tools/list`.
     pub fn from_arc(db: Arc<Axil>) -> Self {
-        Self { db }
+        Self {
+            db,
+            profile: ToolProfile::default(),
+        }
     }
 
     /// Open a database at the given path and create an MCP server.
@@ -225,7 +275,7 @@ impl McpServer {
     pub fn open(path: &Path) -> anyhow::Result<Self> {
         let builder = attach_detected_engines(Axil::open(path))?;
         let db = builder.build()?;
-        Ok(Self { db: Arc::new(db) })
+        Ok(Self::new(db))
     }
 
     /// Narrow accessor for integration tests that need to verify plugin
@@ -331,7 +381,12 @@ impl McpServer {
         // has finished and before anything after it starts. A pipelined
         // `store` → `recall` (or `delete` → `get`) observes the write.
         let (req_tx, req_rx) = tokio::sync::mpsc::unbounded_channel::<JsonRpcRequest>();
-        tokio::spawn(dispatch_in_order(self.db.clone(), req_rx, resp_tx.clone()));
+        tokio::spawn(dispatch_in_order(
+            self.db.clone(),
+            self.profile,
+            req_rx,
+            resp_tx.clone(),
+        ));
 
         loop {
             tokio::select! {
@@ -471,7 +526,7 @@ impl McpServer {
                 name: "axil-mcp".into(),
                 version: env!("CARGO_PKG_VERSION").into(),
             },
-            instructions: Some(SERVER_INSTRUCTIONS.into()),
+            instructions: Some(server_instructions(self.profile)),
         };
 
         match serde_json::to_value(&result) {
@@ -493,6 +548,8 @@ impl McpServer {
     /// `tools/list` output mirrors the dispatch contract: when the
     /// dispatcher routes a tool to an Extension, that Extension's
     /// description and schema win.
+    ///
+    /// The assembled list is then narrowed to the server's [`ToolProfile`].
     fn handle_tools_list(&self, req: &JsonRpcRequest) -> JsonRpcResponse {
         let mut tools = tools::tool_definitions();
         for ext in self.db.extensions() {
@@ -511,6 +568,7 @@ impl McpServer {
                 }
             }
         }
+        tools.retain(|t| self.profile.allows(&t.name));
         let result = ToolsListResult { tools };
 
         match serde_json::to_value(&result) {
@@ -548,7 +606,15 @@ impl McpServer {
             .cloned()
             .unwrap_or(Value::Object(serde_json::Map::new()));
 
-        let result: ToolCallResult = tools::dispatch(&self.db, tool_name, &arguments);
+        let result: ToolCallResult = if self.profile.allows(tool_name) {
+            tools::dispatch(&self.db, tool_name, &arguments)
+        } else {
+            ToolCallResult::error(format!(
+                "`{tool_name}` is not served by the {} tool profile; restart the \
+                 server with `axil mcp --tools full` (or AXIL_MCP_TOOLS=full) to use it",
+                self.profile
+            ))
+        };
 
         match serde_json::to_value(&result) {
             Ok(v) => JsonRpcResponse::success(req.id.clone(), v),
@@ -570,12 +636,19 @@ impl McpServer {
 #[derive(Default)]
 pub struct McpAdapter {
     db: Option<Arc<Axil>>,
+    profile: ToolProfile,
 }
 
 impl McpAdapter {
     /// An unbound MCP adapter. Call [`Adapter::bind`] before [`Adapter::run`].
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Serve `profile` instead of the default [`ToolProfile::Core`].
+    pub fn with_tool_profile(mut self, profile: ToolProfile) -> Self {
+        self.profile = profile;
+        self
     }
 }
 
@@ -597,7 +670,7 @@ impl Adapter for McpAdapter {
         let db = self
             .db
             .ok_or_else(|| AxilError::plugin("MCP adapter run() called before bind()"))?;
-        let server = McpServer::from_arc(db);
+        let server = McpServer::from_arc(db).with_tool_profile(self.profile);
         // The serve loop is async; the Adapter contract is a synchronous
         // `run(self)`, so own a current-thread runtime and block on it. `axil`
         // builds no ambient runtime, so this never nests.
@@ -632,6 +705,7 @@ async fn write_response<W: AsyncWriteExt + Unpin>(
 /// request to finish, and nothing admitted after it starts until it has.
 async fn dispatch_in_order(
     db: Arc<Axil>,
+    profile: ToolProfile,
     mut requests: tokio::sync::mpsc::UnboundedReceiver<JsonRpcRequest>,
     replies: tokio::sync::mpsc::UnboundedSender<JsonRpcResponse>,
 ) {
@@ -640,10 +714,10 @@ async fn dispatch_in_order(
         // Reap finished reads so a long read-only stream doesn't pile up handles.
         while reads.try_join_next().is_some() {}
         if is_read_only_request(&request) {
-            reads.spawn(answer(db.clone(), request, replies.clone()));
+            reads.spawn(answer(db.clone(), profile, request, replies.clone()));
         } else {
             while reads.join_next().await.is_some() {}
-            answer(db.clone(), request, replies.clone()).await;
+            answer(db.clone(), profile, request, replies.clone()).await;
         }
     }
     // Dropping a JoinSet aborts its tasks, which would lose their replies.
@@ -657,12 +731,14 @@ async fn dispatch_in_order(
 /// otherwise never come.
 async fn answer(
     db: Arc<Axil>,
+    profile: ToolProfile,
     request: JsonRpcRequest,
     replies: tokio::sync::mpsc::UnboundedSender<JsonRpcResponse>,
 ) {
     let id = request.id.clone();
     let handled =
-        tokio::task::spawn_blocking(move || McpServer { db }.handle_request(&request)).await;
+        tokio::task::spawn_blocking(move || McpServer { db, profile }.handle_request(&request))
+            .await;
     let response = match handled {
         Ok(response) => response,
         Err(e) => {
@@ -717,41 +793,57 @@ mod adapter_tests {
         assert_eq!(a.protocol(), Protocol::Mcp);
     }
 
-    /// Drift guard: every tool name the `initialize` routing instructions point
-    /// an agent at must be a real, registered tool. A rename/removal that
-    /// forgets to update `SERVER_INSTRUCTIONS` would otherwise ship stale
-    /// guidance to non-existent tools.
+    /// The tool names an instructions string points at: the identifier that
+    /// opens each backticked span (`get <id>` names `get`; flags such as
+    /// `--tools full` are not tool names).
+    fn instruction_tool_refs(text: &str) -> Vec<&str> {
+        text.split('`')
+            .skip(1)
+            .step_by(2)
+            .filter_map(|span| span.split_whitespace().next())
+            .filter(|word| word.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
+            .collect()
+    }
+
+    /// Drift guard: every tool the `initialize` routing instructions point an
+    /// agent at must be a tool the same profile serves. A rename or removal,
+    /// or a tool moved out of the core set, would otherwise ship guidance to a
+    /// tool the agent cannot call.
     #[test]
-    fn server_instructions_reference_only_real_tools() {
-        let defs = crate::tools::tool_definitions();
-        let names: std::collections::HashSet<&str> =
-            defs.iter().map(|t| t.name.as_str()).collect();
-        // The tools the instructions steer toward (backticked in the string).
-        let referenced = [
-            "code_context",
-            "code_search",
-            "recall",
-            "get",
-            "query_history",
-            "remember_decision",
-            "remember_error",
-            "resolve_error",
-            "set_preference",
-            "store",
-            "boot",
-            "link",
-        ];
-        for name in referenced {
+    fn server_instructions_reference_only_served_tools() {
+        for profile in [ToolProfile::Core, ToolProfile::Full] {
+            let text = server_instructions(profile);
+            let refs = instruction_tool_refs(&text);
             assert!(
-                names.contains(name),
-                "SERVER_INSTRUCTIONS references `{name}` but it is not a registered MCP tool — \
-                 update the instructions or restore the tool"
+                refs.len() >= 8,
+                "{profile} instructions name too few tools to be a routing map: {refs:?}"
             );
-            assert!(
-                SERVER_INSTRUCTIONS.contains(name),
-                "test's `referenced` list names `{name}` but the instructions no longer mention it"
-            );
+            let served: std::collections::BTreeSet<String> = assembled_tool_names()
+                .into_iter()
+                .filter(|name| profile.allows(name))
+                .collect();
+            for name in refs {
+                assert!(
+                    served.contains(name),
+                    "the {profile} instructions point at `{name}`, which the {profile} \
+                     profile does not serve: update the instructions or the profile"
+                );
+            }
         }
+    }
+
+    #[test]
+    fn instructions_follow_the_profile() {
+        assert_eq!(server_instructions(ToolProfile::Full), SERVER_INSTRUCTIONS);
+        let core = server_instructions(ToolProfile::Core);
+        assert!(
+            core.contains("--tools full"),
+            "core must say how to get the rest"
+        );
+        assert!(
+            !core.contains("`link`"),
+            "core must not route to a full-only tool"
+        );
     }
 
     /// The MCP surface guide, embedded at compile time so the drift test can
@@ -830,6 +922,24 @@ mod adapter_tests {
             phantom.is_empty(),
             "docs/src/agents/mcp.md documents tools the assembled server does not expose: \
              {phantom:?} — remove the row or restore the tool"
+        );
+    }
+
+    /// Drift guard: the doc's core-profile line must name exactly
+    /// [`CORE_TOOLS`], so the doc never promises a default tool the server
+    /// hides (or hides one it serves).
+    #[test]
+    fn mcp_doc_names_the_core_profile() {
+        let line = MCP_DOC
+            .lines()
+            .find(|l| l.starts_with("**Core profile"))
+            .expect("docs/src/agents/mcp.md has no `**Core profile` line");
+        let documented: std::collections::BTreeSet<&str> =
+            instruction_tool_refs(line).into_iter().collect();
+        let core: std::collections::BTreeSet<&str> = CORE_TOOLS.iter().copied().collect();
+        assert_eq!(
+            documented, core,
+            "the doc's core-profile line and CORE_TOOLS disagree"
         );
     }
 
@@ -940,7 +1050,8 @@ mod serve_tests {
             .with_extension(Probe::default())
             .build()
             .unwrap();
-        let server = McpServer::new(db);
+        // The probe claims `list`, which only the full profile serves.
+        let server = McpServer::new(db).with_tool_profile(ToolProfile::Full);
         let input = format!("{}\n", frames.join("\n"));
         let mut output = Vec::new();
         server
@@ -1034,6 +1145,100 @@ mod serve_tests {
                 "read-only request {id} ran alone"
             );
         }
+    }
+
+    /// A server over a fresh database with the probe Extension, which claims
+    /// one built-in core tool (`recall`), one built-in full-only tool (`list`)
+    /// and one tool no built-in defines (`boom`).
+    fn probe_server(dir: &Path, profile: ToolProfile) -> McpServer {
+        let db = Axil::open(dir.join("profile.axil"))
+            .with_extension(Probe::default())
+            .build()
+            .unwrap();
+        McpServer::new(db).with_tool_profile(profile)
+    }
+
+    fn listed_tools(server: &McpServer) -> Vec<String> {
+        let line = server
+            .handle_frame(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#)
+            .unwrap();
+        let v: Value = serde_json::from_str(&line).unwrap();
+        v["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    fn call_result(server: &McpServer, tool: &str, arguments: Value) -> Value {
+        let line = server.handle_frame(&call(2, tool, arguments)).unwrap();
+        let v: Value = serde_json::from_str(&line).unwrap();
+        v["result"].clone()
+    }
+
+    #[test]
+    fn default_profile_is_core() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Axil::open(dir.path().join("d.axil")).build().unwrap();
+        assert_eq!(McpServer::new(db).tool_profile(), ToolProfile::Core);
+    }
+
+    #[test]
+    fn core_profile_lists_core_tools_and_plugin_tools_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let names = listed_tools(&probe_server(dir.path(), ToolProfile::Core));
+        for name in &names {
+            assert!(
+                CORE_TOOLS.contains(&name.as_str()) || name == "boom",
+                "core profile lists `{name}`"
+            );
+        }
+        for name in ["recall", "store", "get", "boot", "boom"] {
+            assert!(
+                names.iter().any(|n| n == name),
+                "core profile omits `{name}`"
+            );
+        }
+    }
+
+    #[test]
+    fn full_profile_lists_every_tool() {
+        let dir = tempfile::tempdir().unwrap();
+        let full = listed_tools(&probe_server(dir.path(), ToolProfile::Full));
+        let core = listed_tools(&probe_server(dir.path(), ToolProfile::Core));
+        for name in crate::tools::tool_definitions().iter().map(|t| &t.name) {
+            assert!(full.contains(name), "full profile omits `{name}`");
+        }
+        assert!(full.iter().any(|n| n == "boom"));
+        assert!(core.len() < full.len());
+    }
+
+    #[test]
+    fn core_profile_refuses_a_full_only_tool_with_the_way_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let core = probe_server(dir.path(), ToolProfile::Core);
+        let refused = call_result(&core, "list", json!({"table": "notes"}));
+        assert_eq!(refused["isError"], true);
+        let text = refused["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("--tools full"), "{text}");
+        assert!(text.contains("AXIL_MCP_TOOLS"), "{text}");
+
+        // A core tool and a plugin tool still run under core.
+        assert!(call_result(&core, "get", json!({"id": "missing"}))["content"].is_array());
+        drop(core);
+
+        let full = probe_server(dir.path(), ToolProfile::Full);
+        let listed = call_result(&full, "list", json!({"table": "notes"}));
+        assert!(listed.get("isError").is_none(), "{listed}");
+    }
+
+    #[test]
+    fn adapter_carries_the_profile_to_the_server() {
+        let a = McpAdapter::new();
+        assert_eq!(a.profile, ToolProfile::Core);
+        let a = McpAdapter::new().with_tool_profile(ToolProfile::Full);
+        assert_eq!(a.profile, ToolProfile::Full);
     }
 }
 

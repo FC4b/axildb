@@ -42,6 +42,15 @@ const ENTITY_KEY_MEMBERS: TableDefinition<&str, Option<&str>> =
 /// redb table: storage-level marker name → value.
 const STORAGE_MARKERS: TableDefinition<&str, &str> = TableDefinition::new("_storage_markers");
 
+/// redb table: id of every record deleted while the default vector store was
+/// on disk but not attached, so its vector (if it had one) outlived it.
+///
+/// Written in the delete's own transaction, so the note cannot be lost to a
+/// crash between the two; cleared by the next handle that attaches the store
+/// and removes those vectors.
+const PENDING_VECTOR_DELETES: TableDefinition<&str, ()> =
+    TableDefinition::new("_pending_vector_deletes");
+
 /// Marker naming the state of the entity key index.
 ///
 /// `ready:<fingerprint>` once the index has been built, where the fingerprint
@@ -707,6 +716,14 @@ impl Storage {
     /// Uses a single write transaction to ensure atomicity between
     /// reading the record, removing it, and updating the table index.
     pub fn delete(&self, id: &RecordId) -> Result<bool> {
+        self.delete_noting_vector(id, false)
+    }
+
+    /// Delete a record by ID and, when `note_vector` is set, record in the same
+    /// transaction that its vector still has to go (see
+    /// [`Storage::pending_vector_deletes`]). The note is written only when the
+    /// record existed. Returns `true` if the record existed.
+    pub(crate) fn delete_noting_vector(&self, id: &RecordId, note_vector: bool) -> Result<bool> {
         let txn = self.begin_write()?;
         {
             let mut records = txn.open_table(RECORDS)?;
@@ -727,6 +744,10 @@ impl Storage {
             };
 
             records.remove(id.as_str())?;
+            if note_vector {
+                txn.open_table(PENDING_VECTOR_DELETES)?
+                    .insert(id.as_str(), ())?;
+            }
 
             // Remove from table index; drop the key if empty.
             let mut idx = txn.open_table(TABLE_INDEX)?;
@@ -757,6 +778,39 @@ impl Storage {
         txn.commit()?;
 
         Ok(true)
+    }
+
+    /// Ids of records deleted with a vector note (see
+    /// [`Storage::delete_noting_vector`]) that no handle has cleared yet.
+    pub(crate) fn pending_vector_deletes(&self) -> Result<Vec<RecordId>> {
+        let txn = self.begin_read()?;
+        let table = match txn.open_table(PENDING_VECTOR_DELETES) {
+            Ok(t) => t,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
+            Err(e) => return Err(e.into()),
+        };
+        let mut ids = Vec::new();
+        for entry in table.iter()? {
+            let (key, _) = entry?;
+            ids.push(RecordId(key.value().to_string()));
+        }
+        Ok(ids)
+    }
+
+    /// Clear these ids' vector notes, once their vectors are gone.
+    pub(crate) fn clear_pending_vector_deletes(&self, ids: &[RecordId]) -> Result<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let txn = self.begin_write()?;
+        {
+            let mut table = txn.open_table(PENDING_VECTOR_DELETES)?;
+            for id in ids {
+                table.remove(id.as_str())?;
+            }
+        }
+        txn.commit()?;
+        Ok(())
     }
 
     /// List records in a table with optional limit and offset.
@@ -2202,6 +2256,32 @@ mod tests {
         let id = storage.insert(&record).unwrap();
         assert!(storage.delete(&id).unwrap());
         assert!(storage.get(&id).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_vector_note_rides_with_its_delete_until_cleared() {
+        let (storage, _dir) = temp_storage();
+        assert!(storage.pending_vector_deletes().unwrap().is_empty());
+
+        let noted = storage
+            .insert(&Record::new("sessions", json!({"x": 1})))
+            .unwrap();
+        let plain = storage
+            .insert(&Record::new("sessions", json!({"x": 2})))
+            .unwrap();
+        assert!(storage.delete_noting_vector(&noted, true).unwrap());
+        assert!(storage.delete_noting_vector(&plain, false).unwrap());
+        // No record, no note: there was nothing to delete.
+        assert!(!storage
+            .delete_noting_vector(&RecordId::new(), true)
+            .unwrap());
+        assert_eq!(
+            storage.pending_vector_deletes().unwrap(),
+            vec![noted.clone()]
+        );
+
+        storage.clear_pending_vector_deletes(&[noted]).unwrap();
+        assert!(storage.pending_vector_deletes().unwrap().is_empty());
     }
 
     #[test]

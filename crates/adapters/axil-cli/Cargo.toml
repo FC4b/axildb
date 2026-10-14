@@ -110,6 +110,7 @@ optional = true
 workspace = true
 
 [dev-dependencies]
+redb = { workspace = true }
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
