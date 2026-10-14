@@ -193,6 +193,67 @@ const CODE_LINE_STARTS: &[&str] = &[
     "use ",
 ];
 
+/// Phrases with which agent prose reports a failure or a defect that
+/// happened or exists (not one being looked for). Matched lowercased.
+const FAILURE_REPORTS: &[&str] = &[
+    "broke because",
+    "broken since",
+    "can never fire",
+    "crashed because",
+    "dead since",
+    "does not work",
+    "doesn't work",
+    "failed because",
+    "failed once",
+    "fails because",
+    "fails intermittently",
+    "has been broken",
+    "has been dead",
+    "is broken",
+    "never fires",
+    "panicked because",
+    "panics",
+    "ran out of memory",
+    "runs out of memory",
+    "silently",
+    "stopped working",
+    "was broken",
+];
+
+/// A stated root cause ("Root cause: ...", "the root cause is ...", "Root
+/// cause of X ..."). One the agent is still looking for is narration, and
+/// "root cause in one line" names a report field.
+static ROOT_CAUSE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)(?:\b(find|finding|look for|looking for|investigate|investigating|identify|determine|chase|chasing|hunt|locate|likely|possible|probable|potential)\s+(?:the\s+|a\s+)?)?\broot cause\b(?:\*\*)?\s*(?::|—|is\b|was\b|of\b|here\b|turned\b|lies\b|appears\b)")
+        .unwrap()
+});
+
+/// How narration opens: what the agent is about to do or doing, with no
+/// finding ("Let me check ...", "Now the tests.").
+const NARRATION_STARTS: &[&str] = &[
+    "checking",
+    "i'll ",
+    "i will ",
+    "i'm going to ",
+    "investigating",
+    "let me ",
+    "let's ",
+    "looking ",
+    "next,",
+    "now ",
+    "time to ",
+];
+
+/// Words of a `fix:` commit subject that names no defect ("address review",
+/// "misc cleanup").
+const NO_DEFECT_FIXES: &[&str] = &[
+    "cleanup", "comments", "feedback", "misc", "nit", "nits", "review", "reviews", "tidy",
+];
+
+/// A conventional-commit fix subject: `fix(scope): what was wrong`.
+static FIX_SUBJECT: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^(?:fix|bugfix|hotfix)(?:\([^)]*\))?!?:\s+\S").unwrap());
+
 /// A list of standing rules: `CONVENTIONS:`, `**Rules:**`, `- Invariant:`.
 static RULE_LABEL: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
@@ -304,6 +365,22 @@ pub fn analyze(text: &str, source: &str) -> Vec<CapturedKnowledge> {
         return captures;
     }
 
+    // Agent prose reporting a failure, or a fix commit subject naming the
+    // defect. It replaces a weaker pattern capture of the same text.
+    let weak_error = captures.first().is_some_and(|c| c.confidence < 0.8);
+    if captures.is_empty() || weak_error {
+        if let Some((idx, line)) = failure_report(text, &lines, &guards) {
+            captures.clear();
+            captures.push(CapturedKnowledge {
+                capture_type: CaptureType::Error,
+                summary: truncate(line.trim(), 200),
+                confidence: 0.8,
+                source: source.to_string(),
+            });
+            claimed_line = Some(idx);
+        }
+    }
+
     // Detect decisions. Skip the line already claimed by the error capture
     // so "decided to abort because of the error" doesn't double-count.
     for pattern in DECISION_PATTERNS {
@@ -363,6 +440,49 @@ pub fn analyze(text: &str, source: &str) -> Vec<CapturedKnowledge> {
     }
 
     captures
+}
+
+/// The line of agent prose that reports a failure: a fix commit subject
+/// that names its defect, a stated root cause, or a failure phrase, outside
+/// narration and outside a report that the problem is resolved.
+fn failure_report<'a>(
+    text: &str,
+    lines: &[&'a str],
+    guards: &TextGuards,
+) -> Option<(usize, &'a str)> {
+    let subject = text.trim();
+    if !subject.contains('\n') && FIX_SUBJECT.is_match(subject) {
+        let lower = subject.to_lowercase();
+        let names_no_defect = lower
+            .split(|c: char| !c.is_alphanumeric())
+            .any(|w| NO_DEFECT_FIXES.contains(&w))
+            || lower.contains("clean up");
+        if names_no_defect {
+            return None;
+        }
+        let idx = lines.iter().position(|l| l.trim() == subject)?;
+        return Some((idx, lines[idx]));
+    }
+    lines
+        .iter()
+        .enumerate()
+        .map(|(i, l)| (i, *l))
+        .find(|(_, l)| {
+            if guards.is_guarded(l) || l.trim().len() < MIN_SUMMARY_LEN {
+                return false;
+            }
+            let lower = l.to_lowercase();
+            let opening = lower
+                .trim_start()
+                .trim_start_matches(['-', '*', ' '])
+                .trim_start();
+            if NARRATION_STARTS.iter().any(|n| opening.starts_with(n)) || lower.contains("resolved")
+            {
+                return false;
+            }
+            ROOT_CAUSE.captures_iter(l).any(|c| c.get(1).is_none())
+                || FAILURE_REPORTS.iter().any(|p| lower.contains(p))
+        })
 }
 
 /// A line that states a standing rule: a rule list's label, a sentence
@@ -438,12 +558,20 @@ impl TextGuards {
             return true;
         }
         let trimmed = line.trim();
+        // Prose quotes code in backticks (`assert!(x)`); that is not a
+        // source line.
+        let unquoted = without_code_spans(trimmed);
         CODE_LINE_STARTS.iter().any(|p| trimmed.starts_with(p))
-            || trimmed.contains("!(")
-            || trimmed.contains("=>")
+            || unquoted.contains("!(")
+            || unquoted.contains("=>")
             || trimmed.ends_with(';')
             || trimmed.ends_with('{')
     }
+}
+
+/// `line` without its backticked spans.
+fn without_code_spans(line: &str) -> String {
+    line.split('`').step_by(2).collect()
 }
 
 /// Returns `true` when a pattern match looks like a known false positive
@@ -920,6 +1048,57 @@ mod tests {
                     -        return Err(\"connection refused by peer\".into())\n\
                     +        warn!(\"retrying after connection refused\")";
         assert!(errors_in(text).is_empty());
+    }
+
+    #[test]
+    fn prose_reporting_a_failure_is_an_error() {
+        for text in [
+            "**Root cause of the broken vector store:** every open wrote to the file.",
+            "The first attempt failed because `axil store` gives up on a held writer lock.",
+            "- The vector store in this DB has been dead since June 18, and tools say healthy.",
+            "Any parse error in `[lifecycle]` becomes the default config silently.",
+            "Large vectors overflow to NaN and the index panics on every later open.",
+            "`DistCosine` runs `assert!(dist >= -0.00002)`, which panics on NaN distances.",
+            "fix(vector): never let a broken vector store go silent",
+            "fix(cli): run the unit tests on init",
+        ] {
+            let errors = errors_in_prose(text);
+            assert_eq!(errors.len(), 1, "{text}: {errors:?}");
+            assert!(errors[0].confidence >= 0.8, "{text}");
+        }
+    }
+
+    #[test]
+    fn narration_and_fixes_that_name_no_defect_are_not_errors() {
+        for text in [
+            "Let me find the root cause before I touch the lock code.",
+            "Now checking why the import failed because of the schema change:",
+            "The likely root cause is the lock, but I have not confirmed it yet.",
+            "fix: address Codex review (Windows replace, struct break)",
+            "fix(wasm): clear remaining review issues + cleanup",
+            "fix: misc tidy-ups in the init path",
+            "REPORT: per item: status (fixed / not-a-bug), root cause in one line, what changed.",
+            "**Deadlock: resolved.** It was broken by the lock order; 200 runs are green.",
+        ] {
+            let errors = errors_in_prose(text);
+            assert!(
+                errors.iter().all(|c| c.confidence < 0.8),
+                "{text}: {errors:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_failure_report_in_command_output_needs_failure_output() {
+        let text = "Exit code 1\nThe first attempt failed because the writer lock was held.";
+        assert!(errors_in(text).iter().all(|c| c.confidence < 0.8));
+    }
+
+    fn errors_in_prose(text: &str) -> Vec<CapturedKnowledge> {
+        analyze(text, "agent")
+            .into_iter()
+            .filter(|c| c.capture_type == CaptureType::Error)
+            .collect()
     }
 
     #[test]
