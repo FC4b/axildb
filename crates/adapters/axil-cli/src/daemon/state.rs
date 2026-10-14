@@ -356,6 +356,7 @@ pub fn graph_name(state: &Option<GraphState>) -> &'static str {
         Some(GraphState::Disk) => "disk",
         Some(GraphState::Memory) => "memory",
         Some(GraphState::Failed(_)) => "failed",
+        Some(_) => "unknown",
     }
 }
 

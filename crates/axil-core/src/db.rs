@@ -7130,6 +7130,7 @@ pub struct WarmUpReport {
 
 /// What [`Axil::prewarm`] loaded.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
 pub struct PrewarmReport {
     /// The embed that loads the model: `None` without an embedder, the
     /// error when it failed.

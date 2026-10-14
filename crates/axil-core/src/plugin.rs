@@ -329,6 +329,7 @@ pub trait GraphIndex: Engine {
 /// How far a graph index has settled the backend its queries run on.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "state", content = "error")]
+#[non_exhaustive]
 pub enum GraphState {
     /// No graph operation has run yet.
     Unloaded,
