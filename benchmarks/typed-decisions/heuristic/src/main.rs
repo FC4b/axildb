@@ -1,17 +1,27 @@
-//! Control arm of the Phase 29 bake-off: run Axil's production supersession
-//! heuristic on the U1 pairs and print one JSON line per pair.
+//! Control arm of the typed-decisions bake-off: run Axil's production heuristics on
+//! the labeled sets and print one JSON line per item.
 //!
-//! Mirrors `Axil::detect_conflicts`: cosine similarity of the two texts under
-//! the default bge-small embedder, then `check_conflict(new, existing, sim)`.
-//! Retrieval is assumed to have surfaced the pair (the bake-off measures the
-//! judgement, not the candidate search).
+//! * Default mode (U1 pairs) mirrors `Axil::detect_conflicts`: cosine
+//!   similarity of the two texts under the default bge-small embedder, then
+//!   `check_conflict(new, existing, sim)`. Retrieval is assumed to have
+//!   surfaced the pair (the bake-off measures the judgement, not the
+//!   candidate search).
+//! * `--full-path` runs the supersession path end to end in a real database.
+//! * `--entities` (U5 texts) runs the entity extraction `Axil::auto_link`
+//!   performs on every insert.
 
 use std::io::{BufRead, BufReader, Write};
+use std::time::Instant;
 
-use axil_core::{check_conflict, judge_conflict, ConflictResult, Record};
+use axil_core::{
+    check_conflict, extract_entities, judge_conflict, ConflictResult, EntityType, Record,
+};
 use axil_vector::embed::Embedder;
 use axil_vector::models::EmbeddingModel;
 use serde_json::{json, Value};
+
+/// `Axil::auto_link` keeps at most this many entities per record.
+const MAX_AUTO_LINK_ENTITIES: usize = 50;
 
 fn cosine(a: &[f32], b: &[f32]) -> f32 {
     let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
@@ -31,6 +41,13 @@ fn main() {
             .get(1)
             .expect("usage: typed-decisions-heuristic --full-path <u1.jsonl>");
         full_path(path);
+        return;
+    }
+    if args.first().map(String::as_str) == Some("--entities") {
+        let path = args
+            .get(1)
+            .expect("usage: typed-decisions-heuristic --entities <u5.jsonl>");
+        entities(path);
         return;
     }
     let path = args
@@ -145,4 +162,66 @@ fn full_path(path: &str) {
         )
         .expect("write");
     }
+}
+
+/// The production entity extractor on the U5 texts. Each text is stored as
+/// the `summary` of a record, and its entities are what `Axil::auto_link`
+/// links on insert: `extract_entities` over the record's text, capped at
+/// [`MAX_AUTO_LINK_ENTITIES`]. No LLM is configured, so this is the default
+/// path (`Axil::extract_entities_enhanced` only differs when one is).
+///
+/// Prints one JSON line per text: each entity's surface form (`text`, the
+/// `source_text` Axil stores), its stored `name`, its Axil type and language
+/// hint, and the extraction time in microseconds. The first call, which
+/// compiles the patterns, is timed separately and reported on stderr.
+fn entities(path: &str) {
+    let rows: Vec<Value> = BufReader::new(std::fs::File::open(path).expect("open set"))
+        .lines()
+        .map(|l| l.expect("read line"))
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(&l).expect("parse row"))
+        .collect();
+
+    let t = Instant::now();
+    let _ = extract_entities("Warm up `AuthModule` in src/auth/login.rs: fn parse_token(s)");
+    let first_call_us = t.elapsed().as_secs_f64() * 1e6;
+
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    for row in &rows {
+        let record = Record::new("decisions", json!({ "summary": row["text"] }));
+        let t = Instant::now();
+        let text = axil_core::util::record_text(&record);
+        let mut found = extract_entities(&text);
+        found.truncate(MAX_AUTO_LINK_ENTITIES);
+        let extract_us = t.elapsed().as_secs_f64() * 1e6;
+        let entities: Vec<Value> = found
+            .iter()
+            .map(|e| {
+                let (axil_type, lang_hint) = match &e.entity_type {
+                    EntityType::File => ("file", None),
+                    EntityType::Code => ("code", None),
+                    EntityType::Project => ("project", None),
+                    EntityType::Reference => ("reference", None),
+                    EntityType::CodeSymbol { lang_hint } => ("code_symbol", lang_hint.clone()),
+                };
+                json!({
+                    "text": e.source_text,
+                    "name": e.name,
+                    "axil_type": axil_type,
+                    "lang_hint": lang_hint,
+                })
+            })
+            .collect();
+        writeln!(
+            out,
+            "{}",
+            json!({ "id": row["id"], "entities": entities, "extract_us": extract_us })
+        )
+        .expect("write");
+    }
+    eprintln!(
+        "{}",
+        json!({ "first_call_us": first_call_us, "texts": rows.len() })
+    );
 }
