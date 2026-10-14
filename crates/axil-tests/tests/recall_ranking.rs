@@ -556,4 +556,6 @@ fn a_long_record_gets_a_vector_per_turn() {
         .recall("connection pool timeout", 1, Some(cli_config()))
         .unwrap();
     assert_eq!(hits[0].record.id, session.id);
+    // The piece that matched comes back with the hit.
+    assert_eq!(hits[0].explanation.best_chunk.as_deref(), Some(turns[3].as_str()));
 }

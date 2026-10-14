@@ -177,6 +177,8 @@ axil heal --reindex     # rebuild all indexes from the canonical records (slow);
 axil heal --orphans     # clean orphaned edges and vectors only
 axil heal --embed-internal  # embed code-index / dep-doc / chunk rows left
                         # without a vector (opt-in, see below)
+axil heal --rechunk     # re-split long records into recall units with this
+                        # version's splitter and re-embed them (opt-in)
 axil heal --dry-run     # print what would be fixed, change nothing
 axil heal               # also DOWNSAMPLES (see warning below)
 ```

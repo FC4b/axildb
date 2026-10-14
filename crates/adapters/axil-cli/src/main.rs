@@ -9838,6 +9838,10 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
                 .iter()
                 .map(|rr| {
                     let mut v = scored_to_json(&rr.record, rr.score);
+                    // The piece of a long record that matched the query best.
+                    if let Some(snippet) = &rr.explanation.best_chunk {
+                        v["snippet"] = json!(snippet);
+                    }
                     // Include explanation when --explain is set
                     if explain {
                         let signals: Value = rr

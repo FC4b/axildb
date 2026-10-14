@@ -7835,15 +7835,18 @@ impl Axil {
 
         // Window results without stored chunk vectors are chunked here and
         // embedded together in one batched call; a call per result cost up to
-        // `top_k` model runs per recall.
+        // `top_k` model runs per recall. `pieces` keeps each chunk's own text
+        // (`chunks` holds it as embedded, headed) for the snippet.
         let mut pending: Vec<(usize, std::ops::Range<usize>)> = Vec::new();
         let mut chunks: Vec<String> = Vec::new();
+        let mut pieces: Vec<String> = Vec::new();
         for i in window {
             let result = &mut results[i];
-            if let Some(best) =
+            if let Some((best, unit)) =
                 self.qtc_best_cosine_from_stored_chunks(&result.record, query_vec, q_norm)
             {
                 blend(result, best);
+                result.explanation.best_chunk = self.recall_unit_text(&unit);
                 continue;
             }
             let text = crate::util::searchable_text(&result.record.data);
@@ -7863,6 +7866,7 @@ impl Axil {
                     .iter()
                     .map(|chunk| with_unit_header(&header, chunk)),
             );
+            pieces.extend(record_chunks);
             pending.push((i, start..chunks.len()));
         }
         if pending.is_empty() {
@@ -7875,6 +7879,7 @@ impl Axil {
             .ok()
             .filter(|vectors| vectors.len() == refs.len());
         for (i, range) in pending {
+            let (first, several) = (range.start, range.len() > 1);
             // One text that fails to embed fails the whole batch. Embed each
             // result on its own then, so only a result that fails by itself
             // keeps its unblended score.
@@ -7889,17 +7894,34 @@ impl Axil {
                     own.as_slice()
                 }
             };
-            let best = vectors
+            let (best_at, best) = vectors
                 .iter()
                 .map(|vec| cosine(query_vec, q_norm, vec))
-                .fold(0.0f32, f32::max);
+                .enumerate()
+                .fold((0, 0.0f32), |kept, (at, sim)| {
+                    if sim > kept.1 {
+                        (at, sim)
+                    } else {
+                        kept
+                    }
+                });
             blend(&mut results[i], best);
+            if several {
+                results[i].explanation.best_chunk = pieces.get(first + best_at).cloned();
+            }
         }
+    }
+
+    /// The stored text of a recall unit.
+    fn recall_unit_text(&self, unit: &RecordId) -> Option<String> {
+        let unit = self.storage.get(unit).ok()??;
+        unit.data.get("content")?.as_str().map(str::to_string)
     }
 
     /// If the source record has index-time chunks registered, pull each
     /// chunk's stored vector from the vector index and return the max
-    /// cosine against the query. Returns `None` when:
+    /// cosine against the query, with the chunk that scored it. Returns
+    /// `None` when:
     /// - the record has no registered chunks (short content → no chunking)
     /// - the vector index is missing or doesn't implement `get_vector`
     /// - every chunk vector lookup fails
@@ -7911,31 +7933,24 @@ impl Axil {
         source_record: &Record,
         query_vec: &[f32],
         query_norm: f32,
-    ) -> Option<f32> {
+    ) -> Option<(f32, RecordId)> {
         let chunk_ids = recall_chunk_ids(source_record);
         if chunk_ids.is_empty() {
             return None;
         }
         let vi = self.vector_index.as_ref()?;
 
-        let mut best: f32 = f32::NEG_INFINITY;
-        let mut any_hit = false;
-        for chunk_id in &chunk_ids {
-            let Ok(Some(chunk_vec)) = vi.get_vector(chunk_id) else {
+        let mut best: Option<(f32, RecordId)> = None;
+        for chunk_id in chunk_ids {
+            let Ok(Some(chunk_vec)) = vi.get_vector(&chunk_id) else {
                 continue;
             };
-            any_hit = true;
             let sim = cosine(query_vec, query_norm, &chunk_vec);
-            if sim > best {
-                best = sim;
+            if sim.is_finite() && best.as_ref().is_none_or(|(kept, _)| sim > *kept) {
+                best = Some((sim, chunk_id));
             }
         }
-
-        if any_hit && best.is_finite() {
-            Some(best)
-        } else {
-            None
-        }
+        best
     }
 
     fn resolve_recall_candidate(
@@ -8544,6 +8559,7 @@ mod tests {
                 signals: vec![],
                 summary: String::new(),
                 query_class: None,
+                best_chunk: None,
                 relevance: None,
             },
         }
@@ -9031,6 +9047,7 @@ mod tests {
                     signals: Vec::new(),
                     summary: String::new(),
                     query_class: None,
+                    best_chunk: None,
                     relevance: None,
                 },
             })

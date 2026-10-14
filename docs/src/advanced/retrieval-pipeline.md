@@ -284,10 +284,20 @@ lets records whose only strength is a high cosine (file summaries, code
 proxies) outrank the answers, which cost the dogfood eval's hit@5 about
 three points.
 
-A record long enough to be chunked at insert (over 1600 bytes) is scored
-from its stored chunk vectors; a shorter one is cut into overlapping windows
-(default 1200 chars, 900-char stride = 25% overlap) and embedded at query
-time.
+A record longer than 1600 bytes gets a vector per recall unit at insert:
+one per line of its text (a dialog turn or a fact), a short line joined
+with the lines after it until the unit holds 400 bytes, a unit longer than
+1600 bytes cut into overlapping 1600-byte pieces. QTC scores such a record from those stored
+vectors; a shorter one is cut into overlapping windows (default 1200 chars,
+900-char stride = 25% overlap) and embedded at query time. Either way each
+piece is embedded under a one-line header with the record's table and date
+and the files and entities it lists (`decisions, 2026-03-12; files:
+src/db.rs`), so a piece cut out of a record still says what the record is
+about; the stored and FTS-indexed text is the piece alone.
+
+The piece that scored best comes back with the hit
+(`ScoreExplanation::best_chunk`, `snippet` in the CLI's JSON). A database written before the splitter changed keeps its old
+pieces until `axil heal --rechunk` re-splits them.
 
 `Axil::recall` also draws a fixed candidate pool (80 per source, doubled for
 the fetch) instead of one scaled by `top_k`, so a smaller `top_k` returns a

@@ -111,6 +111,12 @@ pub struct ScoreExplanation {
     /// serialization when absent so existing JSON output is unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub query_class: Option<String>,
+    /// The piece of a long record's text that matched the query best: the
+    /// recall unit (or query-time chunk) the rerank scored it by. `Some`
+    /// only when the rerank saw the record as more than one piece. Skipped
+    /// from serialization when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub best_chunk: Option<String>,
     /// The score without its recency term, summed the same way for every
     /// record: two records that differ only in age get exactly the same
     /// value. Taking recency back out of the final score instead left a
@@ -131,6 +137,7 @@ impl ScoreExplanation {
             signals,
             summary,
             query_class: None,
+            best_chunk: None,
             relevance: None,
         }
     }
@@ -517,6 +524,7 @@ pub fn fuse_signals(
         // Set by the caller (recall) once the query is classified; fuse_signals
         // itself is query-class agnostic.
         query_class: None,
+        best_chunk: None,
         relevance: Some(relevance),
     };
 
