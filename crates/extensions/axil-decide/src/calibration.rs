@@ -29,6 +29,10 @@ const U1_JSON: &str = include_str!("../calibration/u1-nli-deberta-v3-xsmall-qint
 /// any (see [`Calibration::check_fit`]).
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct Calibration {
+    /// Short name of this calibration, recorded as provenance on what its
+    /// verdicts create, e.g. `u1@2026-10-04` (decision and fitting date).
+    #[serde(default)]
+    pub id: String,
     /// Model name the calibration was fitted for (see [`crate::PairModel::name`]).
     pub model: String,
     /// Hugging Face revision of that model.
@@ -221,6 +225,7 @@ mod tests {
 
     fn calibration(temperature: f64, threshold: f64) -> Calibration {
         Calibration {
+            id: String::new(),
             model: "m".into(),
             revision: "r".into(),
             label: "contradiction".into(),
@@ -288,6 +293,7 @@ mod tests {
     #[test]
     fn bundled_u1_calibration_parses() {
         let c = Calibration::u1();
+        assert_eq!(c.id, "u1@2026-10-04");
         assert_eq!(c.model, "nli-deberta-v3-xsmall-qint8");
         assert_eq!(c.label, "contradiction");
         assert!(c.temperature > 1.0, "the raw model is over-confident");

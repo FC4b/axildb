@@ -286,6 +286,8 @@ name = "axil-decide"
 version = "0.1.0"
 dependencies = [
  "axil-core",
+ "axil-graph",
+ "axil-vector",
  "ort",
  "parking_lot",
  "serde",
@@ -531,6 +533,7 @@ dependencies = [
  "axil-cache",
  "axil-checkpoint",
  "axil-core",
+ "axil-decide",
  "axil-docs",
  "axil-fts",
  "axil-graph",

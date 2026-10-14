@@ -37,6 +37,7 @@ pub mod branch;
 pub mod code_refs;
 pub mod config;
 pub mod consolidation;
+pub mod contradiction;
 #[cfg(feature = "encryption")]
 pub mod crypto;
 pub mod db;
@@ -87,6 +88,10 @@ pub use config::{
     EnginesConfig, ExtensionsConfig, FtsConfig, HealingConfig, IndexConfig, LifecycleConfig,
     LifecycleLoad, MetricsHealingConfig, OptimizeConfig, PluginConfig, RuntimeConfig,
     TableLifecycle, TimeseriesConfig,
+};
+pub use contradiction::{
+    JudgedPair, PossibleContradiction, ReviewOptions, ReviewReport, CONTRADICTION_REVIEW_TABLE,
+    DEFAULT_REVIEW_TABLES,
 };
 pub use db::{
     companion_path, drop_engine_companion, is_database_file_name, is_expired_record,

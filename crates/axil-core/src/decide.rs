@@ -35,4 +35,9 @@ pub trait PairJudge: Send + Sync {
 
     /// The model behind the verdicts, for provenance on anything they create.
     fn name(&self) -> &str;
+
+    /// The calibration that turned the model's scores into verdicts, for
+    /// provenance next to [`PairJudge::name`]: the same model under another
+    /// temperature or threshold flags different pairs.
+    fn calibration(&self) -> &str;
 }

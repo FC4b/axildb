@@ -113,6 +113,22 @@ problem is printed as a warning when the database opens and reported by
 whole file is not valid TOML, every table named in a
 `[lifecycle.tables.<t>]` header is protected the same way.
 
+### Possible-contradiction review (optional)
+
+Read only by a build with the `decide` feature (see
+[Memory Hygiene](../advanced/memory-hygiene.md#possible-contradictions-opt-in)).
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `decide.review` | bool | `false` | Run the review pass in `axil worker run`: judge new records against their supersede candidates and flag possible contradictions. Never supersedes anything. |
+| `decide.tables` | string list | `["decisions", "context", "rules"]` | Tables whose new records are judged; `_`-prefixed tables are skipped. |
+| `decide.max_records` | int | `20` | Most records judged per pass, newest first; the rest wait for the next pass. |
+| `decide.window_days` | int | `7` | Only records created this recently are judged by a pass. |
+| `decide.candidates` | int | `5` | Older records judged against each new one, most similar first. |
+
+A malformed `[decide]` section (a wrong type, a value below 1, an unknown
+key) prints a warning and turns review off until it is fixed.
+
 ### LLM (optional)
 
 | Key | Type | Default | Description |

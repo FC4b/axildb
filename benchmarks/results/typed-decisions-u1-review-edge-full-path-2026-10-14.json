@@ -1,0 +1,110 @@
+{
+  "benchmark": "typed-decisions-u1-review-edge-full-path",
+  "date": "2026-10-14",
+  "what": "Runs `heuristic --full-path <set> --judge` on the U1 sets: every old text is stored in a real database (default bge-small embedder), then each new text goes through `Axil::supersede_candidates` (cosine >= 0.65, top 5) and both judges:",
+  "judge": "nli-deberta-v3-xsmall-qint8, calibration u1@2026-10-04 (threshold 0.695294)",
+  "candidates": "Axil::supersede_candidates, cosine >= 0.65, top 5, default bge-small embedder",
+  "note": "Quality numbers, independent of machine load. 'other_candidates_*' counts flags (or retirements) on candidates that are not the pair's labeled old text; they are unlabeled, so some may be real contradictions between records of the same set, but most should be read as review noise. The model judge only flags (records_retired is 0 by construction: the judge path has no supersede call); before = the rule judge `axil detect-conflicts` applies, which supersedes.",
+  "sets": {
+    "u1_repo": {
+      "all": {
+        "pairs": {
+          "updates": 20,
+          "non_updates": 20
+        },
+        "candidate_recall_updates": 0.75,
+        "before_rule_judge_supersedes": {
+          "updates_caught": 0.1,
+          "still_valid_retired": 0.0,
+          "other_candidates_retired": 0
+        },
+        "after_u1_review_edge_flags": {
+          "updates_flagged": 0.45,
+          "still_valid_flagged": 0.05,
+          "other_candidates_flagged": 21,
+          "other_candidates_flagged_per_pair": 0.525,
+          "records_retired": 0
+        }
+      },
+      "test": {
+        "pairs": {
+          "updates": 15,
+          "non_updates": 14
+        },
+        "candidate_recall_updates": 0.8,
+        "before_rule_judge_supersedes": {
+          "updates_caught": 0.1333,
+          "still_valid_retired": 0.0,
+          "other_candidates_retired": 0
+        },
+        "after_u1_review_edge_flags": {
+          "updates_flagged": 0.4667,
+          "still_valid_flagged": 0.0714,
+          "other_candidates_flagged": 11,
+          "other_candidates_flagged_per_pair": 0.3793,
+          "records_retired": 0
+        }
+      },
+      "superseded_at_end": 0,
+      "superseded_note": "records the database marked superseded after the run; the judge path has no supersede call, so these come from insert-time near-duplicate handling (cosine >= 0.92) while the old texts were stored",
+      "flagged_scores": [
+        0.6988,
+        0.7068,
+        0.7243,
+        0.7271,
+        0.7291,
+        0.7305,
+        0.7374,
+        0.7401,
+        0.7585,
+        0.8
+      ]
+    },
+    "u1_lme": {
+      "all": {
+        "pairs": {
+          "updates": 69,
+          "non_updates": 140
+        },
+        "candidate_recall_updates": 0.8696,
+        "before_rule_judge_supersedes": {
+          "updates_caught": 0.0145,
+          "still_valid_retired": 0.0,
+          "other_candidates_retired": 0
+        },
+        "after_u1_review_edge_flags": {
+          "updates_flagged": 0.0145,
+          "still_valid_flagged": 0.0,
+          "other_candidates_flagged": 3,
+          "other_candidates_flagged_per_pair": 0.0144,
+          "records_retired": 0
+        }
+      },
+      "test": {
+        "pairs": {
+          "updates": 38,
+          "non_updates": 80
+        },
+        "candidate_recall_updates": 0.8947,
+        "before_rule_judge_supersedes": {
+          "updates_caught": 0.0263,
+          "still_valid_retired": 0.0,
+          "other_candidates_retired": 0
+        },
+        "after_u1_review_edge_flags": {
+          "updates_flagged": 0.0263,
+          "still_valid_flagged": 0.0,
+          "other_candidates_flagged": 1,
+          "other_candidates_flagged_per_pair": 0.0085,
+          "records_retired": 0
+        }
+      },
+      "superseded_at_end": 0,
+      "superseded_note": "records the database marked superseded after the run; the judge path has no supersede call, so these come from insert-time near-duplicate handling (cosine >= 0.92) while the old texts were stored",
+      "flagged_scores": [
+        0.7296
+      ]
+    }
+  },
+  "reproduce": "cargo build --release --manifest-path benchmarks/typed-decisions/heuristic/Cargo.toml; python3 benchmarks/typed-decisions/review_edge_full_path.py --bin <that binary> --out <file>"
+}

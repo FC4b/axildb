@@ -93,6 +93,35 @@ Resolution is an explicit step on purpose: in the typed-decisions benchmark
 (`benchmarks/typed-decisions`), no model could tell reliably from text alone that
 a later note fixed an error. The agent that did the fix can.
 
+## contradictions
+
+Review the pairs of records a local model flagged as possible
+contradictions: a newer `decisions`, `context` or `rules` record that may
+replace, update or contradict an older one. A flag is a suggestion; nothing
+about either record changes until you act on it.
+
+```bash
+axil contradictions                          # open flags (same as `list`)
+axil contradictions accept <NEWER> <OLDER>   # the newer replaced it: mark the older superseded
+axil contradictions dismiss <NEWER> <OLDER>  # both hold: close the flag
+axil contradictions log [--record <ID>]      # every judged pair with its score
+axil contradictions run [--record <ID>]      # judge now (needs the `decide` feature)
+axil contradictions model [--download]       # the judge's model: status, or fetch it
+```
+
+Each open flag shows both records' text, the score `p`, the `threshold` it
+reached, the cosine `similarity` that made the older record a candidate, and
+the `model` and `calibration` that scored it. `accept` goes through the same
+supersede rules as every other writer, so a pinned record or a
+`supersede = false` table is refused (dismiss the flag instead). A flag also
+closes on its own when the older record is superseded some other way or
+either record is deleted.
+
+Flags come from a build with the `decide` feature and `[decide] review = true`
+in `axil.toml` (see [Memory Hygiene](../advanced/memory-hygiene.md#possible-contradictions-opt-in)).
+Listing, accepting and dismissing work in every build. While a flag is open,
+`axil boot` shows one line under `## Review` with the count.
+
 ## boot
 
 Get startup context for an agent session.

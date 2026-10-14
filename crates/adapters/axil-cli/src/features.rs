@@ -209,6 +209,14 @@ pub const CATALOG: &[FeatureInfo] = &[
         in_full: false,
     },
     FeatureInfo {
+        name: "decide",
+        tier: "opt-in",
+        description: "Possible-contradiction review by a local NLI model (opt-in ~96 MB download)",
+        requires: &["embed", "graph"],
+        in_default: false,
+        in_full: false,
+    },
+    FeatureInfo {
         name: "encryption",
         tier: "opt-in",
         description: "Encryption-at-rest for record bodies (XChaCha20-Poly1305, AXIL_ENC_KEY)",
@@ -242,6 +250,7 @@ fn is_compiled(name: &str) -> bool {
         "otel" => cfg!(feature = "otel"),
         "wasm-host" => cfg!(feature = "wasm-host"),
         "event-log" => cfg!(feature = "event-log"),
+        "decide" => cfg!(feature = "decide"),
         "encryption" => cfg!(feature = "encryption"),
         _ => false,
     }

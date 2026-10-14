@@ -443,6 +443,8 @@ def main():
 
     date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     runtime = {
+        # Provenance the review edge records next to the model name.
+        "id": f"u1@{date}",
         "decision": "U1",
         "signal": "contradiction-model score calibrated against U1 labels (replace, update or contradict): "
                   "the NLI contradiction logit for (premise=OLD, hypothesis=NEW) with a fitted temperature; "

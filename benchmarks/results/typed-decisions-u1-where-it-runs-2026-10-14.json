@@ -1,0 +1,590 @@
+{
+  "benchmark": "typed-decisions-u1-where-it-runs",
+  "date": "2026-10-14",
+  "machine": "arm64 Darwin 25.6.0, 10 cores",
+  "threads": 4,
+  "status": "one-shot and host modes measured on a quiet machine (1-minute load average 3.0-4.5 throughout); the worker mode could not be: other agents restarted during it, and both of its runs saw load 21-36, so its timings are loaded numbers (its memory is less sensitive to load). An x86_64 Linux run is pending.",
+  "quiet": {
+    "when": "2026-10-14 16:27-16:31, other agents paused",
+    "one_shot": {
+      "what": "fresh process: load (sha256 check + session + tokenizer), one pair, exit",
+      "runs": [
+        {
+          "first_pair_ms": 28.785666000000003,
+          "load_and_first_pair_ms": 975.97475,
+          "load_ms": 947.189084,
+          "machine": "aarch64 macos",
+          "mode": "one-shot",
+          "model": "nli-deberta-v3-xsmall-qint8@a150876415327c80daeff35ca6f68f5ed8cf5c24",
+          "probability": 0.20392047477707842,
+          "rss_end_kb": 433488,
+          "rss_loaded_kb": 436064,
+          "rss_start_kb": 7888,
+          "threads": 4,
+          "process_wall_ms": 1084.2,
+          "peak_rss_kb": 448736,
+          "peak_footprint_kb": 439808,
+          "loadavg_1m": [
+            3.0,
+            3.0
+          ]
+        },
+        {
+          "first_pair_ms": 28.891917,
+          "load_and_first_pair_ms": 803.776209,
+          "load_ms": 774.884292,
+          "machine": "aarch64 macos",
+          "mode": "one-shot",
+          "model": "nli-deberta-v3-xsmall-qint8@a150876415327c80daeff35ca6f68f5ed8cf5c24",
+          "probability": 0.20392047477707842,
+          "rss_end_kb": 527200,
+          "rss_loaded_kb": 523088,
+          "rss_start_kb": 7888,
+          "threads": 4,
+          "process_wall_ms": 882.6,
+          "peak_rss_kb": 527248,
+          "peak_footprint_kb": 466528,
+          "loadavg_1m": [
+            3.0,
+            3.0
+          ]
+        },
+        {
+          "first_pair_ms": 27.063042,
+          "load_and_first_pair_ms": 792.994584,
+          "load_ms": 765.931542,
+          "machine": "aarch64 macos",
+          "mode": "one-shot",
+          "model": "nli-deberta-v3-xsmall-qint8@a150876415327c80daeff35ca6f68f5ed8cf5c24",
+          "probability": 0.20392047477707842,
+          "rss_end_kb": 497696,
+          "rss_loaded_kb": 493568,
+          "rss_start_kb": 7872,
+          "threads": 4,
+          "process_wall_ms": 874.0,
+          "peak_rss_kb": 497760,
+          "peak_footprint_kb": 438032,
+          "loadavg_1m": [
+            3.0,
+            3.0
+          ]
+        },
+        {
+          "first_pair_ms": 40.891375000000004,
+          "load_and_first_pair_ms": 1312.03,
+          "load_ms": 1271.138625,
+          "machine": "aarch64 macos",
+          "mode": "one-shot",
+          "model": "nli-deberta-v3-xsmall-qint8@a150876415327c80daeff35ca6f68f5ed8cf5c24",
+          "probability": 0.20392047477707842,
+          "rss_end_kb": 357968,
+          "rss_loaded_kb": 353536,
+          "rss_start_kb": 7872,
+          "threads": 4,
+          "process_wall_ms": 1420.6,
+          "peak_rss_kb": 358224,
+          "peak_footprint_kb": 437376,
+          "loadavg_1m": [
+            3.0,
+            4.2
+          ]
+        },
+        {
+          "first_pair_ms": 36.133916,
+          "load_and_first_pair_ms": 884.208582,
+          "load_ms": 848.074666,
+          "machine": "aarch64 macos",
+          "mode": "one-shot",
+          "model": "nli-deberta-v3-xsmall-qint8@a150876415327c80daeff35ca6f68f5ed8cf5c24",
+          "probability": 0.20392047477707842,
+          "rss_end_kb": 496768,
+          "rss_loaded_kb": 492288,
+          "rss_start_kb": 7920,
+          "threads": 4,
+          "process_wall_ms": 968.2,
+          "peak_rss_kb": 496832,
+          "peak_footprint_kb": 435712,
+          "loadavg_1m": [
+            4.2,
+            4.2
+          ]
+        },
+        {
+          "first_pair_ms": 28.942708,
+          "load_and_first_pair_ms": 765.1707500000001,
+          "load_ms": 736.2280420000001,
+          "machine": "aarch64 macos",
+          "mode": "one-shot",
+          "model": "nli-deberta-v3-xsmall-qint8@a150876415327c80daeff35ca6f68f5ed8cf5c24",
+          "probability": 0.20392047477707842,
+          "rss_end_kb": 525536,
+          "rss_loaded_kb": 521456,
+          "rss_start_kb": 7872,
+          "threads": 4,
+          "process_wall_ms": 845.9,
+          "peak_rss_kb": 525600,
+          "peak_footprint_kb": 464960,
+          "loadavg_1m": [
+            4.2,
+            4.2
+          ]
+        },
+        {
+          "first_pair_ms": 28.747708,
+          "load_and_first_pair_ms": 831.792917,
+          "load_ms": 803.045209,
+          "machine": "aarch64 macos",
+          "mode": "one-shot",
+          "model": "nli-deberta-v3-xsmall-qint8@a150876415327c80daeff35ca6f68f5ed8cf5c24",
+          "probability": 0.20392047477707842,
+          "rss_end_kb": 523072,
+          "rss_loaded_kb": 518720,
+          "rss_start_kb": 7888,
+          "threads": 4,
+          "process_wall_ms": 910.5,
+          "peak_rss_kb": 523104,
+          "peak_footprint_kb": 463184,
+          "loadavg_1m": [
+            4.2,
+            4.2
+          ]
+        }
+      ],
+      "process_wall_ms": {
+        "n": 7,
+        "median": 910.5,
+        "min": 845.9,
+        "max": 1420.6
+      },
+      "load_ms": {
+        "n": 7,
+        "median": 803.0,
+        "min": 736.2,
+        "max": 1271.1
+      },
+      "first_pair_ms": {
+        "n": 7,
+        "median": 28.9,
+        "min": 27.1,
+        "max": 40.9
+      },
+      "peak_rss_mb": {
+        "n": 7,
+        "median": 486.1,
+        "min": 349.8,
+        "max": 514.9
+      },
+      "peak_footprint_mb": {
+        "n": 7,
+        "median": 429.5,
+        "min": 425.5,
+        "max": 455.6
+      },
+      "rss_start_mb": {
+        "n": 7,
+        "median": 7.7,
+        "min": 7.7,
+        "max": 7.7
+      }
+    },
+    "host": {
+      "load_ms": 772.54425,
+      "machine": "aarch64 macos",
+      "mode": "host",
+      "model": "nli-deberta-v3-xsmall-qint8@a150876415327c80daeff35ca6f68f5ed8cf5c24",
+      "rounds": [
+        {
+          "mean_ms": 19.769224261044176,
+          "p50_ms": 19.052458,
+          "p95_ms": 31.133542,
+          "pairs": 249,
+          "round": 1,
+          "rss_after_kb": 233536,
+          "wall_ms": 4922.596042
+        },
+        {
+          "mean_ms": 17.861432377510052,
+          "p50_ms": 18.484917,
+          "p95_ms": 26.201958,
+          "pairs": 249,
+          "round": 2,
+          "rss_after_kb": 233792,
+          "wall_ms": 4447.553334
+        }
+      ],
+      "rss_loaded_kb": 494864,
+      "rss_start_kb": 7872,
+      "threads": 4,
+      "warm_up_pairs": 5,
+      "process_wall_ms": 10322.3,
+      "peak_rss_kb": 515104,
+      "peak_footprint_kb": 439312,
+      "loadavg_1m": [
+        4.2,
+        4.5
+      ],
+      "what": "one process: load once, 5 warm-up pairs, then every U1 pair one at a time per round; RSS read with ps after each round"
+    },
+    "worker": {
+      "review_off": {
+        "process_wall_ms": 194.2,
+        "peak_rss_kb": 20720,
+        "peak_footprint_kb": 8736,
+        "loadavg_1m": [
+          21.0,
+          21.0
+        ],
+        "contradiction_review": null
+      },
+      "review_on": {
+        "process_wall_ms": 9624.8,
+        "peak_rss_kb": 550944,
+        "peak_footprint_kb": 568993,
+        "loadavg_1m": [
+          21.0,
+          22.8
+        ],
+        "contradiction_review": {
+          "duration_ms": 9350,
+          "flagged": 29,
+          "load_ms": 2331,
+          "model": "nli-deberta-v3-xsmall-qint8@a150876415327c80daeff35ca6f68f5ed8cf5c24",
+          "pairs_judged": 137,
+          "pending": 35,
+          "records_reviewed": 40
+        }
+      },
+      "review_cost": {
+        "wall_ms": 9430.6,
+        "peak_rss_mb": 517.8,
+        "peak_footprint_mb": 547.1
+      },
+      "database": {
+        "sets": [
+          "u1_repo.jsonl"
+        ],
+        "records": 78,
+        "max_records": 40,
+        "what": "every distinct U1 old text, then every new text, stored as decisions with the default embedder; both runs on byte-identical copies"
+      },
+      "conditions": "load rose to 21-23 during this mode (other agents restarting): timings are loaded"
+    },
+    "worker_repeat": {
+      "review_off": {
+        "process_wall_ms": 173.9,
+        "peak_rss_kb": 20496,
+        "peak_footprint_kb": 8528,
+        "loadavg_1m": [
+          34.1,
+          34.1
+        ],
+        "contradiction_review": null
+      },
+      "review_on": {
+        "process_wall_ms": 9889.2,
+        "peak_rss_kb": 547616,
+        "peak_footprint_kb": 568609,
+        "loadavg_1m": [
+          34.1,
+          35.7
+        ],
+        "contradiction_review": {
+          "duration_ms": 9715,
+          "flagged": 29,
+          "load_ms": 1960,
+          "model": "nli-deberta-v3-xsmall-qint8@a150876415327c80daeff35ca6f68f5ed8cf5c24",
+          "pairs_judged": 137,
+          "pending": 35,
+          "records_reviewed": 40
+        }
+      },
+      "review_cost": {
+        "wall_ms": 9715.3,
+        "peak_rss_mb": 514.8,
+        "peak_footprint_mb": 547.0
+      },
+      "database": {
+        "sets": [
+          "u1_repo.jsonl"
+        ],
+        "records": 78,
+        "max_records": 40,
+        "what": "every distinct U1 old text, then every new text, stored as decisions with the default embedder; both runs on byte-identical copies"
+      },
+      "conditions": "repeated once because the load passed 8; load 34-36, so still loaded; waited 60 s after storing the records before timing"
+    }
+  },
+  "loaded": {
+    "note": "measured under load: other agents' builds and model runs shared this 10-core M1 Pro (1-minute load average recorded per step); provisional, a quiet-machine re-measure and an x86_64 Linux run are pending",
+    "one_shot": {
+      "what": "fresh process: load (sha256 check + session + tokenizer), one pair, exit",
+      "runs": [
+        {
+          "first_pair_ms": 177.454834,
+          "load_and_first_pair_ms": 3057.280584,
+          "load_ms": 2879.82575,
+          "machine": "aarch64 macos",
+          "mode": "one-shot",
+          "model": "nli-deberta-v3-xsmall-qint8@a150876415327c80daeff35ca6f68f5ed8cf5c24",
+          "probability": 0.20392047477707842,
+          "rss_end_kb": 322672,
+          "rss_loaded_kb": 377824,
+          "rss_start_kb": 7888,
+          "threads": 4,
+          "process_wall_ms": 3345.5,
+          "peak_rss_kb": 381712,
+          "peak_footprint_kb": 438864,
+          "loadavg_1m": [
+            76.5,
+            75.8
+          ]
+        },
+        {
+          "first_pair_ms": 119.156792,
+          "load_and_first_pair_ms": 2454.7857089999998,
+          "load_ms": 2335.628917,
+          "machine": "aarch64 macos",
+          "mode": "one-shot",
+          "model": "nli-deberta-v3-xsmall-qint8@a150876415327c80daeff35ca6f68f5ed8cf5c24",
+          "probability": 0.20392047477707842,
+          "rss_end_kb": 461712,
+          "rss_loaded_kb": 492448,
+          "rss_start_kb": 7888,
+          "threads": 4,
+          "process_wall_ms": 2720.1,
+          "peak_rss_kb": 492816,
+          "peak_footprint_kb": 437936,
+          "loadavg_1m": [
+            75.8,
+            75.8
+          ]
+        },
+        {
+          "first_pair_ms": 39.634207999999994,
+          "load_and_first_pair_ms": 3785.750624,
+          "load_ms": 3746.116416,
+          "machine": "aarch64 macos",
+          "mode": "one-shot",
+          "model": "nli-deberta-v3-xsmall-qint8@a150876415327c80daeff35ca6f68f5ed8cf5c24",
+          "probability": 0.20392047477707842,
+          "rss_end_kb": 370032,
+          "rss_loaded_kb": 375616,
+          "rss_start_kb": 7872,
+          "threads": 4,
+          "process_wall_ms": 4048.2,
+          "peak_rss_kb": 375728,
+          "peak_footprint_kb": 437616,
+          "loadavg_1m": [
+            75.8,
+            80.8
+          ]
+        },
+        {
+          "first_pair_ms": 254.808625,
+          "load_and_first_pair_ms": 3670.100125,
+          "load_ms": 3415.2915,
+          "machine": "aarch64 macos",
+          "mode": "one-shot",
+          "model": "nli-deberta-v3-xsmall-qint8@a150876415327c80daeff35ca6f68f5ed8cf5c24",
+          "probability": 0.20392047477707842,
+          "rss_end_kb": 327664,
+          "rss_loaded_kb": 307744,
+          "rss_start_kb": 7872,
+          "threads": 4,
+          "process_wall_ms": 4228.3,
+          "peak_rss_kb": 328272,
+          "peak_footprint_kb": 413312,
+          "loadavg_1m": [
+            80.8,
+            81.5
+          ]
+        },
+        {
+          "first_pair_ms": 283.432083,
+          "load_and_first_pair_ms": 5057.798542,
+          "load_ms": 4774.366459000001,
+          "machine": "aarch64 macos",
+          "mode": "one-shot",
+          "model": "nli-deberta-v3-xsmall-qint8@a150876415327c80daeff35ca6f68f5ed8cf5c24",
+          "probability": 0.20392047477707842,
+          "rss_end_kb": 274928,
+          "rss_loaded_kb": 225040,
+          "rss_start_kb": 7872,
+          "threads": 4,
+          "process_wall_ms": 5309.5,
+          "peak_rss_kb": 426160,
+          "peak_footprint_kb": 418736,
+          "loadavg_1m": [
+            81.5,
+            82.1
+          ]
+        },
+        {
+          "first_pair_ms": 145.486917,
+          "load_and_first_pair_ms": 4318.578542,
+          "load_ms": 4173.091625,
+          "machine": "aarch64 macos",
+          "mode": "one-shot",
+          "model": "nli-deberta-v3-xsmall-qint8@a150876415327c80daeff35ca6f68f5ed8cf5c24",
+          "probability": 0.20392047477707842,
+          "rss_end_kb": 327760,
+          "rss_loaded_kb": 279856,
+          "rss_start_kb": 7872,
+          "threads": 4,
+          "process_wall_ms": 4802.7,
+          "peak_rss_kb": 404832,
+          "peak_footprint_kb": 465072,
+          "loadavg_1m": [
+            82.1,
+            83.1
+          ]
+        },
+        {
+          "first_pair_ms": 131.82079199999998,
+          "load_and_first_pair_ms": 2399.915333,
+          "load_ms": 2268.094541,
+          "machine": "aarch64 macos",
+          "mode": "one-shot",
+          "model": "nli-deberta-v3-xsmall-qint8@a150876415327c80daeff35ca6f68f5ed8cf5c24",
+          "probability": 0.20392047477707842,
+          "rss_end_kb": 360656,
+          "rss_loaded_kb": 355040,
+          "rss_start_kb": 7888,
+          "threads": 4,
+          "process_wall_ms": 2908.3,
+          "peak_rss_kb": 360704,
+          "peak_footprint_kb": 447792,
+          "loadavg_1m": [
+            83.1,
+            82.8
+          ]
+        }
+      ],
+      "process_wall_ms": {
+        "n": 7,
+        "median": 4048.2,
+        "min": 2720.1,
+        "max": 5309.5
+      },
+      "load_ms": {
+        "n": 7,
+        "median": 3415.3,
+        "min": 2268.1,
+        "max": 4774.4
+      },
+      "first_pair_ms": {
+        "n": 7,
+        "median": 145.5,
+        "min": 39.6,
+        "max": 283.4
+      },
+      "peak_rss_mb": {
+        "n": 7,
+        "median": 372.8,
+        "min": 320.6,
+        "max": 481.3
+      },
+      "peak_footprint_mb": {
+        "n": 7,
+        "median": 427.7,
+        "min": 403.6,
+        "max": 454.2
+      },
+      "rss_start_mb": {
+        "n": 7,
+        "median": 7.7,
+        "min": 7.7,
+        "max": 7.7
+      }
+    },
+    "host": {
+      "load_ms": 2456.560375,
+      "machine": "aarch64 macos",
+      "mode": "host",
+      "model": "nli-deberta-v3-xsmall-qint8@a150876415327c80daeff35ca6f68f5ed8cf5c24",
+      "rounds": [
+        {
+          "mean_ms": 218.33009076305217,
+          "p50_ms": 153.598916,
+          "p95_ms": 595.953708,
+          "pairs": 249,
+          "round": 1,
+          "rss_after_kb": 112656,
+          "wall_ms": 54364.285916999994
+        },
+        {
+          "mean_ms": 350.3264847831324,
+          "p50_ms": 239.734917,
+          "p95_ms": 888.928584,
+          "pairs": 249,
+          "round": 2,
+          "rss_after_kb": 85008,
+          "wall_ms": 87231.466958
+        }
+      ],
+      "rss_loaded_kb": 490032,
+      "rss_start_kb": 7872,
+      "threads": 4,
+      "warm_up_pairs": 5,
+      "process_wall_ms": 145809.2,
+      "peak_rss_kb": 493104,
+      "peak_footprint_kb": 436928,
+      "loadavg_1m": [
+        82.8,
+        92.4
+      ],
+      "what": "one process: load once, 5 warm-up pairs, then every U1 pair one at a time per round; RSS read with ps after each round"
+    },
+    "worker": {
+      "review_off": {
+        "process_wall_ms": 319.2,
+        "peak_rss_kb": 20992,
+        "peak_footprint_kb": 9040,
+        "loadavg_1m": [
+          92.3,
+          92.3
+        ],
+        "contradiction_review": null
+      },
+      "review_on": {
+        "process_wall_ms": 28339.5,
+        "peak_rss_kb": 654528,
+        "peak_footprint_kb": 581297,
+        "loadavg_1m": [
+          92.3,
+          81.9
+        ],
+        "contradiction_review": {
+          "duration_ms": 27753,
+          "flagged": 29,
+          "load_ms": 3757,
+          "model": "nli-deberta-v3-xsmall-qint8@a150876415327c80daeff35ca6f68f5ed8cf5c24",
+          "pairs_judged": 137,
+          "pending": 35,
+          "records_reviewed": 40
+        }
+      },
+      "review_cost": {
+        "wall_ms": 28020.3,
+        "peak_rss_mb": 618.7,
+        "peak_footprint_mb": 558.8
+      },
+      "database": {
+        "sets": [
+          "u1_repo.jsonl"
+        ],
+        "records": 78,
+        "max_records": 40,
+        "what": "every distinct U1 old text, then every new text, stored as decisions with the default embedder; both runs on byte-identical copies"
+      }
+    },
+    "when": "2026-10-14 morning, under heavy load from other agents (1-minute load average 76-92 on 10 cores)"
+  },
+  "reading": {
+    "one_shot": "what a foreground CLI command or a hook would pay to judge even one pair: the model load, then the pair",
+    "host": "what a long-lived process pays once, and what it keeps resident; RSS after the rounds drops because macOS compresses idle pages under the memory pressure other processes put on the machine, so read peak_footprint_kb as what the model holds",
+    "worker": "the shipped path: the review pass inside `axil worker run`; review_off is the same worker on a byte-identical copy with `[decide] review = false`, which loads no model (and no embedder)"
+  },
+  "compare_with": "benchmarks/results/typed-decisions-u1-rust-runtime-2026-10-04.json: the same runtime on the same machine at a 1-minute load average of 7 to 14 (load 739-811 ms, p50 19-38 ms per pair)",
+  "reproduce": "cargo build --release -p axil-decide --example u1_footprint; cargo build --release -p axildb --features decide; python3 benchmarks/typed-decisions/measure_u1_footprint.py --probe target/release/examples/u1_footprint --axil target/release/axil --max-records 40 --out FILE.json (add --modes worker --settle-s 60 to repeat only the worker mode)"
+}

@@ -18,6 +18,7 @@ mod cli_io;
 #[cfg(feature = "http")]
 mod http_server;
 
+mod contradictions;
 mod features;
 mod hook_brain;
 mod install_wizard;
@@ -2255,6 +2256,14 @@ enum Command {
     DetectConflicts {
         /// Record ID to check.
         id: String,
+    },
+
+    /// Review pairs of records a local model flagged as possible
+    /// contradictions (suggestions only: nothing changes until you accept or
+    /// dismiss one). Judging needs a build with the `decide` feature.
+    Contradictions {
+        #[command(subcommand)]
+        command: Option<contradictions::ContradictionsCommand>,
     },
 
     /// Consolidate facts about an entity into a merged summary.
@@ -15766,7 +15775,15 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
                         axil_core::AxilWorker::new(&db)
                     };
                     let report = worker.run().context("worker run failed")?;
-                    out.print(&serde_json::to_value(&report).unwrap());
+                    #[allow(unused_mut)]
+                    let mut report = serde_json::to_value(&report).unwrap();
+                    // The model loads here, in the worker's own process (the
+                    // hook drainer's at session close), never in a hook.
+                    #[cfg(feature = "decide")]
+                    if let Some(review) = contradictions::worker_review(&db, &db_path, out) {
+                        report["contradiction_review"] = review;
+                    }
+                    out.print(&report);
                     Ok(EXIT_OK)
                 }
                 WorkerCommand::Status => {
@@ -16153,6 +16170,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
 
         // ── ──────────────────────────────────────────────────
         Command::Workspace { op } => workspace::handle_workspace(op, &db_opt, out),
+        Command::Contradictions { command } => contradictions::handle(command, &db_opt, out),
         Command::Consent { op } => workspace::handle_consent(op, &db_opt, out),
         Command::Bridge { op } => workspace::handle_bridge(op, &db_opt, out),
         #[cfg(feature = "embed")]

@@ -11,5 +11,7 @@ publish = false
 [dependencies]
 axil-core = { path = "../../../crates/axil-core" }
 axil-vector = { path = "../../../crates/engines/axil-vector", features = ["embed"] }
+# `--full-path --judge`: the U1 model judge the review pass uses.
+axil-decide = { path = "../../../crates/extensions/axil-decide" }
 serde_json = "1"
 tempfile = "3"

@@ -1,4 +1,5 @@
 {
+  "id": "u1@2026-10-04",
   "decision": "U1",
   "signal": "contradiction-model score calibrated against U1 labels (replace, update or contradict): the NLI contradiction logit for (premise=OLD, hypothesis=NEW) with a fitted temperature; a review signal, not an update detector, it flags few plain updates",
   "model": "nli-deberta-v3-xsmall-qint8",
