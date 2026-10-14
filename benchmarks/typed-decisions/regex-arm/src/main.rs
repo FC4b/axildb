@@ -1,0 +1,124 @@
+//! Production pattern arms on the U5 and U3 sets, without the model crates.
+//!
+//! * `--entities <u5.jsonl>` prints what `heuristic --entities` prints: the
+//!   entities `axil_core::extract_entities` finds in each text, capped at the
+//!   number `Axil::auto_link` keeps.
+//! * `--capture <u3.jsonl>` prints what `heuristic --capture` prints: every
+//!   capture `auto_capture::analyze` returns, with the table and importance of
+//!   the record it would store.
+//!
+//! Output is one JSON line per text, the shape `run_u5_bakeoff.py` and
+//! `run_u3_bakeoff.py` read, so `run_regex_arm.py` can score it with their
+//! code.
+
+use std::io::{BufRead, BufReader, Write};
+use std::time::Instant;
+
+use axil_core::auto_capture::{analyze, capture_to_record};
+use axil_core::importance::compute_importance;
+use axil_core::{extract_entities, EntityType, Record};
+use serde_json::{json, Value};
+
+/// `Axil::auto_link` keeps at most this many entities per record.
+const MAX_AUTO_LINK_ENTITIES: usize = 50;
+
+fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let usage = "usage: typed-decisions-regex-arm (--entities <u5.jsonl> | --capture <u3.jsonl>)";
+    let (Some(mode), Some(path)) = (args.first(), args.get(1)) else {
+        eprintln!("{usage}");
+        std::process::exit(2);
+    };
+    match mode.as_str() {
+        "--entities" => entities(path),
+        "--capture" => capture(path),
+        _ => {
+            eprintln!("{usage}");
+            std::process::exit(2);
+        }
+    }
+}
+
+/// Read a JSONL file into rows, skipping blank lines.
+fn read_rows(path: &str) -> Vec<Value> {
+    BufReader::new(std::fs::File::open(path).expect("open set"))
+        .lines()
+        .map(|l| l.expect("read line"))
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(&l).expect("parse row"))
+        .collect()
+}
+
+fn entities(path: &str) {
+    let rows = read_rows(path);
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    for row in &rows {
+        let record = Record::new("decisions", json!({ "summary": row["text"] }));
+        let t = Instant::now();
+        let text = axil_core::util::record_text(&record);
+        let mut found = extract_entities(&text);
+        found.truncate(MAX_AUTO_LINK_ENTITIES);
+        let extract_us = t.elapsed().as_secs_f64() * 1e6;
+        let entities: Vec<Value> = found
+            .iter()
+            .map(|e| {
+                let (axil_type, lang_hint) = match &e.entity_type {
+                    EntityType::File => ("file", None),
+                    EntityType::Code => ("code", None),
+                    EntityType::Project => ("project", None),
+                    EntityType::Reference => ("reference", None),
+                    EntityType::CodeSymbol { lang_hint } => ("code_symbol", lang_hint.clone()),
+                };
+                json!({
+                    "text": e.source_text,
+                    "name": e.name,
+                    "axil_type": axil_type,
+                    "lang_hint": lang_hint,
+                })
+            })
+            .collect();
+        writeln!(
+            out,
+            "{}",
+            json!({ "id": row["id"], "entities": entities, "extract_us": extract_us })
+        )
+        .expect("write");
+    }
+}
+
+fn capture(path: &str) {
+    let rows = read_rows(path);
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    for row in &rows {
+        let text = row["text"].as_str().unwrap_or_default();
+        let t = Instant::now();
+        let captures = analyze(text, "bash");
+        let analyze_us = t.elapsed().as_secs_f64() * 1e6;
+        let captures: Vec<Value> = captures
+            .iter()
+            .map(|c| {
+                let (table, data) = capture_to_record(c);
+                json!({
+                    "type": c.capture_type,
+                    "confidence": c.confidence,
+                    "summary": c.summary,
+                    "table": table,
+                    "importance": compute_importance(&data),
+                })
+            })
+            .collect();
+        writeln!(
+            out,
+            "{}",
+            json!({
+                "id": row["id"],
+                "captures": captures,
+                "plain_importance": compute_importance(&json!({ "summary": text })),
+                "analyze_us": analyze_us,
+            })
+        )
+        .expect("write");
+    }
+}
