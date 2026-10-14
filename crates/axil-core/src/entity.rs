@@ -1,8 +1,8 @@
 //! Pattern-based entity extraction — no LLM required.
 //!
 //! Extracts entities from record text using deterministic patterns:
-//! file paths, CamelCase/snake_case identifiers, backtick-wrapped code,
-//! quoted strings, and project names. Also handles code symbols
+//! file paths, CamelCase/snake_case identifiers and backtick-wrapped code.
+//! Also handles code symbols
 //! (`fn foo`, `auth::login`, `class User`, …) with a language hint so
 //! cross-language collisions can be disambiguated downstream. Declaration
 //! keywords such as `trait` and `class` are English words too, so those
@@ -22,7 +22,8 @@ pub enum EntityType {
     Code,
     /// Project name
     Project,
-    /// Quoted or backtick-wrapped string
+    /// A name that fits no other type: what an LLM extractor returns for
+    /// people and concepts. The patterns never produce it.
     Reference,
     /// A code symbol extracted via a language-aware pattern.
     /// `lang_hint` is `"rust" | "python" | "ts" | "go" | "java" | ...`
@@ -73,7 +74,10 @@ pub struct Entity {
 /// 2. File paths: `/src/auth/login.rs` → file entity
 /// 3. CamelCase identifiers: `AuthModule` → code entity
 /// 4. snake_case identifiers: `auth_module` → code entity
-/// 5. Quoted strings (3+ words): potential reference entity
+///
+/// Quoted strings are not entities: a quoted phrase is an error message or an
+/// example, and linking notes on it joins notes that merely quote the same
+/// words.
 pub fn extract_entities(text: &str) -> Vec<Entity> {
     let mut entities = Vec::new();
     let mut seen = HashSet::new();
@@ -89,9 +93,6 @@ pub fn extract_entities(text: &str) -> Vec<Entity> {
 
     // 4. snake_case identifiers
     extract_snake_case(text, &mut entities, &mut seen);
-
-    // 5. Quoted strings
-    extract_quoted_strings(text, &mut entities, &mut seen);
 
     extract_code_symbols(text, &mut entities, &mut seen);
 
@@ -198,50 +199,6 @@ fn extract_snake_case(text: &str, entities: &mut Vec<Entity>, seen: &mut HashSet
                 });
             }
         }
-    }
-}
-
-fn extract_quoted_strings(text: &str, entities: &mut Vec<Entity>, seen: &mut HashSet<String>) {
-    // Double-quoted strings
-    extract_between(text, '"', '"', entities, seen);
-    // Single-quoted strings
-    extract_between(text, '\'', '\'', entities, seen);
-}
-
-fn extract_between(
-    text: &str,
-    open: char,
-    close: char,
-    entities: &mut Vec<Entity>,
-    seen: &mut HashSet<String>,
-) {
-    let chars: Vec<char> = text.chars().collect();
-    let mut i = 0;
-    while i < chars.len() {
-        if chars[i] == open {
-            let start = i + 1;
-            i += 1;
-            while i < chars.len() && chars[i] != close {
-                i += 1;
-            }
-            if i < chars.len() {
-                let content: String = chars[start..i].iter().collect();
-                let trimmed = content.trim();
-                // Only extract meaningful quoted strings (3+ words)
-                let word_count = trimmed.split_whitespace().count();
-                if word_count >= 3 && trimmed.len() <= 200 {
-                    let key = trimmed.to_lowercase();
-                    if seen.insert(key) {
-                        entities.push(Entity {
-                            name: trimmed.to_string(),
-                            entity_type: EntityType::Reference,
-                            source_text: trimmed.to_string(),
-                        });
-                    }
-                }
-            }
-        }
-        i += 1;
     }
 }
 
@@ -598,12 +555,14 @@ mod tests {
     }
 
     #[test]
-    fn extract_quoted_string() {
-        let text = "Error message was \"connection timed out unexpectedly\"";
-        let entities = extract_entities(text);
-        assert!(entities
-            .iter()
-            .any(|e| e.entity_type == EntityType::Reference));
+    fn quoted_phrases_are_not_entities() {
+        for text in [
+            "Error message was \"connection timed out unexpectedly\"",
+            "It printed 'no summary available' and the user's notes don't say why",
+        ] {
+            let entities = extract_entities(text);
+            assert!(entities.is_empty(), "{text:?} minted {entities:?}");
+        }
     }
 
     #[test]
