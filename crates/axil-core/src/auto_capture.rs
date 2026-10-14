@@ -18,6 +18,8 @@ pub enum CaptureType {
     Decision,
     /// General context or learning.
     Context,
+    /// A standing constraint on later work ("never ...", "every X must ...").
+    Rule,
     /// Not significant enough to capture.
     Skip,
 }
@@ -191,6 +193,27 @@ const CODE_LINE_STARTS: &[&str] = &[
     "use ",
 ];
 
+/// A list of standing rules: `CONVENTIONS:`, `**Rules:**`, `- Invariant:`.
+static RULE_LABEL: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)^\s*(?:[-*]\s+|\d+\.\s+)?(?:\*\*)?(?:conventions?|rules?|ground rules|house rules|constraints?|invariants?)(?:\*\*)?\s*:",
+    )
+    .unwrap()
+});
+
+/// A sentence that opens with a standing imperative. Capitalized, so a
+/// wrapped line that happens to start with "never" does not count.
+static RULE_IMPERATIVE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?:^|[.;!]\s+)(?:[-*]\s+|\d+\.\s+)?(?:\*\*)?(?:Never|NEVER|Always|ALWAYS|Do not|Do NOT|DO NOT|Don't|DON'T)\s",
+    )
+    .unwrap()
+});
+
+/// "Every new table name must ...": a rule over a whole kind of thing.
+static RULE_EVERY_MUST: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\bevery\s+(?:[\w-]+\s+){1,4}must\b").unwrap());
+
 /// A finding the agent labeled as one: `Gotcha: ...`, `**Lesson learned:**`,
 /// a list item `- TIL: ...`.
 static FINDING_LABEL: LazyLock<Regex> = LazyLock::new(|| {
@@ -224,7 +247,7 @@ pub const COMMAND_OUTPUT_SOURCE: &str = "bash";
 /// Analyze text and extract capturable knowledge.
 ///
 /// Returns a list of captures with confidence scores, the most specific
-/// class first (an error, then a decision). Text from
+/// class first (an error, a decision, a rule, then context). Text from
 /// [`COMMAND_OUTPUT_SOURCE`] only yields errors.
 /// Callers (e.g. `axil auto-capture`) should only auto-store captures with
 /// confidence >= 0.7.
@@ -305,6 +328,23 @@ pub fn analyze(text: &str, source: &str) -> Vec<CapturedKnowledge> {
         break;
     }
 
+    // Detect standing rules.
+    let rule = lines
+        .iter()
+        .enumerate()
+        .find(|(i, l)| Some(*i) != claimed_line && !guards.is_guarded(l) && is_rule(l));
+    if let Some((_, line)) = rule {
+        let summary = line.trim();
+        if summary.len() >= MIN_SUMMARY_LEN {
+            captures.push(CapturedKnowledge {
+                capture_type: CaptureType::Rule,
+                summary: truncate(summary, 200),
+                confidence: 0.8,
+                source: source.to_string(),
+            });
+        }
+    }
+
     // Detect findings worth keeping as context.
     let finding = lines
         .iter()
@@ -323,6 +363,12 @@ pub fn analyze(text: &str, source: &str) -> Vec<CapturedKnowledge> {
     }
 
     captures
+}
+
+/// A line that states a standing rule: a rule list's label, a sentence
+/// opening with "Never" / "Always" / "Do not" / "Don't", or "every X must".
+fn is_rule(line: &str) -> bool {
+    RULE_LABEL.is_match(line) || RULE_IMPERATIVE.is_match(line) || RULE_EVERY_MUST.is_match(line)
 }
 
 /// A line the agent wrote to record a finding: a labeled one, or "it turns
@@ -521,6 +567,7 @@ pub fn capture_to_record(capture: &CapturedKnowledge) -> (String, Value) {
         CaptureType::Error => "errors",
         CaptureType::Decision => "decisions",
         CaptureType::Context => "context",
+        CaptureType::Rule => "rules",
         CaptureType::Skip => "context",
     };
 
@@ -533,6 +580,12 @@ pub fn capture_to_record(capture: &CapturedKnowledge) -> (String, Value) {
         }),
         CaptureType::Decision => json!({
             "summary": capture.summary,
+            "_auto_captured": true,
+            "_capture_source": capture.source,
+            "_capture_confidence": capture.confidence,
+        }),
+        CaptureType::Rule => json!({
+            "rule": capture.summary,
             "_auto_captured": true,
             "_capture_source": capture.source,
             "_capture_confidence": capture.confidence,
@@ -867,6 +920,31 @@ mod tests {
                     -        return Err(\"connection refused by peer\".into())\n\
                     +        warn!(\"retrying after connection refused\")";
         assert!(errors_in(text).is_empty());
+    }
+
+    #[test]
+    fn a_standing_constraint_is_a_rule() {
+        for text in [
+            "CONVENTIONS: match surrounding style. Public APIs need doc comments.",
+            "Tests pass on dev. Never edit the generated fixtures by hand; regenerate them.",
+            "- Do not run `cargo fmt` on whole crates; the tree is not fmt-clean.",
+            "Every new internal table name must start with an underscore.",
+        ] {
+            let captures = analyze(text, "agent");
+            assert_eq!(captures.len(), 1, "{text}: {captures:?}");
+            assert_eq!(captures[0].capture_type, CaptureType::Rule, "{text}");
+            let (table, data) = capture_to_record(&captures[0]);
+            assert_eq!(table, "rules");
+            assert!(data["rule"].is_string());
+        }
+    }
+
+    #[test]
+    fn a_wrapped_never_or_a_rule_in_command_output_is_not_a_rule() {
+        let text = "The vector store on this machine has\nnever been repaired since June.";
+        assert!(analyze(text, "agent").is_empty());
+        let text = "Exit code 1\n- Never edit the generated fixtures by hand; regenerate them.";
+        assert!(analyze(text, COMMAND_OUTPUT_SOURCE).is_empty());
     }
 
     #[test]
