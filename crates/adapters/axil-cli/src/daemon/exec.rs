@@ -15,6 +15,17 @@
 //!   verbose-mode banner, the embedder's execution-provider line) prints once
 //!   in the host's life: in the first request that triggers it, or on the
 //!   host's stderr when the host's own open triggers it.
+//! - A database whose open prints anything (an unloadable or corrupt row, a
+//!   config warning, a migration's note) is not served at all:
+//!   [`WarmState::open`] fails with [`OpenPrinted`], and a reopen that
+//!   prints leaves no handle. Each command then runs in its own process and
+//!   prints the line, with its hint, every time, until the cause is fixed.
+//!   Replaying the lines into each response instead would not match: each
+//!   command's one-shot open attaches only the engines it needs, and prints
+//!   only theirs.
+//! - A line an engine prints the first time a handle uses something (the
+//!   graph store when its adjacency tables can't be used, say) prints in
+//!   the first request that does, not in every one.
 //! - Lines printed inside recall's ranking (`query.rs` and `Axil::recall`)
 //!   and by the recall workers a `--timeout-ms` deadline leaves running go
 //!   to the host's stderr: those threads carry no request.
@@ -155,6 +166,38 @@ pub struct WarmState {
     panic_next: AtomicBool,
 }
 
+/// Opening the database printed: it is not served in-process. Each line,
+/// such as an unloadable row and the `axil heal` that clears it, would
+/// otherwise show once on the host's stderr and never in the commands the
+/// user runs. Carries what the open printed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenPrinted(pub String);
+
+impl fmt::Display for OpenPrinted {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "the database is not served in-process: opening it printed\n{}",
+            self.0.trim_end()
+        )
+    }
+}
+
+impl std::error::Error for OpenPrinted {}
+
+/// [`WarmDb::open`], as long as the open prints nothing; [`OpenPrinted`]
+/// otherwise, with the handle closed again.
+fn open_warm(path: &Path) -> anyhow::Result<WarmDb> {
+    let (stdout, stderr, warm) = cli_io::capture(ReqCtx::default(), || WarmDb::open(path));
+    let warm = warm?;
+    if stdout.is_empty() && stderr.is_empty() {
+        return Ok(warm);
+    }
+    drop(warm);
+    let printed = [stdout, stderr].concat();
+    Err(OpenPrinted(String::from_utf8_lossy(&printed).into_owned()).into())
+}
+
 /// Why [`WarmState::reopen`] did not reopen the database.
 #[derive(Debug)]
 pub enum ReopenError {
@@ -167,7 +210,8 @@ pub enum ReopenError {
     /// Requests still held the old handle when the timeout ran out. The
     /// old handle is kept and serves on.
     InUse,
-    /// The database did not open again. No handle is left, and requests get
+    /// The database did not open again, or the open printed
+    /// ([`OpenPrinted`]). No handle is left, and requests get
     /// [`NotServed::Unavailable`] until a later reopen succeeds.
     Open(anyhow::Error),
 }
@@ -187,9 +231,11 @@ impl std::error::Error for ReopenError {}
 
 impl WarmState {
     /// Open the database at `path` (see [`WarmDb::open`]) to serve requests.
+    /// An open that prints anything fails with [`OpenPrinted`], and leaves
+    /// the database closed.
     pub fn open(path: &Path) -> anyhow::Result<Self> {
         cli_io::install_diagnostic_sink();
-        let warm = WarmDb::open(path)?;
+        let warm = open_warm(path)?;
         Ok(Self {
             path: warm.key().to_path_buf(),
             warm: RwLock::new(Some(warm)),
@@ -262,7 +308,7 @@ impl WarmState {
                 return Err(ReopenError::InUse);
             }
         }
-        let warm = WarmDb::open(&self.path).map_err(ReopenError::Open)?;
+        let warm = open_warm(&self.path).map_err(ReopenError::Open)?;
         *self.slot_write() = Some(warm);
         Ok(())
     }
@@ -1275,6 +1321,57 @@ mod tests {
         });
         let unique: std::collections::HashSet<&String> = ids.iter().collect();
         assert_eq!((ids.len(), unique.len()), (32, 32));
+    }
+
+    /// A database whose open prints, here a vector row the load skips with
+    /// a hint to heal it, is not served, and is left closed for the
+    /// commands the client runs itself, which print the line every time.
+    #[cfg(feature = "vector")]
+    #[test]
+    fn a_database_whose_open_prints_is_not_served() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = build_fixture(tmp.path());
+        let db = proj.join(".axil/memory.axil");
+        // The store a detected open attaches: the default model's, with its
+        // embedder when the build has one.
+        #[cfg(feature = "embed")]
+        let dims = {
+            let model = crate::resolve_embedding_model(&db);
+            if !axil_vector::download::is_model_available(&model) {
+                eprintln!("skipped: {} is not installed", model.name());
+                return;
+            }
+            model.dimensions()
+        };
+        #[cfg(not(feature = "embed"))]
+        let dims = 4;
+        drop(axil_vector::VectorEngine::open(&db, dims).unwrap());
+        {
+            let vec_file = axil_core::companion_path(&db, ".vec");
+            let vectors = redb::Database::open(vec_file).unwrap();
+            let txn = vectors.begin_write().unwrap();
+            {
+                let table: redb::TableDefinition<&str, &[u8]> =
+                    redb::TableDefinition::new("vectors");
+                let mut table = txn.open_table(table).unwrap();
+                table.insert("zzzz", b"bad".as_slice()).unwrap();
+            }
+            txn.commit().unwrap();
+        }
+        for _ in 0..2 {
+            let err = WarmState::open(&db).err().expect("served");
+            let printed = &err
+                .downcast_ref::<OpenPrinted>()
+                .unwrap_or_else(|| panic!("{err:#}"))
+                .0;
+            assert!(
+                printed.contains("unloadable") && printed.contains("axil heal --reindex"),
+                "{printed}"
+            );
+        }
+        let (_, err, code) = one_shot_at(&["boot"], None, &proj, None);
+        let err = String::from_utf8_lossy(&err);
+        assert!(code == 0 && err.contains("axil heal --reindex"), "{err}");
     }
 
     /// A warning an engine prints during the command reaches the request's
