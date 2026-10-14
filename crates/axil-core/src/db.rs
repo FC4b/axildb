@@ -32,6 +32,10 @@ const RECALL_CHUNKS_TABLE: &str = "_recall_chunks";
 /// a pool of 40 cost top-10 recall a question.
 const RECALL_CANDIDATE_POOL: usize = 80;
 
+/// Candidates closest to the query by vector that graph proximity measures
+/// links to (see `compute_graph_proximity`).
+const GRAPH_SEEDS: usize = 10;
+
 /// Table-name prefix of the code index: proxies, file / module / project
 /// summaries and the code-ref reverse index. Its writers embed rows into the
 /// default vector index for code-search, which shares that index with memory
@@ -7127,26 +7131,34 @@ pub struct WarmUpReport {
     pub vector_rebuilt: bool,
 }
 
-/// Graph proximity of each candidate: its 1-hop neighbours among the other
-/// candidates, normalized by its degree and the pool size,
-/// `links / sqrt(degree * pool)`, so a hub linked to everything does not
-/// outscore a record whose few links all land in the pool. Only a candidate
-/// that is itself linked to an entity in `named` (the entities the query
-/// names) gets one; with none named, nobody does.
+/// Graph proximity of each candidate: its 1-hop neighbours among the seeds,
+/// the [`GRAPH_SEEDS`] candidates closest to the query by vector, normalized
+/// by its degree and the seed count, `links / sqrt(degree * seeds)`. Fixed
+/// seeds make the score independent of the pool's size and of whatever
+/// weakly matching records fill it; the degree keeps a hub linked to
+/// everything from outscoring a record whose few links all land on seeds.
+/// Only a candidate that is itself linked to an entity in `named` (the
+/// entities the query names) gets one; with none named, nobody does.
 fn compute_graph_proximity(
     gi: &dyn GraphIndex,
     candidates: &[(RecordId, f32)],
     named: &std::collections::HashSet<String>,
 ) -> std::collections::HashMap<String, f32> {
     let mut scores = std::collections::HashMap::new();
-    let ids: std::collections::HashSet<String> = candidates
-        .iter()
-        .map(|(rid, _)| rid.as_str().to_string())
-        .collect();
-
-    if ids.len() <= 1 || named.is_empty() {
+    if candidates.len() <= 1 || named.is_empty() {
         return scores;
     }
+    let mut by_vector: Vec<&(RecordId, f32)> = candidates.iter().collect();
+    by_vector.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.0.cmp(&b.0))
+    });
+    let seeds: std::collections::HashSet<String> = by_vector
+        .iter()
+        .take(GRAPH_SEEDS)
+        .map(|(rid, _)| rid.as_str().to_string())
+        .collect();
 
     for (rid, _) in candidates {
         // Distinct 1-hop neighbours: parallel edges count once.
@@ -7161,11 +7173,11 @@ fn compute_graph_proximity(
 
         let connected = neighbors
             .iter()
-            .filter(|nid| ids.contains(nid.as_str()))
+            .filter(|nid| *nid != rid && seeds.contains(nid.as_str()))
             .count();
 
         if connected > 0 {
-            let norm = ((neighbors.len() * ids.len()) as f32).sqrt();
+            let norm = ((neighbors.len() * seeds.len()) as f32).sqrt();
             let proximity = (connected as f32 / norm).min(1.0);
             scores.insert(rid.as_str().to_string(), proximity);
         }
