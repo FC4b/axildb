@@ -150,6 +150,14 @@ impl StopReason {
     }
 }
 
+/// Why the daemon did not get to serve.
+enum Unopened {
+    /// It was told to stop first.
+    Stopped(StopReason),
+    /// The database can't be served, for this reason.
+    Unservable(String),
+}
+
 /// How a shutdown ended.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Finish {
@@ -292,23 +300,29 @@ impl Server {
             server.key.display()
         ));
 
-        if let Err(why) = server.open() {
-            server.block(&why);
-            server.shutdown(&StopReason::Blocked(why.clone()));
-            return Err(why);
+        match server.open() {
+            Ok(()) => Ok(server),
+            Err(Unopened::Stopped(reason)) => {
+                server.shutdown(&reason);
+                Err(format!("stopped while opening: {}", reason.describe()))
+            }
+            Err(Unopened::Unservable(why)) => {
+                server.block(&why);
+                server.shutdown(&StopReason::Blocked(why.clone()));
+                Err(why)
+            }
         }
-        Ok(server)
     }
 
     /// Open the database, retrying while another process holds its lock.
-    fn open(self: &Arc<Self>) -> Result<(), String> {
+    fn open(self: &Arc<Self>) -> Result<(), Unopened> {
         let deadline = Instant::now() + self.opts.open_wait;
         let state = loop {
+            if let Some(sig) = take_signal() {
+                return Err(Unopened::Stopped(StopReason::Signal(sig)));
+            }
             if let Some(reason) = self.stop_reason() {
-                return Err(format!(
-                    "stopped while opening the database: {}",
-                    reason.describe()
-                ));
+                return Err(Unopened::Stopped(reason));
             }
             let fp = FileFp::read(&self.key);
             match WarmState::open(&self.key) {
@@ -319,11 +333,11 @@ impl Server {
                 Err(e) if crate::is_lock_contention(&e) && Instant::now() < deadline => {
                     thread::sleep(Duration::from_millis(100));
                 }
-                Err(e) => return Err(format!("{e:#}")),
+                Err(e) => return Err(Unopened::Unservable(format!("{e:#}"))),
             }
         };
         if let Some(why) = unservable(&state) {
-            return Err(why);
+            return Err(Unopened::Unservable(why));
         }
         let _ = self.state.set(state);
         self.phase.advance(Phase::Starting, Phase::Ready);

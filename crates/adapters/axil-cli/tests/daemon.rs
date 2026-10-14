@@ -490,3 +490,24 @@ fn the_hot_commands_print_nothing_into_the_log() {
     );
     assert!(log.contains("ready"), "{log}");
 }
+
+/// `AXIL_DAEMON=off` keeps a daemon from starting.
+#[test]
+fn the_kill_switch_keeps_the_daemon_from_starting() {
+    let fx = fixture();
+    let out = Command::new(BIN)
+        .args(["daemon", "start"])
+        .current_dir(&fx.proj)
+        .env_remove("AXIL_DB")
+        .env("AXIL_DAEMON", "off")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        text(&out.stderr).contains("AXIL_DAEMON=off"),
+        "{}",
+        text(&out.stderr)
+    );
+    assert!(!fx.locked());
+}

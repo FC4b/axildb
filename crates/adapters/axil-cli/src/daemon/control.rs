@@ -137,20 +137,57 @@ fn start(db: &Path, idle_timeout: Duration, wait: Duration, out: &Output) -> Res
     run.create()
         .with_context(|| format!("can't use {}", run.dir().display()))?;
     let own = proto::ExeId::current()?.build_id();
-    if let Ok(hello) = proto::hello(run.socket(), Duration::from_secs(1)) {
-        if hello.state != "stopping" {
-            out.print(&json!({
-                "started": false,
-                "running": true,
-                "pid": hello.pid,
-                "state": hello.state,
-                "build_id": hello.build_id,
-                "same_build": hello.build_id == own,
-            }));
-            return Ok(EXIT_OK);
-        }
-    }
+    // One that is starting or reloading is waited for, not replaced.
+    let running = proto::hello(run.socket(), Duration::from_secs(1))
+        .is_ok_and(|hello| hello.state != "stopping");
+    let mut child = if running {
+        None
+    } else {
+        Some(spawn(&key, &run, idle_timeout)?)
+    };
 
+    let deadline = Instant::now() + wait;
+    let mut exited = false;
+    loop {
+        if let Ok(hello) = proto::hello(run.socket(), Duration::from_secs(1)) {
+            if hello.state == "ready" {
+                out.print(&json!({
+                    "started": child.as_ref().is_some_and(|c| c.id() == hello.pid),
+                    "running": true,
+                    "pid": hello.pid,
+                    "state": hello.state,
+                    "build_id": hello.build_id,
+                    "same_build": hello.build_id == own,
+                    "socket": run.socket(),
+                }));
+                return Ok(EXIT_OK);
+            }
+        }
+        if let Some(child) = child.as_mut() {
+            exited = exited || child.try_wait()?.is_some();
+        }
+        // Exited without a daemon to wait for: it would not serve, or lost
+        // to one that is gone again.
+        if exited || child.is_none() {
+            if let Some(blocked) = read_json_file::<Value>(&run.blocked()) {
+                let reason = blocked["reason"].as_str().unwrap_or("unknown").to_string();
+                out.print(&json!({"started": false, "running": false, "blocked": reason}));
+                return Ok(EXIT_ERROR);
+            }
+        }
+        if Instant::now() >= deadline {
+            anyhow::bail!(
+                "the daemon was not ready after {}s; see `axil daemon logs`",
+                wait.as_secs()
+            );
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Spawn `axil daemon run` for the database `key`, in a session of its
+/// own, its output appended to the log.
+fn spawn(key: &Path, run: &RunDir, idle_timeout: Duration) -> Result<std::process::Child> {
     // Started by hand: whatever kept the last one from serving is tried
     // again.
     let _ = fs::remove_file(run.blocked());
@@ -162,7 +199,7 @@ fn start(db: &Path, idle_timeout: Duration, wait: Duration, out: &Output) -> Res
     let exe = std::env::current_exe()?;
     let mut cmd = std::process::Command::new(&exe);
     cmd.arg("--db")
-        .arg(&key)
+        .arg(key)
         .args(["daemon", "run", "--idle-timeout"])
         .arg(format!("{}s", idle_timeout.as_secs()))
         .current_dir("/")
@@ -183,47 +220,10 @@ fn start(db: &Path, idle_timeout: Duration, wait: Duration, out: &Output) -> Res
             });
         }
     }
-    let mut child = cmd.spawn().context("can't start the daemon")?;
+    let child = cmd.spawn().context("can't start the daemon")?;
     let stamp = json!({"pid": child.id(), "at": chrono::Utc::now().to_rfc3339()});
     let _ = write_atomic(&run.spawn_stamp(), stamp.to_string().as_bytes());
-
-    let deadline = Instant::now() + wait;
-    let mut exited = None;
-    loop {
-        if let Ok(hello) = proto::hello(run.socket(), Duration::from_secs(1)) {
-            if hello.state == "ready" {
-                out.print(&json!({
-                    "started": hello.pid == child.id(),
-                    "running": true,
-                    "pid": hello.pid,
-                    "state": hello.state,
-                    "build_id": hello.build_id,
-                    "same_build": hello.build_id == own,
-                    "socket": run.socket(),
-                }));
-                return Ok(EXIT_OK);
-            }
-        }
-        if exited.is_none() {
-            exited = child.try_wait()?;
-        }
-        // Exited without a daemon to wait for: it would not serve, or lost
-        // to one that is gone again.
-        if exited.is_some() {
-            if let Some(blocked) = read_json_file::<Value>(&run.blocked()) {
-                let reason = blocked["reason"].as_str().unwrap_or("unknown").to_string();
-                out.print(&json!({"started": false, "running": false, "blocked": reason}));
-                return Ok(EXIT_ERROR);
-            }
-        }
-        if Instant::now() >= deadline {
-            anyhow::bail!(
-                "the daemon was not ready after {}s; see `axil daemon logs`",
-                wait.as_secs()
-            );
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    Ok(child)
 }
 
 fn stop(db: &Path, wait: Duration, out: &Output) -> Result<i32> {
