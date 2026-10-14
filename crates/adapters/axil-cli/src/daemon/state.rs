@@ -38,7 +38,10 @@ impl Phase {
     }
 }
 
-/// A [`Phase`] shared between threads.
+/// A [`Phase`] shared between threads. Sequentially consistent, so a
+/// shutdown that sets [`Phase::Stopping`] and then counts the requests
+/// running, and a request that counts itself in and then reads the phase,
+/// can't miss each other.
 pub struct PhaseCell(AtomicU8);
 
 impl PhaseCell {
@@ -47,7 +50,7 @@ impl PhaseCell {
     }
 
     pub fn get(&self) -> Phase {
-        match self.0.load(Ordering::Acquire) {
+        match self.0.load(Ordering::SeqCst) {
             0 => Phase::Starting,
             1 => Phase::Ready,
             2 => Phase::Reloading,
@@ -56,14 +59,14 @@ impl PhaseCell {
     }
 
     pub fn set(&self, phase: Phase) {
-        self.0.store(phase as u8, Ordering::Release);
+        self.0.store(phase as u8, Ordering::SeqCst);
     }
 
     /// Move from `from` to `to`, unless the phase has moved on meanwhile
     /// (a shutdown that began is never undone).
     pub fn advance(&self, from: Phase, to: Phase) -> bool {
         self.0
-            .compare_exchange(from as u8, to as u8, Ordering::AcqRel, Ordering::Acquire)
+            .compare_exchange(from as u8, to as u8, Ordering::SeqCst, Ordering::SeqCst)
             .is_ok()
     }
 }
@@ -99,6 +102,9 @@ pub struct DaemonInfo {
     pub stopped_at: Option<String>,
     /// Why it stopped.
     pub exit_reason: Option<String>,
+    /// Whether it closed the database when it stopped. A daemon that could
+    /// not exits without closing it, and the next open repairs it.
+    pub closed_cleanly: Option<bool>,
     /// How long it stays up with nothing to do, in seconds.
     pub idle_timeout_secs: u64,
 }

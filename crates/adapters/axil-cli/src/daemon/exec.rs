@@ -405,7 +405,7 @@ impl WarmState {
 
     /// Record that a request panicked on `warm`, and leak it so the
     /// database is never closed cleanly (see [`WarmState::poisoned`]).
-    fn poison(&self, warm: WarmDb) {
+    pub fn poison(&self, warm: WarmDb) {
         self.poisoned.store(true, Ordering::Release);
         std::mem::forget(warm);
     }

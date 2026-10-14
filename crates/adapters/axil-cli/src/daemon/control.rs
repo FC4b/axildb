@@ -9,13 +9,13 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 
 use super::paths::{write_atomic, RunDir};
-use super::proto::{self, Ack, Identity, Op, RunReply};
+use super::proto::{self, Ack, Hello, Identity, Op, RunReply};
 use super::server;
 use super::state::{graph_name, DaemonInfo};
 use crate::cli_io;
@@ -48,7 +48,9 @@ pub enum DaemonCommand {
         #[arg(long)]
         launch_path: Option<PathBuf>,
     },
-    /// Ask the daemon to stop, and wait until it has closed the database.
+    /// Ask the daemon to stop, and wait until it has exited. `clean`
+    /// says whether it closed the database; when it could not, the next
+    /// open repairs it.
     Stop {
         /// How long to wait, in seconds.
         #[arg(long, default_value = "15")]
@@ -135,30 +137,51 @@ fn read_json_file<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
     serde_json::from_slice(&fs::read(path).ok()?).ok()
 }
 
+fn epoch_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
+}
+
+/// The daemon answering on `run`'s socket, if it is the daemon of `key`.
+/// One that serves another database (two whose socket paths were too long
+/// share the fallback directory, and could share a name) is an error: it
+/// is not this database's to start, stop or report on.
+fn hello_for(key: &Path, run: &RunDir, timeout: Duration) -> Result<Option<Hello>> {
+    let Ok(hello) = proto::hello(run.socket(), timeout) else {
+        return Ok(None);
+    };
+    anyhow::ensure!(
+        Path::new(&hello.db) == key,
+        "{} is answered by the daemon of another database, {}",
+        run.socket().display(),
+        hello.db
+    );
+    Ok(Some(hello))
+}
+
 fn start(db: &Path, idle_timeout: Duration, wait: Duration, out: &Output) -> Result<i32> {
     anyhow::ensure!(
         mode() != Mode::Off,
         "the daemon is turned off (AXIL_DAEMON=off)"
     );
+    let started_ms = epoch_ms();
     let (key, run) = run_dir(db)?;
     run.create()
         .with_context(|| format!("can't use {}", run.dir().display()))?;
     let own = proto::ExeId::current()?.build_id();
     // One that is starting or reloading is waited for, not replaced.
-    let running = proto::hello(run.socket(), Duration::from_secs(1))
-        .ok()
+    let running = hello_for(&key, &run, Duration::from_secs(1))?
         .filter(|hello| hello.state != "stopping")
         .map(|hello| hello.pid);
     let mut child = match running {
         Some(_) => None,
         None => Some(spawn(&key, &run, idle_timeout)?),
     };
-    let waited_for = running.or(child.as_ref().map(|c| c.id()));
 
     let deadline = Instant::now() + wait;
-    let mut exited = false;
     loop {
-        if let Ok(hello) = proto::hello(run.socket(), Duration::from_secs(1)) {
+        if let Some(hello) = hello_for(&key, &run, Duration::from_secs(1))? {
             if hello.state == "ready" {
                 out.print(&json!({
                     "started": child.as_ref().is_some_and(|c| c.id() == hello.pid),
@@ -172,18 +195,21 @@ fn start(db: &Path, idle_timeout: Duration, wait: Duration, out: &Output) -> Res
                 return Ok(EXIT_OK);
             }
         }
-        if let Some(child) = child.as_mut() {
-            exited = exited || child.try_wait()?.is_some();
-        }
-        // The daemon waited for would not serve: it said why, and stopped.
-        if exited || child.is_none() {
-            let blocked = read_json_file::<Value>(&run.blocked())
-                .filter(|b| b["pid"].as_u64() == waited_for.map(u64::from));
-            if let Some(blocked) = blocked {
-                let reason = blocked["reason"].as_str().unwrap_or("unknown").to_string();
-                out.print(&json!({"started": false, "running": false, "blocked": reason}));
-                return Ok(EXIT_ERROR);
+        if let Some(c) = child.as_mut() {
+            // Reaped, so it is not left a zombie for as long as this waits.
+            if c.try_wait()?.is_some() {
+                child = None;
             }
+        }
+        // A daemon that would not serve says why, and stops: the one this
+        // spawned, or the one it lost the election to. A reason recorded
+        // before this started is an earlier daemon's.
+        let blocked = read_json_file::<Value>(&run.blocked())
+            .filter(|b| b["at_ms"].as_u64().is_some_and(|at| at >= started_ms));
+        if let Some(blocked) = blocked {
+            let reason = blocked["reason"].as_str().unwrap_or("unknown").to_string();
+            out.print(&json!({"started": false, "running": false, "blocked": reason}));
+            return Ok(EXIT_ERROR);
         }
         if Instant::now() >= deadline {
             anyhow::bail!(
@@ -196,11 +222,9 @@ fn start(db: &Path, idle_timeout: Duration, wait: Duration, out: &Output) -> Res
 }
 
 /// Spawn `axil daemon run` for the database `key`, in a session of its
-/// own, its output appended to the log.
+/// own, its output appended to the log. Whatever kept the last one from
+/// serving is tried again; its record stays until a daemon serves.
 fn spawn(key: &Path, run: &RunDir, idle_timeout: Duration) -> Result<std::process::Child> {
-    // Started by hand: whatever kept the last one from serving is tried
-    // again.
-    let _ = fs::remove_file(run.blocked());
     let log = OpenOptions::new()
         .create(true)
         .append(true)
@@ -259,23 +283,41 @@ fn launch_path() -> Option<PathBuf> {
 }
 
 fn stop(db: &Path, wait: Duration, out: &Output) -> Result<i32> {
-    let (_, run) = run_dir(db)?;
-    let pid = read_json_file::<DaemonInfo>(&run.info()).map(|info| info.pid);
+    let (key, run) = run_dir(db)?;
+    let info = read_json_file::<DaemonInfo>(&run.info());
+    let pid = info.as_ref().map(|info| info.pid);
     let op = Op::Shutdown {
         reason: "axil daemon stop".into(),
     };
-    if proto::call::<Ack>(run.socket(), &op, Duration::from_secs(5)).is_err() {
-        if server::lock_held(&run) {
-            out.print(&json!({
-                "stopped": false,
-                "running": true,
-                "pid": pid,
-                "error": "a daemon holds the lock but does not answer",
-            }));
-            return Ok(EXIT_ERROR);
+    let asked = match hello_for(&key, &run, Duration::from_secs(5))? {
+        Some(_) => proto::call::<Ack>(run.socket(), &op, Duration::from_secs(5)).is_ok(),
+        None => false,
+    };
+    let mut signalled = false;
+    if !asked {
+        if !server::lock_held(&run) {
+            out.print(&json!({"stopped": false, "running": false}));
+            return Ok(EXIT_OK);
         }
-        out.print(&json!({"stopped": false, "running": false}));
-        return Ok(EXIT_OK);
+        // One shutting down already has unlinked its socket: wait for it.
+        // One that holds the lock but does not answer (every connection
+        // taken, say) is sent SIGTERM, once it is sure to be this
+        // database's daemon.
+        if !server::said_stopping(&run) {
+            if let Some(pid) = pid.filter(|pid| is_daemon_of(*pid, &key)) {
+                // SAFETY: kill only sends a signal.
+                signalled = unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) } == 0;
+            }
+            if !signalled {
+                out.print(&json!({
+                    "stopped": false,
+                    "running": true,
+                    "pid": pid,
+                    "error": "a daemon holds the lock but does not answer",
+                }));
+                return Ok(EXIT_ERROR);
+            }
+        }
     }
     let deadline = Instant::now() + wait;
     while server::lock_held(&run) {
@@ -290,15 +332,46 @@ fn stop(db: &Path, wait: Duration, out: &Output) -> Result<i32> {
         }
         std::thread::sleep(Duration::from_millis(20));
     }
-    out.print(&json!({"stopped": true, "pid": pid}));
+    // The lock goes with the process when the daemon could not close the
+    // database; its record says which.
+    let last = read_json_file::<DaemonInfo>(&run.info());
+    let clean = last
+        .as_ref()
+        .is_some_and(|info| info.state == "stopped" && info.closed_cleanly == Some(true));
+    let mut report = json!({"stopped": true, "pid": pid, "clean": clean});
+    if signalled {
+        report["signalled"] = json!(true);
+    }
+    out.print(&report);
     Ok(EXIT_OK)
+}
+
+/// Whether process `pid` is `axil daemon run` for the database `key`.
+fn is_daemon_of(pid: u32, key: &Path) -> bool {
+    let Ok(out) = std::process::Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "command="])
+        .stderr(Stdio::null())
+        .output()
+    else {
+        return false;
+    };
+    let command = String::from_utf8_lossy(&out.stdout);
+    command.contains(&format!("--db {} daemon run", key.display()))
 }
 
 /// The status report: the record the daemon left, the lock and socket
 /// probed now, and the live figures when it answers.
 fn report(key: &Path, run: &RunDir) -> Value {
     let last = read_json_file::<DaemonInfo>(&run.info());
-    let live = proto::call::<Value>(run.socket(), &Op::Status, Duration::from_secs(2)).ok();
+    let answer = proto::call::<Value>(run.socket(), &Op::Status, Duration::from_secs(2)).ok();
+    // Another database's daemon on this socket is not this one's.
+    let other_db = answer
+        .as_ref()
+        .and_then(|a| a["db"].as_str())
+        .filter(|db| Path::new(db) != key)
+        .map(str::to_string);
+    let live = answer.filter(|_| other_db.is_none());
+    let lock_held = server::lock_held(run);
     let own = proto::ExeId::current().map(|e| e.build_id()).ok();
     let same_build = live
         .as_ref()
@@ -308,11 +381,13 @@ fn report(key: &Path, run: &RunDir) -> Value {
     json!({
         "db": key,
         "running": live.is_some(),
-        "lock_held": server::lock_held(run),
+        "lock_held": lock_held,
+        "stopping": live.is_none() && lock_held && server::said_stopping(run),
         "socket": {
             "path": run.socket(),
             "exists": run.socket().exists(),
             "answers": live.is_some(),
+            "other_db": other_db,
         },
         "this_build": own,
         "same_build": same_build,
@@ -346,6 +421,8 @@ fn describe(report: &Value) -> Vec<String> {
             live["state"].as_str().unwrap_or("?"),
             live["pid"]
         ));
+    } else if report["stopping"] == true {
+        lines.push(format!("daemon: stopping (pid {})", last["pid"]));
     } else if report["lock_held"] == true {
         lines.push("daemon: holds the lock but does not answer".to_string());
     } else if last.is_object() {

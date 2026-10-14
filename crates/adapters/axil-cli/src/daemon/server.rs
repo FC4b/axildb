@@ -4,18 +4,21 @@
 //!
 //! [`run_daemon`] is `axil daemon run`. In order:
 //!
-//! 1. Take `run/daemon.lock`, retrying for 5 s to outlast a daemon that is
-//!    retiring. When a daemon already answers, leave it to serve and exit 0.
-//! 2. Point stdout and stderr at `run/daemon.log`, remove from the
-//!    environment what each request carries itself ([`STRIPPED_ENV`]), and
-//!    handle SIGTERM, SIGINT and SIGHUP by shutting down.
+//! 1. Take the run directory's `daemon.lock` (see [`RunDir`]), retrying for
+//!    5 s to outlast a daemon that is retiring, and for 30 s while one says
+//!    it is stopping. When a daemon already answers, leave it to serve and
+//!    exit 0.
+//! 2. Point stdout and stderr at `daemon.log`, remove from the environment
+//!    what each request carries itself ([`STRIPPED_ENV`]), and handle
+//!    SIGTERM, SIGINT and SIGHUP by shutting down.
 //! 3. Replace any stale socket and bind it 0600. Clients connecting from
 //!    here on are told the daemon is starting. A connection from another
 //!    user is dropped.
 //! 4. Open the database ([`WarmState::open`]), retrying for 10 s while
 //!    another process holds its lock. A database that can't be served (its
 //!    open printed, an engine is missing, or it is read-only) is written to
-//!    `run/daemon.blocked`, and the daemon exits 1.
+//!    `daemon.blocked`, and the daemon exits 1. Once it serves, a
+//!    `daemon.blocked` left from before is removed.
 //! 5. Serve, and warm the embedder and the graph up in the background.
 //!
 //! The process-wide setup a command runs under is the one-shot binary's:
@@ -36,22 +39,27 @@
 //! database. A store written in place by another process (a backup copied
 //! over it) can't be reopened: the daemon stops without closing it, since
 //! closing would write the handle's stale view over the copy. A tick each
-//! second does the same checks, and stops the daemon when it has
-//! been idle for its idle timeout, when it was signalled, or when its
-//! executable changed on disk, or the path it was started by now leads to
-//! another.
+//! second does the same checks, and stops the daemon when it has been idle
+//! for its idle timeout (by the monotonic clock or the wall clock, which
+//! counts a sleep), when it was signalled, or when its executable changed
+//! on disk, or the path it was started by now leads to another.
 //!
-//! Shutting down unlinks the socket first, so new clients fall back at
-//! once, answers queued connections `stopping`, lets running requests
-//! finish, and closes the database cleanly before the lock is let go. After
-//! a request panicked the database is never closed (see
-//! [`WarmState::poisoned`]): the daemon exits 1 without dropping it.
+//! Shutting down records `stopping`, unlinks the socket, so new clients fall
+//! back at once, answers queued connections `stopping`, waits for running
+//! requests and for the warm-up or a reload still running, and closes the
+//! database before the lock is let go. When the database can't be closed
+//! (a request panicked, see [`WarmState::poisoned`]; its files were
+//! overwritten; or something still held it when the wait ran out), the
+//! daemon records that it did not close it and exits 1 without dropping
+//! anything, holding the lock until the process is gone: the next open
+//! repairs the files, as after a one-shot command that was killed.
 
 use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
+use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, PoisonError};
@@ -88,7 +96,7 @@ const FRESH_FOR: Duration = Duration::from_millis(250);
 /// How long a reopen waits for the requests on the old handle.
 const REOPEN_WAIT: Duration = Duration::from_secs(10);
 
-/// How long shutting down waits for running requests.
+/// How long shutting down waits for running requests and background work.
 const DRAIN_WAIT: Duration = Duration::from_secs(10);
 
 /// How long a connection over [`MAX_CONNECTIONS`] may take to send its
@@ -96,8 +104,14 @@ const DRAIN_WAIT: Duration = Duration::from_secs(10);
 const OVER_CAP_READ: Duration = Duration::from_millis(200);
 
 /// How long shutting down waits for the last references to the handle,
-/// after the requests are done: recall workers a deadline left running.
+/// after the requests and the background work are done: recall workers a
+/// deadline left running.
 const RELEASE_WAIT: Duration = Duration::from_secs(3);
+
+/// How long a daemon starting waits for the lock while the daemon holding
+/// it says it is stopping: that one waits up to 10 s for its requests and
+/// 3 s for the last references to the handle.
+const STOPPING_WAIT: Duration = Duration::from_secs(30);
 
 /// How often the tick runs.
 const TICK: Duration = Duration::from_secs(1);
@@ -121,6 +135,9 @@ pub struct Options {
     pub open_wait: Duration,
     /// How long a reopen waits for the requests on the old handle.
     pub reopen_wait: Duration,
+    /// How long shutting down waits for running requests and background
+    /// work.
+    pub drain_wait: Duration,
     /// The path the daemon's binary was started by, before symlinks are
     /// resolved: the daemon retires when it leads to another binary.
     pub launch_path: Option<PathBuf>,
@@ -142,7 +159,7 @@ pub enum StopReason {
     ExeChanged,
     /// The database can't be served.
     Blocked(String),
-    /// A request panicked.
+    /// A request, or the warm-up, panicked.
     Panicked,
     /// A store was written in place under the open handle.
     Overwritten(String),
@@ -185,9 +202,11 @@ enum Unopened {
 pub enum Finish {
     /// The database is closed; exit with this code.
     Exit(i32),
-    /// A request panicked, or the files were overwritten under the handle:
-    /// exit 1 without dropping anything (see [`WarmState::poisoned`]).
-    Poisoned,
+    /// The database was left open: a request panicked (see
+    /// [`WarmState::poisoned`]), its files were overwritten, or something
+    /// still held it. Exit 1 without dropping anything, and without letting
+    /// the lock go before the process is gone.
+    Abandoned,
 }
 
 /// One entry in the daemon's log, each of its lines stamped. Unit tests
@@ -256,17 +275,23 @@ pub struct Server {
     graph_reloads: AtomicU32,
     fail_graph: AtomicBool,
     accept: Mutex<Option<JoinHandle<()>>>,
+    /// The warm-ups and reloads started, which shutting down waits for;
+    /// `None` once it has begun, when nothing more starts.
+    background: Mutex<Option<Vec<JoinHandle<()>>>>,
     /// [`Options::launch_path`], when it leads to this binary.
     launch: Option<PathBuf>,
+    #[cfg(test)]
+    panic_prewarm: AtomicBool,
 }
 
 /// A run request counted against [`MAX_IN_FLIGHT`] until dropped.
 struct Admitted<'a>(&'a AtomicUsize);
 
 impl<'a> Admitted<'a> {
+    /// Sequentially consistent with the phase: see [`PhaseCell`].
     fn new(count: &'a AtomicUsize, cap: usize) -> Option<Self> {
-        if count.fetch_add(1, Ordering::AcqRel) >= cap {
-            count.fetch_sub(1, Ordering::AcqRel);
+        if count.fetch_add(1, Ordering::SeqCst) >= cap {
+            count.fetch_sub(1, Ordering::SeqCst);
             return None;
         }
         Some(Self(count))
@@ -275,7 +300,7 @@ impl<'a> Admitted<'a> {
 
 impl Drop for Admitted<'_> {
     fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::AcqRel);
+        self.0.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -356,7 +381,10 @@ impl Server {
             graph_reloads: AtomicU32::new(0),
             fail_graph: AtomicBool::new(false),
             accept: Mutex::new(None),
+            background: Mutex::new(Some(Vec::new())),
             launch,
+            #[cfg(test)]
+            panic_prewarm: AtomicBool::new(false),
         });
         server.write_info();
 
@@ -424,6 +452,8 @@ impl Server {
         self.write_info_as(Phase::Ready.name());
         self.phase.advance(Phase::Starting, Phase::Ready);
         log("ready");
+        // Whatever kept an earlier daemon from serving is gone.
+        let _ = fs::remove_file(self.run.blocked());
         self.prewarm();
         Ok(())
     }
@@ -453,8 +483,7 @@ impl Server {
         if let Some(sig) = self.signalled() {
             return Some(StopReason::Signal(sig));
         }
-        if self.in_flight.load(Ordering::Acquire) == 0 && self.idle_for() >= self.opts.idle_timeout
-        {
+        if self.in_flight.load(Ordering::SeqCst) == 0 && self.idle_for() >= self.opts.idle_timeout {
             return Some(StopReason::Idle);
         }
         if let Some(exe) = &self.exe {
@@ -471,10 +500,7 @@ impl Server {
         if self.phase.get() == Phase::Ready {
             match self.check(Duration::ZERO, 0) {
                 Some(Change::Reload(why)) => {
-                    let server = self.clone();
-                    let _ = thread::Builder::new()
-                        .name("axil-reload".into())
-                        .spawn(move || server.reload(&why));
+                    self.spawn_background("axil-reload", move |server| server.reload(&why))
                 }
                 Some(Change::Overwritten(why)) => {
                     self.abandon(&why);
@@ -484,6 +510,31 @@ impl Server {
             }
         }
         None
+    }
+
+    /// Run `work` on a thread of its own, which shutting down waits for.
+    /// Once shutting down has begun, nothing starts.
+    fn spawn_background(
+        self: &Arc<Self>,
+        name: &str,
+        work: impl FnOnce(Arc<Server>) + Send + 'static,
+    ) {
+        let mut background = self
+            .background
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let Some(handles) = background.as_mut() else {
+            return;
+        };
+        handles.retain(|handle| !handle.is_finished());
+        let server = self.clone();
+        match thread::Builder::new()
+            .name(name.into())
+            .spawn(move || work(server))
+        {
+            Ok(handle) => handles.push(handle),
+            Err(e) => log(format!("can't start {name}: {e}")),
+        }
     }
 
     /// The signal the daemon process received, if any. Signals are the
@@ -499,6 +550,8 @@ impl Server {
     /// Stop serving and close the database, as [`Finish`] says.
     pub fn shutdown(self: &Arc<Self>, reason: &StopReason) -> Finish {
         self.phase.set(Phase::Stopping);
+        // `daemon stop` and a daemon starting wait for one that says so.
+        self.write_info_as(Phase::Stopping.name());
         log(format!("stopping: {}", reason.describe()));
         // New clients find no socket and fall back at once.
         let _ = fs::remove_file(self.run.socket());
@@ -510,36 +563,57 @@ impl Server {
         {
             let _ = accept.join();
         }
-        let deadline = Instant::now() + DRAIN_WAIT;
-        while self.in_flight.load(Ordering::Acquire) > 0 && Instant::now() < deadline {
+        let background = self
+            .background
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+            .unwrap_or_default();
+        let working = || background.iter().filter(|h| !h.is_finished()).count();
+        let deadline = Instant::now() + self.opts.drain_wait;
+        while (self.in_flight.load(Ordering::SeqCst) > 0 || working() > 0)
+            && Instant::now() < deadline
+        {
             thread::sleep(Duration::from_millis(10));
         }
-        let left = self.in_flight.load(Ordering::Acquire);
-        if left > 0 {
+        let (left, busy) = (self.in_flight.load(Ordering::SeqCst), working());
+        if left > 0 || busy > 0 {
             log(format!(
-                "{left} requests still running after {DRAIN_WAIT:?}"
+                "{left} requests and {busy} warm-ups or reloads still running after {:?}",
+                self.opts.drain_wait
             ));
         }
-
-        let poisoned = self.state.get().is_some_and(WarmState::poisoned);
-        if !poisoned {
-            if let Some(state) = self.state.get() {
-                match state.release(RELEASE_WAIT) {
-                    Ok(()) => log("closed the database"),
-                    Err(e) => log(format!("did not close the database: {e}")),
-                }
+        for handle in background {
+            if handle.is_finished() {
+                let _ = handle.join();
             }
         }
+
+        let closed = match self.state.get() {
+            None => true,
+            Some(state) if state.poisoned() => false,
+            Some(state) => match state.release(RELEASE_WAIT) {
+                Ok(()) => {
+                    log("closed the database");
+                    true
+                }
+                Err(e) => {
+                    log(format!("did not close the database: {e}"));
+                    false
+                }
+            },
+        };
         {
             let mut info = self.info.lock().unwrap_or_else(PoisonError::into_inner);
             info.stopped_at = Some(now_rfc3339());
             info.exit_reason = Some(reason.describe());
+            info.closed_cleanly = Some(closed);
         }
         self.write_info_as("stopped");
-        if poisoned {
-            Finish::Poisoned
-        } else {
+        if closed {
             Finish::Exit(reason.exit_code())
+        } else {
+            Finish::Abandoned
         }
     }
 
@@ -567,6 +641,7 @@ impl Server {
             "reason": why,
             "pid": std::process::id(),
             "at": now_rfc3339(),
+            "at_ms": epoch_ms(),
         });
         if let Err(e) = write_atomic(&self.run.blocked(), record.to_string().as_bytes()) {
             log(format!("can't write {}: {e}", self.run.blocked().display()));
@@ -779,6 +854,20 @@ impl Server {
                 };
                 write_json(&mut stream, &ack)
             }
+            #[cfg(debug_assertions)]
+            Op::DebugHold { ms } => {
+                self.spawn_background("axil-debug-hold", move |server| {
+                    let _busy = server.busy();
+                    let held = server.state.get().and_then(WarmState::handle);
+                    thread::sleep(Duration::from_millis(ms));
+                    drop(held);
+                });
+                let ack = Ack {
+                    op: "debug_hold".into(),
+                    ok: true,
+                };
+                write_json(&mut stream, &ack)
+            }
         };
     }
 
@@ -826,6 +915,12 @@ impl Server {
             self.stats.refused.fetch_add(1, Ordering::AcqRel);
             (reply, None)
         };
+        // Counted in before the phase is read: a shutdown that set the
+        // phase and then found no request running can't have this one
+        // start after it (see `PhaseCell`).
+        let Some(_admitted) = Admitted::new(&self.in_flight, MAX_IN_FLIGHT) else {
+            return refused(RunReply::Overloaded);
+        };
         match self.phase.get() {
             Phase::Starting => return refused(RunReply::Starting),
             Phase::Stopping => return refused(RunReply::Stopping),
@@ -836,9 +931,6 @@ impl Server {
                 reason: reason.to_string(),
             });
         }
-        let Some(_admitted) = Admitted::new(&self.in_flight, MAX_IN_FLIGHT) else {
-            return refused(RunReply::Overloaded);
-        };
         self.touch();
         if expired(header.deadline_ms) {
             return refused(RunReply::Expired);
@@ -1015,23 +1107,37 @@ impl Server {
             return;
         }
         log(format!("reloading: {why}"));
+        enum Outcome {
+            Reopened(FileFp),
+            Postponed,
+            Stopping,
+            Failed(String),
+        }
         let deadline = Instant::now() + self.opts.open_wait;
         let outcome = loop {
+            if self.phase.get() == Phase::Stopping {
+                break Outcome::Stopping;
+            }
             let before = FileFp::read(&self.key);
             match state.reopen(self.opts.reopen_wait) {
-                Ok(()) => break Ok(before),
-                Err(ReopenError::Running) | Err(ReopenError::InUse) => break Err(None),
-                Err(ReopenError::Poisoned) => break Err(Some("a request panicked".to_string())),
+                Ok(()) => break Outcome::Reopened(before),
+                Err(ReopenError::Running) | Err(ReopenError::InUse) => break Outcome::Postponed,
+                Err(ReopenError::Poisoned) => {
+                    break Outcome::Failed("a request panicked".to_string())
+                }
                 Err(ReopenError::Open(e))
                     if crate::is_lock_contention(&e) && Instant::now() < deadline =>
                 {
                     thread::sleep(Duration::from_millis(100));
                 }
-                Err(ReopenError::Open(e)) => break Err(Some(format!("{e:#}"))),
+                Err(ReopenError::Open(e)) => break Outcome::Failed(format!("{e:#}")),
             }
         };
         match outcome {
-            Ok(before) => {
+            // Shutting down closes whatever handle there is.
+            Outcome::Stopping => {}
+            Outcome::Reopened(_) if self.phase.get() == Phase::Stopping => {}
+            Outcome::Reopened(before) => {
                 if let Some(why) = unservable(state) {
                     self.stop_blocked(why);
                     return;
@@ -1043,11 +1149,13 @@ impl Server {
                 log("reloaded");
                 self.prewarm_on(state);
             }
-            Err(None) => {
+            Outcome::Postponed => {
                 log("reload postponed: requests still hold the database");
                 self.phase.advance(Phase::Reloading, Phase::Ready);
             }
-            Err(Some(failed)) => self.stop_blocked(format!("reopening after {why}: {failed}")),
+            Outcome::Failed(failed) => {
+                self.stop_blocked(format!("reopening after {why}: {failed}"))
+            }
         }
     }
 
@@ -1063,55 +1171,77 @@ impl Server {
     /// command would, so the database is not served: a graph left in memory
     /// prints that warning in each one-shot command. A failed graph is
     /// reloaded by the next check instead.
+    ///
+    /// The graph's backend may write its adjacency tables. A panic there
+    /// can unwind through a write transaction, so it leaves the handle as a
+    /// request that panicked does ([`WarmState::poisoned`]).
     fn prewarm_on(self: &Arc<Self>, state: &WarmState) {
         let Some(warm) = state.handle() else {
             return;
         };
-        let server = Arc::clone(self);
-        let _ = thread::Builder::new()
-            .name("axil-prewarm".into())
-            .spawn(move || {
-                let _busy = server.busy();
-                let started = Instant::now();
-                let (out, err, report) = cli_io::capture(ReqCtx::default(), || warm.db().prewarm());
-                drop(warm);
-                let printed = String::from_utf8_lossy(&[out, err].concat()).into_owned();
-                log(format!(
-                    "warmed up in {} ms: embedder {}, graph {}",
-                    started.elapsed().as_millis(),
-                    match &report.embedder {
-                        None => "none".to_string(),
-                        Some(Ok(())) => "loaded".to_string(),
-                        Some(Err(e)) => format!("failed ({e})"),
-                    },
-                    super::state::graph_name(&report.graph),
-                ));
-                for line in printed.lines() {
-                    log(format!("warm-up printed: {line}"));
-                }
-                let graph = report.graph.clone();
-                server.stats.set_prewarm(report);
-                // The embedder's banners (its execution provider, its
-                // session pool) print once per process in the daemon, in
-                // whichever command loads it first in a one-shot run; any
-                // other line reports something wrong with the database.
-                let problems: Vec<&str> = printed
-                    .lines()
-                    .filter(|line| !line.trim().is_empty() && !line.starts_with("[axil-vector]"))
-                    .collect();
-                match graph {
-                    Some(GraphState::Failed(_)) => {}
-                    Some(GraphState::Memory) => server.stop_blocked(
-                        "the graph's adjacency tables can't be used, so every command would \
-                         print that it loads every edge into memory"
-                            .to_string(),
-                    ),
-                    _ if !problems.is_empty() => {
-                        server.stop_blocked(format!("warming up printed:\n{}", problems.join("\n")))
+        self.spawn_background("axil-prewarm", move |server| {
+            let _busy = server.busy();
+            let started = Instant::now();
+            let (out, err, report) = cli_io::capture(ReqCtx::default(), || {
+                panic::catch_unwind(AssertUnwindSafe(|| {
+                    #[cfg(test)]
+                    if server.panic_prewarm.swap(false, Ordering::AcqRel) {
+                        panic!("the warm-up panicked on purpose");
                     }
-                    _ => server.graph_reloads.store(0, Ordering::Release),
-                }
+                    warm.db().prewarm()
+                }))
             });
+            let report = match report {
+                Ok(report) => {
+                    drop(warm);
+                    report
+                }
+                Err(_) => {
+                    log("the warm-up panicked; the database is left unclosed");
+                    if let Some(state) = server.state.get() {
+                        state.poison(warm);
+                    }
+                    server.request_stop(StopReason::Panicked);
+                    return;
+                }
+            };
+            let printed = String::from_utf8_lossy(&[out, err].concat()).into_owned();
+            log(format!(
+                "warmed up in {} ms: embedder {}, graph {}",
+                started.elapsed().as_millis(),
+                match &report.embedder {
+                    None => "none".to_string(),
+                    Some(Ok(())) => "loaded".to_string(),
+                    Some(Err(e)) => format!("failed ({e})"),
+                },
+                super::state::graph_name(&report.graph),
+            ));
+            for line in printed.lines() {
+                log(format!("warm-up printed: {line}"));
+            }
+            let graph = report.graph.clone();
+            server.stats.set_prewarm(report);
+            // The embedder's banners (its execution provider, its
+            // session pool) print once per process in the daemon, in
+            // whichever command loads it first in a one-shot run; any
+            // other line reports something wrong with the database.
+            let problems: Vec<&str> = printed
+                .lines()
+                .filter(|line| !line.trim().is_empty() && !line.starts_with("[axil-vector]"))
+                .collect();
+            match graph {
+                Some(GraphState::Failed(_)) => {}
+                Some(GraphState::Memory) => server.stop_blocked(
+                    "the graph's adjacency tables can't be used, so every command would \
+                         print that it loads every edge into memory"
+                        .to_string(),
+                ),
+                _ if !problems.is_empty() => {
+                    server.stop_blocked(format!("warming up printed:\n{}", problems.join("\n")))
+                }
+                _ => server.graph_reloads.store(0, Ordering::Release),
+            }
+        });
     }
 
     fn hello(&self) -> Hello {
@@ -1149,7 +1279,7 @@ impl Server {
         let graph = warm.as_ref().and_then(|warm| warm.db().graph_load_state());
         drop(warm);
         let idle = self.idle_for();
-        let busy = self.in_flight.load(Ordering::Acquire) > 0;
+        let busy = self.in_flight.load(Ordering::SeqCst) > 0;
         let stale = self
             .fresh
             .lock()
@@ -1176,7 +1306,7 @@ impl Server {
             } else {
                 self.opts.idle_timeout.saturating_sub(idle).as_secs()
             },
-            "in_flight": self.in_flight.load(Ordering::Acquire),
+            "in_flight": self.in_flight.load(Ordering::SeqCst),
             "stale": stale,
             "lease_holder": Value::Null,
             "abandoned_recalls": cli_io::RECALL_SLOTS.live(),
@@ -1275,8 +1405,8 @@ fn rotate_log(run: &RunDir) {
 }
 
 /// Take the daemon lock, or find that another daemon has it. `None` means
-/// another daemon answers (or still held the lock after 5 s): this one
-/// exits.
+/// another daemon answers, or still held the lock after 5 s, or after
+/// [`STOPPING_WAIT`] while it said it was stopping: this one exits.
 fn elect(run: &RunDir) -> io::Result<Option<File>> {
     let file = OpenOptions::new()
         .create(true)
@@ -1284,16 +1414,25 @@ fn elect(run: &RunDir) -> io::Result<Option<File>> {
         .read(true)
         .write(true)
         .open(run.lock())?;
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let started = Instant::now();
     loop {
         match file.try_lock() {
             Ok(()) => return Ok(Some(file)),
             Err(fs::TryLockError::WouldBlock) => {
                 // One that answers is serving; one that doesn't may be
-                // retiring, so wait for it to let go.
-                let answers = proto::hello(run.socket(), Duration::from_millis(500))
-                    .is_ok_and(|hello| hello.state != Phase::Stopping.name());
-                if answers || Instant::now() >= deadline {
+                // retiring, so wait for it to let go, longer when it says
+                // it is shutting down.
+                let hello = proto::hello(run.socket(), Duration::from_millis(500)).ok();
+                let stopping = Phase::Stopping.name();
+                if hello.as_ref().is_some_and(|hello| hello.state != stopping) {
+                    return Ok(None);
+                }
+                let wait = if hello.is_some() || said_stopping(run) {
+                    STOPPING_WAIT
+                } else {
+                    Duration::from_secs(5)
+                };
+                if started.elapsed() >= wait {
                     return Ok(None);
                 }
                 thread::sleep(Duration::from_millis(50));
@@ -1301,6 +1440,14 @@ fn elect(run: &RunDir) -> io::Result<Option<File>> {
             Err(fs::TryLockError::Error(e)) => return Err(e),
         }
     }
+}
+
+/// Whether the daemon's record says it is shutting down.
+pub fn said_stopping(run: &RunDir) -> bool {
+    fs::read(run.info())
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<DaemonInfo>(&bytes).ok())
+        .is_some_and(|info| info.state == Phase::Stopping.name())
 }
 
 /// Whether a daemon holds `run`'s lock, probed without waiting.
@@ -1335,6 +1482,7 @@ pub fn run_daemon(
         idle_timeout,
         open_wait: Duration::from_secs(10),
         reopen_wait: REOPEN_WAIT,
+        drain_wait: DRAIN_WAIT,
         launch_path,
         process: true,
     };
@@ -1349,8 +1497,12 @@ pub fn run_daemon(
             drop(lock);
             Ok(code)
         }
-        Finish::Poisoned => {
+        Finish::Abandoned => {
+            // Nothing is dropped: the handle stays open, and the lock held,
+            // until the process is gone, so no daemon opens the database
+            // before then and `daemon stop` waits for the exit.
             std::mem::forget(server);
+            std::mem::forget(lock);
             std::process::exit(crate::EXIT_ERROR)
         }
     }
@@ -1369,6 +1521,7 @@ mod tests {
             idle_timeout,
             open_wait: Duration::from_secs(5),
             reopen_wait: REOPEN_WAIT,
+            drain_wait: DRAIN_WAIT,
             launch_path: None,
             process: false,
         }
@@ -1418,13 +1571,23 @@ mod tests {
         matches!(&outcome.reply, RunReply::NotServed { reason, .. } if reason == "unavailable")
     }
 
-    /// Until the warm-up is done, so it holds nothing.
+    /// Until the warm-up and any reload are done, so they hold nothing.
     fn quiet(server: &Server) {
         let deadline = Instant::now() + Duration::from_secs(120);
-        while server.stats.prewarm().is_none() || server.fresh.lock().unwrap().busy > 0 {
+        while server
+            .background
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|handles| handles.iter().any(|h| !h.is_finished()))
+        {
             assert!(Instant::now() < deadline, "the warm-up did not finish");
             thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    fn info_of(server: &Server) -> DaemonInfo {
+        serde_json::from_slice(&fs::read(server.run.info()).unwrap()).unwrap()
     }
 
     /// The cli_io parity matrix sent through the socket of a daemon on the
@@ -1698,13 +1861,78 @@ mod tests {
             matches!(&reason, StopReason::Overwritten(why) if why.starts_with("the database")),
             "{reason:?}"
         );
-        assert_eq!(server.shutdown(&reason), Finish::Poisoned);
+        assert_eq!(server.shutdown(&reason), Finish::Abandoned);
         assert_eq!(
             fs::read(&db).unwrap(),
             backup,
             "the copy is left as written"
         );
+        let info = info_of(&server);
+        assert_eq!(
+            (info.state.as_str(), info.closed_cleanly),
+            ("stopped", Some(false))
+        );
         // As the daemon process does: exit without dropping it.
+        std::mem::forget(server);
+    }
+
+    /// Shutting down waits for the background work on the handle, then
+    /// closes it. A handle something still holds when the waits run out is
+    /// left open, and the record says so.
+    #[test]
+    fn shutting_down_waits_for_the_background_work() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = build_fixture(tmp.path());
+        let db = proj.join(".axil/memory.axil");
+
+        let server = start(&db);
+        quiet(&server);
+        server.spawn_background("test-hold", |server| {
+            let _busy = server.busy();
+            let held = server.state.get().and_then(WarmState::handle);
+            thread::sleep(Duration::from_millis(500));
+            drop(held);
+        });
+        let started = Instant::now();
+        stop(server.clone());
+        assert!(started.elapsed() >= Duration::from_millis(400));
+        assert_eq!(info_of(&server).closed_cleanly, Some(true));
+        drop(server);
+
+        let opts = Options {
+            drain_wait: Duration::from_millis(100),
+            ..options(Duration::from_secs(3600))
+        };
+        let server = start_with(&db, opts);
+        quiet(&server);
+        let held = server.state.get().unwrap().handle().unwrap();
+        let reason = StopReason::Requested("test".into());
+        assert_eq!(server.shutdown(&reason), Finish::Abandoned);
+        let info = info_of(&server);
+        assert_eq!(
+            (info.state.as_str(), info.closed_cleanly),
+            ("stopped", Some(false))
+        );
+        drop(held);
+        std::mem::forget(server);
+    }
+
+    /// The warm-up panicking leaves the handle as a panicked request does:
+    /// never used or closed again.
+    #[test]
+    fn a_warm_up_that_panics_poisons_the_handle() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = build_fixture(tmp.path());
+        let server = start(&proj.join(".axil/memory.axil"));
+        quiet(&server);
+        let cwd = proj.canonicalize().unwrap();
+        // A reload warms up again.
+        server.panic_prewarm.store(true, Ordering::Release);
+        server.fail_graph.store(true, Ordering::Release);
+        let _ = send(&server, &["boot"], &cwd, None);
+        assert_eq!(server.serve(), StopReason::Panicked);
+        assert!(server.state.get().unwrap().poisoned());
+        assert_eq!(server.shutdown(&StopReason::Panicked), Finish::Abandoned);
         std::mem::forget(server);
     }
 
@@ -1862,10 +2090,10 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(10));
         assert_eq!(server.shutdown(&StopReason::Idle), Finish::Exit(0));
         closed_cleanly();
-        let info: DaemonInfo =
-            serde_json::from_slice(&fs::read(server.run.info()).unwrap()).unwrap();
+        let info = info_of(&server);
         assert_eq!(info.state, "stopped");
         assert_eq!(info.exit_reason.as_deref(), Some("idle"));
+        assert_eq!(info.closed_cleanly, Some(true));
     }
 
     /// A machine that slept through the idle timeout: the monotonic clock

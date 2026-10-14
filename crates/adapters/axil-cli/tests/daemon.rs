@@ -361,6 +361,7 @@ fn idle_sigterm_and_stop_each_close_every_store() {
     let out = fx.axil(&["daemon", "stop"]);
     let stopped: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(stopped["stopped"], true, "{stopped}");
+    assert_eq!(stopped["clean"], true, "{stopped}");
     assert!(!fx.locked());
     fx.closed_cleanly().unwrap();
     assert_eq!(fx.info()["state"], "stopped");
@@ -560,17 +561,34 @@ fn the_kill_switch_keeps_the_daemon_from_starting() {
 fn a_database_whose_open_warns_is_not_served() {
     let fx = fixture();
     std::fs::write(fx.proj.join("axil.toml"), "[healing\nevent_log = true\n").unwrap();
-    let out = fx.axil(&["daemon", "start", "--idle-timeout", "60s"]);
-    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
-    let report: Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(report["started"], false);
-    assert!(
-        report["blocked"]
-            .as_str()
-            .unwrap()
-            .contains("invalid config"),
-        "{report}"
-    );
+    // Four at once: whichever daemon wins, every start reports its reason.
+    let starts: Vec<_> = (0..4)
+        .map(|_| {
+            let mut cmd = Command::new(BIN);
+            cmd.args(["daemon", "start", "--idle-timeout", "60s"])
+                .current_dir(&fx.proj)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            for name in ENV {
+                cmd.env_remove(name);
+            }
+            cmd.spawn().unwrap()
+        })
+        .collect();
+    for child in starts {
+        let out = child.wait_with_output().unwrap();
+        assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+        let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(report["started"], false);
+        assert!(
+            report["blocked"]
+                .as_str()
+                .unwrap()
+                .contains("invalid config"),
+            "{report}"
+        );
+    }
     assert!(!fx.locked());
     let status = fx.status();
     assert_eq!(status["running"], false);
@@ -619,6 +637,47 @@ fn two_databases_in_one_directory_have_a_daemon_each() {
     assert_eq!(fx.status()["live"]["pid"], first["pid"]);
 }
 
+/// A daemon slow to shut down (here holding the database 7 s, as a long
+/// warm-up would): `status` says it is stopping, `stop` waits for it and
+/// reports it closed the database, and a `start` meanwhile waits for it to
+/// go and takes over.
+#[test]
+fn a_slow_shutdown_is_waited_for() {
+    let fx = fixture();
+    let slow_shutdown = || {
+        let first = fx.start();
+        let socket = PathBuf::from(first["socket"].as_str().unwrap());
+        let hold = raw_call(&socket, r#"{"op":"debug_hold","ms":7000}"#);
+        assert_eq!(hold["ok"], true);
+        let shutdown = raw_call(&socket, r#"{"op":"shutdown","reason":"test"}"#);
+        assert_eq!(shutdown["ok"], true);
+        assert!(wait_for(Duration::from_secs(10), || fx.info()["state"] == "stopping"));
+        first["pid"].as_u64().unwrap()
+    };
+
+    let pid = slow_shutdown();
+    assert_eq!(fx.status()["stopping"], true);
+    let human = text(&fx.axil(&["daemon", "status"]).stdout);
+    assert!(human.starts_with("daemon: stopping"), "{human}");
+    let out = fx.axil(&["daemon", "stop", "--wait", "20"]);
+    let stopped: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        (
+            &stopped["stopped"],
+            &stopped["clean"],
+            stopped["pid"].as_u64()
+        ),
+        (&Value::Bool(true), &Value::Bool(true), Some(pid)),
+        "{stopped}"
+    );
+    fx.closed_cleanly().unwrap();
+
+    let pid = slow_shutdown();
+    let next = fx.start();
+    assert_ne!(next["pid"].as_u64().unwrap(), pid);
+    assert_eq!(next["started"], true, "{next}");
+}
+
 /// A backup copied over the database in place, as `cp` does, keeping its
 /// inode: the daemon stops without closing the database, which would write
 /// its stale view over the copy, so the copy is what the next command
@@ -655,6 +714,7 @@ fn a_backup_copied_over_the_database_is_kept() {
             .starts_with("its files were overwritten"),
         "{info}"
     );
+    assert_eq!(info["closed_cleanly"], false);
     assert!(
         std::fs::read(&fx.db).unwrap() == backup,
         "the copy was written over"
@@ -665,4 +725,22 @@ fn a_backup_copied_over_the_database_is_kept() {
         "{}",
         text(&get.stderr)
     );
+}
+
+/// A daemon that holds the lock but answers nothing (stopped with SIGSTOP
+/// here) is sent SIGTERM by `stop`, which first makes sure the process is
+/// this database's daemon.
+#[test]
+fn stop_signals_a_daemon_that_does_not_answer() {
+    let fx = fixture();
+    let pid = fx.start()["pid"].as_u64().unwrap();
+    signal(pid, "-STOP");
+    let out = fx.axil(&["daemon", "stop", "--wait", "2"]);
+    signal(pid, "-CONT");
+    let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+    // Still stopped when the wait ran out; the signal was waiting for it.
+    assert_eq!(report["running"], true, "{report}");
+    assert!(wait_for(Duration::from_secs(15), || !fx.locked()));
+    assert_eq!(fx.info()["exit_reason"], "signal 15");
+    fx.closed_cleanly().unwrap();
 }

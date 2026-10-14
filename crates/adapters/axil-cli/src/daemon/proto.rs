@@ -102,6 +102,11 @@ pub enum Op {
     /// watch the daemon reload. Answered by `{"op":"debug_fail_graph","ok":true}`.
     #[cfg(debug_assertions)]
     DebugFailGraph,
+    /// Debug builds only: hold the open database in the background for
+    /// `ms` milliseconds, as a slow warm-up would, so a test can watch a
+    /// shutdown wait for it. Answered by `{"op":"debug_hold","ok":true}`.
+    #[cfg(debug_assertions)]
+    DebugHold { ms: u64 },
 }
 
 /// The frozen answer to `hello`.

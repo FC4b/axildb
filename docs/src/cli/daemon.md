@@ -17,16 +17,20 @@ database nor loads a model on each call. Unix only.
 axil daemon start [--idle-timeout 30m] [--wait 30]   # start in the background
 axil daemon status [--json]                         # what it is doing, or how it ended
 axil daemon logs [-n 50]                            # the end of its log
-axil daemon stop [--wait 15]                        # stop it and wait until it has
+axil daemon stop [--wait 15]                        # stop it and wait until it has exited
 ```
 
 `start` does nothing when a daemon already serves the database, and waits for
-one that is still starting. It prints the daemon's pid and build id as JSON.
-`status` works whether or not a daemon runs: it reads what the last one
-recorded and probes the lock and the socket. While one runs it adds the idle
-time left, the requests in flight, each command's p50/p95 latency over its
-last 256 requests, the reloads and why, and the state of the engines and the
-graph.
+one that is still starting, or for one still shutting down to go. It prints
+the daemon's pid and build id as JSON. `stop` waits for the daemon to exit and
+says whether it closed the database (`"clean"`); one that couldn't (see below)
+leaves the next open to repair it. A daemon that holds the lock but answers
+nothing is sent SIGTERM, once `stop` has checked that the process is this
+database's daemon. `status` works whether or not a daemon runs: it reads what
+the last one recorded and probes the lock and the socket. While one runs it
+adds the idle time left, the requests in flight, each command's p50/p95
+latency over its last 256 requests, the reloads and why, and the state of the
+engines and the graph.
 
 `AXIL_DAEMON=off` keeps `start` from starting one.
 
@@ -43,7 +47,7 @@ created `0700` and refused if another user owns them:
 | `axil.sock` | The socket (`0600`). When its path would be 100 bytes or more, too long for a socket address, it moves to `axil-<uid>/<hash>.sock` in this user's own temporary directory on macOS (the one `getconf DARWIN_USER_TEMP_DIR` prints), in `/run/user/<uid>` on Linux when that is the user's and private, and in `/tmp` otherwise. None of it comes from the environment, so every client finds the same socket. |
 | `daemon.json` | What the daemon last recorded about itself: pid, build, state, and why it stopped. |
 | `daemon.log` | Its own output, rotated to `daemon.log.1` at 1 MiB. A command's output goes to the client that sent it; only the few warnings printed inside recall's ranking (such as `recall ran without vector search`) land here instead. |
-| `daemon.blocked` | Why it would not serve the database. `start` clears it and tries again. |
+| `daemon.blocked` | Why it would not serve the database. `start` tries again; a daemon that then serves removes it. |
 | `spawn.stamp` | When `start` last spawned one. |
 
 ## What it serves, and to whom
@@ -89,8 +93,11 @@ it is found. **Stop the daemon before restoring a backup in place**
 It stops by itself after its idle timeout with no command to run (counting
 time the machine slept), on SIGTERM, SIGINT or SIGHUP, and when its
 executable changes on disk: a new build installed over it, or the path it was
-started by, a symlink say, now leading to another build. Stopping removes the socket first, finishes the
-requests running, and closes every store cleanly.
+started by, a symlink say, now leading to another build. Stopping records
+`stopping`, removes the socket, waits up to 10 s for the requests running and
+for a warm-up or reload in progress, and closes the database. If something
+still holds it then, the daemon exits without closing it, and says so in
+`daemon.json` and to `stop`; the next open repairs it.
 
 It refuses to serve, and says why in `daemon.blocked`, a database whose open
 prints a warning, opens with an engine missing or read-only, or whose warm-up
