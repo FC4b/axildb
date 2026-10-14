@@ -6,9 +6,13 @@
 //!   `--project-dir`, extraction uses the gazetteer `Axil::auto_link` builds
 //!   for a database under `<dir>/.axil/` (`Gazetteer::for_project_dir`; a
 //!   database with `_deps` rows adds those names too).
-//! * `--capture <u3.jsonl>` prints what `heuristic --capture` prints: every
-//!   capture `auto_capture::analyze` returns, with the table and importance of
-//!   the record it would store.
+//! * `--capture <u3.jsonl> [--all-bash]` prints what `heuristic --capture`
+//!   prints: every capture `auto_capture::analyze` returns, with the table and
+//!   importance of the record it would store. Each text is analyzed with the
+//!   source it would arrive with: shell output (`bash_failure`,
+//!   `bash_output`) as the hook sends it (`bash`), anything else as `axil
+//!   auto-capture` labels it by default (`auto`). `--all-bash` analyzes every
+//!   text as `bash`, the call `heuristic --capture` makes.
 //!
 //! * `--records <export.jsonl> [--project-dir <dir>]` reads an `axil export`
 //!   and prints, per record, the importance insert would compute for its
@@ -34,14 +38,16 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let usage = "usage: typed-decisions-regex-arm \
                  ((--entities <u5.jsonl> | --records <export.jsonl>) [--project-dir <dir>] \
-                 | --capture <u3.jsonl>)";
+                 | --capture <u3.jsonl> [--all-bash])";
     let (Some(mode), Some(path)) = (args.first(), args.get(1)) else {
         eprintln!("{usage}");
         std::process::exit(2);
     };
+    let all_bash = mode == "--capture" && args.get(2).map(String::as_str) == Some("--all-bash");
     let project_dir = match (args.get(2).map(String::as_str), args.get(3)) {
         (Some("--project-dir"), Some(dir)) => Some(std::path::PathBuf::from(dir)),
         (None, _) => None,
+        (Some("--all-bash"), None) if all_bash => None,
         _ => {
             eprintln!("{usage}");
             std::process::exit(2);
@@ -49,7 +55,7 @@ fn main() {
     };
     match mode.as_str() {
         "--entities" => entities(path, project_dir.as_deref()),
-        "--capture" => capture(path),
+        "--capture" => capture(path, all_bash),
         "--records" => records(path, project_dir.as_deref()),
         _ => {
             eprintln!("{usage}");
@@ -113,14 +119,20 @@ fn entities(path: &str, project_dir: Option<&std::path::Path>) {
     }
 }
 
-fn capture(path: &str) {
+fn capture(path: &str, all_bash: bool) {
     let rows = read_rows(path);
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
     for row in &rows {
         let text = row["text"].as_str().unwrap_or_default();
+        let shell_output = matches!(row["source"].as_str(), Some("bash_failure" | "bash_output"));
+        let source = if all_bash || shell_output {
+            "bash"
+        } else {
+            "auto"
+        };
         let t = Instant::now();
-        let captures = analyze(text, "bash");
+        let captures = analyze(text, source);
         let analyze_us = t.elapsed().as_secs_f64() * 1e6;
         let captures: Vec<Value> = captures
             .iter()
