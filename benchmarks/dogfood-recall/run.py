@@ -25,9 +25,14 @@ With --dump-context, each question's hook block (what the agent actually gets)
 and the text of its expected records are written as JSONL for end-to-end QA
 (benchmarks/e2e-qa/qa.py).
 
+--rerank (and --rerank-weight) are passed to `axil recall` in both views. A
+cross-encoder run needs an axil built with the `rerank` feature and the model
+at models/cross-encoder.onnx under the working directory.
+
 Usage:
   python3 benchmarks/dogfood-recall/run.py [--db .axil/memory.axil]
       [--axil axil] [--top-k 10] [--out results.json] [--dump-context qa.jsonl]
+      [--rerank cross-encoder [--rerank-weight W]]
 """
 
 import argparse
@@ -77,22 +82,23 @@ def run_axil(axil: str, db: Path, args: list) -> str:
     return out.stdout
 
 
-def ranked_ids(axil: str, db: Path, question: str, top_k: int, via: str, fetch: int) -> list:
+def ranked_ids(axil: str, db: Path, question: str, top_k: int, via: str, fetch: int,
+               extra: list) -> list:
     if via == "ask":
         hits = json.loads(run_axil(axil, db, ["ask", question, "--top-k", str(fetch)]) or "{}")
         hits = hits.get("results", [])
     else:
         hits = json.loads(run_axil(axil, db, [
-            "recall", question, "--top-k", str(fetch), "--recall-format", "full",
+            "recall", question, "--top-k", str(fetch), "--recall-format", "full", *extra,
         ]) or "[]")
     kept = [h["id"] for h in hits if (h.get("created_at") or "") <= CUTOFF]
     return kept[:top_k]
 
 
-def hook_block(axil: str, db: Path, question: str) -> str:
+def hook_block(axil: str, db: Path, question: str, extra: list) -> str:
     return run_axil(axil, db, [
         "recall", question, "--recall-format", "context-block",
-        "--budget", "2000", "--top-k", "5",
+        "--budget", "2000", "--top-k", "5", *extra,
     ])
 
 
@@ -152,7 +158,16 @@ def main() -> int:
     ap.add_argument("--snapshot", help="reuse (or create) a frozen, healed copy of the DB here")
     ap.add_argument("--via", choices=["recall", "ask"], default="recall",
                     help="command for the ranked view (the hook view is always recall)")
+    ap.add_argument("--rerank", choices=["off", "cross-encoder", "llm"], default="off",
+                    help="`axil recall --rerank` mode for both recall views")
+    ap.add_argument("--rerank-weight", type=float,
+                    help="`axil recall --rerank-weight` (cross-encoder blend weight)")
     args = ap.parse_args()
+    extra = []
+    if args.rerank != "off":
+        extra += ["--rerank", args.rerank]
+    if args.rerank_weight is not None:
+        extra += ["--rerank-weight", str(args.rerank_weight)]
 
     questions = [json.loads(l) for l in open(HERE / "questions.jsonl") if l.strip()]
     version = subprocess.run([args.axil, "--version"], capture_output=True, text=True).stdout.strip()
@@ -171,8 +186,8 @@ def main() -> int:
             db = copy_db(source, Path(tmp))
             run_axil(args.axil, db, ["heal", "--reindex"])
         for i, q in enumerate(questions, 1):
-            ranked = ranked_ids(args.axil, db, q["question"], args.top_k, args.via, args.fetch)
-            block = hook_block(args.axil, db, q["question"])
+            ranked = ranked_ids(args.axil, db, q["question"], args.top_k, args.via, args.fetch, extra)
+            block = hook_block(args.axil, db, q["question"], extra)
             row = {"id": q["id"], "kind": q["kind"], **score(q["expect"], ranked, block, args.top_k)}
             rows.append(row)
             if args.dump_context:
@@ -196,6 +211,8 @@ def main() -> int:
         "cutoff": CUTOFF,
         "top_k": args.top_k,
         "fetch": args.fetch,
+        "rerank": args.rerank,
+        **({"rerank_weight": args.rerank_weight} if args.rerank_weight is not None else {}),
         "overall": summarize(rows),
         "by_kind": {k: summarize(v) for k, v in sorted(by_kind.items())},
         "per_question": [{k: r[k] for k in ("id", "first_rank", "hook_hit")} for r in rows],

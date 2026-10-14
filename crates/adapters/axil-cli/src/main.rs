@@ -277,6 +277,29 @@ enum RerankMode {
     Llm,
 }
 
+/// With `--rerank`, `axil recall` hands the reranker this many candidates per
+/// requested result, and cuts the reranked list back to `--top-k`: a reranker
+/// can only promote what it is given, so reordering just the `--top-k` that
+/// recall would print changes their order and never their membership.
+const RERANK_POOL_PER_RESULT: usize = 4;
+
+/// The smallest rerank pool: the reranker's default window, and the 20
+/// candidates the LongMemEval harness reranks, so the default `--top-k 5`
+/// reranks the same depth the harness measures.
+const RERANK_POOL_MIN: usize = 20;
+
+/// How many recall candidates `axil recall` keeps for printing: `top_k`
+/// without a reranker, `max(4 × top_k, 20)` with one (cut to `top_k` after
+/// the rerank).
+fn rerank_pool_size(top_k: usize, rerank: &RerankMode) -> usize {
+    match rerank {
+        RerankMode::Off => top_k,
+        RerankMode::CrossEncoder | RerankMode::Llm => top_k
+            .saturating_mul(RERANK_POOL_PER_RESULT)
+            .max(RERANK_POOL_MIN),
+    }
+}
+
 /// Boot context output format.
 #[derive(Clone, ValueEnum, Default)]
 enum BootFormat {
@@ -1339,8 +1362,17 @@ enum Command {
         #[arg(long)]
         timeout_ms: Option<u64>,
         /// Reranking mode (12.4): off (default), cross-encoder, or llm.
+        /// A reranker reorders a pool of max(4 × --top-k, 20) recall
+        /// candidates, and the first --top-k of its order are printed.
         #[arg(long, default_value = "off")]
         rerank: RerankMode,
+        /// With --rerank cross-encoder: the cross-encoder's share of the
+        /// final order, 0.0–1.0. Below 1.0 each candidate is ranked by
+        /// W × cross-encoder + (1 − W) × recall score, both min-max
+        /// normalized over the pool. 1.0 (default) uses the cross-encoder's
+        /// order alone.
+        #[arg(long, default_value = "1.0")]
+        rerank_weight: f32,
         /// Expand the query with graph neighbors + alias synonyms before retrieval (12.5).
         #[arg(long)]
         expand: bool,
@@ -9502,6 +9534,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
             min_confidence,
             timeout_ms,
             rerank,
+            rerank_weight,
             expand,
             expand_neighbors,
             no_cascade,
@@ -9510,6 +9543,9 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
             let db_path = require_db(&db_opt)?;
             if top_k > MAX_RESULT_LIMIT {
                 anyhow::bail!("--top-k exceeds maximum of {MAX_RESULT_LIMIT}");
+            }
+            if !(0.0..=1.0).contains(&rerank_weight) {
+                anyhow::bail!("--rerank-weight must be between 0.0 and 1.0");
             }
             let recall_start = std::time::Instant::now();
             let deadline = timeout_ms.map(|ms| recall_start + std::time::Duration::from_millis(ms));
@@ -9633,10 +9669,13 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
                 || agent_filter.is_some()
                 || min_importance.is_some()
                 || (fresh_only && !stale_paths.is_empty());
+            // With a reranker, recall keeps a wider pool than --top-k for it
+            // to reorder; without one the pool is --top-k.
+            let rerank_pool = rerank_pool_size(top_k, &rerank);
             let fetch_k = if post_filtered {
-                top_k.saturating_mul(FILTER_INFLATION)
+                top_k.saturating_mul(FILTER_INFLATION).max(rerank_pool)
             } else {
-                top_k
+                rerank_pool
             };
 
             // Deadline-bounded recall: when --timeout-ms is set we run db.recall in a worker
@@ -9877,7 +9916,8 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
                 // (file/symbol names, error strings, config keys) the vector
                 // index missed because it semantically clustered them away.
                 if cascade_rung.is_none() && !deadline_exceeded() {
-                    if let Ok(fts_hits) = db.search_text(&query, top_k.saturating_mul(2)) {
+                    let fts_k = top_k.saturating_mul(2).max(rerank_pool);
+                    if let Ok(fts_hits) = db.search_text(&query, fts_k) {
                         let mut r3: Vec<axil_core::scoring::RecallResult> = fts_hits
                             .into_iter()
                             .map(|(rec, score)| axil_core::scoring::RecallResult {
@@ -9891,7 +9931,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
                             .collect();
                         apply_filters(&mut r3);
                         if !r3.is_empty() {
-                            r3.truncate(top_k);
+                            r3.truncate(rerank_pool);
                             recall_results = r3;
                             cascade_rung = Some("fts");
                         }
@@ -9905,8 +9945,10 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
                     );
                 }
             }
-            if fetch_k > top_k {
-                recall_results.truncate(top_k);
+            // A filtered query over-fetched; keep the pool. (Unfiltered, recall
+            // was asked for the pool, and widening may have grown it.)
+            if post_filtered {
+                recall_results.truncate(rerank_pool);
             }
 
             // --profile: surface the identifier-aware query classification and
@@ -9932,6 +9974,12 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
                     errln!("[recall] query_class={} ({note})", qc.tag());
                 } else {
                     errln!("[recall] query_class={} (pure RRF, no tilt)", qc.tag());
+                }
+                if rerank != RerankMode::Off {
+                    errln!(
+                        "[recall] rerank pool={} (cut to --top-k {top_k} after the rerank)",
+                        recall_results.len()
+                    );
                 }
             }
 
@@ -9977,7 +10025,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
 
             // Skip rerank when the caller's deadline has already passed — reranking is
             // quality sugar, never worth blowing the budget the hook promised.
-            let values = if deadline_exceeded() {
+            let mut values = if deadline_exceeded() {
                 values
             } else {
                 match rerank {
@@ -9988,6 +10036,9 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
                             let mut vals = values;
                             let rerank_config = axil_indexer::rerank::RerankConfig {
                                 enabled: true,
+                                // The pool was sized for the reranker: score all of it.
+                                top_k_rerank: vals.len(),
+                                blend_weight: rerank_weight,
                                 ..Default::default()
                             };
                             if let Err(e) =
@@ -10017,6 +10068,12 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
                     }
                 }
             };
+            // The pool only widened for the reranker. Cut it here even when
+            // the rerank was skipped or failed, so --rerank never prints more
+            // than --top-k.
+            if rerank != RerankMode::Off {
+                values.truncate(top_k);
+            }
 
             let recall_ms = recall_start.elapsed().as_secs_f64() * 1000.0;
             // Logging a slow query is a write. A request can turn it off for
@@ -22818,5 +22875,29 @@ mod cli_tree_tests {
             parse_error(&["axil", "context-savings", "--format", "html"]),
             Some(clap::error::ErrorKind::InvalidValue)
         );
+    }
+}
+
+#[cfg(test)]
+mod rerank_pool_tests {
+    use super::{rerank_pool_size, RerankMode};
+
+    // Without --rerank the pool is --top-k, so recall keeps exactly what it
+    // kept before the pool existed and the output does not change.
+    #[test]
+    fn off_keeps_top_k() {
+        for k in [0, 1, 5, 10, 100] {
+            assert_eq!(rerank_pool_size(k, &RerankMode::Off), k);
+        }
+    }
+
+    #[test]
+    fn a_reranker_gets_four_per_result_and_at_least_twenty() {
+        for mode in [RerankMode::CrossEncoder, RerankMode::Llm] {
+            assert_eq!(rerank_pool_size(1, &mode), 20);
+            assert_eq!(rerank_pool_size(5, &mode), 20);
+            assert_eq!(rerank_pool_size(10, &mode), 40);
+            assert_eq!(rerank_pool_size(usize::MAX, &mode), usize::MAX);
+        }
     }
 }

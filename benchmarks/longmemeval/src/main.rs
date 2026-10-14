@@ -14,6 +14,8 @@
 //!   --limit N               Max questions to evaluate (default: all)
 //!   --strategy vector|fts|ask|recall  Retrieval strategy (default: vector)
 //!   --rerank off|cross-encoder        Optional reranking for recall results
+//!   --rerank-weight W[,W..] Cross-encoder share when blending with recall's score (default 1.0)
+//!   --compare-no-rerank     With --rerank, also report the unreranked order of the same candidates
 //!   --top-k N               Results per query (default: 5)
 
 use std::collections::HashMap;
@@ -120,6 +122,20 @@ struct Args {
     /// Only rerank the top K retrieved candidates.
     #[arg(long, default_value = "20")]
     rerank_top_k: usize,
+
+    /// The cross-encoder's share of the reranked order, 0.0–1.0: below 1.0
+    /// each candidate is ranked by W × cross-encoder + (1 − W) × recall
+    /// score, both min-max normalized over the reranked window. 1.0 uses the
+    /// cross-encoder's order alone. Several comma-separated weights each get
+    /// a report, all scored on the same retrieved candidates (one ingest per
+    /// question), and the reports are printed as a JSON array.
+    #[arg(long, value_delimiter = ',', default_value = "1.0")]
+    rerank_weight: Vec<f32>,
+
+    /// With `--rerank`, also report the same candidates in recall's order,
+    /// paired with the reranked reports from one ingest per question.
+    #[arg(long)]
+    compare_no_rerank: bool,
 
     /// Path to dataset directory.
     #[arg(long, default_value = "benchmarks/longmemeval/data")]
@@ -260,6 +276,9 @@ struct BenchmarkReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     weights: Option<String>,
     rerank: String,
+    /// The blend weight of a reranked run (`--rerank-weight`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rerank_weight: Option<f32>,
     top_k: usize,
     total_questions: usize,
     overall: OverallStats,
@@ -436,11 +455,21 @@ fn main() {
     eprintln!("║  Variant:  {:<38}║", args.variant);
     eprintln!("║  Strategy: {:<38}║", args.strategy);
     eprintln!("║  Rerank:   {:<38}║", format!("{:?}", args.rerank).to_lowercase());
+    if matches!(args.rerank, BenchRerankMode::CrossEncoder) {
+        let weights: Vec<String> = args.rerank_weight.iter().map(f32::to_string).collect();
+        eprintln!("║  Weight:   {:<38}║", weights.join(","));
+    }
     eprintln!("║  Top-K:    {:<38}║", args.top_k);
     eprintln!("║  Data:     {:<38}║", data_file.display());
     eprintln!("╚══════════════════════════════════════════════════╝");
     eprintln!();
 
+    if args.rerank_weight.is_empty() || args.rerank_weight.iter().any(|w| !(0.0..=1.0).contains(w))
+    {
+        eprintln!("--rerank-weight must be between 0.0 and 1.0");
+        std::process::exit(2);
+    }
+    let variants = rerank_variants(&args);
     if matches!(args.rerank, BenchRerankMode::CrossEncoder) && !cross_encoder_compiled() {
         eprintln!("warning: cross-encoder rerank requested, but this binary was built without the `rerank` feature; base recall order will be used");
     }
@@ -491,16 +520,18 @@ fn main() {
     // Evaluate in parallel.
     eprintln!("[3/4] Evaluating {} questions...", total);
     let done = AtomicUsize::new(0);
-    let results: Vec<QuestionResult> = pool.install(|| {
+    let results: Vec<Vec<QuestionResult>> = pool.install(|| {
         questions
             .par_iter()
             .take(total)
             .map(|q| {
-                let result = evaluate_question(q, &args, &embedder, &embedding_model);
+                let results = evaluate_question(q, &args, &embedder, &embedding_model, &variants);
                 let n = done.fetch_add(1, Ordering::Relaxed) + 1;
                 if n % 10 == 0 || n == 1 {
                     eprint!("\r       {}/{}", n, total);
                 }
+                // The first variant's result stands for the question.
+                let result = &results[0];
                 if args.verbose {
                     eprintln!(
                         "\n  {} [{}] recall={:.2} precision={:.2} {}",
@@ -511,13 +542,79 @@ fn main() {
                         if result.recall > 0.0 { "HIT" } else { "MISS" }
                     );
                 }
-                result
+                results
             })
             .collect()
     });
     eprintln!("\r       {}/{} done.          ", total, total);
 
-    // Aggregate.
+    // One list of question results per variant.
+    let mut per_variant: Vec<Vec<QuestionResult>> =
+        variants.iter().map(|_| Vec::with_capacity(total)).collect();
+    for question in results {
+        for (i, result) in question.into_iter().enumerate() {
+            per_variant[i].push(result);
+        }
+    }
+
+    eprintln!("[4/4] Results:");
+    eprintln!();
+    let mut reports = Vec::with_capacity(variants.len());
+    let mut contexts: Vec<QaContext> = Vec::new();
+    for (i, (variant, results)) in variants.iter().zip(per_variant).enumerate() {
+        let (report, variant_contexts) = build_report(&args, *variant, results, total);
+        if i == 0 {
+            contexts = variant_contexts;
+        }
+        reports.push(report);
+    }
+
+    if let Some(path) = &args.dump_context {
+        contexts.sort_by(|a, b| a.question_id.cmp(&b.question_id));
+        let lines: Vec<String> = contexts
+            .iter()
+            .map(|c| serde_json::to_string(c).unwrap())
+            .collect();
+        std::fs::write(path, lines.join("\n") + "\n").expect("write --dump-context file");
+        eprintln!(
+            "       wrote {} contexts to {}",
+            contexts.len(),
+            path.display()
+        );
+    }
+
+    if reports.len() == 1 {
+        println!("{}", serde_json::to_string_pretty(&reports[0]).unwrap());
+    } else {
+        println!("{}", serde_json::to_string_pretty(&reports).unwrap());
+    }
+}
+
+/// The orderings a run reports, all from the same retrieved candidates:
+/// `None` is recall's order, `Some(w)` the cross-encoder rerank at blend
+/// weight `w`.
+fn rerank_variants(args: &Args) -> Vec<Option<f32>> {
+    match args.rerank {
+        BenchRerankMode::Off => vec![None],
+        BenchRerankMode::CrossEncoder => {
+            let reranked = args.rerank_weight.iter().copied().map(Some);
+            if args.compare_no_rerank {
+                std::iter::once(None).chain(reranked).collect()
+            } else {
+                reranked.collect()
+            }
+        }
+    }
+}
+
+/// Aggregate one variant's question results into its report, plus the
+/// contexts its questions carried for `--dump-context`.
+fn build_report(
+    args: &Args,
+    variant: Option<f32>,
+    results: Vec<QuestionResult>,
+    total: usize,
+) -> (BenchmarkReport, Vec<QaContext>) {
     let mut category_stats: HashMap<String, CategoryStats> = HashMap::new();
     let mut category_harder: HashMap<String, HarderSums> = HashMap::new();
     let mut contexts: Vec<QaContext> = Vec::new();
@@ -561,17 +658,17 @@ fn main() {
         }
     }
 
-    // Build report
-    eprintln!("[4/4] Results:");
-    eprintln!();
-
     let report = BenchmarkReport {
         benchmark: "LongMemEval".to_string(),
         variant: args.variant.clone(),
         strategy: args.strategy.clone(),
         model: args.model.clone(),
         weights: args.weights.clone(),
-        rerank: format!("{:?}", args.rerank).to_lowercase(),
+        rerank: match variant {
+            None => "off".to_string(),
+            Some(_) => format!("{:?}", args.rerank).to_lowercase(),
+        },
+        rerank_weight: variant,
         top_k: args.top_k,
         total_questions: total,
         overall: OverallStats {
@@ -599,29 +696,28 @@ fn main() {
             .collect(),
         misses,
     };
-
-    if let Some(path) = &args.dump_context {
-        contexts.sort_by(|a, b| a.question_id.cmp(&b.question_id));
-        let lines: Vec<String> = contexts
-            .iter()
-            .map(|c| serde_json::to_string(c).unwrap())
-            .collect();
-        std::fs::write(path, lines.join("\n") + "\n").expect("write --dump-context file");
-        eprintln!(
-            "       wrote {} contexts to {}",
-            contexts.len(),
-            path.display()
-        );
-    }
-
-    println!("{}", serde_json::to_string_pretty(&report).unwrap());
+    (report, contexts)
 }
 
 // ── Per-question evaluation ────────────────────────────────────────
 
-fn evaluate_question(q: &Question, args: &Args, embedder: &Arc<Embedder>, model: &EmbeddingModel) -> QuestionResult {
+/// Evaluate one question, returning one result per entry of `variants`
+/// (see [`rerank_variants`]), all scored on one ingest and one retrieval.
+fn evaluate_question(
+    q: &Question,
+    args: &Args,
+    embedder: &Arc<Embedder>,
+    model: &EmbeddingModel,
+    variants: &[Option<f32>],
+) -> Vec<QuestionResult> {
     use std::time::Instant;
     let t0 = Instant::now();
+    let failed = || -> Vec<QuestionResult> {
+        variants
+            .iter()
+            .map(|_| question_failure(q, Vec::new(), Vec::new()))
+            .collect()
+    };
 
     // Create a temp DB
     let tmp = tempfile::tempdir().expect("tmpdir");
@@ -630,7 +726,7 @@ fn evaluate_question(q: &Question, args: &Args, embedder: &Arc<Embedder>, model:
     let dims = model.dimensions();
     let builder = match Axil::open(&db_path).with_vector(dims) {
         Ok(b) => b,
-        Err(_) => return question_failure(q, Vec::new(), Vec::new()),
+        Err(_) => return failed(),
     };
     let builder = builder.with_embedder(Box::new(SharedEmbedder(embedder.clone())));
     // FTS is only consulted by the `fts` and `ask` strategies. For
@@ -640,14 +736,14 @@ fn evaluate_question(q: &Question, args: &Args, embedder: &Arc<Embedder>, model:
     let builder = if needs_fts {
         match builder.with_fts_engine() {
             Ok(b) => b,
-            Err(_) => return question_failure(q, Vec::new(), Vec::new()),
+            Err(_) => return failed(),
         }
     } else {
         builder
     };
     let db = match builder.build() {
         Ok(db) => db,
-        Err(_) => return question_failure(q, Vec::new(), Vec::new()),
+        Err(_) => return failed(),
     };
     let t_db = t0.elapsed();
 
@@ -712,21 +808,29 @@ fn evaluate_question(q: &Question, args: &Args, embedder: &Arc<Embedder>, model:
     };
     let q_text = question_text.as_str();
 
-    // Query chunk records, then collapse to top-k unique sessions.
-    let retrieved_hits: Vec<(axil_core::RecordId, f32)> = match args.strategy.as_str() {
-        "fts" => {
+    // Query chunk records, then collapse to top-k unique sessions. Recall
+    // strategies retrieve once and order the candidates once per variant;
+    // the others have nothing to rerank, so every variant gets their hits.
+    let recall_variants =
+        |results: Vec<axil_core::RecallResult>| order_variants(q_text, &results, args, variants);
+    let same_for_all =
+        |hits: Vec<(axil_core::RecordId, f32)>| -> Vec<Vec<(axil_core::RecordId, f32)>> {
+            vec![hits; variants.len()]
+        };
+    let retrieved: Vec<Vec<(axil_core::RecordId, f32)>> = match args.strategy.as_str() {
+        "fts" => same_for_all(
             db.search_text(q_text, fetch_k)
                 .unwrap_or_default()
                 .into_iter()
                 .map(|(r, score)| (r.id, score))
-                .collect()
-        }
+                .collect(),
+        ),
         "ask" => {
             let db_arc = Arc::new(db);
             let result = ask_runtime().block_on(axil_indexer::ask::ask_parallel(
                 Arc::clone(&db_arc), q_text, fetch_k, None,
             ));
-            match result {
+            same_for_all(match result {
                 Ok(r) => r.results.iter()
                     .filter_map(|v| {
                         let id = v.get("id").and_then(|id| id.as_str())?;
@@ -736,7 +840,7 @@ fn evaluate_question(q: &Question, args: &Args, embedder: &Arc<Embedder>, model:
                     .filter_map(|(id, score)| axil_core::RecordId::from_string(id).ok().map(|rid| (rid, score)))
                     .collect(),
                 Err(_) => Vec::new(),
-            }
+            })
         }
         "recall" => {
             let mut cfg = axil_core::RecallConfig::default();
@@ -744,12 +848,7 @@ fn evaluate_question(q: &Question, args: &Args, embedder: &Arc<Embedder>, model:
             if let Some(now) = parse_question_now(q) {
                 cfg.now = now;
             }
-            let mut results = db.recall(q_text, fetch_k, Some(cfg)).unwrap_or_default();
-            maybe_rerank_recall_results(q_text, &mut results, args);
-            results
-                .into_iter()
-                .map(|r| (r.record.id, r.score))
-                .collect()
+            recall_variants(db.recall(q_text, fetch_k, Some(cfg)).unwrap_or_default())
         }
         "recall-qtc" => {
             let mut cfg = axil_core::RecallConfig::default();
@@ -758,42 +857,32 @@ fn evaluate_question(q: &Question, args: &Args, embedder: &Arc<Embedder>, model:
                 cfg.now = now;
             }
             cfg.qtc = Some(axil_core::scoring::QtcConfig::default());
-            let mut results = db.recall(q_text, fetch_k, Some(cfg)).unwrap_or_default();
-            maybe_rerank_recall_results(q_text, &mut results, args);
-            results
-                .into_iter()
-                .map(|r| (r.record.id, r.score))
-                .collect()
+            recall_variants(db.recall(q_text, fetch_k, Some(cfg)).unwrap_or_default())
         }
         "oracle-answer" => {
             let oracle_query = oracle_answer_text(q);
             let q_str = if oracle_query.trim().is_empty() { question_text.clone() } else { oracle_query };
-            db.similar_to(&q_str, fetch_k)
-                .unwrap_or_default()
-                .into_iter()
-                .map(|(r, score)| (r.id, score))
-                .collect()
+            same_for_all(
+                db.similar_to(&q_str, fetch_k)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(r, score)| (r.id, score))
+                    .collect(),
+            )
         }
-        _ => {
+        _ => same_for_all(
             db.similar_to(q_text, fetch_k)
                 .unwrap_or_default()
                 .into_iter()
                 .map(|(r, score)| (r.id, score))
-                .collect()
-        }
+                .collect(),
+        ),
     };
 
     let t_query = t0.elapsed();
     eprintln!("    [timing] query={:.1}s total={:.1}s",
         (t_query - t_fts).as_secs_f64(),
         t_query.as_secs_f64());
-
-    let ranked = collapse_to_sessions(
-        retrieved_hits,
-        &record_to_session,
-        args.top_k.max(NDCG_DEPTH),
-    );
-    let retrieved_sessions: Vec<String> = ranked.iter().take(args.top_k).cloned().collect();
 
     // The answer_session_ids in LongMemEval use a different naming scheme.
     // We need to check if any retrieved session contains answer content.
@@ -811,18 +900,52 @@ fn evaluate_question(q: &Question, args: &Args, embedder: &Arc<Embedder>, model:
         .map(|i| format!("session_{}", i))
         .collect();
 
+    retrieved
+        .into_iter()
+        .enumerate()
+        .map(|(i, hits)| {
+            score_retrieval(
+                q,
+                args,
+                hits,
+                &record_to_session,
+                &session_texts,
+                &answer_session_tags,
+                i == 0,
+            )
+        })
+        .collect()
+}
+
+/// Score one ordering of a question's retrieved hits: collapse them to
+/// sessions and measure the top-k against the answer sessions. Only the
+/// first variant carries the `--dump-context` context.
+fn score_retrieval(
+    q: &Question,
+    args: &Args,
+    retrieved_hits: Vec<(axil_core::RecordId, f32)>,
+    record_to_session: &HashMap<axil_core::RecordId, String>,
+    session_texts: &[String],
+    answer_session_tags: &[String],
+    with_context: bool,
+) -> QuestionResult {
+    let ranked = collapse_to_sessions(
+        retrieved_hits,
+        record_to_session,
+        args.top_k.max(NDCG_DEPTH),
+    );
+    let retrieved_sessions: Vec<String> = ranked.iter().take(args.top_k).cloned().collect();
+
     let harder = harder_metrics(
         q,
-        &session_texts,
+        session_texts,
         &ranked,
         &retrieved_sessions,
-        &answer_session_tags,
+        answer_session_tags,
     );
 
-    let context = args
-        .dump_context
-        .is_some()
-        .then(|| qa_context(q, &session_texts, &retrieved_sessions));
+    let context = (with_context && args.dump_context.is_some())
+        .then(|| qa_context(q, session_texts, &retrieved_sessions));
 
     // Compute recall and precision
     if answer_session_tags.is_empty() {
@@ -863,7 +986,7 @@ fn evaluate_question(q: &Question, args: &Args, embedder: &Arc<Embedder>, model:
             recall,
             precision,
             retrieved_sessions: retrieved_sessions.clone(),
-            answer_sessions: answer_session_tags.clone(),
+            answer_sessions: answer_session_tags.to_vec(),
         })
     };
 
@@ -1043,17 +1166,23 @@ fn question_failure(q: &Question, retrieved_sessions: Vec<String>, answer_sessio
     }
 }
 
-fn maybe_rerank_recall_results(
+/// Recall's candidates as hits, once per variant: `None` keeps recall's
+/// order and scores, `Some(w)` reorders them with the cross-encoder at blend
+/// weight `w`. The cross-encoder scores the candidates once for every weight;
+/// if it fails, every variant keeps recall's order.
+fn order_variants(
     query: &str,
-    results: &mut Vec<axil_core::RecallResult>,
+    results: &[axil_core::RecallResult],
     args: &Args,
-) {
-    if !matches!(args.rerank, BenchRerankMode::CrossEncoder) || results.is_empty() {
-        return;
-    }
-
-    let original_ids: Vec<String> = results.iter().map(|r| r.record.id.to_string()).collect();
-    let mut values: Vec<Value> = results
+    variants: &[Option<f32>],
+) -> Vec<Vec<(axil_core::RecordId, f32)>> {
+    let recall_order = || -> Vec<(axil_core::RecordId, f32)> {
+        results
+            .iter()
+            .map(|r| (r.record.id.clone(), r.score))
+            .collect()
+    };
+    let values: Vec<Value> = results
         .iter()
         .map(|result| {
             json!({
@@ -1063,44 +1192,77 @@ fn maybe_rerank_recall_results(
             })
         })
         .collect();
-
     let config = axil_indexer::rerank::RerankConfig {
         enabled: true,
         model: args.rerank_model.clone(),
         top_k_rerank: args.rerank_top_k,
+        ..Default::default()
     };
-
-    if let Err(err) = axil_indexer::rerank::rerank(query, &mut values, &config) {
-        eprintln!("[rerank] cross-encoder failed: {err} — returning base recall order");
-        return;
-    }
-
-    let mut by_id: HashMap<String, axil_core::RecallResult> = results
-        .drain(..)
+    let scores = if variants.iter().any(Option::is_some) && !results.is_empty() {
+        match cross_encoder_scores(query, &values, &config) {
+            Ok(scores) => Some(scores),
+            Err(err) => {
+                eprintln!("[rerank] cross-encoder failed: {err} — returning base recall order");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let by_id: HashMap<String, &axil_core::RecallResult> = results
+        .iter()
         .map(|result| (result.record.id.to_string(), result))
         .collect();
-    let mut reranked = Vec::with_capacity(by_id.len());
 
-    for value in &values {
-        let Some(id) = value.get("id").and_then(|v| v.as_str()) else {
-            continue;
-        };
-        let Some(mut result) = by_id.remove(id) else {
-            continue;
-        };
-        if let Some(score) = value.get("rerank_score").and_then(|v| v.as_f64()) {
-            result.score = score as f32;
-        }
-        reranked.push(result);
-    }
+    variants
+        .iter()
+        .map(|variant| {
+            let (Some(weight), Some(scores)) = (variant, &scores) else {
+                return recall_order();
+            };
+            let mut ordered = values.clone();
+            let config = axil_indexer::rerank::RerankConfig {
+                blend_weight: *weight,
+                ..config.clone()
+            };
+            axil_indexer::rerank::apply_scores(&mut ordered, scores, &config);
+            // The reranked order is the ranking, and `collapse_to_sessions`
+            // sorts by score. Cross-encoder logits for the window and fused
+            // scores for the candidates below it are on different scales (a
+            // fused score in the tail outranks a negative logit), so score
+            // each hit by its position.
+            let n = ordered.len();
+            ordered
+                .iter()
+                .enumerate()
+                .filter_map(|(i, value)| {
+                    let id = value.get("id").and_then(Value::as_str)?;
+                    let result = by_id.get(id)?;
+                    Some((result.record.id.clone(), (n - i) as f32))
+                })
+                .collect()
+        })
+        .collect()
+}
 
-    for id in original_ids {
-        if let Some(result) = by_id.remove(&id) {
-            reranked.push(result);
-        }
-    }
+#[cfg(feature = "rerank")]
+fn cross_encoder_scores(
+    query: &str,
+    values: &[Value],
+    config: &axil_indexer::rerank::RerankConfig,
+) -> Result<Vec<axil_indexer::rerank::RerankScore>, String> {
+    axil_indexer::rerank::cross_encoder_scores(query, values, config)
+}
 
-    *results = reranked;
+/// Without the `rerank` feature nothing is scored, and every candidate keeps
+/// recall's order (`main` warns once).
+#[cfg(not(feature = "rerank"))]
+fn cross_encoder_scores(
+    _query: &str,
+    _values: &[Value],
+    _config: &axil_indexer::rerank::RerankConfig,
+) -> Result<Vec<axil_indexer::rerank::RerankScore>, String> {
+    Ok(Vec::new())
 }
 
 #[cfg(feature = "rerank")]
