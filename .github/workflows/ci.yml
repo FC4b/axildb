@@ -36,6 +36,10 @@ jobs:
           # free build); this guards the feature-gated SyncClient.
           - label: axil-sync http
             cmd: cargo check -p axil-sync --features http
+          # The opt-in possible-contradiction judge is in neither default nor
+          # full, so no check above compiles the CLI's wiring of it.
+          - label: decide (opt-in)
+            cmd: cargo check -p axildb --features decide
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

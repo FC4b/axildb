@@ -122,6 +122,7 @@ axil-indexer = { path = "crates/extensions/axil-indexer", version = "3.0.0" }
 axil-scip = { path = "crates/extensions/axil-scip", version = "2.1.4" }
 axil-docs = { path = "crates/extensions/axil-docs", version = "2.1.4" }
 axil-checkpoint = { path = "crates/extensions/axil-checkpoint", version = "2.1.4" }
+axil-decide = { path = "crates/extensions/axil-decide", version = "0.1.0" }
 axil-cache = { path = "crates/extensions/axil-cache", version = "2.1.4" }
 axil-workspace = { path = "crates/extensions/axil-workspace", version = "2.1.4" }
 axil-sync = { path = "crates/extensions/axil-sync", version = "2.1.4" }

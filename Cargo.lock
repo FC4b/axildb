@@ -533,6 +533,7 @@ dependencies = [
  "axil-cache",
  "axil-checkpoint",
  "axil-core",
+ "axil-decide",
  "axil-docs",
  "axil-fts",
  "axil-graph",

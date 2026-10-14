@@ -74,6 +74,10 @@ optional = true
 workspace = true
 optional = true
 
+[dependencies.axil-decide]
+workspace = true
+optional = true
+
 [dependencies.axil-cache]
 workspace = true
 optional = true
@@ -154,6 +158,13 @@ mcp = ["dep:axil-mcp"]
 ql = ["dep:axil-ql", "dep:rustyline"]
 rerank = ["indexer", "axil-indexer/rerank"]
 http = ["dep:axum", "dep:tower-http"]
+# "Possible contradiction" review: a small local NLI model (opt-in download,
+# ~96 MB) judges new decisions/context/rules against the older records they
+# may replace and flags pairs for review; it never supersedes anything.
+# Default-OFF and outside `full`, like the other opt-ins: the judge is a
+# suggestion source still being evaluated. Even when compiled in, the review
+# pass runs only with `[decide] review = true` in axil.toml.
+decide = ["dep:axil-decide", "embed", "graph"]
 # Runtime WASM plugins. Default-OFF: pulls Wasmtime in, so it's opt-in
 # to preserve the small-binary posture. `axil ext …` + .axil/plugins discovery.
 wasm-host = ["dep:axil-runtime", "axil-runtime/wasm-host"]
