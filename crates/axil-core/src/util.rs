@@ -222,6 +222,11 @@ pub mod edge_types {
     pub const SUPERSEDES: &str = "supersedes";
     /// Two facts contradict each other.
     pub const CONTRADICTS: &str = "contradicts";
+    /// A newer record that a judge flagged as possibly replacing or
+    /// contradicting an older one (newer → older). A suggestion to review,
+    /// written by `Axil::review_possible_contradictions`; it changes neither
+    /// record.
+    pub const POSSIBLY_CONTRADICTS: &str = "possibly_contradicts";
     /// A record (the fix) resolves an `errors` record. Written only by
     /// `Axil::resolve_error`, which also removes it when the error is reopened.
     pub const RESOLVES: &str = "resolves";

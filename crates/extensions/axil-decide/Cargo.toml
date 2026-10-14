@@ -22,3 +22,6 @@ tokenizers = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# The review-edge model test: a real vector index and graph, no embedding model.
+axil-vector = { workspace = true }
+axil-graph = { workspace = true }

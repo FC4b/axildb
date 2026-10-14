@@ -480,7 +480,24 @@ pub fn collect_extension_blocks(db: &Axil) -> Vec<(String, String)> {
     if let Some(hint) = db.code_graph_hint() {
         blocks.push(("code_graph".to_string(), format!("## Code Graph\n- ⚠️ {hint}")));
     }
+    if let Some(line) = possible_contradictions_line(db) {
+        blocks.push(("possible_contradictions".to_string(), line));
+    }
     blocks
+}
+
+/// One line naming how many possible contradictions wait for review, or
+/// `None` when there are none (or the count cannot be read): the pairs stay
+/// in `axil contradictions`, so boot pays a line, not the pairs.
+fn possible_contradictions_line(db: &Axil) -> Option<String> {
+    let open = db.possible_contradictions().ok()?.len();
+    (open > 0).then(|| {
+        let s = if open == 1 { "" } else { "s" };
+        format!(
+            "## Review\n- {open} possible contradiction{s} flagged by a local model \
+             (suggestions; nothing changed): `axil contradictions`"
+        )
+    })
 }
 
 /// Returns true when `record` matches `scope` (or `scope` is None).

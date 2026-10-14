@@ -256,6 +256,10 @@ impl axil_core::PairJudge for PairClassifier {
     fn name(&self) -> &str {
         &self.name
     }
+
+    fn calibration(&self) -> &str {
+        &self.calibration.id
+    }
 }
 
 /// Pairs per inference call. Batching changes scores, slightly even for a
