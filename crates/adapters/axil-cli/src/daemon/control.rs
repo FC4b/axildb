@@ -394,7 +394,10 @@ fn report(key: &Path, run: &RunDir) -> Value {
         "db": key,
         "running": live.is_some(),
         "lock_held": lock_held,
-        "stopping": live.is_none() && lock_held && server::said_stopping(run),
+        // One that answers while it shuts down has not removed its socket
+        // yet.
+        "stopping": live.as_ref().is_some_and(|l| l["state"] == "stopping")
+            || (live.is_none() && lock_held && server::said_stopping(run)),
         "socket": {
             "path": run.socket(),
             "exists": run.socket().exists(),
@@ -427,14 +430,19 @@ fn describe(report: &Value) -> Vec<String> {
     let mut lines = Vec::new();
     let live = &report["live"];
     let last = &report["last"];
-    if live.is_object() {
+    if report["stopping"] == true {
+        let pid = if live.is_object() {
+            &live["pid"]
+        } else {
+            &last["pid"]
+        };
+        lines.push(format!("daemon: stopping (pid {pid})"));
+    } else if live.is_object() {
         lines.push(format!(
             "daemon: running, {} (pid {})",
             live["state"].as_str().unwrap_or("?"),
             live["pid"]
         ));
-    } else if report["stopping"] == true {
-        lines.push(format!("daemon: stopping (pid {})", last["pid"]));
     } else if report["lock_held"] == true {
         lines.push("daemon: holds the lock but does not answer".to_string());
     } else if last.is_object() {
