@@ -8,14 +8,19 @@ today?
 |---|---|---|
 | **U1** | Does NEW replace, update or contradict OLD? | `check_conflict` (bge-small cosine ≥ 0.92, then entity + negation rules) |
 | **U2** | Does LATER show that ERROR is actually fixed? | Nothing: errors have no resolved status |
+| **U5** | Which strings in a stored note are entities worth linking? | `extract_entities` (backticks, paths, CamelCase/snake_case, quoted strings, code-symbol patterns), run by `auto_link` on every insert |
 
-There are three arms:
+For U1 and U2 there are three arms:
 - the **production heuristic** (`heuristic/`, a Rust crate that calls the real `axil_core::check_conflict`);
 - **small NLI cross-encoders** via ONNX Runtime (`run_bakeoff.py`);
 - **Jev-style typed-decision models:**
   - Laya (`run_laya.py`).
   - Fastino GLiNER2.5-Decide, 340M and 1B (`run_gliner_decide.py`).
   - TypeSafe Jev itself, via its hosted API (`run_jev.py`). This one is opt-in: it needs `TYPESAFE_API_KEY` and `--confirm-external`, because it uploads every pair to TypeSafe.
+
+U5 has two (`run_u5_bakeoff.py`):
+- the **production extractor**, through the same Rust crate (`heuristic/ --entities`);
+- **zero-shot GLiNER span models** on CPU: Fastino GLiNER2.5-small (74M) and -base (194M), and `urchade/gliner_small-v2.1`, each pinned by revision.
 
 The plan and the go/no-go rules are in `tasks/phase-29-typed-decisions-laya.md`. That file is local-only.
 
@@ -71,7 +76,7 @@ Gold is every form at least two of the three listed (1,051 unanimous, 84 two-vot
 
 Remaining caveat: the annotators are models, not people.
 
-Each pair's `split` is 40% `train` / 60% `test`, derived from sha256 of its id. The train split is used only to fit the decision threshold and the Platt calibration; every reported metric is on test.
+Each pair's `split` is 40% `train` / 60% `test`, derived from sha256 of its id. The train split is used only to fit the decision threshold and the Platt calibration; every reported metric is on test. U5 texts use the same rule (63 train, 97 test); there, train only picks each model's label phrasing and span threshold.
 
 ## Run
 
@@ -114,6 +119,25 @@ file `crates/extensions/axil-decide/calibration/u1-nli-deberta-v3-xsmall-qint8.j
 and the Rust parity fixture `crates/extensions/axil-decide/tests/fixtures/u1_parity.json`.
 The model and tokenizer are pinned by revision and sha256.
 
+```bash
+# U5 entity bake-off. The GLiNER arms also need gliner, sentencepiece and psutil
+# (requirements.txt); the control arm needs the heuristic binary.
+cargo build --release --manifest-path heuristic/Cargo.toml
+python adjudicate_u5.py                # optional: rebuild sets/u5_repo.jsonl and the validation JSON
+python run_u5_bakeoff.py --arm all     # every arm in its own process, then the summary
+python run_u5_bakeoff.py --summarize   # re-score the saved arm outputs only
+```
+
+`run_u5_bakeoff.py` runs each GLiNER arm once per label phrasing (two at most)
+over every text at a low threshold, then sweeps the threshold offline. Phrasing
+and threshold are picked on `train`: the best train F1 whose train precision is
+at least the production extractor's. The chosen setting then runs for real on
+`test` (batch 1, 4 threads), which gives the reported predictions and latency.
+Each arm runs in its own process, so peak RSS is per arm. The 1-minute load
+average is recorded next to every latency, because other jobs share the
+machine. It writes `benchmarks/results/typed-decisions-u5-bakeoff-<date>.json`;
+`--write-junk-list` regenerates `u5_junk_words.txt`.
+
 Raw outputs go to `out/`, which is gitignored. The committed summary is `benchmarks/results/typed-decisions-bakeoff-<date>.json`.
 
 ## Metrics
@@ -124,6 +148,12 @@ Raw outputs go to `out/`, which is gitignored. The committed summary is `benchma
 - **Per-kind accuracy:** shows which kinds of negative fool a model.
 - **CPU latency:** p50/p95 per pair, batch 1, model already loaded, Python-side. Load time is reported separately.
 
+For U5:
+- **Mention-level micro precision / recall / F1** on test, over normalized surface forms (`adjudicate_u5.norm`), one form per text. Span = the form matches; span + type = the type matches too. Reported per type and per stratum. Precision plays the false-positive role: a wrong entity becomes a graph node that links unrelated notes.
+- **Junk rate:** the share of predicted mentions that are wrong *and* are markdown syntax or made only of words in `u5_junk_words.txt` (stopwords, generic nouns, keywords, dictionary words).
+- **Entities per text**, against the gold mean.
+- **CPU latency** p50/p95 per text, batch 1, model loaded, with the load average. Load time, peak RSS and size on disk are reported per arm.
+
 ## Numbers policy
 
-U2 now has 201 validated pairs. Still, none of these numbers go into README, docs or CLI output: they measure a candidate for a feature that isn't built yet. Once a winner is wired into Axil, its end-to-end numbers get their own committed result. The labels are model-validated (blind agreement between models); a human spot-check of the disputed items listed in the validation files is still recommended before publishing anything.
+U2 now has 201 validated pairs. Still, none of these numbers go into README, docs or CLI output: they measure a candidate for a feature that isn't built yet. The same holds for the U5 bake-off results; the U5 latencies were also measured on a shared, heavily loaded machine, so read them with the load average recorded next to each. Once a winner is wired into Axil, its end-to-end numbers get their own committed result. The labels are model-validated (blind agreement between models); a human spot-check of the disputed items listed in the validation files is still recommended before publishing anything.
