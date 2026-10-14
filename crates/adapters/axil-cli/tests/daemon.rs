@@ -618,3 +618,51 @@ fn two_databases_in_one_directory_have_a_daemon_each() {
     assert_eq!(stopped["pid"], second["pid"]);
     assert_eq!(fx.status()["live"]["pid"], first["pid"]);
 }
+
+/// A backup copied over the database in place, as `cp` does, keeping its
+/// inode: the daemon stops without closing the database, which would write
+/// its stale view over the copy, so the copy is what the next command
+/// reads.
+#[test]
+fn a_backup_copied_over_the_database_is_kept() {
+    let fx = fixture();
+    let backup = std::fs::read(&fx.db).unwrap();
+    fx.start();
+    let stored = fx.send(
+        &["store", "decisions", r#"{"summary":"after the backup"}"#],
+        None,
+    );
+    assert!(stored.status.success(), "{}", text(&stored.stderr));
+    let id = serde_json::from_slice::<Value>(&stored.stdout).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(&fx.db)
+            .unwrap();
+        file.write_all(&backup).unwrap();
+    }
+    assert!(wait_for(Duration::from_secs(15), || !fx.locked()));
+    let info = fx.info();
+    assert!(
+        info["exit_reason"]
+            .as_str()
+            .unwrap()
+            .starts_with("its files were overwritten"),
+        "{info}"
+    );
+    assert!(
+        std::fs::read(&fx.db).unwrap() == backup,
+        "the copy was written over"
+    );
+    let get = fx.axil(&["get", &id]);
+    assert!(
+        text(&get.stderr).contains("not found"),
+        "{}",
+        text(&get.stderr)
+    );
+}

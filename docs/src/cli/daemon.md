@@ -67,12 +67,24 @@ process could build once.
 
 ## When it reloads, and when it stops
 
-Before a request, and once a second, the daemon checks whether the files
-behind its open handle changed without it: the config file it reads, the
-inode of the database or of any companion store (a backup renamed over it, a
-store removed by `compact --drop-engine` or created by another command), and
-the plugins directory. Any change, or a graph that failed to load, makes it
-finish the requests running on the old handle and open the database again.
+Before a request, again before a write once it is next in line, and once a
+second, the daemon checks whether the files behind its open handle changed
+without it: the config file it reads, the inode of the database or of any
+companion store (a backup renamed over it, a store removed by `compact
+--drop-engine` or created by another command), and the plugins directory. Any
+change, or a graph that failed to load, makes it finish the requests running
+on the old handle and open the database again. Until it has, every command is
+handed back unrun, so a write never lands in a file that is no longer the
+database.
+
+A store written over in place, its inode kept (`cp backup.axil
+.axil/memory.axil`), can't be reopened: the daemon stops at the next check
+without closing the database, since closing would write its view of the old
+file over the copy. The check compares each store's size and modification
+time while no command runs, so a copy made while one runs can be missed, and
+a read that comes within 250 ms of the last check may run on the copy before
+it is found. **Stop the daemon before restoring a backup in place**
+(renaming one over the database is always noticed).
 
 It stops by itself after its idle timeout with no command to run (counting
 time the machine slept), on SIGTERM, SIGINT or SIGHUP, and when its

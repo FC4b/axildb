@@ -223,6 +223,7 @@ impl RunReply {
     /// The reply for a request [`exec::execute_captured`] did not serve.
     pub fn not_served(reason: NotServed) -> RunReply {
         let code = match reason {
+            NotServed::Expired => return RunReply::Expired,
             NotServed::Parse => "parse",
             NotServed::WrongDb => "wrong_db",
             NotServed::Command => "command",

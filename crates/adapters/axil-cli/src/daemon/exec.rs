@@ -132,9 +132,11 @@ pub enum NotServed {
     /// binary would wait there for the user to type the input.
     Terminal,
     /// The host has no handle to run it on: a reopen is running or failed,
-    /// a request panicked ([`WarmState::poisoned`]), or the request's thread
-    /// couldn't start.
+    /// a request panicked ([`WarmState::poisoned`]), the host's gate found
+    /// the handle stale, or the request's thread couldn't start.
     Unavailable,
+    /// The request's deadline passed before the command could start.
+    Expired,
 }
 
 impl fmt::Display for NotServed {
@@ -146,6 +148,7 @@ impl fmt::Display for NotServed {
             NotServed::Lacks(need) => WarmLacks(*need).fmt(f),
             NotServed::Terminal => f.write_str("the command reads stdin from a terminal"),
             NotServed::Unavailable => f.write_str("the database is not open"),
+            NotServed::Expired => f.write_str("the request's deadline passed before it ran"),
         }
     }
 }
@@ -407,6 +410,17 @@ impl WarmState {
         std::mem::forget(warm);
     }
 
+    /// Never serve or close the handle again, as after a panic (see
+    /// [`WarmState::poisoned`]): for a host that found the database's files
+    /// written by someone else under the open handle. Closing it would write
+    /// the handle's view of the file over theirs.
+    pub fn abandon(&self) {
+        match self.handle() {
+            Some(warm) => self.poison(warm),
+            None => self.poisoned.store(true, Ordering::Release),
+        }
+    }
+
     fn slot_read(&self) -> std::sync::RwLockReadGuard<'_, Option<WarmDb>> {
         self.warm.read().unwrap_or_else(PoisonError::into_inner)
     }
@@ -426,11 +440,25 @@ impl WarmState {
 /// prints as the one-shot binary prints it and exits 1. A panic exits 1 too,
 /// and poisons `state` ([`WarmState::poisoned`]).
 pub fn execute_captured(req: Request, state: &WarmState) -> Result<Response, NotServed> {
+    execute_gated(req, state, &|_| Ok(()))
+}
+
+/// [`execute_captured`], with `gate` asked last before the command runs:
+/// after a write has taken the writer lock and before the request takes the
+/// handle, with whether the command writes. A [`NotServed`] it returns is
+/// the request's answer, with nothing run. A host checks there what may
+/// have changed while the request waited: its deadline, and whether the
+/// handle is still the database's.
+pub fn execute_gated(
+    req: Request,
+    state: &WarmState,
+    gate: &(dyn Fn(bool) -> Result<(), NotServed> + Sync),
+) -> Result<Response, NotServed> {
     std::thread::scope(|scope| {
         let request = std::thread::Builder::new()
             .name("axil-request".into())
             .stack_size(REQUEST_STACK)
-            .spawn_scoped(scope, move || execute(req, state));
+            .spawn_scoped(scope, move || execute(req, state, gate));
         match request {
             // A panic outside the command itself (parsing, say) leaves the
             // handle as it was.
@@ -442,7 +470,11 @@ pub fn execute_captured(req: Request, state: &WarmState) -> Result<Response, Not
     })
 }
 
-fn execute(req: Request, state: &WarmState) -> Result<Response, NotServed> {
+fn execute(
+    req: Request,
+    state: &WarmState,
+    gate: &(dyn Fn(bool) -> Result<(), NotServed> + Sync),
+) -> Result<Response, NotServed> {
     let mut cli = match parse(&req)? {
         Parsed::Run(cli) => cli,
         Parsed::Printed(response) => return Ok(response),
@@ -451,19 +483,21 @@ fn execute(req: Request, state: &WarmState) -> Result<Response, NotServed> {
         return Err(NotServed::Terminal);
     }
     let db_path = request_db(cli.db.as_deref(), &req.cwd).ok_or(NotServed::WrongDb)?;
+    let writes = writes(&cli.command);
+    // A write waits for the writes before it without holding the handle,
+    // so a queue of writes never keeps a reopen waiting on it.
+    let _writing = writes.then(|| state.writer.lock().unwrap_or_else(PoisonError::into_inner));
+    // A write that waited on the lock behind one that panicked.
+    if state.poisoned() {
+        return Err(NotServed::Unavailable);
+    }
+    gate(writes)?;
     let warm = state.current()?;
     if cli_io::db_key(&db_path).ok().as_deref() != Some(warm.key()) {
         return Err(NotServed::WrongDb);
     }
     warm_route(&cli.command, warm.db())?;
     cli.db = Some(db_path);
-
-    let _writing =
-        writes(&cli.command).then(|| state.writer.lock().unwrap_or_else(PoisonError::into_inner));
-    // A write that waited on the lock behind one that panicked.
-    if state.poisoned() {
-        return Err(NotServed::Unavailable);
-    }
     let held = warm.clone();
     let ctx = ReqCtx {
         stdin: req.stdin,

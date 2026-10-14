@@ -27,10 +27,16 @@
 //! While serving, a request runs on its own thread, at most
 //! [`MAX_IN_FLIGHT`] at a time (more are answered `overloaded`). Writes run
 //! one at a time under the warm state's writer lock. Before a request runs,
-//! the daemon checks (at most every 250 ms) whether the files behind the
-//! open handle changed without it ([`FileFp`]) or the graph failed to load;
-//! either reopens the database once the requests on the old handle finish.
-//! A tick each second does the same check, and stops the daemon when it has
+//! the daemon checks (at most every 250 ms, and again for a write once it
+//! holds the writer lock) whether the files behind the open handle changed
+//! without it ([`FileFp`]) or the graph failed to load; either reopens the
+//! database once the requests on the old handle finish. Until a reopen
+//! succeeds, no request runs on the old handle: each is answered
+//! `unavailable`, so a write is never made to a file that is no longer the
+//! database. A store written in place by another process (a backup copied
+//! over it) can't be reopened: the daemon stops without closing it, since
+//! closing would write the handle's stale view over the copy. A tick each
+//! second does the same checks, and stops the daemon when it has
 //! been idle for its idle timeout, when it was signalled, or when its
 //! executable changed on disk, or the path it was started by now leads to
 //! another.
@@ -55,13 +61,13 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use axil_core::GraphState;
 use serde_json::{json, Value};
 
-use super::exec::{self, ReopenError, WarmState};
+use super::exec::{self, NotServed, ReopenError, WarmState};
 use super::paths::{self, write_atomic, RunDir};
 use super::proto::{
     self, read_frame, read_json, write_frame, write_json, Ack, ExeId, Hello, Identity, Op,
     RunHeader, RunReply, DAEMON_PROTO, MAX_FRAME, STRIPPED_ENV, VERSION,
 };
-use super::state::{op_label, DaemonInfo, FileFp, Phase, PhaseCell, Stats};
+use super::state::{op_label, Change, DaemonInfo, FileFp, Phase, PhaseCell, Stats};
 use crate::cli_io::{self, ReqCtx};
 
 /// Run requests running at once; more are answered `overloaded`.
@@ -113,6 +119,8 @@ pub struct Options {
     pub idle_timeout: Duration,
     /// How long to retry an open that another process's lock blocks.
     pub open_wait: Duration,
+    /// How long a reopen waits for the requests on the old handle.
+    pub reopen_wait: Duration,
     /// The path the daemon's binary was started by, before symlinks are
     /// resolved: the daemon retires when it leads to another binary.
     pub launch_path: Option<PathBuf>,
@@ -136,6 +144,8 @@ pub enum StopReason {
     Blocked(String),
     /// A request panicked.
     Panicked,
+    /// A store was written in place under the open handle.
+    Overwritten(String),
 }
 
 impl StopReason {
@@ -148,12 +158,15 @@ impl StopReason {
             StopReason::ExeChanged => "its executable changed".to_string(),
             StopReason::Blocked(why) => format!("blocked: {why}"),
             StopReason::Panicked => "a request panicked".to_string(),
+            StopReason::Overwritten(why) => format!("its files were overwritten: {why}"),
         }
     }
 
     fn exit_code(&self) -> i32 {
         match self {
-            StopReason::Blocked(_) | StopReason::Panicked => crate::EXIT_ERROR,
+            StopReason::Blocked(_) | StopReason::Panicked | StopReason::Overwritten(_) => {
+                crate::EXIT_ERROR
+            }
             _ => crate::EXIT_OK,
         }
     }
@@ -172,8 +185,8 @@ enum Unopened {
 pub enum Finish {
     /// The database is closed; exit with this code.
     Exit(i32),
-    /// A request panicked: exit 1 without dropping anything (see
-    /// [`WarmState::poisoned`]).
+    /// A request panicked, or the files were overwritten under the handle:
+    /// exit 1 without dropping anything (see [`WarmState::poisoned`]).
     Poisoned,
 }
 
@@ -200,10 +213,25 @@ fn epoch_ms() -> u64 {
         .map_or(0, |d| d.as_millis() as u64)
 }
 
+/// Whether a request's deadline has passed.
+fn expired(deadline_ms: Option<u64>) -> bool {
+    deadline_ms.is_some_and(|deadline| epoch_ms() >= deadline)
+}
+
 /// The open handle's view of when its files last matched it.
 struct Freshness {
+    /// The files as the handle left them.
     baseline: FileFp,
+    /// When they were last compared.
     checked: Instant,
+    /// A change found and not reloaded yet. Until a reload succeeds, no
+    /// request runs on the handle.
+    stale: Option<String>,
+    /// Work running on the handle ([`Busy`]).
+    busy: usize,
+    /// The baseline's store contents are what the handle's own work last
+    /// left them as, so they can be compared; see [`FileFp`].
+    settled: bool,
 }
 
 /// A running daemon.
@@ -224,7 +252,7 @@ pub struct Server {
     /// When the last run request came or finished, on both clocks: an
     /// [`Instant`] does not advance while the machine sleeps.
     last_active: Mutex<(Instant, SystemTime)>,
-    fresh: Mutex<Option<Freshness>>,
+    fresh: Mutex<Freshness>,
     graph_reloads: AtomicU32,
     fail_graph: AtomicBool,
     accept: Mutex<Option<JoinHandle<()>>>,
@@ -248,6 +276,22 @@ impl<'a> Admitted<'a> {
 impl Drop for Admitted<'_> {
     fn drop(&mut self) {
         self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// Work on the open handle, counted until dropped: a request, or the
+/// warm-up. When the last of it ends, the stores' contents as it left them
+/// become the baseline ([`FileFp`]).
+struct Busy<'a>(&'a Server);
+
+impl Drop for Busy<'_> {
+    fn drop(&mut self) {
+        let mut fresh = self.0.fresh.lock().unwrap_or_else(PoisonError::into_inner);
+        fresh.busy -= 1;
+        if fresh.busy == 0 {
+            let now = FileFp::read(&self.0.key);
+            self.0.settle(&mut fresh, &now);
+        }
     }
 }
 
@@ -286,6 +330,7 @@ impl Server {
             idle_timeout_secs: opts.idle_timeout.as_secs(),
             ..DaemonInfo::default()
         };
+        let baseline = FileFp::read(&key);
         let server = Arc::new(Server {
             key,
             run,
@@ -301,7 +346,13 @@ impl Server {
             in_flight: AtomicUsize::new(0),
             connections: AtomicUsize::new(0),
             last_active: Mutex::new((Instant::now(), SystemTime::now())),
-            fresh: Mutex::new(None),
+            fresh: Mutex::new(Freshness {
+                baseline,
+                checked: Instant::now(),
+                stale: None,
+                busy: 0,
+                settled: false,
+            }),
             graph_reloads: AtomicU32::new(0),
             fail_graph: AtomicBool::new(false),
             accept: Mutex::new(None),
@@ -348,10 +399,10 @@ impl Server {
             if let Some(reason) = self.stop_reason() {
                 return Err(Unopened::Stopped(reason));
             }
-            let fp = FileFp::read(&self.key);
+            let before = FileFp::read(&self.key);
             match WarmState::open(&self.key) {
                 Ok(state) => {
-                    self.set_fresh(fp);
+                    self.set_fresh(before);
                     break state;
                 }
                 Err(e) if crate::is_lock_contention(&e) && Instant::now() < deadline => {
@@ -418,11 +469,18 @@ impl Server {
             rotate_log(&self.run);
         }
         if self.phase.get() == Phase::Ready {
-            if let Some(why) = self.stale() {
-                let server = self.clone();
-                let _ = thread::Builder::new()
-                    .name("axil-reload".into())
-                    .spawn(move || server.reload(&why));
+            match self.check(Duration::ZERO, 0) {
+                Some(Change::Reload(why)) => {
+                    let server = self.clone();
+                    let _ = thread::Builder::new()
+                        .name("axil-reload".into())
+                        .spawn(move || server.reload(&why));
+                }
+                Some(Change::Overwritten(why)) => {
+                    self.abandon(&why);
+                    return Some(StopReason::Overwritten(why));
+                }
+                None => {}
             }
         }
         None
@@ -552,11 +610,48 @@ impl Server {
             .unwrap_or_else(PoisonError::into_inner) = (Instant::now(), SystemTime::now());
     }
 
-    fn set_fresh(&self, baseline: FileFp) {
-        *self.fresh.lock().unwrap_or_else(PoisonError::into_inner) = Some(Freshness {
-            baseline,
-            checked: Instant::now(),
-        });
+    /// A handle opened on the files `before` describes: the baseline from
+    /// now on. Their identities are taken from before the open, so a file
+    /// replaced while it opened is found; the stores' contents from after
+    /// it, since the open may write.
+    fn set_fresh(&self, before: FileFp) {
+        let mut baseline = before;
+        baseline.absorb(&FileFp::read(&self.key));
+        let mut fresh = self.fresh.lock().unwrap_or_else(PoisonError::into_inner);
+        fresh.baseline = baseline;
+        fresh.checked = Instant::now();
+        fresh.stale = None;
+        fresh.settled = true;
+    }
+
+    /// Count work on the handle until the guard is dropped.
+    fn busy(&self) -> Busy<'_> {
+        self.fresh
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .busy += 1;
+        Busy(self)
+    }
+
+    /// With no work on the handle, take the stores' contents in `now` as
+    /// what the handle's own work left them as. A recall worker a deadline
+    /// left running may still write (a recall records which memories it
+    /// returned), so while one runs nothing is taken, and the contents are
+    /// not compared until a check finds it gone.
+    fn settle(&self, fresh: &mut Freshness, now: &FileFp) {
+        if cli_io::RECALL_SLOTS.live() > 0 {
+            fresh.settled = false;
+            return;
+        }
+        // Files replaced since are left for the reload to take in; should
+        // the change be undone instead, the contents are taken by the next
+        // check that finds nothing running, not compared.
+        if fresh.baseline.changed(now, false).is_none() {
+            fresh.baseline.absorb(now);
+            fresh.settled = true;
+        } else {
+            fresh.settled = false;
+        }
     }
 
     /// Bind the socket, replacing a stale one: the lock says no daemon is
@@ -745,22 +840,31 @@ impl Server {
             return refused(RunReply::Overloaded);
         };
         self.touch();
-        if header
-            .deadline_ms
-            .is_some_and(|deadline| epoch_ms() >= deadline)
-        {
+        if expired(header.deadline_ms) {
             return refused(RunReply::Expired);
         }
         let Some(state) = self.state.get() else {
             return refused(RunReply::Starting);
         };
-        if let Some(why) = self.stale() {
-            self.reload(&why);
+        let op = op_label(&header.argv);
+        match self.check(FRESH_FOR, 0) {
+            Some(Change::Reload(why)) => self.reload(&why),
+            Some(Change::Overwritten(why)) => {
+                self.abandon(&why);
+                self.request_stop(StopReason::Overwritten(why));
+                self.stats.not_served(op);
+                return (RunReply::not_served(NotServed::Unavailable), None);
+            }
+            None => {}
         }
 
-        let op = op_label(&header.argv);
         let started = Instant::now();
-        let result = exec::execute_captured(header.to_request(stdin), state);
+        let deadline = header.deadline_ms;
+        let gate = |writes: bool| self.gate(deadline, writes);
+        let result = {
+            let _busy = self.busy();
+            exec::execute_gated(header.to_request(stdin), state, &gate)
+        };
         let took = started.elapsed();
         self.touch();
         if state.poisoned() {
@@ -793,28 +897,77 @@ impl Server {
         }
     }
 
-    /// Why the open handle is stale, if it is: its files changed under it,
-    /// or the graph failed to load. The file check stands for 250 ms.
-    fn stale(&self) -> Option<String> {
+    /// Asked last before a request runs, once a write holds the writer
+    /// lock: whether its deadline passed while it waited, and whether the
+    /// handle still is the database's. A write is checked against the
+    /// files as they are now, not as they were up to 250 ms ago: a write
+    /// to a handle whose file was replaced is lost with the handle.
+    fn gate(&self, deadline_ms: Option<u64>, writes: bool) -> Result<(), NotServed> {
+        if expired(deadline_ms) {
+            return Err(NotServed::Expired);
+        }
+        let fresh_for = if writes { Duration::ZERO } else { FRESH_FOR };
+        match self.check(fresh_for, 1) {
+            None => Ok(()),
+            Some(Change::Reload(_)) => Err(NotServed::Unavailable),
+            Some(Change::Overwritten(why)) => {
+                self.abandon(&why);
+                self.request_stop(StopReason::Overwritten(why));
+                Err(NotServed::Unavailable)
+            }
+        }
+    }
+
+    /// What changed under the open handle, if anything: its files changed
+    /// without it, or the graph failed to load. A change found stands until
+    /// a reload takes it in. Otherwise the file check stands for
+    /// `fresh_for`. The stores' contents are compared only when no work
+    /// but the caller's own (`own`) runs on the handle.
+    fn check(&self, fresh_for: Duration, own: usize) -> Option<Change> {
         if self.graph_failed() {
-            return Some(GRAPH_FAILED.to_string());
+            return Some(Change::Reload(GRAPH_FAILED.to_string()));
         }
         let mut fresh = self.fresh.lock().unwrap_or_else(PoisonError::into_inner);
-        let fresh = fresh.as_mut()?;
-        if fresh.checked.elapsed() < FRESH_FOR {
+        if let Some(why) = &fresh.stale {
+            return Some(Change::Reload(why.clone()));
+        }
+        if fresh.checked.elapsed() < fresh_for {
             return None;
         }
         fresh.checked = Instant::now();
-        fresh.baseline.changed(&FileFp::read(&self.key))
+        let now = FileFp::read(&self.key);
+        let quiet = fresh.busy <= own && cli_io::RECALL_SLOTS.live() == 0;
+        if quiet && !fresh.settled {
+            self.settle(&mut fresh, &now);
+        }
+        let change = fresh.baseline.changed(&now, quiet && fresh.settled);
+        if let Some(Change::Reload(why)) = &change {
+            fresh.stale = Some(why.clone());
+        }
+        change
     }
 
-    /// Whether the files behind the handle differ from those it opened,
-    /// read now.
+    /// Whether the files behind the handle were replaced, added, removed or
+    /// edited since it opened, read now.
     fn files_changed(&self) -> bool {
         let fresh = self.fresh.lock().unwrap_or_else(PoisonError::into_inner);
         fresh
-            .as_ref()
-            .is_some_and(|f| f.baseline.changed(&FileFp::read(&self.key)).is_some())
+            .baseline
+            .changed(&FileFp::read(&self.key), false)
+            .is_some()
+    }
+
+    /// Stop serving the handle for good and never close it: a store was
+    /// written in place under it (see [`WarmState::abandon`]).
+    fn abandon(&self, why: &str) {
+        let Some(state) = self.state.get().filter(|state| !state.poisoned()) else {
+            return;
+        };
+        log(format!(
+            "not serving {} any more, and leaving it unclosed: {why}",
+            self.key.display()
+        ));
+        state.abandon();
     }
 
     fn graph_failed(&self) -> bool {
@@ -829,8 +982,11 @@ impl Server {
 
     /// Reopen the database because `why`. One reload runs at a time: a
     /// caller that finds one running, or the daemon stopping, returns at
-    /// once. Requests are not served while it runs. A database that doesn't
-    /// open again stops the daemon.
+    /// once. Requests are not served while it runs, nor after it until one
+    /// succeeds (the change found stands; see [`Server::check`]): a reload
+    /// put off because requests still hold the old handle is tried again
+    /// by the next tick. A database that doesn't open again stops the
+    /// daemon.
     fn reload(self: &Arc<Self>, why: &str) {
         let Some(state) = self.state.get() else {
             return;
@@ -838,7 +994,8 @@ impl Server {
         if !self.phase.advance(Phase::Ready, Phase::Reloading) {
             return;
         }
-        // Another caller may have reloaded since `why` was found.
+        // Another caller may have reloaded since `why` was found, or the
+        // change been undone.
         let graph = why == GRAPH_FAILED;
         let still = if graph {
             self.graph_failed()
@@ -846,6 +1003,10 @@ impl Server {
             self.files_changed()
         };
         if !still {
+            self.fresh
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .stale = None;
             self.phase.advance(Phase::Reloading, Phase::Ready);
             return;
         }
@@ -856,9 +1017,9 @@ impl Server {
         log(format!("reloading: {why}"));
         let deadline = Instant::now() + self.opts.open_wait;
         let outcome = loop {
-            let fp = FileFp::read(&self.key);
-            match state.reopen(REOPEN_WAIT) {
-                Ok(()) => break Ok(fp),
+            let before = FileFp::read(&self.key);
+            match state.reopen(self.opts.reopen_wait) {
+                Ok(()) => break Ok(before),
                 Err(ReopenError::Running) | Err(ReopenError::InUse) => break Err(None),
                 Err(ReopenError::Poisoned) => break Err(Some("a request panicked".to_string())),
                 Err(ReopenError::Open(e))
@@ -870,12 +1031,12 @@ impl Server {
             }
         };
         match outcome {
-            Ok(fp) => {
+            Ok(before) => {
                 if let Some(why) = unservable(state) {
                     self.stop_blocked(why);
                     return;
                 }
-                self.set_fresh(fp);
+                self.set_fresh(before);
                 self.fail_graph.store(false, Ordering::Release);
                 self.stats.reloaded(why);
                 self.phase.advance(Phase::Reloading, Phase::Ready);
@@ -910,6 +1071,7 @@ impl Server {
         let _ = thread::Builder::new()
             .name("axil-prewarm".into())
             .spawn(move || {
+                let _busy = server.busy();
                 let started = Instant::now();
                 let (out, err, report) = cli_io::capture(ReqCtx::default(), || warm.db().prewarm());
                 drop(warm);
@@ -988,6 +1150,12 @@ impl Server {
         drop(warm);
         let idle = self.idle_for();
         let busy = self.in_flight.load(Ordering::Acquire) > 0;
+        let stale = self
+            .fresh
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .stale
+            .clone();
         json!({
             "op": "status",
             "state": self.phase.get().name(),
@@ -1009,6 +1177,7 @@ impl Server {
                 self.opts.idle_timeout.saturating_sub(idle).as_secs()
             },
             "in_flight": self.in_flight.load(Ordering::Acquire),
+            "stale": stale,
             "lease_holder": Value::Null,
             "abandoned_recalls": cli_io::RECALL_SLOTS.live(),
             "panics": u64::from(self.state.get().is_some_and(WarmState::poisoned)),
@@ -1165,6 +1334,7 @@ pub fn run_daemon(
     let opts = Options {
         idle_timeout,
         open_wait: Duration::from_secs(10),
+        reopen_wait: REOPEN_WAIT,
         launch_path,
         process: true,
     };
@@ -1198,6 +1368,7 @@ mod tests {
         Options {
             idle_timeout,
             open_wait: Duration::from_secs(5),
+            reopen_wait: REOPEN_WAIT,
             launch_path: None,
             process: false,
         }
@@ -1240,6 +1411,19 @@ mod tests {
         match outcome.reply {
             RunReply::Served { exit } => (outcome.stdout, outcome.stderr, exit),
             other => panic!("not served: {other:?}"),
+        }
+    }
+
+    fn unavailable(outcome: &RunOutcome) -> bool {
+        matches!(&outcome.reply, RunReply::NotServed { reason, .. } if reason == "unavailable")
+    }
+
+    /// Until the warm-up is done, so it holds nothing.
+    fn quiet(server: &Server) {
+        let deadline = Instant::now() + Duration::from_secs(120);
+        while server.stats.prewarm().is_none() || server.fresh.lock().unwrap().busy > 0 {
+            assert!(Instant::now() < deadline, "the warm-up did not finish");
+            thread::sleep(Duration::from_millis(10));
         }
     }
 
@@ -1422,6 +1606,106 @@ mod tests {
         );
         assert_eq!(server.phase.get(), Phase::Ready);
         stop(server);
+    }
+
+    /// A database replaced under a handle that requests still hold: the
+    /// reload is put off, and until one succeeds nothing runs on the old
+    /// handle, a write least of all, not even in the 250 ms a clean check
+    /// stands for. A request whose deadline passes while it waits is not
+    /// run. Once the old handle is let go, the write lands in the database
+    /// on disk.
+    #[test]
+    fn nothing_runs_on_a_handle_known_to_be_stale() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = build_fixture(tmp.path());
+        let db = proj.join(".axil/memory.axil");
+        let backup = proj.join(".axil/backup.axil");
+        fs::copy(&db, &backup).unwrap();
+        let opts = Options {
+            reopen_wait: Duration::from_millis(200),
+            ..options(Duration::from_secs(3600))
+        };
+        let server = start_with(&db, opts);
+        quiet(&server);
+        let cwd = proj.canonicalize().unwrap();
+        let reloads = || server.stats.reloads.load(Ordering::Acquire);
+
+        // A request still running on the old handle.
+        let held = server.state.get().unwrap().handle().unwrap();
+        fs::rename(&backup, &db).unwrap();
+        thread::sleep(FRESH_FOR + Duration::from_millis(50));
+        let data = json!({ "summary": "written while stale" }).to_string();
+        let store = ["store", "decisions", data.as_str()];
+        let first = send(&server, &store, &cwd, None);
+        assert!(unavailable(&first), "{first:?}");
+        let again = send(&server, &store, &cwd, None);
+        assert!(unavailable(&again), "{again:?}");
+        let read = send(&server, &["boot"], &cwd, None);
+        assert!(unavailable(&read), "{read:?}");
+        assert_eq!(reloads(), 0);
+
+        let mut header = Identity::current()
+            .unwrap()
+            .header(parity::argv(&store), &cwd, false);
+        header.env.clear();
+        header.deadline_ms = Some(epoch_ms() + 100);
+        let late = proto::run(server.run.socket(), &header, None, Duration::from_secs(30)).unwrap();
+        assert_eq!(late.reply, RunReply::Expired);
+
+        drop(held);
+        let (out, err, exit) = served(send(&server, &store, &cwd, None));
+        assert_eq!(exit, 0, "{}", String::from_utf8_lossy(&err));
+        assert_eq!(reloads(), 1);
+        let record: Value = serde_json::from_slice(&out).unwrap();
+        let id = axil_core::RecordId::from_string(record["id"].as_str().unwrap()).unwrap();
+        let warm = server.state.get().unwrap().handle().unwrap();
+        assert!(warm.db().get(&id).unwrap().is_some());
+        drop(warm);
+        stop(server);
+    }
+
+    /// A backup copied over the database in place, its inode kept: the
+    /// daemon serves nothing more and stops without closing the handle,
+    /// which would write its view of the file over the copy.
+    #[test]
+    fn a_store_written_in_place_is_left_unclosed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = build_fixture(tmp.path());
+        let db = proj.join(".axil/memory.axil");
+        let backup = fs::read(&db).unwrap();
+        let server = start(&db);
+        quiet(&server);
+        let cwd = proj.canonicalize().unwrap();
+        let data = json!({ "summary": "after the backup" }).to_string();
+        let (_, err, exit) = served(send(&server, &["store", "decisions", &data], &cwd, None));
+        assert_eq!(exit, 0, "{}", String::from_utf8_lossy(&err));
+        served(send(&server, &["boot"], &cwd, None));
+
+        {
+            use std::io::Write;
+            let mut file = OpenOptions::new()
+                .write(true)
+                .truncate(true)
+                .open(&db)
+                .unwrap();
+            file.write_all(&backup).unwrap();
+        }
+        thread::sleep(FRESH_FOR + Duration::from_millis(50));
+        let after = send(&server, &["boot"], &cwd, None);
+        assert!(unavailable(&after), "{after:?}");
+        let reason = server.serve();
+        assert!(
+            matches!(&reason, StopReason::Overwritten(why) if why.starts_with("the database")),
+            "{reason:?}"
+        );
+        assert_eq!(server.shutdown(&reason), Finish::Poisoned);
+        assert_eq!(
+            fs::read(&db).unwrap(),
+            backup,
+            "the copy is left as written"
+        );
+        // As the daemon process does: exit without dropping it.
+        std::mem::forget(server);
     }
 
     /// With every connection taken by clients that send nothing, `hello`

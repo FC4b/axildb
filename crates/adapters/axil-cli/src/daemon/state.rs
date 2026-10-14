@@ -276,15 +276,38 @@ impl Stats {
 /// `meta.json`'s: tantivy writes a new `meta.json` and renames it over the
 /// old one at every commit, so its inode changes with each write the handle
 /// makes. A rebuilt or restored index replaces the directory.
+///
+/// Apart from those, the size and modification time of each redb store
+/// ([`FileFp::content`]): a backup copied over a store in place keeps its
+/// inode. The handle's own writes change them too, so they are compared
+/// only while nothing runs on the handle, against what they were when the
+/// last work on it finished.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileFp {
     config: Option<(PathBuf, u64, i128)>,
     stores: Vec<(&'static str, Option<(u64, u64)>)>,
     plugins: Option<i128>,
+    content: Vec<(&'static str, Option<(u64, i128)>)>,
+}
+
+/// What changed in the files behind the open handle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Change {
+    /// A file was replaced, added, removed or edited without being written
+    /// through the handle: reopen the database.
+    Reload(String),
+    /// A store was written in place by someone else: the handle's view of
+    /// it is wrong, and closing the handle would write that view over it.
+    Overwritten(String),
 }
 
 /// The companion stores, by suffix.
 const STORES: &[&str] = &["", ".vec", ".graph", ".ts", ".fts"];
+
+/// The stores that are redb files, which a backup can be copied over in
+/// place. Not the full-text index: tantivy merges segments in the
+/// background, after the command that committed them is done.
+const REDB_STORES: &[&str] = &["", ".vec", ".graph", ".ts"];
 
 fn mtime_ns(meta: &std::fs::Metadata) -> i128 {
     i128::from(meta.mtime()) * 1_000_000_000 + i128::from(meta.mtime_nsec())
@@ -311,40 +334,74 @@ impl FileFp {
         let plugins = std::fs::metadata(dir.join("plugins"))
             .ok()
             .map(|m| mtime_ns(&m));
+        let content = REDB_STORES
+            .iter()
+            .map(|suffix| {
+                let path = axil_core::companion_path(key, suffix);
+                let stat = std::fs::metadata(path)
+                    .ok()
+                    .map(|m| (m.len(), mtime_ns(&m)));
+                (*suffix, stat)
+            })
+            .collect();
         FileFp {
             config,
             stores,
             plugins,
+            content,
         }
     }
 
-    /// What changed from `self` to `now`, in words; `None` when nothing.
-    pub fn changed(&self, now: &FileFp) -> Option<String> {
-        if self == now {
-            return None;
-        }
+    /// What changed from `self` to `now`; `None` when nothing. The stores'
+    /// contents are compared only when `content` is set.
+    pub fn changed(&self, now: &FileFp, content: bool) -> Option<Change> {
         if self.config != now.config {
-            return Some(match (&self.config, &now.config) {
+            return Some(Change::Reload(match (&self.config, &now.config) {
                 (_, Some((path, ..))) => format!("{} changed", path.display()),
                 (Some((path, ..)), None) => format!("{} was removed", path.display()),
                 (None, None) => unreachable!(),
-            });
+            }));
         }
         for ((suffix, was), (_, is)) in self.stores.iter().zip(&now.stores) {
             if was != is {
-                let name = if suffix.is_empty() {
-                    "the database"
-                } else {
-                    suffix
-                };
-                return Some(match (was, is) {
+                let name = store_name(suffix);
+                return Some(Change::Reload(match (was, is) {
                     (None, Some(_)) => format!("{name} appeared"),
                     (Some(_), None) => format!("{name} was removed"),
                     _ => format!("{name} was replaced"),
-                });
+                }));
             }
         }
-        Some("the plugins directory changed".to_string())
+        if self.plugins != now.plugins {
+            return Some(Change::Reload("the plugins directory changed".to_string()));
+        }
+        if !content {
+            return None;
+        }
+        self.content
+            .iter()
+            .zip(&now.content)
+            .find(|((_, was), (_, is))| was != is)
+            .map(|((suffix, _), _)| {
+                Change::Overwritten(format!(
+                    "{} was written in place by another process",
+                    store_name(suffix)
+                ))
+            })
+    }
+
+    /// Take the stores' contents from `now`: what the handle's own work
+    /// left them as.
+    pub fn absorb(&mut self, now: &FileFp) {
+        self.content = now.content.clone();
+    }
+}
+
+fn store_name(suffix: &str) -> &str {
+    if suffix.is_empty() {
+        "the database"
+    } else {
+        suffix
     }
 }
 
@@ -403,13 +460,25 @@ mod tests {
         std::fs::write(&key, b"db").unwrap();
         std::fs::create_dir(dir.join("memory.axil.fts")).unwrap();
         let base = FileFp::read(&key);
-        assert_eq!(base.changed(&FileFp::read(&key)), None);
+        assert_eq!(base.changed(&FileFp::read(&key), true), None);
+        let reload = |why: &str| Some(Change::Reload(why.to_string()));
 
         // Writing through the open file keeps its inode, as a handle's own
-        // writes do, and so does a commit inside the index directory.
+        // writes do, and so does a commit inside the index directory. The
+        // contents differ; they are compared only when asked.
         std::fs::write(&key, b"db, written").unwrap();
         std::fs::write(dir.join("memory.axil.fts/meta.json"), b"{}").unwrap();
-        assert_eq!(base.changed(&FileFp::read(&key)), None);
+        let written = FileFp::read(&key);
+        assert_eq!(base.changed(&written, false), None);
+        assert_eq!(
+            base.changed(&written, true),
+            Some(Change::Overwritten(
+                "the database was written in place by another process".into()
+            ))
+        );
+        let mut absorbed = base.clone();
+        absorbed.absorb(&written);
+        assert_eq!(absorbed.changed(&written, true), None);
 
         // A backup renamed over the database.
         let backup = dir.join("backup");
@@ -417,18 +486,19 @@ mod tests {
         std::fs::rename(&backup, &key).unwrap();
         let restored = FileFp::read(&key);
         assert_eq!(
-            base.changed(&restored).as_deref(),
-            Some("the database was replaced")
+            base.changed(&restored, false),
+            reload("the database was replaced")
         );
 
         // A store appearing; the config file.
         std::fs::write(dir.join("memory.axil.ts"), b"").unwrap();
         let with_ts = FileFp::read(&key);
-        assert_eq!(restored.changed(&with_ts).as_deref(), Some(".ts appeared"));
+        assert_eq!(restored.changed(&with_ts, true), reload(".ts appeared"));
         std::fs::write(tmp.path().join("axil.toml"), b"[engines]\n").unwrap();
         let configured = FileFp::read(&key);
-        assert!(with_ts
-            .changed(&configured)
-            .is_some_and(|why| why.ends_with("axil.toml changed")));
+        assert!(matches!(
+            with_ts.changed(&configured, false),
+            Some(Change::Reload(why)) if why.ends_with("axil.toml changed")
+        ));
     }
 }
