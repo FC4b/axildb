@@ -191,6 +191,22 @@ const CODE_LINE_STARTS: &[&str] = &[
     "use ",
 ];
 
+/// A finding the agent labeled as one: `Gotcha: ...`, `**Lesson learned:**`,
+/// a list item `- TIL: ...`.
+static FINDING_LABEL: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)^\s*(?:[-*]\s+)?(?:\*\*)?(?:gotcha|lessons?(?: learned)?|learned|til|key (?:insight|finding)|takeaway|note to self|for future reference)(?:\*\*)?\s*:",
+    )
+    .unwrap()
+});
+
+/// "It turns out ..." / "turned out that ..." reports a finding, unless the
+/// sentence is conditional ("if it turns out ...").
+static TURNS_OUT: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\b(?:(if|whether|unless|case)\s+)?(?:it\s+|this\s+|that\s+)?(?:turns out|turned out that)\b")
+        .unwrap()
+});
+
 /// Minimum line length for a capture summary. Below this, a match is
 /// almost certainly too short to be a useful knowledge entry.
 const MIN_SUMMARY_LEN: usize = 20;
@@ -289,7 +305,33 @@ pub fn analyze(text: &str, source: &str) -> Vec<CapturedKnowledge> {
         break;
     }
 
+    // Detect findings worth keeping as context.
+    let finding = lines
+        .iter()
+        .enumerate()
+        .find(|(i, l)| Some(*i) != claimed_line && !guards.is_guarded(l) && is_finding(l));
+    if let Some((_, line)) = finding {
+        let summary = line.trim();
+        if summary.len() >= MIN_SUMMARY_LEN {
+            captures.push(CapturedKnowledge {
+                capture_type: CaptureType::Context,
+                summary: truncate(summary, 200),
+                confidence: 0.8,
+                source: source.to_string(),
+            });
+        }
+    }
+
     captures
+}
+
+/// A line the agent wrote to record a finding: a labeled one, or "it turns
+/// out ..." outside a condition.
+fn is_finding(line: &str) -> bool {
+    if FINDING_LABEL.is_match(line) {
+        return true;
+    }
+    TURNS_OUT.captures_iter(line).any(|c| c.get(1).is_none())
 }
 
 /// What a text says about all of its lines: whether it prints a diff, and
@@ -825,6 +867,28 @@ mod tests {
                     -        return Err(\"connection refused by peer\".into())\n\
                     +        warn!(\"retrying after connection refused\")";
         assert!(errors_in(text).is_empty());
+    }
+
+    #[test]
+    fn a_labeled_finding_is_context() {
+        for text in [
+            "Gotcha: the hook runs in a fresh process, so the model loads on every call.",
+            "- **Lesson learned:** redb repairs the file on the first writable open.",
+            "It turns out the CI cache key ignores the lockfile, so bumps reuse stale builds.",
+        ] {
+            let captures = analyze(text, "agent");
+            assert_eq!(captures.len(), 1, "{text}: {captures:?}");
+            assert_eq!(captures[0].capture_type, CaptureType::Context, "{text}");
+            assert!(captures[0].confidence >= 0.8, "{text}");
+        }
+    }
+
+    #[test]
+    fn a_conditional_or_command_output_finding_is_not_context() {
+        let text = "If it turns out the cache is stale, I'll clear it and rerun the suite.";
+        assert!(analyze(text, "agent").is_empty());
+        let text = "Exit code 1\nGotcha: the hook runs in a fresh process every time it fires";
+        assert!(analyze(text, COMMAND_OUTPUT_SOURCE).is_empty());
     }
 
     #[test]
