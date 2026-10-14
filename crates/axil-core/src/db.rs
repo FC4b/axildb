@@ -1699,7 +1699,7 @@ impl Axil {
             if has_graph {
                 for record in &records {
                     if let Err(e) = self.auto_link(&record.id, None) {
-                        eprintln!("warning: auto-link failed for {}: {e}", record.id);
+                        crate::diagln!("warning: auto-link failed for {}: {e}", record.id);
                     }
                 }
             }
@@ -1850,21 +1850,21 @@ impl Axil {
                                         None => factory.remove_from_space(&self.path, &space, id),
                                     };
                                     if let Err(e) = result {
-                                        eprintln!(
+                                        crate::diagln!(
                                             "warning: vector space '{space}' cleanup failed \
                                              for {id}: {e}"
                                         );
                                     }
                                 }
                             }
-                            Err(_) => eprintln!(
+                            Err(_) => crate::diagln!(
                                 "warning: named-space delete cleanup skipped: \
                                  vector space cache lock poisoned"
                             ),
                         }
                     }
                     Err(e) => {
-                        eprintln!("warning: named-space delete cleanup skipped: {e}");
+                        crate::diagln!("warning: named-space delete cleanup skipped: {e}");
                     }
                 }
             }
@@ -1887,7 +1887,7 @@ impl Axil {
             // related-memory recall doesn't surface a tombstone.
             if !table_name.starts_with('_') {
                 if let Err(e) = crate::code_refs::drop_for_record(self, id) {
-                    eprintln!("warning: code_refs index cleanup failed for {id}: {e}");
+                    crate::diagln!("warning: code_refs index cleanup failed for {id}: {e}");
                 }
             }
 
@@ -3464,7 +3464,7 @@ impl Axil {
         match vi.remove_batch_if(&orphans, &is_orphan) {
             Ok(removed) => removed,
             Err(e) => {
-                eprintln!(
+                crate::diagln!(
                     "warning: removing {} orphaned vector(s) failed: {e}",
                     orphans.len()
                 );
@@ -3638,12 +3638,12 @@ impl Axil {
                 match self.open_or_create_space(&space, None) {
                     Ok(vi) if vi.skipped_at_load() > 0 => match vi.purge_unloadable() {
                         Ok(n) => purged += n,
-                        Err(e) => eprintln!(
+                        Err(e) => crate::diagln!(
                             "warning: vector space '{space}' purge of unloadable rows failed: {e}"
                         ),
                     },
                     Ok(_) => {}
-                    Err(e) => eprintln!(
+                    Err(e) => crate::diagln!(
                         "warning: could not open vector space '{space}' for repair: {e}"
                     ),
                 }
@@ -6444,7 +6444,7 @@ impl Axil {
                             &summary_record.id,
                             None,
                         ) {
-                            eprintln!("warning: failed to link source to consolidated: {e}");
+                            crate::diagln!("warning: failed to link source to consolidated: {e}");
                         }
                     }
                 }

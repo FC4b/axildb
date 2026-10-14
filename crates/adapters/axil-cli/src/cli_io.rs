@@ -950,6 +950,30 @@ pub(crate) mod tests {
         }
     }
 
+    /// The lines of `src` that use one of `banned` outside comments, string
+    /// literals and test modules.
+    fn uses_of(src: &str, banned: &[&str]) -> Vec<usize> {
+        let mut code = code_only(src);
+        without_test_modules(&mut code);
+        let mut lines = Vec::new();
+        for needle in banned {
+            let n = needle.as_bytes();
+            for (pos, w) in code.windows(n.len()).enumerate() {
+                // `eprintln!` holds `println!`, and `cli_io::stdout()` holds
+                // `io::stdout()`: only a match that starts a token counts.
+                let starts_token =
+                    pos == 0 || !(code[pos - 1].is_ascii_alphanumeric() || code[pos - 1] == b'_');
+                if w == n && starts_token {
+                    lines.push(src[..pos].matches('\n').count() + 1);
+                }
+            }
+        }
+        lines.sort_unstable();
+        lines
+    }
+
+    const PRINTS: [&str; 4] = ["println!", "print!", "eprintln!", "eprint!"];
+
     /// The commands, and the daemon that runs them in-process, print and
     /// read stdin only through this module. `hook_brain.rs` is exempt: the
     /// hook commands never run in-process.
@@ -960,37 +984,90 @@ pub(crate) mod tests {
             ("daemon/mod.rs", include_str!("daemon/mod.rs")),
             ("daemon/exec.rs", include_str!("daemon/exec.rs")),
         ];
+        let banned = [
+            &PRINTS[..],
+            &["io::stdout()", "io::stderr()", "io::stdin()"],
+        ]
+        .concat();
+        let found: Vec<String> = sources
+            .iter()
+            .flat_map(|(file, src)| {
+                uses_of(src, &banned)
+                    .into_iter()
+                    .map(move |l| format!("{file}:{l}"))
+            })
+            .collect();
+        assert!(
+            found.is_empty(),
+            "use the cli_io macros and helpers instead:\n{}",
+            found.join("\n")
+        );
+    }
+
+    /// The library crates print only through `axil_core::diagln!`, which a
+    /// host running commands in-process points at the request's stderr. The
+    /// exceptions print where no request is: recall's ranking (`query.rs`,
+    /// and `Axil::recall` in `db.rs`, which runs on recall workers too) and
+    /// the sink's own fallback. Adapters are left out: the CLI has the lint
+    /// above, and the MCP server and AxilQL print their protocol's output.
+    #[test]
+    fn the_libraries_print_only_through_the_diagnostic_sink() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let allowed = [
+            ("crates/axil-core/src/query.rs", 2),
+            ("crates/axil-core/src/db.rs", 1),
+            ("crates/axil-core/src/diag.rs", 1),
+        ];
+        let mut dirs = vec![
+            root.join("crates/axil-core/src"),
+            root.join("crates/axil-bundle/src"),
+            root.join("crates/adapters/axil-runtime/src"),
+        ];
+        for group in ["crates/engines", "crates/extensions"] {
+            for entry in std::fs::read_dir(root.join(group)).unwrap() {
+                dirs.push(entry.unwrap().path().join("src"));
+            }
+        }
+        let mut files = 0;
         let mut found = Vec::new();
-        for (file, src) in sources {
-            let mut code = code_only(src);
-            without_test_modules(&mut code);
-            let line_of = |pos: usize| src[..pos].matches('\n').count() + 1;
-            let banned = [
-                "println!",
-                "print!",
-                "eprintln!",
-                "eprint!",
-                "io::stdout()",
-                "io::stderr()",
-                "io::stdin()",
-            ];
-            for needle in banned {
-                let n = needle.as_bytes();
-                for (pos, w) in code.windows(n.len()).enumerate() {
-                    // `eprintln!` holds `println!`, and `cli_io::stdout()`
-                    // holds `io::stdout()`: only a match that starts a token
-                    // counts.
-                    let starts_token = pos == 0
-                        || !(code[pos - 1].is_ascii_alphanumeric() || code[pos - 1] == b'_');
-                    if w == n && starts_token {
-                        found.push(format!("{file}:{} {needle}", line_of(pos)));
-                    }
+        while let Some(dir) = dirs.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    dirs.push(path);
+                    continue;
+                }
+                if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                    continue;
+                }
+                files += 1;
+                let src = std::fs::read_to_string(&path).unwrap();
+                let file = path
+                    .strip_prefix(&root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                let lines = uses_of(&src, &PRINTS);
+                let allow = allowed
+                    .iter()
+                    .find(|(f, _)| *f == file)
+                    .map_or(0, |(_, n)| *n);
+                if lines.len() != allow {
+                    found.push(format!("{file}: lines {lines:?}, {allow} allowed"));
                 }
             }
         }
         assert!(
+            files > 100,
+            "read only {files} files under {}",
+            root.display()
+        );
+        assert!(
             found.is_empty(),
-            "use the cli_io macros and helpers instead:\n{}",
+            "print through axil_core::diagln! instead:\n{}",
             found.join("\n")
         );
     }

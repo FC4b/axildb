@@ -740,7 +740,7 @@ impl MaintenanceThread {
                         reports.push_back(report);
                     }
                     Err(e) => {
-                        eprintln!("maintenance worker error: {e}");
+                        crate::diagln!("maintenance worker error: {e}");
                     }
                 }
             }

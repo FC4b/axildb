@@ -217,14 +217,14 @@ pub fn ingest_scip_opts(db: &Axil, scip_path: &Path, opts: IngestOptions) -> Res
     let progress_interval = (total_docs / 20).max(50);
     let progress_enabled = total_docs >= 100 && !opts.dry_run;
     if progress_enabled {
-        eprintln!(
+        axil_core::diagln!(
             "axil ingest-scip: {total_docs} documents, {} symbols",
             report.symbol_count
         );
     }
     for (doc_idx, doc) in index.documents.iter().enumerate() {
         if progress_enabled && doc_idx > 0 && doc_idx % progress_interval == 0 {
-            eprintln!(
+            axil_core::diagln!(
                 "axil ingest-scip: {}/{} docs, {} entities, {} edges queued",
                 doc_idx,
                 total_docs,
@@ -436,7 +436,7 @@ pub fn ingest_scip_opts(db: &Axil, scip_path: &Path, opts: IngestOptions) -> Res
     // edge txn errors.
     if !opts.dry_run {
         if progress_enabled {
-            eprintln!(
+            axil_core::diagln!(
                 "axil ingest-scip: flushing {} entities, {} aliases, {} edges",
                 entity_buf.pending.len(),
                 alias_buf.pending.len(),
@@ -447,7 +447,7 @@ pub fn ingest_scip_opts(db: &Axil, scip_path: &Path, opts: IngestOptions) -> Res
         let pending = edge_buf.len();
         let written = edge_buf.flush(db)?;
         if progress_enabled {
-            eprintln!(
+            axil_core::diagln!(
                 "axil ingest-scip: wrote {written} new edges ({} dedup'd)",
                 pending.saturating_sub(written),
             );
