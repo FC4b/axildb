@@ -318,14 +318,18 @@ pub fn analyze(text: &str, source: &str) -> Vec<CapturedKnowledge> {
     }
     let text_lower = text.to_lowercase();
 
+    let lines: Vec<&str> = text.lines().collect();
+    let test_failure = has_test_failure(&lines, &text_lower);
+
     // Global negation: any of these phrases in the whole text kills the
     // capture. Cheaper than per-pattern handling and cuts the dominant
     // false-positive class (successful test output misclassified as error).
-    if CAPTURE_NEGATIONS.iter().any(|neg| text_lower.contains(neg)) {
+    // A failing test outranks them: a run of several test binaries prints
+    // `test result: ok. ... 0 failed` for the ones that passed.
+    if !test_failure && CAPTURE_NEGATIONS.iter().any(|neg| text_lower.contains(neg)) {
         return Vec::new();
     }
 
-    let lines: Vec<&str> = text.lines().collect();
     let guards = TextGuards::of(&lines, &text_lower);
     let mut captures = Vec::new();
     let mut claimed_line: Option<usize> = None;
@@ -337,24 +341,22 @@ pub fn analyze(text: &str, source: &str) -> Vec<CapturedKnowledge> {
         if !text_lower.contains(pattern) {
             continue;
         }
-        let Some((idx, line)) = lines
-            .iter()
-            .enumerate()
-            .find(|(_, l)| l.to_lowercase().contains(pattern) && !guards.is_guarded(l))
-        else {
+        // The first line where the pattern reads as a failure: a passing
+        // suite's `0 failed` line does not hide the failing test below it.
+        let Some((idx, line)) = lines.iter().enumerate().find(|(_, l)| {
+            let summary = l.trim();
+            l.to_lowercase().contains(pattern)
+                && !guards.is_guarded(l)
+                && summary.len() >= MIN_SUMMARY_LEN
+                && !is_pattern_false_positive(pattern, summary)
+        }) else {
             continue;
         };
         let summary = line.trim();
-        if summary.len() < MIN_SUMMARY_LEN {
-            continue;
-        }
-        if is_pattern_false_positive(pattern, summary) {
-            continue;
-        }
         captures.push(CapturedKnowledge {
             capture_type: CaptureType::Error,
             summary: truncate(summary, 200),
-            confidence: error_confidence(&text_lower, pattern),
+            confidence: error_confidence(&text_lower, pattern, test_failure),
             source: source.to_string(),
         });
         claimed_line = Some(idx);
@@ -498,6 +500,19 @@ fn is_finding(line: &str) -> bool {
         return true;
     }
     TURNS_OUT.captures_iter(line).any(|c| c.get(1).is_none())
+}
+
+/// A cargo or pytest run that reports a failed test: `test x ... FAILED`,
+/// `test result: FAILED`, cargo's `error: test failed`, pytest's
+/// `FAILED tests/x.py::name`.
+fn has_test_failure(lines: &[&str], text_lower: &str) -> bool {
+    text_lower.contains("test result: failed")
+        || text_lower.contains("error: test failed")
+        || lines.iter().any(|l| {
+            let l = l.trim();
+            (l.starts_with("test ") && l.ends_with(" ... FAILED"))
+                || (l.starts_with("FAILED ") && l.contains("::"))
+        })
 }
 
 /// What a text says about all of its lines: whether it prints a diff, and
@@ -731,8 +746,13 @@ pub fn capture_to_record(capture: &CapturedKnowledge) -> (String, Value) {
 }
 
 /// Confidence scoring for error detection.
-fn error_confidence(text: &str, pattern: &str) -> f32 {
+fn error_confidence(text: &str, pattern: &str, test_failure: bool) -> f32 {
     let mut conf = 0.6f32;
+
+    // A test runner reporting a failed test is as specific as a rustc code.
+    if test_failure {
+        conf += 0.2;
+    }
 
     // Higher confidence for specific error formats
     if text.contains("error[e") {
@@ -752,7 +772,7 @@ fn error_confidence(text: &str, pattern: &str) -> f32 {
     if pattern == "not found" && text.contains("no matches found") {
         conf -= 0.3;
     }
-    if pattern == "failed" && text.contains("0 failed") {
+    if pattern == "failed" && text.contains("0 failed") && !test_failure {
         conf -= 0.4;
     }
 
@@ -1048,6 +1068,20 @@ mod tests {
                     -        return Err(\"connection refused by peer\".into())\n\
                     +        warn!(\"retrying after connection refused\")";
         assert!(errors_in(text).is_empty());
+    }
+
+    #[test]
+    fn a_failing_test_beside_passing_suites_is_an_error() {
+        let text = "test result: ok. 9 passed; 0 failed; 0 ignored; finished in 27.87s\n\
+                    test db::tests::a_failed_batch_rescores_the_rest ... FAILED\n\
+                    test result: FAILED. 41 passed; 1 failed; 0 ignored";
+        let errors = errors_in(text);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(
+            errors[0].summary.starts_with("test db::tests::"),
+            "{errors:?}"
+        );
+        assert!(errors[0].confidence >= 0.8, "{errors:?}");
     }
 
     #[test]
