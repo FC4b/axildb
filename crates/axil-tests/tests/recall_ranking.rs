@@ -351,10 +351,16 @@ fn equal_scores_come_back_in_record_id_order() {
     expected.sort();
 
     // Recall gathers candidates in hash maps, whose order changes with every
-    // map, so twenty runs would show any tie left to that order.
+    // map, so twenty runs would show any tie left to that order. Without the
+    // query-time chunk rerank: it embeds each chunk under a header naming the
+    // record's table, so records in different tables no longer tie there.
     let query = "connection pool timeout";
+    let no_qtc = || RecallConfig {
+        qtc: None,
+        ..cli_config()
+    };
     for _ in 0..20 {
-        assert_eq!(ids(&db, query, 12, cli_config()), expected, "recall");
+        assert_eq!(ids(&db, query, 12, no_qtc()), expected, "recall");
         let fts: Vec<String> = db
             .search_text(query, 12)
             .unwrap()
@@ -373,7 +379,7 @@ fn equal_scores_come_back_in_record_id_order() {
         .unwrap();
     for _ in 0..20 {
         assert_eq!(
-            ids(&db, query, 12, cli_config()),
+            ids(&db, query, 12, no_qtc()),
             expected,
             "recall over full-text search only"
         );

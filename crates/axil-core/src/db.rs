@@ -7423,6 +7423,39 @@ fn parse_source_record_id(record: &Record) -> Option<RecordId> {
         .and_then(|s| RecordId::from_string(s).ok())
 }
 
+/// The line put before a piece of a record's text when the piece is
+/// embedded on its own (a recall unit, or a chunk the query-time rerank
+/// cuts): the record's table and date, and the files and entities it names.
+/// A piece cut out of a long record no longer says what the record is
+/// about or when it happened; the header says it again. The stored and
+/// FTS-indexed text stays the piece alone.
+fn recall_unit_header(record: &Record) -> String {
+    let mut header = format!(
+        "{}, {}",
+        record.table,
+        crate::temporal::record_time(record).format("%Y-%m-%d")
+    );
+    let names = |key: &str| -> Vec<&str> {
+        match record.data.get(key) {
+            Some(Value::String(one)) => vec![one.as_str()],
+            Some(Value::Array(many)) => many.iter().filter_map(Value::as_str).take(5).collect(),
+            _ => Vec::new(),
+        }
+    };
+    for (key, label) in [("files", "files"), ("file", "files"), ("entities", "entities")] {
+        let found = names(key);
+        if !found.is_empty() {
+            header.push_str(&format!("; {label}: {}", found.join(", ")));
+        }
+    }
+    header
+}
+
+/// A recall unit's text as it is embedded: [`recall_unit_header`] first.
+fn with_unit_header(header: &str, piece: &str) -> String {
+    format!("{header}\n{piece}")
+}
+
 fn recall_chunk_ids(record: &Record) -> Vec<RecordId> {
     record
         .metadata
@@ -7516,10 +7549,14 @@ impl Axil {
                 })
                 .collect();
 
+            let header = recall_unit_header(record);
             plans.push(RecordPlan {
                 source_idx,
                 chunk_records,
-                chunk_texts: chunks,
+                chunk_texts: chunks
+                    .iter()
+                    .map(|chunk| with_unit_header(&header, chunk))
+                    .collect(),
             });
         }
 
@@ -7648,7 +7685,12 @@ impl Axil {
 
         // Batch embed all chunks in one ONNX call.
         if has_vector {
-            let chunk_texts: Vec<&str> = chunks.iter().map(|s| s.as_str()).collect();
+            let header = recall_unit_header(record);
+            let embedded: Vec<String> = chunks
+                .iter()
+                .map(|chunk| with_unit_header(&header, chunk))
+                .collect();
+            let chunk_texts: Vec<&str> = embedded.iter().map(String::as_str).collect();
             if let (Ok(embedder), Ok(vi)) = (self.require_embedder(), self.require_vector_index()) {
                 let vectors = embedder.embed_batch(&chunk_texts).or_else(|_| {
                     chunk_texts
@@ -7812,8 +7854,15 @@ impl Axil {
             if record_chunks.is_empty() {
                 continue;
             }
+            // Headed like the stored units, so both kinds of window result
+            // are scored against the same kind of text.
+            let header = recall_unit_header(&result.record);
             let start = chunks.len();
-            chunks.extend(record_chunks);
+            chunks.extend(
+                record_chunks
+                    .iter()
+                    .map(|chunk| with_unit_header(&header, chunk)),
+            );
             pending.push((i, start..chunks.len()));
         }
         if pending.is_empty() {
@@ -9000,7 +9049,11 @@ mod tests {
         if text.trim().is_empty() {
             return before.score;
         }
-        let chunks = chunk_by_chars(&text, qtc.chunk_chars, qtc.stride_chars);
+        let header = recall_unit_header(&before.record);
+        let chunks: Vec<String> = chunk_by_chars(&text, qtc.chunk_chars, qtc.stride_chars)
+            .iter()
+            .map(|chunk| with_unit_header(&header, chunk))
+            .collect();
         let refs: Vec<&str> = chunks.iter().map(String::as_str).collect();
         let Ok(vectors) = embedder.embed_batch(&refs) else {
             return before.score;
@@ -9082,6 +9135,33 @@ mod tests {
                 got[i].score
             );
         }
+    }
+
+    #[test]
+    fn a_unit_header_says_what_the_record_is_and_when() {
+        let mut record = Record::new(
+            "decisions",
+            json!({
+                "summary": "x",
+                "files": ["src/db.rs", "src/util.rs"],
+                "entities": ["Axil", "QTC"],
+            }),
+        );
+        record.created_at = chrono::DateTime::parse_from_rfc3339("2026-03-12T09:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        assert_eq!(
+            recall_unit_header(&record),
+            "decisions, 2026-03-12; files: src/db.rs, src/util.rs; entities: Axil, QTC"
+        );
+        record.data["event_time"] = json!("2025-12-01");
+        record.data["files"] = json!(null);
+        record.data["file"] = json!("README.md");
+        assert_eq!(
+            recall_unit_header(&record),
+            "decisions, 2025-12-01; files: README.md; entities: Axil, QTC"
+        );
+        assert_eq!(with_unit_header("h", "piece"), "h\npiece");
     }
 
     #[test]
