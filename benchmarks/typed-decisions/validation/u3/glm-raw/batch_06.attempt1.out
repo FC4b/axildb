@@ -1,0 +1,25 @@
+[{"id": "b-101", "class": "rule", "importance": "high", "rule": "R1"},
+ {"id": "b-102", "class": "none", "importance": null, "rule": "N4"},
+ {"id": "b-103", "class": "error", "importance": "medium", "rule": "E2"},
+ {"id": "b-104", "class": "none", "importance": null, "rule": "N2"},
+ {"id": "b-105", "class": "none", "importance": null, "rule": "N2"},
+ {"id": "b-106", "class": "none", "importance": null, "rule": "N2"},
+ {"id": "b-107", "class": "none", "importance": null, "rule": "N5"},
+ {"id": "b-108", "class": "none", "importance": null, "rule": "N2"},
+ {"id": "b-109", "class": "error", "importance": "medium", "rule": "E2"},
+ {"id": "b-110", "class": "context", "importance": "medium", "rule": "C1"},
+ {"id": "b-111", "class": "none", "importance": null, "rule": "N3"},
+ {"id": "b-112", "class": "none", "importance": null, "rule": "N1"},
+ {"id": "b-113", "class": "decision", "importance": "medium", "rule": "D2"},
+ {"id": "b-114", "class": "decision", "importance": "medium", "rule": "D2"},
+ {"id": "b-115", "class": "none", "importance": null, "rule": "N2"},
+ {"id": "b-116", "class": "context", "importance": "high", "rule": "C1"},
+ {"id": "b-117", "class": "none", "importance": null, "rule": "N5"},
+ {"id": "b-118", "class": "none", "importance": null, "rule": "N5"},
+ {"id": "b-119", "class": "none", "importance": null, "rule": "N2"},
+ {"id": "b-120", "class": "error", "importance": "high", "rule": "E2"}]
+
+[stderr]
+[0m
+> build · glm-5.3
+[0m

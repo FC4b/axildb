@@ -1,0 +1,2342 @@
+{
+ "date": "2026-10-14",
+ "set": "benchmarks/typed-decisions/sets/u3_repo.jsonl",
+ "texts": "benchmarks/typed-decisions/sets/u3_texts.jsonl",
+ "guidelines": "benchmarks/typed-decisions/validation/u3-guidelines.md",
+ "scripts": [
+  "benchmarks/typed-decisions/repo_sets_u3.py",
+  "benchmarks/typed-decisions/relabel_u3.py",
+  "benchmarks/typed-decisions/adjudicate_u3.py"
+ ],
+ "items": 200,
+ "split": {
+  "test": 125,
+  "train": 75
+ },
+ "annotators": {
+  "claude": {
+   "model": "claude-opus-5-5 (Claude Code)",
+   "blind": false,
+   "note": "Written alongside the guidelines by the session that built the set, reading every item; the reference labels, as for U1/U2/U5.",
+   "file": "validation/u3/claude.jsonl",
+   "items": 200,
+   "by_class": {
+    "none": 145,
+    "context": 9,
+    "error": 35,
+    "decision": 6,
+    "rule": 5
+   },
+   "by_importance": {
+    "medium": 24,
+    "high": 19,
+    "low": 12
+   }
+  },
+  "glm": {
+   "model": "zai-coding-plan/glm-5.3 via OpenCode",
+   "blind": true,
+   "note": "Neutral ids (b-NNN) in shuffled order, batches of 20, guidelines plus item text only (relabel_u3.py); map in glm-map.json, raw output in glm-raw/.",
+   "file": "validation/u3/glm.jsonl",
+   "items": 200,
+   "by_class": {
+    "none": 132,
+    "context": 14,
+    "error": 40,
+    "decision": 9,
+    "rule": 5
+   },
+   "by_importance": {
+    "medium": 37,
+    "high": 20,
+    "low": 11
+   }
+  },
+  "gptoss": {
+   "model": "gpt-oss-120b-medium via agy (Antigravity CLI)",
+   "blind": true,
+   "note": "Same protocol, its own shuffled order; map in gptoss-map.json, raw output in gptoss-raw/. Stands in for Gemini, whose quota ran out after 39 items.",
+   "file": "validation/u3/gptoss.jsonl",
+   "items": 200,
+   "by_class": {
+    "none": 129,
+    "context": 28,
+    "error": 34,
+    "rule": 4,
+    "decision": 5
+   },
+   "by_importance": {
+    "medium": 26,
+    "low": 23,
+    "high": 22
+   }
+  },
+  "gemini": {
+   "model": "gemini-3.8-flash-high via agy (Antigravity CLI)",
+   "blind": true,
+   "vote": false,
+   "note": "Same protocol, its own shuffled order. Every call from batch 03 on returned RESOURCE_EXHAUSTED (individual quota, resets in about 162 h), so only batches 01 and 02 were labeled (39 items; batch 01 hit the 300 s print timeout with 19 of 20 answers). Reported for agreement on those items only; not a vote.",
+   "file": "validation/u3/gemini.jsonl",
+   "items": 39,
+   "by_class": {
+    "none": 28,
+    "error": 6,
+    "context": 3,
+    "decision": 2
+   },
+   "by_importance": {
+    "high": 3,
+    "medium": 7,
+    "low": 1
+   }
+  }
+ },
+ "gold_rule": "class = majority of Claude, GLM and gpt-oss; importance = majority bucket of the voters who gave a class other than none, low against high = medium; ties and overrides only by a named guideline rule, all logged below",
+ "codex_relabel": "pending: the Codex blind relabel used for U1/U2 was not run because the user paused Codex",
+ "gemini_relabel": "partial: 39 of 200 items before the Antigravity quota ran out (resets in about 162 h); gpt-oss-120b is the second external voter instead",
+ "class_splits": {
+  "unanimous": 154,
+  "2-1": 42,
+  "1-1-1": 4
+ },
+ "gold": {
+  "by_class": {
+   "none": 143,
+   "context": 11,
+   "error": 35,
+   "decision": 6,
+   "rule": 5
+  },
+  "by_importance": {
+   "medium": 29,
+   "high": 18,
+   "low": 10
+  },
+  "by_split_and_class": {
+   "train": {
+    "none": 56,
+    "error": 13,
+    "decision": 3,
+    "rule": 2,
+    "context": 1
+   },
+   "test": {
+    "none": 87,
+    "context": 10,
+    "error": 22,
+    "rule": 3,
+    "decision": 3
+   }
+  },
+  "by_source_and_class": {
+   "bash_failure": {
+    "none": 49,
+    "error": 7
+   },
+   "bash_output": {
+    "none": 28,
+    "error": 2
+   },
+   "agent_text": {
+    "none": 33,
+    "context": 10,
+    "error": 13
+   },
+   "agent_brief": {
+    "error": 5,
+    "none": 11,
+    "rule": 5,
+    "decision": 1
+   },
+   "commit_subject": {
+    "none": 22,
+    "decision": 5,
+    "error": 8,
+    "context": 1
+   }
+  }
+ },
+ "agreement_metric": "class: raw agreement and Cohen's kappa over the five classes; capture_vs_none: kappa over the binary store / do not store decision; importance: agreement, kappa and linear-weighted kappa over the items both annotators labeled with a class other than none",
+ "pairwise": {
+  "claude_vs_glm": {
+   "overall": {
+    "items": 200,
+    "class": {
+     "agree": 182,
+     "accuracy": 0.91,
+     "kappa": 0.813
+    },
+    "capture_vs_none": {
+     "agree": 183,
+     "kappa": 0.801
+    },
+    "importance_where_both_capture": {
+     "items": 53,
+     "agree": 42,
+     "accuracy": 0.792,
+     "kappa": 0.672,
+     "linear_weighted_kappa": 0.73
+    }
+   },
+   "per_source": {
+    "bash_failure": {
+     "items": 56,
+     "class": {
+      "agree": 51,
+      "accuracy": 0.911,
+      "kappa": 0.692
+     },
+     "capture_vs_none": {
+      "agree": 51,
+      "kappa": 0.688
+     },
+     "importance_where_both_capture": {
+      "items": 7,
+      "agree": 6,
+      "accuracy": 0.857,
+      "kappa": 0.0,
+      "linear_weighted_kappa": 0.0
+     }
+    },
+    "bash_output": {
+     "items": 30,
+     "class": {
+      "agree": 29,
+      "accuracy": 0.967,
+      "kappa": 0.783
+     },
+     "capture_vs_none": {
+      "agree": 29,
+      "kappa": 0.783
+     },
+     "importance_where_both_capture": {
+      "items": 2,
+      "agree": 1,
+      "accuracy": 0.5,
+      "kappa": 0.333,
+      "linear_weighted_kappa": 0.5
+     }
+    },
+    "agent_text": {
+     "items": 56,
+     "class": {
+      "agree": 50,
+      "accuracy": 0.893,
+      "kappa": 0.818
+     },
+     "capture_vs_none": {
+      "agree": 50,
+      "kappa": 0.782
+     },
+     "importance_where_both_capture": {
+      "items": 21,
+      "agree": 17,
+      "accuracy": 0.81,
+      "kappa": 0.65,
+      "linear_weighted_kappa": 0.674
+     }
+    },
+    "agent_brief": {
+     "items": 22,
+     "class": {
+      "agree": 20,
+      "accuracy": 0.909,
+      "kappa": 0.856
+     },
+     "capture_vs_none": {
+      "agree": 21,
+      "kappa": 0.909
+     },
+     "importance_where_both_capture": {
+      "items": 10,
+      "agree": 9,
+      "accuracy": 0.9,
+      "kappa": 0.783,
+      "linear_weighted_kappa": 0.783
+     }
+    },
+    "commit_subject": {
+     "items": 36,
+     "class": {
+      "agree": 32,
+      "accuracy": 0.889,
+      "kappa": 0.81
+     },
+     "capture_vs_none": {
+      "agree": 32,
+      "kappa": 0.774
+     },
+     "importance_where_both_capture": {
+      "items": 13,
+      "agree": 9,
+      "accuracy": 0.692,
+      "kappa": 0.366,
+      "linear_weighted_kappa": 0.422
+     }
+    }
+   }
+  },
+  "claude_vs_gptoss": {
+   "overall": {
+    "items": 200,
+    "class": {
+     "agree": 163,
+     "accuracy": 0.815,
+     "kappa": 0.626
+    },
+    "capture_vs_none": {
+     "agree": 170,
+     "kappa": 0.655
+    },
+    "importance_where_both_capture": {
+     "items": 48,
+     "agree": 31,
+     "accuracy": 0.646,
+     "kappa": 0.444,
+     "linear_weighted_kappa": 0.467
+    }
+   },
+   "per_source": {
+    "bash_failure": {
+     "items": 56,
+     "class": {
+      "agree": 46,
+      "accuracy": 0.821,
+      "kappa": 0.512
+     },
+     "capture_vs_none": {
+      "agree": 46,
+      "kappa": 0.494
+     },
+     "importance_where_both_capture": {
+      "items": 7,
+      "agree": 5,
+      "accuracy": 0.714,
+      "kappa": -0.167,
+      "linear_weighted_kappa": -0.167
+     }
+    },
+    "bash_output": {
+     "items": 30,
+     "class": {
+      "agree": 25,
+      "accuracy": 0.833,
+      "kappa": 0.242
+     },
+     "capture_vs_none": {
+      "agree": 25,
+      "kappa": 0.211
+     },
+     "importance_where_both_capture": {
+      "items": 1,
+      "agree": 1,
+      "accuracy": 1.0,
+      "kappa": null,
+      "linear_weighted_kappa": null
+     }
+    },
+    "agent_text": {
+     "items": 56,
+     "class": {
+      "agree": 45,
+      "accuracy": 0.804,
+      "kappa": 0.676
+     },
+     "capture_vs_none": {
+      "agree": 48,
+      "kappa": 0.714
+     },
+     "importance_where_both_capture": {
+      "items": 21,
+      "agree": 11,
+      "accuracy": 0.524,
+      "kappa": 0.202,
+      "linear_weighted_kappa": 0.176
+     }
+    },
+    "agent_brief": {
+     "items": 22,
+     "class": {
+      "agree": 17,
+      "accuracy": 0.773,
+      "kappa": 0.632
+     },
+     "capture_vs_none": {
+      "agree": 19,
+      "kappa": 0.727
+     },
+     "importance_where_both_capture": {
+      "items": 8,
+      "agree": 6,
+      "accuracy": 0.75,
+      "kappa": 0.0,
+      "linear_weighted_kappa": 0.0
+     }
+    },
+    "commit_subject": {
+     "items": 36,
+     "class": {
+      "agree": 30,
+      "accuracy": 0.833,
+      "kappa": 0.691
+     },
+     "capture_vs_none": {
+      "agree": 32,
+      "kappa": 0.759
+     },
+     "importance_where_both_capture": {
+      "items": 11,
+      "agree": 8,
+      "accuracy": 0.727,
+      "kappa": 0.389,
+      "linear_weighted_kappa": 0.241
+     }
+    }
+   }
+  },
+  "glm_vs_gptoss": {
+   "overall": {
+    "items": 200,
+    "class": {
+     "agree": 159,
+     "accuracy": 0.795,
+     "kappa": 0.612
+    },
+    "capture_vs_none": {
+     "agree": 169,
+     "kappa": 0.658
+    },
+    "importance_where_both_capture": {
+     "items": 54,
+     "agree": 34,
+     "accuracy": 0.63,
+     "kappa": 0.403,
+     "linear_weighted_kappa": 0.472
+    }
+   },
+   "per_source": {
+    "bash_failure": {
+     "items": 56,
+     "class": {
+      "agree": 45,
+      "accuracy": 0.804,
+      "kappa": 0.526
+     },
+     "capture_vs_none": {
+      "agree": 47,
+      "kappa": 0.586
+     },
+     "importance_where_both_capture": {
+      "items": 10,
+      "agree": 6,
+      "accuracy": 0.6,
+      "kappa": 0.167,
+      "linear_weighted_kappa": 0.355
+     }
+    },
+    "bash_output": {
+     "items": 30,
+     "class": {
+      "agree": 25,
+      "accuracy": 0.833,
+      "kappa": 0.324
+     },
+     "capture_vs_none": {
+      "agree": 26,
+      "kappa": 0.429
+     },
+     "importance_where_both_capture": {
+      "items": 2,
+      "agree": 1,
+      "accuracy": 0.5,
+      "kappa": 0.0,
+      "linear_weighted_kappa": 0.0
+     }
+    },
+    "agent_text": {
+     "items": 56,
+     "class": {
+      "agree": 45,
+      "accuracy": 0.804,
+      "kappa": 0.686
+     },
+     "capture_vs_none": {
+      "agree": 48,
+      "kappa": 0.714
+     },
+     "importance_where_both_capture": {
+      "items": 23,
+      "agree": 14,
+      "accuracy": 0.609,
+      "kappa": 0.324,
+      "linear_weighted_kappa": 0.335
+     }
+    },
+    "agent_brief": {
+     "items": 22,
+     "class": {
+      "agree": 16,
+      "accuracy": 0.727,
+      "kappa": 0.54
+     },
+     "capture_vs_none": {
+      "agree": 18,
+      "kappa": 0.627
+     },
+     "importance_where_both_capture": {
+      "items": 7,
+      "agree": 4,
+      "accuracy": 0.571,
+      "kappa": 0.0,
+      "linear_weighted_kappa": 0.0
+     }
+    },
+    "commit_subject": {
+     "items": 36,
+     "class": {
+      "agree": 28,
+      "accuracy": 0.778,
+      "kappa": 0.63
+     },
+     "capture_vs_none": {
+      "agree": 30,
+      "kappa": 0.661
+     },
+     "importance_where_both_capture": {
+      "items": 12,
+      "agree": 9,
+      "accuracy": 0.75,
+      "kappa": 0.28,
+      "linear_weighted_kappa": 0.308
+     }
+    }
+   }
+  }
+ },
+ "gemini_partial": {
+  "gemini_vs_claude": {
+   "items": 39,
+   "class": {
+    "agree": 36,
+    "accuracy": 0.923,
+    "kappa": 0.834
+   },
+   "capture_vs_none": {
+    "agree": 36,
+    "kappa": 0.815
+   },
+   "importance_where_both_capture": {
+    "items": 10,
+    "agree": 6,
+    "accuracy": 0.6,
+    "kappa": 0.286,
+    "linear_weighted_kappa": 0.375
+   }
+  },
+  "gemini_vs_glm": {
+   "items": 39,
+   "class": {
+    "agree": 35,
+    "accuracy": 0.897,
+    "kappa": 0.799
+   },
+   "capture_vs_none": {
+    "agree": 35,
+    "kappa": 0.772
+   },
+   "importance_where_both_capture": {
+    "items": 11,
+    "agree": 9,
+    "accuracy": 0.818,
+    "kappa": 0.656,
+    "linear_weighted_kappa": 0.694
+   }
+  },
+  "gemini_vs_gptoss": {
+   "items": 39,
+   "class": {
+    "agree": 34,
+    "accuracy": 0.872,
+    "kappa": 0.743
+   },
+   "capture_vs_none": {
+    "agree": 34,
+    "kappa": 0.708
+   },
+   "importance_where_both_capture": {
+    "items": 10,
+    "agree": 8,
+    "accuracy": 0.8,
+    "kappa": 0.661,
+    "linear_weighted_kappa": 0.559
+   }
+  }
+ },
+ "annotator_vs_gold": {
+  "claude": {
+   "items": 200,
+   "class": {
+    "agree": 196,
+    "accuracy": 0.98,
+    "kappa": 0.955
+   },
+   "capture_vs_none": {
+    "agree": 196,
+    "kappa": 0.95
+   },
+   "importance_where_both_capture": {
+    "items": 54,
+    "agree": 46,
+    "accuracy": 0.852,
+    "kappa": 0.766,
+    "linear_weighted_kappa": 0.806
+   }
+  },
+  "glm": {
+   "items": 200,
+   "class": {
+    "agree": 186,
+    "accuracy": 0.93,
+    "kappa": 0.856
+   },
+   "capture_vs_none": {
+    "agree": 187,
+    "kappa": 0.849
+   },
+   "importance_where_both_capture": {
+    "items": 56,
+    "agree": 51,
+    "accuracy": 0.911,
+    "kappa": 0.853,
+    "linear_weighted_kappa": 0.876
+   }
+  },
+  "gptoss": {
+   "items": 200,
+   "class": {
+    "agree": 167,
+    "accuracy": 0.835,
+    "kappa": 0.67
+   },
+   "capture_vs_none": {
+    "agree": 174,
+    "kappa": 0.703
+   },
+   "importance_where_both_capture": {
+    "items": 51,
+    "agree": 39,
+    "accuracy": 0.765,
+    "kappa": 0.623,
+    "linear_weighted_kappa": 0.659
+   }
+  },
+  "gemini": {
+   "items": 39,
+   "class": {
+    "agree": 36,
+    "accuracy": 0.923,
+    "kappa": 0.834
+   },
+   "capture_vs_none": {
+    "agree": 36,
+    "kappa": 0.815
+   },
+   "importance_where_both_capture": {
+    "items": 10,
+    "agree": 8,
+    "accuracy": 0.8,
+    "kappa": 0.643,
+    "linear_weighted_kappa": 0.688
+   }
+  }
+ },
+ "annotator_vs_gold_note": "Claude's labels are one of the three votes, so its agreement with the gold is not independent evidence.",
+ "overrides": [
+  {
+   "id": "u3-115",
+   "from": "context",
+   "to": "none",
+   "rule": "N2 (Normal output)",
+   "reason": "A failed shell call whose output is a stored memory record printed as JSON (`_importance`, `summary`, `type: howto`) and no failure line. N2 lists JSON rows and text printed for reading as normal output; storing it again would duplicate the record it prints. The same rule decides the printed commit messages in u3-157 and u3-172."
+  }
+ ],
+ "class_tiebreaks": [
+  {
+   "id": "u3-015",
+   "class": "none",
+   "rule": "N2 (Normal output)",
+   "reason": "`axil boot` output, exit 0: the open errors it lists are stored records printed for reading, not a failure of this command (votes none / error / context)."
+  },
+  {
+   "id": "u3-113",
+   "class": "error",
+   "rule": "E2 + 3.6 precedence",
+   "reason": "A brief listing review findings to fix: item 1 is a spec gap in the code (higher-priority rows dropped while lower ones show) and item 2 an observed defect (no Decisions section at the hook budget). E2 (a defect that exists) fits; R1 does not, since the \"must\" constrains the code, not later work; error outranks rule in 3.6 (votes error / rule / none)."
+  },
+  {
+   "id": "u3-157",
+   "class": "none",
+   "rule": "N2 + N4",
+   "reason": "A commit message printed by git for reading (N2) followed by zsh's `=== not found` (N4); nothing in the project failed (votes none / error / decision)."
+  },
+  {
+   "id": "u3-172",
+   "class": "none",
+   "rule": "N2 + N4",
+   "reason": "`git show` output of a commit (N2) followed by zsh's `===== not found` (N4), as in u3-157 (votes none / context / error)."
+  }
+ ],
+ "importance_tiebreaks": [
+  {
+   "id": "u3-045",
+   "importance": "medium",
+   "rule": "4 (medium otherwise)",
+   "reason": "A full test pass verifying one branch increment before its merge: a finding about one piece of work; no H test holds (it is not a project-wide verdict or baseline) and no L test (it is not transient noise). Votes high / medium."
+  },
+  {
+   "id": "u3-171",
+   "importance": "medium",
+   "rule": "4 (medium: a scoped design choice)",
+   "reason": "Routing the code-graph hint through extension_blocks is a scoped design choice; L2/L3 do not clearly hold. Votes low / medium."
+  },
+  {
+   "id": "u3-196",
+   "importance": "low",
+   "rule": "L3",
+   "reason": "A point-in-time health snapshot (build sha, record counts, an empty queue): a narrow fact that goes stale with the next session. Votes medium / low."
+  }
+ ],
+ "drops": [],
+ "disputed_items": [
+  {
+   "id": "u3-009",
+   "source": "bash_output",
+   "split": "train",
+   "class_votes": {
+    "claude": "none",
+    "glm": "none",
+    "gptoss": "context"
+   },
+   "importance_votes": {
+    "claude": null,
+    "glm": null,
+    "gptoss": "low"
+   },
+   "rules_cited": {
+    "claude": "N2",
+    "glm": "N5",
+    "gptoss": "C1"
+   },
+   "gold": {
+    "class": "none",
+    "importance": null
+   },
+   "text": "vec memory q11 decision True None [{'class': 'fallback', 'id': '01M3JSQ0785BRCVGQ83YCP5KZR', 'rank': 4}]\nvec memory q13 error True 1 [{'class': 'fallback', 'id': '01M3JSQ0785BRCVGQ83YCP5KZR', 'rank': 9}]\nvec memory q28 rule False 1 [{'class': 'fallback', 'id': '01M3H4BJHZKYQY2EG1SPVDKK29', 'rank': 1"
+  },
+  {
+   "id": "u3-011",
+   "source": "bash_output",
+   "split": "test",
+   "class_votes": {
+    "claude": "none",
+    "glm": "none",
+    "gptoss": "context"
+   },
+   "importance_votes": {
+    "claude": null,
+    "glm": null,
+    "gptoss": "medium"
+   },
+   "rules_cited": {
+    "claude": "N2",
+    "glm": "N2",
+    "gptoss": "C1"
+   },
+   "gold": {
+    "class": "none",
+    "importance": null
+   },
+   "text": "fn ranked_candidates(db: &Axil, question: &str) -> Result<Vec<(Record, f32)>> {\n    // Table-scoped similarity. The ANN index is not partitioned by table, so a\n    // global `similar_to` returns a fixed-size top-N in which a memory-heavy\n    // database's non-cache rows can fill every slot and crowd"
+  },
+  {
+   "id": "u3-015",
+   "source": "bash_output",
+   "split": "test",
+   "class_votes": {
+    "claude": "none",
+    "glm": "error",
+    "gptoss": "context"
+   },
+   "importance_votes": {
+    "claude": null,
+    "glm": "medium",
+    "gptoss": "medium"
+   },
+   "rules_cited": {
+    "claude": "N2",
+    "glm": "E2",
+    "gptoss": "C1"
+   },
+   "gold": {
+    "class": "none",
+    "importance": null
+   },
+   "note": "class tie broken by N2 (Normal output): `axil boot` output, exit 0: the open errors it lists are stored records printed for reading, not a failure of this command (votes none / error / context).",
+   "text": "3161\n=== Axil Boot Context ===\nINSTRUCTION: This database is your memory. Use `axil recall \"<topic>\"` for project questions. Do NOT read files or grep for status — query the DB first.\nRows read `id · age · status · summary`; `axil get <id>` expands one.\n\n## Resume Here\n[... 12 lines cut ...]\n\n## Ope"
+  },
+  {
+   "id": "u3-018",
+   "source": "bash_output",
+   "split": "test",
+   "class_votes": {
+    "claude": "none",
+    "glm": "none",
+    "gptoss": "context"
+   },
+   "importance_votes": {
+    "claude": null,
+    "glm": null,
+    "gptoss": "low"
+   },
+   "rules_cited": {
+    "claude": "N2",
+    "glm": "N2",
+    "gptoss": "C1"
+   },
+   "gold": {
+    "class": "none",
+    "importance": null
+   },
+   "text": "crates/adapters/axil-cli/src/main.rs\n1850:    Reembed {\n10475:                        let (reembedded, refts) =\n10476:                            db.reembed_missing().context(\"reembed missing failed\")?;\n10477:                        if reembedded > 0 || refts > 0 {\n10479:                            "
+  },
+  {
+   "id": "u3-030",
+   "source": "agent_text",
+   "split": "test",
+   "class_votes": {
+    "claude": "context",
+    "glm": "context",
+    "gptoss": "context"
+   },
+   "importance_votes": {
+    "claude": "medium",
+    "glm": "medium",
+    "gptoss": "low"
+   },
+   "rules_cited": {
+    "claude": "C1",
+    "glm": "C1",
+    "gptoss": "C1"
+   },
+   "gold": {
+    "class": "context",
+    "importance": "medium"
+   },
+   "text": "Jev's docs define the same three answer types as Laya, `choice`, `score` and `noul`, down to the unusual name \"noul\". So Laya is a direct open copy of Jev's interface. TypeSafe publishes no model size, architecture or self-hosting option."
+  },
+  {
+   "id": "u3-033",
+   "source": "bash_failure",
+   "split": "test",
+   "class_votes": {
+    "claude": "none",
+    "glm": "none",
+    "gptoss": "context"
+   },
+   "importance_votes": {
+    "claude": null,
+    "glm": null,
+    "gptoss": "medium"
+   },
+   "rules_cited": {
+    "claude": "N3",
+    "glm": "N3",
+    "gptoss": "C1"
+   },
+   "gold": {
+    "class": "none",
+    "importance": null
+   },
+   "text": "Exit code 1\n0\n1c1\n< //!CapturablestdioforCLIcommands.//!//!Everybyteacommandprintsandeverybyteitreadsfromstdingoes//!throughthismodule,soacommandcanrunin-processwithitsoutput//!collectedintobuffersinsteadoflandingontheprocess'sfds.//!//!Aone-shot`axil`runin…"
+  },
+  {
+   "id": "u3-038",
+   "source": "agent_text",
+   "split": "test",
+   "class_votes": {
+    "claude": "error",
+    "glm": "error",
+    "gptoss": "context"
+   },
+   "importance_votes": {
+    "claude": "high",
+    "glm": "high",
+    "gptoss": "medium"
+   },
+   "rules_cited": {
+    "claude": "E2",
+    "glm": "E2",
+    "gptoss": "C1"
+   },
+   "gold": {
+    "class": "error",
+    "importance": "high"
+   },
+   "text": "The fix is in: PR #36 merged as `b0a8221`, and CI on `main` passed. The release is still blocked on the crates.io token, so version 2.3.0 hasn't been published yet."
+  },
+  {
+   "id": "u3-045",
+   "source": "agent_text",
+   "split": "test",
+   "class_votes": {
+    "claude": "none",
+    "glm": "context",
+    "gptoss": "context"
+   },
+   "importance_votes": {
+    "claude": null,
+    "glm": "high",
+    "gptoss": "medium"
+   },
+   "rules_cited": {
+    "claude": "N1",
+    "glm": "C1",
+    "gptoss": "C1"
+   },
+   "gold": {
+    "class": "context",
+    "importance": "medium"
+   },
+   "importance_note": "4 (medium otherwise): A full test pass verifying one branch increment before its merge: a finding about one piece of work; no H test holds (it is not a project-wide verdict or baseline) and no L test (it is not transient noise). Votes high / medium.",
+   "text": "My rerun of the integration suite also passed: 590 passed, 0 failed, 12 ignored. So increment 1 is fully verified, and it's waiting on your OK for the slow-query gate before I merge it into `dev`."
+  },
+  {
+   "id": "u3-047",
+   "source": "bash_output",
+   "split": "test",
+   "class_votes": {
+    "claude": "error",
+    "glm": "error",
+    "gptoss": "error"
+   },
+   "importance_votes": {
+    "claude": "medium",
+    "glm": "high",
+    "gptoss": "medium"
+   },
+   "rules_cited": {
+    "claude": "E2",
+    "glm": "E2",
+    "gptoss": "E2"
+   },
+   "gold": {
+    "class": "error",
+    "importance": "medium"
+   },
+   "text": "## daemon increment 0\n\n- **[major] scripts/daemon-latency.sh:292** — The freshness-scan share is measured against the wrong denominator, and the conclusion drawn from it (that increment 8 is not needed) is wrong but has been saved to memory. The plan says increm…\n[... 2 lines cut ...]\n- **[minor] cr"
+  },
+  {
+   "id": "u3-053",
+   "source": "bash_output",
+   "split": "train",
+   "class_votes": {
+    "claude": "error",
+    "glm": "error",
+    "gptoss": "none"
+   },
+   "importance_votes": {
+    "claude": "low",
+    "glm": "low",
+    "gptoss": null
+   },
+   "rules_cited": {
+    "claude": "E1",
+    "glm": "E1",
+    "gptoss": "N4"
+   },
+   "gold": {
+    "class": "error",
+    "importance": "low"
+   },
+   "text": "ok\ntest result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 27.87s\nerror: unexpected argument 'hits_with_nothing' found\ntest db::tests::a_failed_batch_rescores_the_other_results_one_at_a_time ... FAILED\ntest db::tests::query_time_chunks_are_embedded_in_one_call_with_th"
+  },
+  {
+   "id": "u3-054",
+   "source": "agent_text",
+   "split": "test",
+   "class_votes": {
+    "claude": "none",
+    "glm": "none",
+    "gptoss": "context"
+   },
+   "importance_votes": {
+    "claude": null,
+    "glm": null,
+    "gptoss": "low"
+   },
+   "rules_cited": {
+    "claude": "N1",
+    "glm": "N1",
+    "gptoss": "C1"
+   },
+   "gold": {
+    "class": "none",
+    "importance": null
+   },
+   "text": "None of the 6 show up in `boot` any more, and the `resolves` edge is in place. Next I'll check the other 5 edges and update the task docs."
+  },
+  {
+   "id": "u3-055",
+   "source": "agent_text",
+   "split": "train",
+   "class_votes": {
+    "claude": "decision",
+    "glm": "none",
+    "gptoss": "none"
+   },
+   "importance_votes": {
+    "claude": "medium",
+    "glm": null,
+    "gptoss": null
+   },
+   "rules_cited": {
+    "claude": "D1",
+    "glm": "N1",
+    "gptoss": "N1"
+   },
+   "gold": {
+    "class": "none",
+    "importance": null
+   },
+   "text": "Good idea: independent labelers make the answer key much more trustworthy. I'll run it **blind**: both models get the pairs with the same definitions but **without my answers**, so they aren't nudged toward agreeing with me. Then I'll compare all three sets of labels and list every disagreement."
+  },
+  {
+   "id": "u3-068",
+   "source": "agent_text",
+   "split": "test",
+   "class_votes": {
+    "claude": "none",
+    "glm": "context",
+    "gptoss": "none"
+   },
+   "importance_votes": {
+    "claude": null,
+    "glm": "medium",
+    "gptoss": null
+   },
+   "rules_cited": {
+    "claude": "N2",
+    "glm": "C1",
+    "gptoss": "N2"
+   },
+   "gold": {
+    "class": "none",
+    "importance": null
+   },
+   "text": "| Run | Result |\n  |---|---|\n  | `axil-memory` unit tests | 94 pass |\n  | `axil-cache` unit tests | 40 pass |\n  | `memory_cross` | 9 pass |\n  | new `memory_agent_scope` | 4 pass |\n  | other memory-related `axil-tests` suites | all pass |\n  | `cargo check -p axildb -p axil-mcp` | compiles |"
+  },
+  {
+   "id": "u3-071",
+   "source": "commit_subject",
+   "split": "train",
+   "class_votes": {
+    "claude": "decision",
+    "glm": "decision",
+    "gptoss": "context"
+   },
+   "importance_votes": {
+    "claude": "medium",
+    "glm": "medium",
+    "gptoss": "medium"
+   },
+   "rules_cited": {
+    "claude": "D2",
+    "glm": "D2",
+    "gptoss": "C1"
+   },
+   "gold": {
+    "class": "decision",
+    "importance": "medium"
+   },
+   "text": "bench(vector): nomic stays unprompted; its prompts still lose with the relevance window"
+  },
+  {
+   "id": "u3-073",
+   "source": "bash_failure",
+   "split": "test",
+   "class_votes": {
+    "claude": "none",
+    "glm": "none",
+    "gptoss": "error"
+   },
+   "importance_votes": {
+    "claude": null,
+    "glm": null,
+    "gptoss": "low"
+   },
+   "rules_cited": {
+    "claude": "N2",
+    "glm": "N2",
+    "gptoss": "E1"
+   },
+   "gold": {
+    "class": "none",
+    "importance": null
+   },
+   "text": "Exit code 1\ncrates/extensions/axil-indexer/src/rerank.rs:7://! Default model: `cross-encoder/ms-marco-MiniLM-L-6-v2` (~22MB ONNX).\ncrates/extensions/axil-indexer/src/rerank.rs:33:    /// BERT-family models (MS-MARCO MiniLM) do; RoBERTa-family (BGE reranker,\ncrates/extensions/axil-indexer/src/rerank."
+  },
+  {
+   "id": "u3-075",
+   "source": "agent_brief",
+   "split": "test",
+   "class_votes": {
+    "claude": "rule",
+    "glm": "rule",
+    "gptoss": "none"
+   },
+   "importance_votes": {
+    "claude": "high",
+    "glm": "high",
+    "gptoss": null
+   },
+   "rules_cited": {
+    "claude": "R1",
+    "glm": "R1",
+    "gptoss": "N6"
+   },
+   "gold": {
+    "class": "rule",
+    "importance": "high"
+   },
+   "text": "Read $SCRATCH/briefs/AGENT-RULES.md first and follow it (never git stash; long commands — cargo test, axil-tests, evals, release builds — in the background with a log in your own scratch dir, polled in short calls; make wait loops match the exact marker your command writes; the full axil-tests suite"
+  },
+  {
+   "id": "u3-080",
+   "source": "agent_text",
+   "split": "test",
+   "class_votes": {
+    "claude": "error",
+    "glm": "error",
+    "gptoss": "context"
+   },
+   "importance_votes": {
+    "claude": "medium",
+    "glm": "medium",
+    "gptoss": "medium"
+   },
+   "rules_cited": {
+    "claude": "E2",
+    "glm": "E2",
+    "gptoss": "C1"
+   },
+   "gold": {
+    "class": "error",
+    "importance": "medium"
+   },
+   "gemini": {
+    "class": "none",
+    "importance": null
+   },
+   "text": "Nomic's context is 8,192 tokens, and this machine has 16 GB of RAM. A batch of long LongMemEval sessions padded to that length runs it out of memory. Checking how batches are sized:"
+  },
+  {
+   "id": "u3-081",
+   "source": "bash_failure",
+   "split": "test",
+   "class_votes": {
+    "claude": "none",
+    "glm": "error",
+    "gptoss": "none"
+   },
+   "importance_votes": {
+    "claude": null,
+    "glm": "low",
+    "gptoss": null
+   },
+   "rules_cited": {
+    "claude": "N4",
+    "glm": "E1",
+    "gptoss": "N4"
+   },
+   "gold": {
+    "class": "none",
+    "importance": null
+   },
+   "text": "Exit code 128\nfatal: 'feat/phase-28-graph-adjacency' is already checked out at '~/Documents/GitHub/axil-project/axildb/.claude/worktrees/wf_4080746e-efd-1'"
+  },
+  {
+   "id": "u3-082",
+   "source": "agent_text",
+   "split": "test",
+   "class_votes": {
+    "claude": "error",
+    "glm": "error",
+    "gptoss": "error"
+   },
+   "importance_votes": {
+    "claude": "low",
+    "glm": "medium",
+    "gptoss": "high"
+   },
+   "rules_cited": {
+    "claude": "E2",
+    "glm": "E2",
+    "gptoss": "E2"
+   },
+   "gold": {
+    "class": "error",
+    "importance": "medium"
+   },
+   "importance_note": "ordinal median (low against high)",
+   "text": "Every store failed: the shared reason text contains unescaped double quotes, which broke the JSON. I'll check that nothing half-written landed, then redo the stores with JSON built in Python."
+  },
+  {
+   "id": "u3-083",
+   "source": "agent_brief",
+   "split": "test",
+   "class_votes": {
+    "claude": "error",
+    "glm": "error",
+    "gptoss": "error"
+   },
+   "importance_votes": {
+    "claude": "medium",
+    "glm": "medium",
+    "gptoss": "high"
+   },
+   "rules_cited": {
+    "claude": "E2",
+    "glm": "E2",
+    "gptoss": "E2"
+   },
+   "gold": {
+    "class": "error",
+    "importance": "medium"
+   },
+   "gemini": {
+    "class": "error",
+    "importance": "medium"
+   },
+   "text": "C11. crates/extensions/axil-sync/src/select.rs ~145 (pre-existing): `record_importance` relies on stored `_effective_importance`, but decay became lazy (the worker's `run_decay` pass was removed), so that field is only refreshed by manual `axil decay`. Sync selection uses frozen/undecayed importance"
+  },
+  {
+   "id": "u3-084",
+   "source": "commit_subject",
+   "split": "train",
+   "class_votes": {
+    "claude": "error",
+    "glm": "error",
+    "gptoss": "none"
+   },
+   "importance_votes": {
+    "claude": "medium",
+    "glm": "medium",
+    "gptoss": null
+   },
+   "rules_cited": {
+    "claude": "E3",
+    "glm": "E3",
+    "gptoss": "N5"
+   },
+   "gold": {
+    "class": "error",
+    "importance": "medium"
+   },
+   "text": "fix(vector): adaptive HNSW search ef to hold recall@10 at scale"
+  },
+  {
+   "id": "u3-092",
+   "source": "agent_text",
+   "split": "train",
+   "class_votes": {
+    "claude": "context",
+    "glm": "context",
+    "gptoss": "context"
+   },
+   "importance_votes": {
+    "claude": "medium",
+    "glm": "medium",
+    "gptoss": "low"
+   },
+   "rules_cited": {
+    "claude": "C1",
+    "glm": "C1",
+    "gptoss": "C1"
+   },
+   "gold": {
+    "class": "context",
+    "importance": "medium"
+   },
+   "gemini": {
+    "class": "context",
+    "importance": "high"
+   },
+   "text": "- **`main`** (`592f34c`): CI passed, no open PRs, nothing waiting for approval, and no failed or cancelled runs since this morning's fixes.\n- **Release:** `axildb` 2.3.1 is on crates.io, and its GitHub Release has all 5 platform downloads. The whole pipeline now runs by itself.\n- **Older releases:**"
+  },
+  {
+   "id": "u3-093",
+   "source": "bash_failure",
+   "split": "test",
+   "class_votes": {
+    "claude": "none",
+    "glm": "none",
+    "gptoss": "error"
+   },
+   "importance_votes": {
+    "claude": null,
+    "glm": null,
+    "gptoss": "low"
+   },
+   "rules_cited": {
+    "claude": "N4",
+    "glm": "N4",
+    "gptoss": "E1"
+   },
+   "gold": {
+    "class": "none",
+    "importance": null
+   },
+   "text": "Exit code 2\n        let embedder = self.require_embedder()?;\n        let vector = embedder.embed(text)?;\n        vi.add(id.clone(), &vector)?;\n        Ok(())\n    }\n\n    /// Embed arbitrary text into a vector using the configured embedder.\n    ///\n    /// Unlike [`Axil::embed_text`] (which embeds *an"
+  },
+  {
+   "id": "u3-096",
+   "source": "agent_brief",
+   "split": "test",
+   "class_votes": {
+    "claude": "rule",
+    "glm": "rule",
+    "gptoss": "none"
+   },
+   "importance_votes": {
+    "claude": "high",
+    "glm": "high",
+    "gptoss": null
+   },
+   "rules_cited": {
+    "claude": "R1",
+    "glm": "R1",
+    "gptoss": "N6"
+   },
+   "gold": {
+    "class": "rule",
+    "importance": "high"
+   },
+   "text": "Read $SCRATCH/briefs/AGENT-RULES.md first and follow it (note: never use git stash)."
+  },
+  {
+   "id": "u3-099",
+   "source": "bash_failure",
+   "split": "test",
+   "class_votes": {
+    "claude": "none",
+    "glm": "none",
+    "gptoss": "context"
+   },
+   "importance_votes": {
+    "claude": null,
+    "glm": null,
+    "gptoss": "low"
+   },
+   "rules_cited": {
+    "claude": "N4",
+    "glm": "N4",
+    "gptoss": "C1"
+   },
+   "gold": {
+    "class": "none",
+    "importance": null
+   },
+   "text": "Exit code 1\nPure Rust on [candle](https://github.com/huggingface/candle) — no Python, no torch, no ONNX\nexport step. Runs on CPU, Metal, or CUDA.\ncargo build --release                       # CPU, library + laya CLI\ncargo build --release --features metal     # Apple GPU\nbit-exact agreement between a"
+  },
+  {
+   "id": "u3-100",
+   "source": "agent_brief",
+   "split": "train",
+   "class_votes": {
+    "claude": "rule",
+    "glm": "none",
+    "gptoss": "rule"
+   },
+   "importance_votes": {
+    "claude": "high",
+    "glm": null,
+    "gptoss": "high"
+   },
+   "rules_cited": {
+    "claude": "R1",
+    "glm": "N6",
+    "gptoss": "R1"
+   },
+   "gold": {
+    "class": "rule",
+    "importance": "high"
+   },
+   "text": "Worktree: $SCRATCH/wt/rc (branch review/recall-core, based on dev 4f7e5f3). This branch is FOR THE USER'S REVIEW: it changes recall ranking, so every item must carry same-day, same-snapshot measurements, and it will not be merged without the user. Work through these items in order, one commit series"
+  },
+  {
+   "id": "u3-103",
+   "source": "bash_failure",
+   "split": "test",
+   "class_votes": {
+    "claude": "error",
+    "glm": "error",
+    "gptoss": "error"
+   },
+   "importance_votes": {
+    "claude": "medium",
+    "glm": "low",
+    "gptoss": "low"
+   },
+   "rules_cited": {
+    "claude": "E1",
+    "glm": "E1",
+    "gptoss": "E1"
+   },
+   "gold": {
+    "class": "error",
+    "importance": "low"
+   },
+   "text": "Exit code 1\n== epipe_recall exit 1 (old 1)\n[axil-vector] CPU execution provider (no GPU feature compiled in)\n\nthread 'axil-main' (3258474) panicked at library/std/src/io/stdio.rs:1165:9:\nfailed printing to stdout: Broken pipe (os error 32)\nnote: run with `RUST_BACKTRACE=1` environment variable to di"
+  },
+  {
+   "id": "u3-105",
+   "source": "agent_text",
+   "split": "train",
+   "class_votes": {
+    "claude": "error",
+    "glm": "error",
+    "gptoss": "error"
+   },
+   "importance_votes": {
+    "claude": "low",
+    "glm": "medium",
+    "gptoss": "medium"
+   },
+   "rules_cited": {
+    "claude": "E2",
+    "glm": "E2",
+    "gptoss": "E2"
+   },
+   "gold": {
+    "class": "error",
+    "importance": "medium"
+   },
+   "text": "**Tests:**\n- **Passing:** the axil-core tests (446 passed, 1 ignored), `cargo check` on the whole workspace, and formatting on the changed files. Clippy shows no warnings in the changed code. The measurement example has no tests of its own.\n- **One failure:** a vector-index test, `incremental_graph_"
+  },
+  {
+   "id": "u3-109",
+   "source": "bash_failure",
+   "split": "test",
+   "class_votes": {
+    "claude": "none",
+    "glm": "none",
+    "gptoss": "error"
+   },
+   "importance_votes": {
+    "claude": null,
+    "glm": null,
+    "gptoss": "low"
+   },
+   "rules_cited": {
+    "claude": "N4",
+    "glm": "N4",
+    "gptoss": "E1"
+   },
+   "gold": {
+    "class": "none",
+    "importance": null
+   },
+   "text": "Exit code 1\n        // Concatenate text from all configured fields into one string,\n        // then produce a single embedding per record. This avoids\n        // overwriting earlier fields when multiple are configured.\n        let mut parts = Vec::new();\n        for field in &self.config.auto_embed_"
+  },
+  {
+   "id": "u3-110",
+   "source": "agent_brief",
+   "split": "train",
+   "class_votes": {
+    "claude": "error",
+    "glm": "error",
+    "gptoss": "rule"
+   },
+   "importance_votes": {
+    "claude": "high",
+    "glm": "high",
+    "gptoss": "high"
+   },
+   "rules_cited": {
+    "claude": "E2",
+    "glm": "E2",
+    "gptoss": "R1"
+   },
+   "gold": {
+    "class": "error",
+    "importance": "high"
+   },
+   "text": "C2. crates/axil-core/src/config.rs ~241 `lifecycle_from_toml`: any parse error in `[lifecycle]` (e.g. `[lifecycle.tables.autopsies] compact = \"Never\"` capitalized; `supersede = \"false\"` as a string) goes through `.ok()` and becomes `LifecycleConfig::default()` silently, while `load_config_from` stil"
+  },
+  {
+   "id": "u3-113",
+   "source": "agent_brief",
+   "split": "train",
+   "class_votes": {
+    "claude": "error",
+    "glm": "rule",
+    "gptoss": "none"
+   },
+   "importance_votes": {
+    "claude": "medium",
+    "glm": "medium",
+    "gptoss": null
+   },
+   "rules_cited": {
+    "claude": "E2",
+    "glm": "R1",
+    "gptoss": "N6"
+   },
+   "gold": {
+    "class": "error",
+    "importance": "medium"
+   },
+   "note": "class tie broken by E2 + 3.6 precedence: A brief listing review findings to fix: item 1 is a spec gap in the code (higher-priority rows dropped while lower ones show) and item 2 an observed defect (no Decisions section at the hook budget). E2 (a defect that exists) fits; R1 does not, since the \"must\" constrains the code, not later work; error outranks rule in 3.6 (votes error / rule / none).",
+   "text": "Fix every minor finding and spec gap in the review:\n1. Priority fill must be strict: a higher-priority row (pinned rules, open errors) must never be dropped while lower-priority rows (decisions, sessions, confidence_notes) are shown. Same for the v1 path.\n2. At the production SessionStart hook budge"
+  },
+  {
+   "id": "u3-114",
+   "source": "agent_text",
+   "split": "test",
+   "class_votes": {
+    "claude": "none",
+    "glm": "none",
+    "gptoss": "context"
+   },
+   "importance_votes": {
+    "claude": null,
+    "glm": null,
+    "gptoss": "low"
+   },
+   "rules_cited": {
+    "claude": "N1",
+    "glm": "N1",
+    "gptoss": "C1"
+   },
+   "gold": {
+    "class": "none",
+    "importance": null
+   },
+   "text": "The script stashes the working tree while it builds the \"before\" binary, which would clash with edits I make meanwhile. Switching to a separate worktree of `dev` for that build:"
+  },
+  {
+   "id": "u3-115",
+   "source": "bash_failure",
+   "split": "train",
+   "class_votes": {
+    "claude": "none",
+    "glm": "context",
+    "gptoss": "context"
+   },
+   "importance_votes": {
+    "claude": null,
+    "glm": "medium",
+    "gptoss": "high"
+   },
+   "rules_cited": {
+    "claude": "N2",
+    "glm": "C1",
+    "gptoss": "C1"
+   },
+   "gold": {
+    "class": "none",
+    "importance": null
+   },
+   "note": "majority context overridden by N2 (Normal output): A failed shell call whose output is a stored memory record printed as JSON (`_importance`, `summary`, `type: howto`) and no failure line. N2 lists JSON rows and text printed for reading as normal output; storing it again would duplicate the record it prints. The same rule decides the printed commit messages in u3-157 and u3-172.",
+   "text": "Exit code 1\n{\n \"_effective_importance\": 0.6499996781349182,\n \"_importance\": 0.6499999761581421,\n \"files\": [],\n \"summary\": \"Parallel multi-agent fixes in this repo: one git worktree per agent (git worktree add -b fix/x <scratch>/wt/x dev) plus an APFS copy-on-write clone of the build cache (cp -c -R "
+  },
+  {
+   "id": "u3-118",
+   "source": "commit_subject",
+   "split": "test",
+   "class_votes": {
+    "claude": "context",
+    "glm": "context",
+    "gptoss": "context"
+   },
+   "importance_votes": {
+    "claude": "low",
+    "glm": "low",
+    "gptoss": "medium"
+   },
+   "rules_cited": {
+    "claude": "C2",
+    "glm": "C2",
+    "gptoss": "C2"
+   },
+   "gold": {
+    "class": "context",
+    "importance": "low"
+   },
+   "gemini": {
+    "class": "context",
+    "importance": "medium"
+   },
+   "text": "docs(mcp): recall_delta resumes from next_cursor"
+  },
+  {
+   "id": "u3-119",
+   "source": "commit_subject",
+   "split": "train",
+   "class_votes": {
+    "claude": "none",
+    "glm": "decision",
+    "gptoss": "decision"
+   },
+   "importance_votes": {
+    "claude": null,
+    "glm": "medium",
+    "gptoss": "medium"
+   },
+   "rules_cited": {
+    "claude": "C2",
+    "glm": "D2",
+    "gptoss": "D2"
+   },
+   "gold": {
+    "class": "decision",
+    "importance": "medium"
+   },
+   "text": "refactor: retire the dead axil-rerank crate (12.4)"
+  },
+  {
+   "id": "u3-122",
+   "source": "agent_brief",
+   "split": "test",
+   "class_votes": {
+    "claude": "error",
+    "glm": "error",
+    "gptoss": "context"
+   },
+   "importance_votes": {
+    "claude": "medium",
+    "glm": "medium",
+    "gptoss": "high"
+   },
+   "rules_cited": {
+    "claude": "E2",
+    "glm": "E2",
+    "gptoss": "C1"
+   },
+   "gold": {
+    "class": "error",
+    "importance": "medium"
+   },
+   "text": "L5. crates/adapters/axil-cli/build.rs ~19: `rerun-if-changed` points at a file that does not exist, so Cargo treats the build script as dirty on every build and recompiles the whole `axildb` crate every `cargo build/test/clippy` and every CI job (reviewer reproduced with a minimal crate: \"Dirty ... "
+  },
+  {
+   "id": "u3-129",
+   "source": "commit_subject",
+   "split": "train",
+   "class_votes": {
+    "claude": "decision",
+    "glm": "decision",
+    "gptoss": "decision"
+   },
+   "importance_votes": {
+    "claude": "high",
+    "glm": "medium",
+    "gptoss": "medium"
+   },
+   "rules_cited": {
+    "claude": "D2",
+    "glm": "D2",
+    "gptoss": "D2"
+   },
+   "gold": {
+    "class": "decision",
+    "importance": "medium"
+   },
+   "gemini": {
+    "class": "decision",
+    "importance": "medium"
+   },
+   "text": "perf(vector): scan exactly instead of building the graph in every process"
+  },
+  {
+   "id": "u3-130",
+   "source": "commit_subject",
+   "split": "train",
+   "class_votes": {
+    "claude": "none",
+    "glm": "error",
+    "gptoss": "none"
+   },
+   "importance_votes": {
+    "claude": null,
+    "glm": "medium",
+    "gptoss": null
+   },
+   "rules_cited": {
+    "claude": "N5",
+    "glm": "E3",
+    "gptoss": "N5"
+   },
+   "gold": {
+    "class": "none",
+    "importance": null
+   },
+   "gemini": {
+    "class": "none",
+    "importance": null
+   },
+   "text": "fix: address Codex review (22.6 Windows replace, 20.5 struct break)"
+  },
+  {
+   "id": "u3-133",
+   "source": "commit_subject",
+   "split": "test",
+   "class_votes": {
+    "claude": "none",
+    "glm": "decision",
+    "gptoss": "none"
+   },
+   "importance_votes": {
+    "claude": null,
+    "glm": "medium",
+    "gptoss": null
+   },
+   "rules_cited": {
+    "claude": "C2",
+    "glm": "D2",
+    "gptoss": "N5"
+   },
+   "gold": {
+    "class": "none",
+    "importance": null
+   },
+   "gemini": {
+    "class": "decision",
+    "importance": "medium"
+   },
+   "text": "refactor(cli,mcp): drop the build_configured wrapper now that the builder applies config"
+  },
+  {
+   "id": "u3-135",
+   "source": "agent_brief",
+   "split": "test",
+   "class_votes": {
+    "claude": "rule",
+    "glm": "rule",
+    "gptoss": "rule"
+   },
+   "importance_votes": {
+    "claude": "high",
+    "glm": "medium",
+    "gptoss": "high"
+   },
+   "rules_cited": {
+    "claude": "R1",
+    "glm": "R1",
+    "gptoss": "R1"
+   },
+   "gold": {
+    "class": "rule",
+    "importance": "high"
+   },
+   "text": "Rules: cd into that worktree for every command. Never touch the main tree ~/Documents/GitHub/axil-project/axildb except reading tasks/. Never push/merge. Prefix cargo with CARGO_BUILD_JOBS=3. Do not run `axil store` against the main DB. Do not overwrite ~/.cargo/bin/axil (it is the OLD binary, dev 6"
+  },
+  {
+   "id": "u3-138",
+   "source": "commit_subject",
+   "split": "test",
+   "class_votes": {
+    "claude": "error",
+    "glm": "error",
+    "gptoss": "error"
+   },
+   "importance_votes": {
+    "claude": "medium",
+    "glm": "high",
+    "gptoss": "medium"
+   },
+   "rules_cited": {
+    "claude": "E3",
+    "glm": "E3",
+    "gptoss": "E3"
+   },
+   "gold": {
+    "class": "error",
+    "importance": "medium"
+   },
+   "text": "fix(core): sort every vector/FTS candidate before paging an ordered query"
+  },
+  {
+   "id": "u3-144",
+   "source": "agent_text",
+   "split": "test",
+   "class_votes": {
+    "claude": "context",
+    "glm": "context",
+    "gptoss": "context"
+   },
+   "importance_votes": {
+    "claude": "high",
+    "glm": "high",
+    "gptoss": "low"
+   },
+   "rules_cited": {
+    "claude": "C1",
+    "glm": "C1",
+    "gptoss": "C1"
+   },
+   "gold": {
+    "class": "context",
+    "importance": "high"
+   },
+   "text": "LongMemEval is complete. All 24 pairs (48 runs) finished, none ran out of memory, and prompts on came out worse. I'll resolve the out-of-memory error and record the result in Axil."
+  },
+  {
+   "id": "u3-152",
+   "source": "agent_text",
+   "split": "test",
+   "class_votes": {
+    "claude": "error",
+    "glm": "error",
+    "gptoss": "error"
+   },
+   "importance_votes": {
+    "claude": "high",
+    "glm": "medium",
+    "gptoss": "medium"
+   },
+   "rules_cited": {
+    "claude": "E2",
+    "glm": "E2",
+    "gptoss": "E2"
+   },
+   "gold": {
+    "class": "error",
+    "importance": "medium"
+   },
+   "text": "- **Todo reminder:** Rust matches `TodoWrite`, but current Claude Code uses `TaskUpdate` by default, so the reminder likely never fires.\n- **Failed commands:** neither handles the `PostToolUseFailure` event, so error capture is probably dead in both.\n- **Boot:** the boot text goes to stderr, so the "
+  },
+  {
+   "id": "u3-153",
+   "source": "bash_failure",
+   "split": "train",
+   "class_votes": {
+    "claude": "none",
+    "glm": "none",
+    "gptoss": "context"
+   },
+   "importance_votes": {
+    "claude": null,
+    "glm": null,
+    "gptoss": "low"
+   },
+   "rules_cited": {
+    "claude": "N4",
+    "glm": "N4",
+    "gptoss": "C1"
+   },
+   "gold": {
+    "class": "none",
+    "importance": null
+   },
+   "gemini": {
+    "class": "none",
+    "importance": null
+   },
+   "text": "Exit code 1\n### 29.D — Record the three open Phase 29 decisions  `[S]`\n- **Status:** open · **Review:** needs user review (all three are user decisions; the recommendations are from the old doc §6)\n- **Problem:** 29.6 has no home crate and no model-download policy, and 29.8 has no ort route. Nothing"
+  },
+  {
+   "id": "u3-155",
+   "source": "commit_subject",
+   "split": "test",
+   "class_votes": {
+    "claude": "none",
+    "glm": "decision",
+    "gptoss": "none"
+   },
+   "importance_votes": {
+    "claude": null,
+    "glm": "medium",
+    "gptoss": null
+   },
+   "rules_cited": {
+    "claude": "C2",
+    "glm": "D2",
+    "gptoss": "N5"
+   },
+   "gold": {
+    "class": "none",
+    "importance": null
+   },
+   "text": "refactor(mcp): drop the never-constructed Incoming::Eof variant"
+  },
+  {
+   "id": "u3-157",
+   "source": "bash_failure",
+   "split": "train",
+   "class_votes": {
+    "claude": "none",
+    "glm": "error",
+    "gptoss": "decision"
+   },
+   "importance_votes": {
+    "claude": null,
+    "glm": "medium",
+    "gptoss": "high"
+   },
+   "rules_cited": {
+    "claude": "N4",
+    "glm": "E2",
+    "gptoss": "D1"
+   },
+   "gold": {
+    "class": "none",
+    "importance": null
+   },
+   "note": "class tie broken by N2 + N4: A commit message printed by git for reading (N2) followed by zsh's `=== not found` (N4); nothing in the project failed (votes none / error / decision).",
+   "text": "Exit code 1\nThe TodoWrite and TaskUpdate handlers injected the store reminder on every\ncompleted task, even right after the agent had stored a decision. They now\nemit it only when no decisions/errors/context/commits/checkpoint row was\nstored in the last hour, the same check the 5-edit nudge makes, a"
+  },
+  {
+   "id": "u3-159",
+   "source": "commit_subject",
+   "split": "test",
+   "class_votes": {
+    "claude": "decision",
+    "glm": "decision",
+    "gptoss": "context"
+   },
+   "importance_votes": {
+    "claude": "medium",
+    "glm": "medium",
+    "gptoss": "medium"
+   },
+   "rules_cited": {
+    "claude": "D2",
+    "glm": "D2",
+    "gptoss": "C2"
+   },
+   "gold": {
+    "class": "decision",
+    "importance": "medium"
+   },
+   "text": "perf(embed,recall): batch embeddings under a memory budget; one call for query-time chunks"
+  },
+  {
+   "id": "u3-162",
+   "source": "commit_subject",
+   "split": "train",
+   "class_votes": {
+    "claude": "error",
+    "glm": "error",
+    "gptoss": "error"
+   },
+   "importance_votes": {
+    "claude": "low",
+    "glm": "medium",
+    "gptoss": "high"
+   },
+   "rules_cited": {
+    "claude": "E3",
+    "glm": "E3",
+    "gptoss": "E3"
+   },
+   "gold": {
+    "class": "error",
+    "importance": "medium"
+   },
+   "importance_note": "ordinal median (low against high)",
+   "text": "fix(bench): repair build rot in longmemeval/locomo/vector-latency/criterion-suite"
+  },
+  {
+   "id": "u3-165",
+   "source": "bash_failure",
+   "split": "test",
+   "class_votes": {
+    "claude": "error",
+    "glm": "error",
+    "gptoss": "error"
+   },
+   "importance_votes": {
+    "claude": "low",
+    "glm": "low",
+    "gptoss": "medium"
+   },
+   "rules_cited": {
+    "claude": "E1",
+    "glm": "E1",
+    "gptoss": "E1"
+   },
+   "gold": {
+    "class": "error",
+    "importance": "low"
+   },
+   "text": "Exit code 1\nwrote out/u1-scores-ort1.30.0.jsonl\n$SCRATCH/wt/p29/benchmarks/typed-decisions/calibrate_u1.py:188: RuntimeWarning: overflow encountered in exp\n  q = 1 / (1 + np.exp(-(a * xs + b)))\nwrote out/u1-scores-ort1.22.0.jsonl\nTraceback (most recent call last):\n[... 6 lines cut ...]\n    return 1 "
+  },
+  {
+   "id": "u3-171",
+   "source": "commit_subject",
+   "split": "test",
+   "class_votes": {
+    "claude": "decision",
+    "glm": "decision",
+    "gptoss": "none"
+   },
+   "importance_votes": {
+    "claude": "low",
+    "glm": "medium",
+    "gptoss": null
+   },
+   "rules_cited": {
+    "claude": "D2",
+    "glm": "D2",
+    "gptoss": "N5"
+   },
+   "gold": {
+    "class": "decision",
+    "importance": "medium"
+   },
+   "importance_note": "4 (medium: a scoped design choice): Routing the code-graph hint through extension_blocks is a scoped design choice; L2/L3 do not clearly hold. Votes low / medium.",
+   "text": "refactor(code-intel): route code-graph hint through extension_blocks; dedup budget glue"
+  },
+  {
+   "id": "u3-172",
+   "source": "bash_failure",
+   "split": "test",
+   "class_votes": {
+    "claude": "none",
+    "glm": "context",
+    "gptoss": "error"
+   },
+   "importance_votes": {
+    "claude": null,
+    "glm": "medium",
+    "gptoss": "low"
+   },
+   "rules_cited": {
+    "claude": "N4",
+    "glm": "C1",
+    "gptoss": "E1"
+   },
+   "gold": {
+    "class": "none",
+    "importance": null
+   },
+   "note": "class tie broken by N2 + N4: `git show` output of a commit (N2) followed by zsh's `===== not found` (N4), as in u3-157 (votes none / context / error).",
+   "text": "Exit code 1\n44763490b3f0517009f6f77b2a70b245df00cf66\nThu Sep 24 10:10:27 2026 +0700\nfix(bench): count the lazy HNSW graph build in build/rebuild time\n\nThe graph is now built by the first search that needs it, so rebuild()\nalone no longer includes it: build_ms/rebuild_ms would understate the real\ncos"
+  },
+  {
+   "id": "u3-173",
+   "source": "bash_failure",
+   "split": "train",
+   "class_votes": {
+    "claude": "none",
+    "glm": "none",
+    "gptoss": "context"
+   },
+   "importance_votes": {
+    "claude": null,
+    "glm": null,
+    "gptoss": "low"
+   },
+   "rules_cited": {
+    "claude": "N2",
+    "glm": "N2",
+    "gptoss": "C1"
+   },
+   "gold": {
+    "class": "none",
+    "importance": null
+   },
+   "text": "Exit code 1\n            index: RwLock::new(index),\n            vector_db,\n            embedder: None,\n            skipped_at_load: AtomicUsize::new(skipped_at_load),\n            // Named spaces hold caller-supplied vectors, never embedded text.\n            text_prefixes: false,\n        })\n    }\n\n   "
+  },
+  {
+   "id": "u3-180",
+   "source": "bash_failure",
+   "split": "test",
+   "class_votes": {
+    "claude": "none",
+    "glm": "error",
+    "gptoss": "none"
+   },
+   "importance_votes": {
+    "claude": null,
+    "glm": "low",
+    "gptoss": null
+   },
+   "rules_cited": {
+    "claude": "N4",
+    "glm": "E1",
+    "gptoss": "N4"
+   },
+   "gold": {
+    "class": "none",
+    "importance": null
+   },
+   "text": "Exit code 1\nerror: the following required arguments were not provided:\n  <OLDER>\n\nUsage: axil-decide contradictions dismiss <NEWER> <OLDER>\n\nFor more information, try '--help'.\nexit 2\nerror: the following required arguments were not provided:\n  <OLDER>\n\nUsage: axil-decide contradictions accept <NEWE"
+  },
+  {
+   "id": "u3-184",
+   "source": "agent_text",
+   "split": "test",
+   "class_votes": {
+    "claude": "none",
+    "glm": "none",
+    "gptoss": "error"
+   },
+   "importance_votes": {
+    "claude": null,
+    "glm": null,
+    "gptoss": "low"
+   },
+   "rules_cited": {
+    "claude": "N4",
+    "glm": "N1",
+    "gptoss": "E2"
+   },
+   "gold": {
+    "class": "none",
+    "importance": null
+   },
+   "text": "That replacement failed and wrote nothing: the checkpoint snippet also appears in the cache command. Retrying with the checkpoint edit scoped to its own function:"
+  },
+  {
+   "id": "u3-185",
+   "source": "agent_text",
+   "split": "test",
+   "class_votes": {
+    "claude": "none",
+    "glm": "error",
+    "gptoss": "none"
+   },
+   "importance_votes": {
+    "claude": null,
+    "glm": "high",
+    "gptoss": null
+   },
+   "rules_cited": {
+    "claude": "N1",
+    "glm": "E2",
+    "gptoss": "N1"
+   },
+   "gold": {
+    "class": "none",
+    "importance": null
+   },
+   "gemini": {
+    "class": "none",
+    "importance": null
+   },
+   "text": "The secret was updated today (2026-09-25 01:27 UTC), and `main` is still at `b0a8221`, the same commit as the latest failed release run. Rerunning its failed job now."
+  },
+  {
+   "id": "u3-188",
+   "source": "commit_subject",
+   "split": "test",
+   "class_votes": {
+    "claude": "none",
+    "glm": "none",
+    "gptoss": "context"
+   },
+   "importance_votes": {
+    "claude": null,
+    "glm": null,
+    "gptoss": "low"
+   },
+   "rules_cited": {
+    "claude": "C2",
+    "glm": "C2",
+    "gptoss": "C1"
+   },
+   "gold": {
+    "class": "none",
+    "importance": null
+   },
+   "gemini": {
+    "class": "none",
+    "importance": null
+   },
+   "text": "docs: 1.0 extensibility declaration + WASM plugin WIT world (Phase 21.7 + 22.1)"
+  },
+  {
+   "id": "u3-189",
+   "source": "agent_text",
+   "split": "train",
+   "class_votes": {
+    "claude": "none",
+    "glm": "decision",
+    "gptoss": "none"
+   },
+   "importance_votes": {
+    "claude": null,
+    "glm": "medium",
+    "gptoss": null
+   },
+   "rules_cited": {
+    "claude": "N6",
+    "glm": "D1",
+    "gptoss": "N1"
+   },
+   "gold": {
+    "class": "none",
+    "importance": null
+   },
+   "text": "The new recall-core item (keep code-index vectors out of memory recall) is on the tracker for the review branch."
+  },
+  {
+   "id": "u3-193",
+   "source": "agent_text",
+   "split": "test",
+   "class_votes": {
+    "claude": "none",
+    "glm": "none",
+    "gptoss": "error"
+   },
+   "importance_votes": {
+    "claude": null,
+    "glm": null,
+    "gptoss": "high"
+   },
+   "rules_cited": {
+    "claude": "N7",
+    "glm": "N7",
+    "gptoss": "E2"
+   },
+   "gold": {
+    "class": "none",
+    "importance": null
+   },
+   "text": "**When the results are in**\n1. **Out-of-memory error:** if nomic gets through all 24 questions, resolve `01M3KZ7RSZCF8FY9NQ5YXXAPVW`. Two have passed so far at 3.4 GB peak.\n2. **Prompts decision:** bring you k=10, k=25 and LongMemEval side by side. At k=10 it's even so far, 5 questions better and 5 "
+  },
+  {
+   "id": "u3-194",
+   "source": "agent_text",
+   "split": "test",
+   "class_votes": {
+    "claude": "context",
+    "glm": "context",
+    "gptoss": "context"
+   },
+   "importance_votes": {
+    "claude": "medium",
+    "glm": "high",
+    "gptoss": "high"
+   },
+   "rules_cited": {
+    "claude": "C1",
+    "glm": "C1",
+    "gptoss": "C1"
+   },
+   "gold": {
+    "class": "context",
+    "importance": "high"
+   },
+   "gemini": {
+    "class": "context",
+    "importance": "high"
+   },
+   "text": "- **recall_all** counts a question only when every session holding part of the answer is found. With prompts on, one question loses one of them.\n- **NDCG** differs on only 3 questions: 2 slightly worse with prompts on and 1 slightly better.\n- **Out of memory:** none in 24 nomic runs (12 off, 12 on)."
+  },
+  {
+   "id": "u3-195",
+   "source": "agent_text",
+   "split": "test",
+   "class_votes": {
+    "claude": "context",
+    "glm": "context",
+    "gptoss": "context"
+   },
+   "importance_votes": {
+    "claude": "high",
+    "glm": "high",
+    "gptoss": "medium"
+   },
+   "rules_cited": {
+    "claude": "C1",
+    "glm": "C1",
+    "gptoss": "C1"
+   },
+   "gold": {
+    "class": "context",
+    "importance": "high"
+   },
+   "text": "**Measured so far:**\n- **RC-1:** keeping code-index rows out of memory recall raises dogfood hit@1 from 0.684 to 0.719 on the snapshot as it is. On a copy with the code-index vectors restored, it goes from 0.579 to 0.719, so restoring them no longer hurts recall. Measured today against `dev`; this n"
+  },
+  {
+   "id": "u3-196",
+   "source": "agent_text",
+   "split": "test",
+   "class_votes": {
+    "claude": "none",
+    "glm": "context",
+    "gptoss": "context"
+   },
+   "importance_votes": {
+    "claude": null,
+    "glm": "medium",
+    "gptoss": "low"
+   },
+   "rules_cited": {
+    "claude": "N2",
+    "glm": "C1",
+    "gptoss": "C1"
+   },
+   "gold": {
+    "class": "context",
+    "importance": "low"
+   },
+   "importance_note": "L3: A point-in-time health snapshot (build sha, record counts, an empty queue): a narrow fact that goes stale with the next session. Votes medium / low.",
+   "text": "- **Installed build:** `c4e2d80`, the same commit as `dev` and `origin/dev`, with nothing uncommitted.\n- **Database health:** every `axil doctor` check passes.\n  - 122,207 records across 23 tables, all intact.\n  - 1,547 vectors at 384 dimensions.\n  - 161,727 graph edges with no orphans.\n  - The new "
+  },
+  {
+   "id": "u3-197",
+   "source": "agent_text",
+   "split": "test",
+   "class_votes": {
+    "claude": "none",
+    "glm": "none",
+    "gptoss": "error"
+   },
+   "importance_votes": {
+    "claude": null,
+    "glm": null,
+    "gptoss": "high"
+   },
+   "rules_cited": {
+    "claude": "N5",
+    "glm": "N5",
+    "gptoss": "E2"
+   },
+   "gold": {
+    "class": "none",
+    "importance": null
+   },
+   "text": "```\nERROR: \"Backlog features merged to main but not published; crates.io still at 1.1.1.\"\nLATER: \"Open backlog shipped to main: PR #5 merged.\"\nAnswer: NO. Merged is not the same as published.\n```"
+  },
+  {
+   "id": "u3-199",
+   "source": "agent_text",
+   "split": "test",
+   "class_votes": {
+    "claude": "error",
+    "glm": "error",
+    "gptoss": "decision"
+   },
+   "importance_votes": {
+    "claude": "medium",
+    "glm": "medium",
+    "gptoss": "high"
+   },
+   "rules_cited": {
+    "claude": "E2",
+    "glm": "E2",
+    "gptoss": "D1"
+   },
+   "gold": {
+    "class": "error",
+    "importance": "medium"
+   },
+   "text": "The cause was the old chunk-rescoring window, not the prompts. Recall rescored only its top 20 candidates. Recency filled those slots with new commits, and the prompts raised those commits' similarity enough to push older right answers out. So you chose to keep every model unprompted until the windo"
+  }
+ ],
+ "caveat": "The annotators are models, not people; a human spot-check of the disputed items is still recommended before publishing anything."
+}

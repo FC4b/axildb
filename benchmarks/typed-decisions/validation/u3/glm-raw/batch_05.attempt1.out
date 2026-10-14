@@ -1,0 +1,25 @@
+[{"id": "b-081", "class": "none", "importance": null, "rule": "C2"},
+{"id": "b-082", "class": "none", "importance": null, "rule": "N1"},
+{"id": "b-083", "class": "none", "importance": null, "rule": "N6"},
+{"id": "b-084", "class": "none", "importance": null, "rule": "N6"},
+{"id": "b-085", "class": "none", "importance": null, "rule": "N2"},
+{"id": "b-086", "class": "none", "importance": null, "rule": "C2"},
+{"id": "b-087", "class": "none", "importance": null, "rule": "N4"},
+{"id": "b-088", "class": "error", "importance": "high", "rule": "E3"},
+{"id": "b-089", "class": "error", "importance": "high", "rule": "E2"},
+{"id": "b-090", "class": "none", "importance": null, "rule": "N4"},
+{"id": "b-091", "class": "none", "importance": null, "rule": "N1"},
+{"id": "b-092", "class": "none", "importance": null, "rule": "N4"},
+{"id": "b-093", "class": "none", "importance": null, "rule": "C2"},
+{"id": "b-094", "class": "error", "importance": "high", "rule": "E2"},
+{"id": "b-095", "class": "none", "importance": null, "rule": "N4"},
+{"id": "b-096", "class": "error", "importance": "medium", "rule": "E3"},
+{"id": "b-097", "class": "error", "importance": "low", "rule": "E1"},
+{"id": "b-098", "class": "none", "importance": null, "rule": "N4"},
+{"id": "b-099", "class": "error", "importance": "low", "rule": "E1"},
+{"id": "b-100", "class": "none", "importance": null, "rule": "N4"}]
+
+[stderr]
+[0m
+> build · glm-5.3
+[0m

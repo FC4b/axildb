@@ -1,0 +1,25 @@
+2026-10-14T10:34:50Z batch 01 attempt 1: start
+2026-10-14T10:34:50Z batch 02 attempt 1: start
+2026-10-14T10:37:59Z batch 02 attempt 1: rc=0 188.5s ok_ids=20/20 problems=[]
+2026-10-14T10:37:59Z batch 02 done after 1 attempt(s)
+2026-10-14T10:37:59Z batch 03 attempt 1: start
+2026-10-14T10:38:07Z batch 03 attempt 1: rc=3 8.3s ok_ids=0/20 problems=['no JSON array found']
+2026-10-14T10:38:07Z batch 03: RETRY because ['no JSON array found']
+2026-10-14T10:38:07Z batch 03 attempt 2: start
+2026-10-14T10:39:56Z batch 01 attempt 1: rc=0 305.8s ok_ids=19/20 problems=['array did not parse; recovered objects one by one', "missing 1: ['b-020']"]
+2026-10-14T10:39:56Z batch 01: RETRY because ['array did not parse; recovered objects one by one', "missing 1: ['b-020']"]
+2026-10-14T10:39:56Z batch 01 attempt 2: start
+2026-10-14T10:40:02Z batch 01 attempt 2: rc=3 5.4s ok_ids=0/20 problems=['no JSON array found']
+2026-10-14T10:40:02Z batch 01: RETRY because ['no JSON array found']
+2026-10-14T10:40:02Z batch 01 attempt 3: start
+2026-10-14T10:40:08Z batch 01 attempt 3: rc=3 6.4s ok_ids=0/20 problems=['no JSON array found']
+2026-10-14T10:40:08Z batch 01: RETRY because ['no JSON array found']
+2026-10-14T10:40:08Z batch 01: gave up after 3 attempts
+2026-10-14T10:40:08Z batch 04 attempt 1: start
+2026-10-14T10:40:14Z batch 04 attempt 1: rc=3 6.0s ok_ids=0/20 problems=['no JSON array found']
+2026-10-14T10:40:14Z batch 04: RETRY because ['no JSON array found']
+2026-10-14T10:40:14Z batch 04 attempt 2: start
+2026-10-14T10:40:22Z batch 04 attempt 2: rc=3 8.4s ok_ids=0/20 problems=['no JSON array found']
+2026-10-14T10:40:22Z batch 04: RETRY because ['no JSON array found']
+2026-10-14T10:40:22Z batch 04 attempt 3: start
+2026-10-14T10:41:49Z NOTE: from batch 03 on every call returned RESOURCE_EXHAUSTED (429, 'Individual quota reached ... Resets in 162h'); probes of gemini-3.8-flash-high/-medium/-low gave the same. Run stopped by hand. Batch 01 attempt 1 hit the 300 s print timeout with 19 of 20 answers. Gemini covers 39 items (batches 01 and 02); gpt-oss-120b-medium via agy (relabel_u3.py --annotator gptoss) is the second external annotator instead.

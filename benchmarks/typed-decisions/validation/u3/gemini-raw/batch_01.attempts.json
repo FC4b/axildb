@@ -1,0 +1,33 @@
+[
+ {
+  "attempt": 1,
+  "rc": 0,
+  "secs": 305.8,
+  "ok_ids": 19,
+  "problems": [
+   "array did not parse; recovered objects one by one",
+   "missing 1: ['b-020']"
+  ],
+  "out": "batch_01.attempt1.out"
+ },
+ {
+  "attempt": 2,
+  "rc": 3,
+  "secs": 5.4,
+  "ok_ids": 0,
+  "problems": [
+   "no JSON array found"
+  ],
+  "out": "batch_01.attempt2.out"
+ },
+ {
+  "attempt": 3,
+  "rc": 3,
+  "secs": 6.4,
+  "ok_ids": 0,
+  "problems": [
+   "no JSON array found"
+  ],
+  "out": "batch_01.attempt3.out"
+ }
+]

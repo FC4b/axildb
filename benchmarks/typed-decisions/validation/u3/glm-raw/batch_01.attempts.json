@@ -1,0 +1,12 @@
+[
+ {
+  "attempt": 1,
+  "rc": 0,
+  "secs": 105.0,
+  "ok_ids": 20,
+  "problems": [
+   "array did not parse; recovered objects one by one"
+  ],
+  "out": "batch_01.attempt1.out"
+ }
+]

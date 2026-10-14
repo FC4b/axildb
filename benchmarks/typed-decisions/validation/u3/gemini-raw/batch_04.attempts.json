@@ -1,0 +1,22 @@
+[
+ {
+  "attempt": 1,
+  "rc": 3,
+  "secs": 6.0,
+  "ok_ids": 0,
+  "problems": [
+   "no JSON array found"
+  ],
+  "out": "batch_04.attempt1.out"
+ },
+ {
+  "attempt": 2,
+  "rc": 3,
+  "secs": 8.4,
+  "ok_ids": 0,
+  "problems": [
+   "no JSON array found"
+  ],
+  "out": "batch_04.attempt2.out"
+ }
+]
