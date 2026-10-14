@@ -10,6 +10,11 @@
 //!   capture `auto_capture::analyze` returns, with the table and importance of
 //!   the record it would store.
 //!
+//! * `--records <export.jsonl> [--project-dir <dir>]` reads an `axil export`
+//!   and prints, per record, the importance insert would compute for its
+//!   data (`_`-prefixed fields removed) and how many entities auto-linking
+//!   would keep, so two builds can be compared on a real database.
+//!
 //! Output is one JSON line per text, the shape `run_u5_bakeoff.py` and
 //! `run_u3_bakeoff.py` read, so `run_regex_arm.py` can score it with their
 //! code.
@@ -28,7 +33,8 @@ const MAX_AUTO_LINK_ENTITIES: usize = 50;
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let usage = "usage: typed-decisions-regex-arm \
-                 (--entities <u5.jsonl> [--project-dir <dir>] | --capture <u3.jsonl>)";
+                 ((--entities <u5.jsonl> | --records <export.jsonl>) [--project-dir <dir>] \
+                 | --capture <u3.jsonl>)";
     let (Some(mode), Some(path)) = (args.first(), args.get(1)) else {
         eprintln!("{usage}");
         std::process::exit(2);
@@ -44,6 +50,7 @@ fn main() {
     match mode.as_str() {
         "--entities" => entities(path, project_dir.as_deref()),
         "--capture" => capture(path),
+        "--records" => records(path, project_dir.as_deref()),
         _ => {
             eprintln!("{usage}");
             std::process::exit(2);
@@ -136,6 +143,41 @@ fn capture(path: &str) {
                 "captures": captures,
                 "plain_importance": compute_importance(&json!({ "summary": text })),
                 "analyze_us": analyze_us,
+            })
+        )
+        .expect("write");
+    }
+}
+
+fn records(path: &str, project_dir: Option<&std::path::Path>) {
+    let gazetteer = project_dir.map(Gazetteer::for_project_dir);
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    for row in read_rows(path) {
+        if row["kind"] != "record" {
+            continue;
+        }
+        let table = row["table"].as_str().unwrap_or_default();
+        let mut data = row["data"].clone();
+        if let Some(obj) = data.as_object_mut() {
+            obj.retain(|k, _| !k.starts_with('_'));
+        }
+        let record = Record::new(table, data.clone());
+        let text = axil_core::util::record_text(&record);
+        let mut found = match &gazetteer {
+            Some(g) => extract_entities_with(&text, g),
+            None => extract_entities(&text),
+        };
+        found.truncate(MAX_AUTO_LINK_ENTITIES);
+        writeln!(
+            out,
+            "{}",
+            json!({
+                "id": row["id"],
+                "table": table,
+                "importance": compute_importance(&data),
+                "entities": found.len(),
+                "pure_entities": extract_entities(&axil_core::util::value_text(&data)).len(),
             })
         )
         .expect("write");
