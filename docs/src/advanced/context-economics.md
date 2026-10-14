@@ -76,6 +76,9 @@ axil context-savings --task "where is auth handled"
 axil context-savings --tasks tasks.json --format markdown
 ```
 
+Here `--format` picks the report: `text` (the default), `markdown` (or `md`),
+or `json`, the same report `--save <FILE>` writes.
+
 On Axil's own repo this reports ~99% reduction (~557 vs ~70k tokens). **Treat
 that as an optimistic ceiling, not a real-world figure.** Its baseline
 assumes whole-file reads; a competent agent greps to a ~15-line range, so

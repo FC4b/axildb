@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
+use clap::builder::{EnumValueParser, TypedValueParser};
 use clap::{Parser, Subcommand, ValueEnum};
 use serde_json::{json, Value};
 
@@ -203,6 +204,42 @@ enum OutputFormat {
     Table,
 }
 
+/// What the global `--format` flag parsed to.
+///
+/// `context-savings` declares its own `--format` under the same arg id, so
+/// clap does not propagate the global flag into it and that command can take
+/// its report formats (`text`, `markdown`). clap still copies a subcommand's
+/// value for a global arg's id up to [`Cli::format`], so both declarations
+/// must parse to this one type.
+#[derive(Clone)]
+enum FormatFlag {
+    /// The global flag, on every command but `context-savings`, or given
+    /// before the subcommand name.
+    Output(OutputFormat),
+    /// `context-savings --format`.
+    #[cfg(feature = "indexer")]
+    Savings(SavingsFormat),
+}
+
+/// `context-savings` report format.
+#[cfg(feature = "indexer")]
+#[derive(Clone, ValueEnum)]
+enum SavingsFormat {
+    /// Plain-text table (default).
+    Text,
+    /// Markdown table, for docs and PR comments.
+    #[value(alias = "md")]
+    Markdown,
+    /// The full report as JSON.
+    Json,
+    // The global flag's other values print the text table, so a script that
+    // passes one to every command keeps working; hidden from help.
+    #[value(hide = true)]
+    Pretty,
+    #[value(hide = true)]
+    Table,
+}
+
 /// Recall output format.
 #[derive(Clone, ValueEnum, Default)]
 enum RecallFormat {
@@ -260,7 +297,13 @@ impl Output {
     /// The output settings a parsed command line asks for.
     fn for_cli(cli: &Cli) -> Self {
         Self {
-            format: cli.format.clone(),
+            format: match &cli.format {
+                FormatFlag::Output(format) => format.clone(),
+                // `context-savings` renders text and markdown itself and
+                // prints its JSON report compact.
+                #[cfg(feature = "indexer")]
+                FormatFlag::Savings(_) => OutputFormat::Json,
+            },
             quiet: cli.quiet,
             jsonl: cli.jsonl,
         }
@@ -455,8 +498,13 @@ struct Cli {
     db: Option<PathBuf>,
 
     /// Output format: json (default) or pretty.
-    #[arg(long, global = true, default_value = "json")]
-    format: OutputFormat,
+    #[arg(
+        long,
+        global = true,
+        default_value = "json",
+        value_parser = EnumValueParser::<OutputFormat>::new().map(FormatFlag::Output)
+    )]
+    format: FormatFlag,
 
     /// Suppress non-essential output.
     #[arg(long, global = true)]
@@ -1410,9 +1458,15 @@ enum Command {
         /// Hits per task — more hits = more files an unaided agent reads.
         #[arg(long, default_value = "5")]
         top_k: usize,
+        // Same id as the global `--format`, which it replaces here: see
+        // `FormatFlag`.
         /// Output format: `text` (default), `markdown`, or `json`.
-        #[arg(long = "format", default_value = "text")]
-        savings_format: String,
+        #[arg(
+            long,
+            default_value = "text",
+            value_parser = EnumValueParser::<SavingsFormat>::new().map(FormatFlag::Savings)
+        )]
+        format: FormatFlag,
         /// Persist the full JSON report to this path (A/B baseline).
         #[arg(long = "save")]
         save: Option<String>,
@@ -10206,7 +10260,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
             task,
             tasks,
             top_k,
-            savings_format,
+            format,
             save,
         } => {
             use axil_indexer::context_savings as cs;
@@ -10231,9 +10285,13 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
                     .with_context(|| format!("write savings report to {path}"))?;
             }
 
-            match savings_format.as_str() {
-                "markdown" | "md" => outp!("{}", cs::render_markdown(&report)),
-                "json" => out.print(&cs::report_to_json(&report)),
+            // A global `--format` given before the subcommand name arrives as
+            // `FormatFlag::Output` and keeps the text default.
+            match format {
+                FormatFlag::Savings(SavingsFormat::Markdown) => {
+                    outp!("{}", cs::render_markdown(&report))
+                }
+                FormatFlag::Savings(SavingsFormat::Json) => out.print(&cs::report_to_json(&report)),
                 _ => outp!("{}", cs::render_plain(&report)),
             }
             Ok(EXIT_OK)
@@ -22581,5 +22639,113 @@ mod project_root_tests {
         // A marker in the project does.
         std::fs::write(proj.join("Cargo.toml"), "").unwrap();
         assert_eq!(root(&db), Some(proj));
+    }
+}
+
+#[cfg(test)]
+mod cli_tree_tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    /// Run `f` on a 32 MiB thread: in debug builds, building the whole clap
+    /// tree overflows the default 2 MiB test-thread stack.
+    fn on_big_stack<R: Send + 'static>(f: impl FnOnce() -> R + Send + 'static) -> R {
+        std::thread::Builder::new()
+            .stack_size(32 * 1024 * 1024)
+            .spawn(f)
+            .unwrap()
+            .join()
+            .unwrap()
+    }
+
+    /// clap checks the tree (unique long and short names per command, valid
+    /// defaults, ...) only in debug builds and only for the subcommand being
+    /// parsed, so a clash on a command nobody ran in debug ships unnoticed.
+    #[test]
+    fn whole_clap_tree_passes_debug_asserts() {
+        on_big_stack(|| Cli::command().debug_assert());
+    }
+
+    /// The parse error clap reports for `args`, if any.
+    fn parse_error(args: &'static [&'static str]) -> Option<clap::error::ErrorKind> {
+        on_big_stack(move || Cli::try_parse_from(args).err().map(|e| e.kind()))
+    }
+
+    #[test]
+    fn global_format_still_rejects_report_formats_on_other_commands() {
+        use clap::error::ErrorKind;
+        assert_eq!(
+            parse_error(&["axil", "get", "x", "--format", "markdown"]),
+            Some(ErrorKind::InvalidValue)
+        );
+        assert_eq!(
+            parse_error(&["axil", "--format", "text", "get", "x"]),
+            Some(ErrorKind::InvalidValue)
+        );
+        assert_eq!(
+            parse_error(&["axil", "get", "x", "--format", "table"]),
+            None
+        );
+    }
+
+    #[cfg(feature = "indexer")]
+    #[test]
+    fn context_savings_takes_its_report_formats() {
+        use FormatFlag::{Output as Global, Savings};
+
+        /// The command's `--format` and the shared output's format for `args`.
+        fn parse(args: &'static [&'static str]) -> (FormatFlag, OutputFormat) {
+            on_big_stack(move || {
+                let cli = Cli::try_parse_from(args).unwrap_or_else(|e| panic!("{args:?}: {e}"));
+                let output = Output::for_cli(&cli).format;
+                match cli.command {
+                    Command::ContextSavings { format, .. } => (format, output),
+                    _ => unreachable!(),
+                }
+            })
+        }
+
+        let (format, output) = parse(&["axil", "context-savings"]);
+        assert!(matches!(format, Savings(SavingsFormat::Text)));
+        assert!(matches!(output, OutputFormat::Json));
+
+        let (format, _) = parse(&["axil", "context-savings", "--format", "markdown"]);
+        assert!(matches!(format, Savings(SavingsFormat::Markdown)));
+        let (format, _) = parse(&["axil", "context-savings", "--format=md"]);
+        assert!(matches!(format, Savings(SavingsFormat::Markdown)));
+
+        let (format, output) = parse(&["axil", "context-savings", "--format", "json"]);
+        assert!(matches!(format, Savings(SavingsFormat::Json)));
+        assert!(matches!(output, OutputFormat::Json));
+
+        // The global values still parse here, and print the text table.
+        let (format, _) = parse(&["axil", "context-savings", "--format", "pretty"]);
+        assert!(matches!(format, Savings(SavingsFormat::Pretty)));
+
+        // A global `--format` before the subcommand reaches it unchanged...
+        let (format, output) = parse(&["axil", "--format", "pretty", "context-savings"]);
+        assert!(matches!(format, Global(OutputFormat::Pretty)));
+        assert!(matches!(output, OutputFormat::Pretty));
+        // ...unless the subcommand sets its own, which wins for both.
+        let (format, output) = parse(&[
+            "axil",
+            "--format",
+            "pretty",
+            "context-savings",
+            "--format",
+            "json",
+        ]);
+        assert!(matches!(format, Savings(SavingsFormat::Json)));
+        assert!(matches!(output, OutputFormat::Json));
+
+        // A report format is not a value of the global flag.
+        assert_eq!(
+            parse_error(&["axil", "--format", "markdown", "context-savings"]),
+            Some(clap::error::ErrorKind::InvalidValue)
+        );
+        assert_eq!(
+            parse_error(&["axil", "context-savings", "--format", "html"]),
+            Some(clap::error::ErrorKind::InvalidValue)
+        );
     }
 }
