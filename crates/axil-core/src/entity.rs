@@ -189,7 +189,7 @@ fn extract_backtick_entities(x: &mut Extraction<'_>) {
                 continue;
             }
             x.claim(x.range_of(trimmed));
-            let entity_type = if looks_like_path(name) {
+            let entity_type = if is_file_like(name) {
                 EntityType::File
             } else {
                 EntityType::Code
@@ -989,6 +989,11 @@ fn is_directory(s: &str) -> bool {
         && (first.starts_with('.')
             || first.starts_with('~')
             || PROJECT_DIRS.binary_search(&first).is_ok() && name_like)
+}
+
+/// Whether one word names a file or directory by any of the file patterns.
+fn is_file_like(s: &str) -> bool {
+    looks_like_path(s) || is_file_name(s) || is_directory(s) || is_companion_file(s, "")
 }
 
 /// An Axil companion file named by its suffix (`.vec`, `.axil.graph`).
@@ -1949,6 +1954,23 @@ mod tests {
         assert!(entities
             .iter()
             .any(|e| e.source_text == "fix/notes.md" && e.entity_type == EntityType::File));
+    }
+
+    #[test]
+    fn backticked_file_names_are_files() {
+        let entities =
+            extract_entities("Edit `db.rs`, `target/` and `.axil.vec`, not `AuthModule`.");
+        for name in ["db.rs", "target/", ".axil.vec"] {
+            assert!(
+                entities
+                    .iter()
+                    .any(|e| e.source_text == name && e.entity_type == EntityType::File),
+                "{name}: {entities:?}"
+            );
+        }
+        assert!(entities
+            .iter()
+            .any(|e| e.source_text == "AuthModule" && e.entity_type == EntityType::Code));
     }
 
     #[test]
