@@ -696,7 +696,7 @@ impl AxilBuilder {
         // an inspection open to a later one.
         if db.vector_index.is_some() && !db.storage.is_read_only() && !defer_vector_delete_notes {
             if let Err(e) = db.apply_pending_vector_deletes() {
-                eprintln!(
+                crate::diagln!(
                     "axil: warning: removing the vectors of records deleted while the \
                      vector store was unavailable failed: {e}. The next open retries."
                 );
