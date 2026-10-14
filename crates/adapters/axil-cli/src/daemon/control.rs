@@ -64,8 +64,8 @@ pub enum DaemonCommand {
         lines: usize,
     },
     /// Send one command line to the daemon and print what it printed,
-    /// exiting with its exit code; 125 when the daemon did not run it.
-    /// Give the command line after `--`.
+    /// exiting with its exit code; 125 when it was not run, by the daemon's
+    /// choice or because none answers. Give the command line after `--`.
     #[command(hide = true)]
     Send {
         /// The command line, without the program name.
@@ -421,28 +421,47 @@ fn logs(db: &Path, lines: usize) -> Result<i32> {
     Ok(EXIT_OK)
 }
 
+/// Whether the command line `argv` reads stdin, as the command would:
+/// one with a `-` argument (`store <table> -`, `checkpoint -`), or a
+/// `checkpoint` given no JSON. Another leaves stdin be.
+fn reads_stdin(argv: &[String]) -> bool {
+    if argv.iter().any(|a| a == "-") {
+        return true;
+    }
+    #[cfg(feature = "checkpoint")]
+    {
+        use clap::Parser;
+        if let Ok(cli) = crate::Cli::try_parse_from(argv) {
+            return matches!(cli.command, crate::Command::Checkpoint { arg: None, .. });
+        }
+    }
+    false
+}
+
 fn send(db: &Path, args: Vec<String>) -> Result<i32> {
     let (_, run) = run_dir(db)?;
     let identity = Identity::current()?;
     let argv: Vec<String> = std::iter::once("axil".to_string()).chain(args).collect();
-    // Stdin is read only for a command that reads it, `-` or a checkpoint
-    // without its JSON, as the command would: another would leave it be.
-    let reads_stdin =
-        argv.iter().any(|a| a == "-") || super::state::op_label(&argv) == "checkpoint";
-    let stdin = if reads_stdin && !cli_io::stdin_is_terminal() {
+    let stdin = if reads_stdin(&argv) && !cli_io::stdin_is_terminal() {
         Some(cli_io::read_stdin(u64::MAX)?.into_bytes())
     } else {
         None
     };
     let cwd = std::env::current_dir()?;
     let header = identity.header(argv, &cwd, stdin.is_some());
-    let outcome = proto::run(
+    let outcome = match proto::run(
         run.socket(),
         &header,
         stdin.as_deref(),
         Duration::from_secs(300),
-    )
-    .with_context(|| format!("no daemon answers on {}", run.socket().display()))?;
+    ) {
+        Ok(outcome) => outcome,
+        // Not run, as when the daemon declines it.
+        Err(e) => {
+            errln!("axil: no daemon answers on {}: {e}", run.socket().display());
+            return Ok(NOT_SERVED_EXIT);
+        }
+    };
     match outcome.reply {
         RunReply::Served { exit } => {
             let mut stdout = cli_io::stdout();

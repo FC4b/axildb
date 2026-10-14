@@ -318,8 +318,9 @@ fn a_killed_daemon_refuses_connections_and_the_next_start_takes_over() {
     // The socket file is still there, and nothing listens on it.
     let err = UnixStream::connect(&socket).unwrap_err();
     assert_eq!(err.kind(), std::io::ErrorKind::ConnectionRefused);
+    // Not run, as a command the daemon declines is not.
     let sent = fx.send(&["boot"], None);
-    assert!(!sent.status.success());
+    assert_eq!(sent.status.code(), Some(125), "{}", text(&sent.stderr));
     // The stores are left as a killed writer leaves them.
     assert!(fx.closed_cleanly().is_err());
     let status = fx.status();
@@ -489,6 +490,27 @@ fn the_hot_commands_print_nothing_into_the_log() {
         foreign.join("\n")
     );
     assert!(log.contains("ready"), "{log}");
+
+    // A checkpoint given its JSON does not read stdin, so an open pipe
+    // nobody writes to does not hold it up.
+    let mut cmd = Command::new(BIN);
+    cmd.args(["daemon", "send", "--", "checkpoint", cp])
+        .current_dir(&fx.proj)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for name in ENV {
+        cmd.env_remove(name);
+    }
+    let mut child = cmd.spawn().unwrap();
+    let open_stdin = child.stdin.take();
+    let finished = wait_for(Duration::from_secs(60), || {
+        child.try_wait().unwrap().is_some()
+    });
+    drop(open_stdin);
+    let out = child.wait_with_output().unwrap();
+    assert!(finished, "send waited on stdin");
+    assert!(out.status.success(), "{}", text(&out.stderr));
 }
 
 /// `AXIL_DAEMON=off` keeps a daemon from starting.
