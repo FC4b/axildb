@@ -1,0 +1,3722 @@
+{
+  "benchmark": "dogfood-recall",
+  "what": "CLI recall --rerank cross-encoder: the old window vs a candidate pool, and the blend weight sweep",
+  "measured": "2026-10-14, all runs between 16:27 and 18:03 on one frozen corpus",
+  "snapshot": "a copy of benchmarks/dogfood-recall/data/snap-prefix (created 2026-09-28)",
+  "binaries": {
+    "base": "dev 4f7e5f3, default features (base-off) or --features rerank (base-ce)",
+    "new": "feat/rerank-window d1f10de (CLI rerank pool + --rerank-weight), --features rerank"
+  },
+  "reranker": "cross-encoder/ms-marco-MiniLM-L-6-v2 onnx/model.onnx (fp32) + tokenizer.json at revision c5ee24cb16019beea0893ab7796b1df96625c6b8, model sha256 5d3e70fd0c9ff14b9b5169a51e957b7a9c74897afd0a35ce4bd318150c1d4d4a",
+  "command": "python3 benchmarks/dogfood-recall/run.py --axil <binary> --snapshot <copy of snap-prefix> --fetch 10 [--rerank cross-encoder [--rerank-weight W]]",
+  "weight_selection": "w = 0.3, the highest NDCG@10 of the sweep (MRR@10 within 0.0004 of the best, w = 0.5); chosen before any LongMemEval result of the sweep was read",
+  "note": "57 questions: one question moves a hit metric by 0.0175",
+  "runs": {
+    "base-off": {
+      "benchmark": "dogfood-recall",
+      "via": "recall",
+      "cutoff": "2026-09-28T02:00:00Z",
+      "top_k": 10,
+      "fetch": 10,
+      "rerank": "off",
+      "overall": {
+        "hit@1": 0.6842105263157895,
+        "hit@5": 0.8947368421052632,
+        "hit@10": 0.9298245614035088,
+        "mrr@10": 0.7912280701754386,
+        "recall_all@10": 0.9122807017543859,
+        "ndcg@10": 0.8116991086830022,
+        "hook_hit": 0.8947368421052632,
+        "hook_tokens": 302.8640350877193,
+        "hook_hits_per_1k_tokens": 2.9542525306648515,
+        "n": 57
+      },
+      "by_kind": {
+        "commit": {
+          "hit@1": 1.0,
+          "hit@5": 1.0,
+          "hit@10": 1.0,
+          "mrr@10": 1.0,
+          "recall_all@10": 1.0,
+          "ndcg@10": 1.0,
+          "hook_hit": 1.0,
+          "hook_tokens": 304.1875,
+          "hook_hits_per_1k_tokens": 3.2874460653379907,
+          "n": 4
+        },
+        "context": {
+          "hit@1": 0.6,
+          "hit@5": 1.0,
+          "hit@10": 1.0,
+          "mrr@10": 0.8,
+          "recall_all@10": 1.0,
+          "ndcg@10": 0.8523719014285831,
+          "hook_hit": 1.0,
+          "hook_tokens": 335.2,
+          "hook_hits_per_1k_tokens": 2.983293556085919,
+          "n": 5
+        },
+        "decision": {
+          "hit@1": 0.5925925925925926,
+          "hit@5": 0.8518518518518519,
+          "hit@10": 0.8888888888888888,
+          "mrr@10": 0.725925925925926,
+          "recall_all@10": 0.8888888888888888,
+          "ndcg@10": 0.7638997737209733,
+          "hook_hit": 0.8518518518518519,
+          "hook_tokens": 293.72222222222223,
+          "hook_hits_per_1k_tokens": 2.9001954479541014,
+          "n": 27
+        },
+        "error": {
+          "hit@1": 0.7894736842105263,
+          "hit@5": 0.8947368421052632,
+          "hit@10": 0.9473684210526315,
+          "mrr@10": 0.8508771929824562,
+          "recall_all@10": 0.8947368421052632,
+          "ndcg@10": 0.8357734630169437,
+          "hook_hit": 0.8947368421052632,
+          "hook_tokens": 300.14473684210526,
+          "hook_hits_per_1k_tokens": 2.981017929946079,
+          "n": 19
+        },
+        "rule": {
+          "hit@1": 0.5,
+          "hit@5": 1.0,
+          "hit@10": 1.0,
+          "mrr@10": 0.6666666666666666,
+          "recall_all@10": 1.0,
+          "ndcg@10": 0.75,
+          "hook_hit": 1.0,
+          "hook_tokens": 368.625,
+          "hook_hits_per_1k_tokens": 2.712783994574432,
+          "n": 2
+        }
+      },
+      "per_question": [
+        {
+          "id": "q01",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q02",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q03",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q04",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q05",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q06",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q07",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q08",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q09",
+          "first_rank": 10,
+          "hook_hit": 0.0
+        },
+        {
+          "id": "q10",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q11",
+          "first_rank": null,
+          "hook_hit": 0.0
+        },
+        {
+          "id": "q12",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q13",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q14",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q15",
+          "first_rank": null,
+          "hook_hit": 0.0
+        },
+        {
+          "id": "q16",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q17",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q18",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q19",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q20",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q21",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q22",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q23",
+          "first_rank": null,
+          "hook_hit": 0.0
+        },
+        {
+          "id": "q24",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q25",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q26",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q27",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q28",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q29",
+          "first_rank": 3,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q30",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q31",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q32",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q33",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q34",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q35",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q36",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q37",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q38",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q39",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q40",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q41",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q42",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q43",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q44",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q45",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q46",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q47",
+          "first_rank": 6,
+          "hook_hit": 0.0
+        },
+        {
+          "id": "q48",
+          "first_rank": null,
+          "hook_hit": 0.0
+        },
+        {
+          "id": "q49",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q50",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q51",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q52",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q53",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q54",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q55",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q56",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q57",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        }
+      ],
+      "label": "baseline: dev 4f7e5f3, no rerank"
+    },
+    "base-ce": {
+      "benchmark": "dogfood-recall",
+      "via": "recall",
+      "cutoff": "2026-09-28T02:00:00Z",
+      "top_k": 10,
+      "fetch": 10,
+      "rerank": "cross-encoder",
+      "overall": {
+        "hit@1": 0.7192982456140351,
+        "hit@5": 0.9122807017543859,
+        "hit@10": 0.9298245614035088,
+        "mrr@10": 0.8076023391812865,
+        "recall_all@10": 0.9122807017543859,
+        "ndcg@10": 0.8334031003753981,
+        "hook_hit": 0.8947368421052632,
+        "hook_tokens": 302.8640350877193,
+        "hook_hits_per_1k_tokens": 2.9542525306648515,
+        "n": 57
+      },
+      "by_kind": {
+        "commit": {
+          "hit@1": 1.0,
+          "hit@5": 1.0,
+          "hit@10": 1.0,
+          "mrr@10": 1.0,
+          "recall_all@10": 1.0,
+          "ndcg@10": 1.0,
+          "hook_hit": 1.0,
+          "hook_tokens": 304.1875,
+          "hook_hits_per_1k_tokens": 3.2874460653379907,
+          "n": 4
+        },
+        "context": {
+          "hit@1": 1.0,
+          "hit@5": 1.0,
+          "hit@10": 1.0,
+          "mrr@10": 1.0,
+          "recall_all@10": 1.0,
+          "ndcg@10": 1.0,
+          "hook_hit": 1.0,
+          "hook_tokens": 335.2,
+          "hook_hits_per_1k_tokens": 2.983293556085919,
+          "n": 5
+        },
+        "decision": {
+          "hit@1": 0.6296296296296297,
+          "hit@5": 0.8888888888888888,
+          "hit@10": 0.8888888888888888,
+          "mrr@10": 0.7358024691358025,
+          "recall_all@10": 0.8888888888888888,
+          "ndcg@10": 0.7767803137617106,
+          "hook_hit": 0.8518518518518519,
+          "hook_tokens": 293.72222222222223,
+          "hook_hits_per_1k_tokens": 2.9001954479541014,
+          "n": 27
+        },
+        "error": {
+          "hit@1": 0.6842105263157895,
+          "hit@5": 0.8947368421052632,
+          "hit@10": 0.9473684210526315,
+          "mrr@10": 0.7982456140350876,
+          "recall_all@10": 0.8947368421052632,
+          "ndcg@10": 0.8174162236753424,
+          "hook_hit": 0.8947368421052632,
+          "hook_tokens": 300.14473684210526,
+          "hook_hits_per_1k_tokens": 2.981017929946079,
+          "n": 19
+        },
+        "rule": {
+          "hit@1": 1.0,
+          "hit@5": 1.0,
+          "hit@10": 1.0,
+          "mrr@10": 1.0,
+          "recall_all@10": 1.0,
+          "ndcg@10": 1.0,
+          "hook_hit": 1.0,
+          "hook_tokens": 368.625,
+          "hook_hits_per_1k_tokens": 2.712783994574432,
+          "n": 2
+        }
+      },
+      "per_question": [
+        {
+          "id": "q01",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q02",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q03",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q04",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q05",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q06",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q07",
+          "first_rank": 3,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q08",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q09",
+          "first_rank": 2,
+          "hook_hit": 0.0
+        },
+        {
+          "id": "q10",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q11",
+          "first_rank": null,
+          "hook_hit": 0.0
+        },
+        {
+          "id": "q12",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q13",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q14",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q15",
+          "first_rank": null,
+          "hook_hit": 0.0
+        },
+        {
+          "id": "q16",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q17",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q18",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q19",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q20",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q21",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q22",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q23",
+          "first_rank": null,
+          "hook_hit": 0.0
+        },
+        {
+          "id": "q24",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q25",
+          "first_rank": 3,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q26",
+          "first_rank": 5,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q27",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q28",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q29",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q30",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q31",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q32",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q33",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q34",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q35",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q36",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q37",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q38",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q39",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q40",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q41",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q42",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q43",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q44",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q45",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q46",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q47",
+          "first_rank": 6,
+          "hook_hit": 0.0
+        },
+        {
+          "id": "q48",
+          "first_rank": null,
+          "hook_hit": 0.0
+        },
+        {
+          "id": "q49",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q50",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q51",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q52",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q53",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q54",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q55",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q56",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q57",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        }
+      ],
+      "label": "dev 4f7e5f3 --rerank cross-encoder (old window: reorders only the printed --top-k)"
+    },
+    "new-off": {
+      "benchmark": "dogfood-recall",
+      "via": "recall",
+      "cutoff": "2026-09-28T02:00:00Z",
+      "top_k": 10,
+      "fetch": 10,
+      "rerank": "off",
+      "overall": {
+        "hit@1": 0.6842105263157895,
+        "hit@5": 0.8947368421052632,
+        "hit@10": 0.9298245614035088,
+        "mrr@10": 0.7912280701754386,
+        "recall_all@10": 0.9122807017543859,
+        "ndcg@10": 0.8116991086830022,
+        "hook_hit": 0.8947368421052632,
+        "hook_tokens": 302.8640350877193,
+        "hook_hits_per_1k_tokens": 2.9542525306648515,
+        "n": 57
+      },
+      "by_kind": {
+        "commit": {
+          "hit@1": 1.0,
+          "hit@5": 1.0,
+          "hit@10": 1.0,
+          "mrr@10": 1.0,
+          "recall_all@10": 1.0,
+          "ndcg@10": 1.0,
+          "hook_hit": 1.0,
+          "hook_tokens": 304.1875,
+          "hook_hits_per_1k_tokens": 3.2874460653379907,
+          "n": 4
+        },
+        "context": {
+          "hit@1": 0.6,
+          "hit@5": 1.0,
+          "hit@10": 1.0,
+          "mrr@10": 0.8,
+          "recall_all@10": 1.0,
+          "ndcg@10": 0.8523719014285831,
+          "hook_hit": 1.0,
+          "hook_tokens": 335.2,
+          "hook_hits_per_1k_tokens": 2.983293556085919,
+          "n": 5
+        },
+        "decision": {
+          "hit@1": 0.5925925925925926,
+          "hit@5": 0.8518518518518519,
+          "hit@10": 0.8888888888888888,
+          "mrr@10": 0.725925925925926,
+          "recall_all@10": 0.8888888888888888,
+          "ndcg@10": 0.7638997737209733,
+          "hook_hit": 0.8518518518518519,
+          "hook_tokens": 293.72222222222223,
+          "hook_hits_per_1k_tokens": 2.9001954479541014,
+          "n": 27
+        },
+        "error": {
+          "hit@1": 0.7894736842105263,
+          "hit@5": 0.8947368421052632,
+          "hit@10": 0.9473684210526315,
+          "mrr@10": 0.8508771929824562,
+          "recall_all@10": 0.8947368421052632,
+          "ndcg@10": 0.8357734630169437,
+          "hook_hit": 0.8947368421052632,
+          "hook_tokens": 300.14473684210526,
+          "hook_hits_per_1k_tokens": 2.981017929946079,
+          "n": 19
+        },
+        "rule": {
+          "hit@1": 0.5,
+          "hit@5": 1.0,
+          "hit@10": 1.0,
+          "mrr@10": 0.6666666666666666,
+          "recall_all@10": 1.0,
+          "ndcg@10": 0.75,
+          "hook_hit": 1.0,
+          "hook_tokens": 368.625,
+          "hook_hits_per_1k_tokens": 2.712783994574432,
+          "n": 2
+        }
+      },
+      "per_question": [
+        {
+          "id": "q01",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q02",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q03",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q04",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q05",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q06",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q07",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q08",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q09",
+          "first_rank": 10,
+          "hook_hit": 0.0
+        },
+        {
+          "id": "q10",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q11",
+          "first_rank": null,
+          "hook_hit": 0.0
+        },
+        {
+          "id": "q12",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q13",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q14",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q15",
+          "first_rank": null,
+          "hook_hit": 0.0
+        },
+        {
+          "id": "q16",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q17",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q18",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q19",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q20",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q21",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q22",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q23",
+          "first_rank": null,
+          "hook_hit": 0.0
+        },
+        {
+          "id": "q24",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q25",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q26",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q27",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q28",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q29",
+          "first_rank": 3,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q30",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q31",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q32",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q33",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q34",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q35",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q36",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q37",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q38",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q39",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q40",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q41",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q42",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q43",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q44",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q45",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q46",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q47",
+          "first_rank": 6,
+          "hook_hit": 0.0
+        },
+        {
+          "id": "q48",
+          "first_rank": null,
+          "hook_hit": 0.0
+        },
+        {
+          "id": "q49",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q50",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q51",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q52",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q53",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q54",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q55",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q56",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q57",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        }
+      ],
+      "label": "new, no rerank (must equal the baseline)"
+    },
+    "new-ce-w1.0": {
+      "benchmark": "dogfood-recall",
+      "via": "recall",
+      "cutoff": "2026-09-28T02:00:00Z",
+      "top_k": 10,
+      "fetch": 10,
+      "rerank": "cross-encoder",
+      "overall": {
+        "hit@1": 0.7017543859649122,
+        "hit@5": 0.9298245614035088,
+        "hit@10": 0.9473684210526315,
+        "mrr@10": 0.8071846282372599,
+        "recall_all@10": 0.9298245614035088,
+        "ndcg@10": 0.8375958311362441,
+        "hook_hit": 0.9298245614035088,
+        "hook_tokens": 298.42543859649123,
+        "hook_hits_per_1k_tokens": 3.115768433738481,
+        "n": 57
+      },
+      "by_kind": {
+        "commit": {
+          "hit@1": 1.0,
+          "hit@5": 1.0,
+          "hit@10": 1.0,
+          "mrr@10": 1.0,
+          "recall_all@10": 1.0,
+          "ndcg@10": 1.0,
+          "hook_hit": 1.0,
+          "hook_tokens": 292.5625,
+          "hook_hits_per_1k_tokens": 3.4180730613116856,
+          "n": 4
+        },
+        "context": {
+          "hit@1": 1.0,
+          "hit@5": 1.0,
+          "hit@10": 1.0,
+          "mrr@10": 1.0,
+          "recall_all@10": 1.0,
+          "ndcg@10": 1.0,
+          "hook_hit": 1.0,
+          "hook_tokens": 330.3,
+          "hook_hits_per_1k_tokens": 3.027550711474417,
+          "n": 5
+        },
+        "decision": {
+          "hit@1": 0.5925925925925926,
+          "hit@5": 0.8888888888888888,
+          "hit@10": 0.9259259259259259,
+          "mrr@10": 0.7287477954144621,
+          "recall_all@10": 0.9259259259259259,
+          "ndcg@10": 0.7803059745200902,
+          "hook_hit": 0.8888888888888888,
+          "hook_tokens": 290.51851851851853,
+          "hook_hits_per_1k_tokens": 3.059663437021927,
+          "n": 27
+        },
+        "error": {
+          "hit@1": 0.6842105263157895,
+          "hit@5": 0.9473684210526315,
+          "hit@10": 0.9473684210526315,
+          "mrr@10": 0.8070175438596492,
+          "recall_all@10": 0.8947368421052632,
+          "ndcg@10": 0.8249842664591306,
+          "hook_hit": 0.9473684210526315,
+          "hook_tokens": 290.86842105263156,
+          "hook_hits_per_1k_tokens": 3.2570342893332125,
+          "n": 19
+        },
+        "rule": {
+          "hit@1": 1.0,
+          "hit@5": 1.0,
+          "hit@10": 1.0,
+          "mrr@10": 1.0,
+          "recall_all@10": 1.0,
+          "ndcg@10": 1.0,
+          "hook_hit": 1.0,
+          "hook_tokens": 409.0,
+          "hook_hits_per_1k_tokens": 2.444987775061125,
+          "n": 2
+        }
+      },
+      "per_question": [
+        {
+          "id": "q01",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q02",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q03",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q04",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q05",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q06",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q07",
+          "first_rank": 3,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q08",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q09",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q10",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q11",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q12",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q13",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q14",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q15",
+          "first_rank": null,
+          "hook_hit": 0.0
+        },
+        {
+          "id": "q16",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q17",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q18",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q19",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q20",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q21",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q22",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q23",
+          "first_rank": null,
+          "hook_hit": 0.0
+        },
+        {
+          "id": "q24",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q25",
+          "first_rank": 5,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q26",
+          "first_rank": 7,
+          "hook_hit": 0.0
+        },
+        {
+          "id": "q27",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q28",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q29",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q30",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q31",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q32",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q33",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q34",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q35",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q36",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q37",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q38",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q39",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q40",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q41",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q42",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q43",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q44",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q45",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q46",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q47",
+          "first_rank": null,
+          "hook_hit": 0.0
+        },
+        {
+          "id": "q48",
+          "first_rank": 3,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q49",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q50",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q51",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q52",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q53",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q54",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q55",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q56",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q57",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        }
+      ],
+      "label": "new --rerank cross-encoder (pool of max(4 x top_k, 20), cross-encoder order alone)"
+    },
+    "new-ce-w0.9": {
+      "benchmark": "dogfood-recall",
+      "via": "recall",
+      "cutoff": "2026-09-28T02:00:00Z",
+      "top_k": 10,
+      "fetch": 10,
+      "rerank": "cross-encoder",
+      "rerank_weight": 0.9,
+      "overall": {
+        "hit@1": 0.7017543859649122,
+        "hit@5": 0.9298245614035088,
+        "hit@10": 0.9473684210526315,
+        "mrr@10": 0.8084795321637427,
+        "recall_all@10": 0.9298245614035088,
+        "ndcg@10": 0.8392373752488201,
+        "hook_hit": 0.9298245614035088,
+        "hook_tokens": 299.82894736842104,
+        "hook_hits_per_1k_tokens": 3.1011834232969093,
+        "n": 57
+      },
+      "by_kind": {
+        "commit": {
+          "hit@1": 1.0,
+          "hit@5": 1.0,
+          "hit@10": 1.0,
+          "mrr@10": 1.0,
+          "recall_all@10": 1.0,
+          "ndcg@10": 1.0,
+          "hook_hit": 1.0,
+          "hook_tokens": 292.5625,
+          "hook_hits_per_1k_tokens": 3.4180730613116856,
+          "n": 4
+        },
+        "context": {
+          "hit@1": 1.0,
+          "hit@5": 1.0,
+          "hit@10": 1.0,
+          "mrr@10": 1.0,
+          "recall_all@10": 1.0,
+          "ndcg@10": 1.0,
+          "hook_hit": 1.0,
+          "hook_tokens": 330.0,
+          "hook_hits_per_1k_tokens": 3.0303030303030303,
+          "n": 5
+        },
+        "decision": {
+          "hit@1": 0.5925925925925926,
+          "hit@5": 0.8888888888888888,
+          "hit@10": 0.9259259259259259,
+          "mrr@10": 0.7314814814814815,
+          "recall_all@10": 0.9259259259259259,
+          "ndcg@10": 0.7827762561724435,
+          "hook_hit": 0.8888888888888888,
+          "hook_tokens": 291.10185185185185,
+          "hook_hits_per_1k_tokens": 3.05353223703044,
+          "n": 27
+        },
+        "error": {
+          "hit@1": 0.6842105263157895,
+          "hit@5": 0.9473684210526315,
+          "hit@10": 0.9473684210526315,
+          "mrr@10": 0.8070175438596492,
+          "recall_all@10": 0.8947368421052632,
+          "ndcg@10": 0.8263984985540409,
+          "hook_hit": 0.9473684210526315,
+          "hook_tokens": 294.32894736842104,
+          "hook_hits_per_1k_tokens": 3.218740220841343,
+          "n": 19
+        },
+        "rule": {
+          "hit@1": 1.0,
+          "hit@5": 1.0,
+          "hit@10": 1.0,
+          "mrr@10": 1.0,
+          "recall_all@10": 1.0,
+          "ndcg@10": 1.0,
+          "hook_hit": 1.0,
+          "hook_tokens": 409.0,
+          "hook_hits_per_1k_tokens": 2.444987775061125,
+          "n": 2
+        }
+      },
+      "per_question": [
+        {
+          "id": "q01",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q02",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q03",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q04",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q05",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q06",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q07",
+          "first_rank": 3,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q08",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q09",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q10",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q11",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q12",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q13",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q14",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q15",
+          "first_rank": null,
+          "hook_hit": 0.0
+        },
+        {
+          "id": "q16",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q17",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q18",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q19",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q20",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q21",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q22",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q23",
+          "first_rank": null,
+          "hook_hit": 0.0
+        },
+        {
+          "id": "q24",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q25",
+          "first_rank": 4,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q26",
+          "first_rank": 6,
+          "hook_hit": 0.0
+        },
+        {
+          "id": "q27",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q28",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q29",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q30",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q31",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q32",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q33",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q34",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q35",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q36",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q37",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q38",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q39",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q40",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q41",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q42",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q43",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q44",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q45",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q46",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q47",
+          "first_rank": null,
+          "hook_hit": 0.0
+        },
+        {
+          "id": "q48",
+          "first_rank": 3,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q49",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q50",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q51",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q52",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q53",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q54",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q55",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q56",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q57",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        }
+      ],
+      "label": "new --rerank cross-encoder --rerank-weight 0.9"
+    },
+    "new-ce-w0.7": {
+      "benchmark": "dogfood-recall",
+      "via": "recall",
+      "cutoff": "2026-09-28T02:00:00Z",
+      "top_k": 10,
+      "fetch": 10,
+      "rerank": "cross-encoder",
+      "rerank_weight": 0.7,
+      "overall": {
+        "hit@1": 0.7017543859649122,
+        "hit@5": 0.9473684210526315,
+        "hit@10": 0.9473684210526315,
+        "mrr@10": 0.8134502923976609,
+        "recall_all@10": 0.9298245614035088,
+        "ndcg@10": 0.8432882316632866,
+        "hook_hit": 0.9473684210526315,
+        "hook_tokens": 299.4122807017544,
+        "hook_hits_per_1k_tokens": 3.1640933993496025,
+        "n": 57
+      },
+      "by_kind": {
+        "commit": {
+          "hit@1": 1.0,
+          "hit@5": 1.0,
+          "hit@10": 1.0,
+          "mrr@10": 1.0,
+          "recall_all@10": 1.0,
+          "ndcg@10": 1.0,
+          "hook_hit": 1.0,
+          "hook_tokens": 292.5625,
+          "hook_hits_per_1k_tokens": 3.4180730613116856,
+          "n": 4
+        },
+        "context": {
+          "hit@1": 1.0,
+          "hit@5": 1.0,
+          "hit@10": 1.0,
+          "mrr@10": 1.0,
+          "recall_all@10": 1.0,
+          "ndcg@10": 1.0,
+          "hook_hit": 1.0,
+          "hook_tokens": 330.25,
+          "hook_hits_per_1k_tokens": 3.028009084027252,
+          "n": 5
+        },
+        "decision": {
+          "hit@1": 0.5555555555555556,
+          "hit@5": 0.9259259259259259,
+          "hit@10": 0.9259259259259259,
+          "mrr@10": 0.7234567901234569,
+          "recall_all@10": 0.9259259259259259,
+          "ndcg@10": 0.7776587957722968,
+          "hook_hit": 0.9259259259259259,
+          "hook_tokens": 291.73148148148147,
+          "hook_hits_per_1k_tokens": 3.173897863966738,
+          "n": 27
+        },
+        "error": {
+          "hit@1": 0.7368421052631579,
+          "hit@5": 0.9473684210526315,
+          "hit@10": 0.9473684210526315,
+          "mrr@10": 0.8333333333333334,
+          "recall_all@10": 0.8947368421052632,
+          "ndcg@10": 0.8458232483660694,
+          "hook_hit": 0.9473684210526315,
+          "hook_tokens": 293.82894736842104,
+          "hook_hits_per_1k_tokens": 3.224217455555058,
+          "n": 19
+        },
+        "rule": {
+          "hit@1": 1.0,
+          "hit@5": 1.0,
+          "hit@10": 1.0,
+          "mrr@10": 1.0,
+          "recall_all@10": 1.0,
+          "ndcg@10": 1.0,
+          "hook_hit": 1.0,
+          "hook_tokens": 392.75,
+          "hook_hits_per_1k_tokens": 2.546148949713558,
+          "n": 2
+        }
+      },
+      "per_question": [
+        {
+          "id": "q01",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q02",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q03",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q04",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q05",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q06",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q07",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q08",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q09",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q10",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q11",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q12",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q13",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q14",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q15",
+          "first_rank": null,
+          "hook_hit": 0.0
+        },
+        {
+          "id": "q16",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q17",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q18",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q19",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q20",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q21",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q22",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q23",
+          "first_rank": null,
+          "hook_hit": 0.0
+        },
+        {
+          "id": "q24",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q25",
+          "first_rank": 3,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q26",
+          "first_rank": 5,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q27",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q28",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q29",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q30",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q31",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q32",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q33",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q34",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q35",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q36",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q37",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q38",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q39",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q40",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q41",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q42",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q43",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q44",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q45",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q46",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q47",
+          "first_rank": null,
+          "hook_hit": 0.0
+        },
+        {
+          "id": "q48",
+          "first_rank": 3,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q49",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q50",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q51",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q52",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q53",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q54",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q55",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q56",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q57",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        }
+      ],
+      "label": "new --rerank cross-encoder --rerank-weight 0.7"
+    },
+    "new-ce-w0.5": {
+      "benchmark": "dogfood-recall",
+      "via": "recall",
+      "cutoff": "2026-09-28T02:00:00Z",
+      "top_k": 10,
+      "fetch": 10,
+      "rerank": "cross-encoder",
+      "rerank_weight": 0.5,
+      "overall": {
+        "hit@1": 0.7368421052631579,
+        "hit@5": 0.9473684210526315,
+        "hit@10": 0.9473684210526315,
+        "mrr@10": 0.8309941520467836,
+        "recall_all@10": 0.9298245614035088,
+        "ndcg@10": 0.8551416324143616,
+        "hook_hit": 0.9298245614035088,
+        "hook_tokens": 298.07456140350877,
+        "hook_hits_per_1k_tokens": 3.1194361472020717,
+        "n": 57
+      },
+      "by_kind": {
+        "commit": {
+          "hit@1": 1.0,
+          "hit@5": 1.0,
+          "hit@10": 1.0,
+          "mrr@10": 1.0,
+          "recall_all@10": 1.0,
+          "ndcg@10": 1.0,
+          "hook_hit": 1.0,
+          "hook_tokens": 288.9375,
+          "hook_hits_per_1k_tokens": 3.4609560891196196,
+          "n": 4
+        },
+        "context": {
+          "hit@1": 1.0,
+          "hit@5": 1.0,
+          "hit@10": 1.0,
+          "mrr@10": 1.0,
+          "recall_all@10": 1.0,
+          "ndcg@10": 1.0,
+          "hook_hit": 1.0,
+          "hook_tokens": 330.2,
+          "hook_hits_per_1k_tokens": 3.0284675953967293,
+          "n": 5
+        },
+        "decision": {
+          "hit@1": 0.5925925925925926,
+          "hit@5": 0.9259259259259259,
+          "hit@10": 0.9259259259259259,
+          "mrr@10": 0.7419753086419754,
+          "recall_all@10": 0.9259259259259259,
+          "ndcg@10": 0.7913280641585391,
+          "hook_hit": 0.8888888888888888,
+          "hook_tokens": 285.9259259259259,
+          "hook_hits_per_1k_tokens": 3.1088082901554404,
+          "n": 27
+        },
+        "error": {
+          "hit@1": 0.7894736842105263,
+          "hit@5": 0.9473684210526315,
+          "hit@10": 0.9473684210526315,
+          "mrr@10": 0.8596491228070174,
+          "recall_all@10": 0.8947368421052632,
+          "ndcg@10": 0.8619587008072657,
+          "hook_hit": 0.9473684210526315,
+          "hook_tokens": 300.2368421052632,
+          "hook_hits_per_1k_tokens": 3.1554036287141725,
+          "n": 19
+        },
+        "rule": {
+          "hit@1": 1.0,
+          "hit@5": 1.0,
+          "hit@10": 1.0,
+          "mrr@10": 1.0,
+          "recall_all@10": 1.0,
+          "ndcg@10": 1.0,
+          "hook_hit": 1.0,
+          "hook_tokens": 379.5,
+          "hook_hits_per_1k_tokens": 2.635046113306983,
+          "n": 2
+        }
+      },
+      "per_question": [
+        {
+          "id": "q01",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q02",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q03",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q04",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q05",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q06",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q07",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q08",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q09",
+          "first_rank": 2,
+          "hook_hit": 0.0
+        },
+        {
+          "id": "q10",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q11",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q12",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q13",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q14",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q15",
+          "first_rank": null,
+          "hook_hit": 0.0
+        },
+        {
+          "id": "q16",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q17",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q18",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q19",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q20",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q21",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q22",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q23",
+          "first_rank": null,
+          "hook_hit": 0.0
+        },
+        {
+          "id": "q24",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q25",
+          "first_rank": 3,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q26",
+          "first_rank": 5,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q27",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q28",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q29",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q30",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q31",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q32",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q33",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q34",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q35",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q36",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q37",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q38",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q39",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q40",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q41",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q42",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q43",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q44",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q45",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q46",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q47",
+          "first_rank": null,
+          "hook_hit": 0.0
+        },
+        {
+          "id": "q48",
+          "first_rank": 3,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q49",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q50",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q51",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q52",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q53",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q54",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q55",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q56",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q57",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        }
+      ],
+      "label": "new --rerank cross-encoder --rerank-weight 0.5"
+    },
+    "new-ce-w0.3": {
+      "benchmark": "dogfood-recall",
+      "via": "recall",
+      "cutoff": "2026-09-28T02:00:00Z",
+      "top_k": 10,
+      "fetch": 10,
+      "rerank": "cross-encoder",
+      "rerank_weight": 0.3,
+      "overall": {
+        "hit@1": 0.7368421052631579,
+        "hit@5": 0.9473684210526315,
+        "hit@10": 0.9649122807017544,
+        "mrr@10": 0.8305764411027569,
+        "recall_all@10": 0.9473684210526315,
+        "ndcg@10": 0.8586925724101838,
+        "hook_hit": 0.9298245614035088,
+        "hook_tokens": 298.55263157894734,
+        "hook_hits_per_1k_tokens": 3.1144410166005585,
+        "n": 57
+      },
+      "by_kind": {
+        "commit": {
+          "hit@1": 1.0,
+          "hit@5": 1.0,
+          "hit@10": 1.0,
+          "mrr@10": 1.0,
+          "recall_all@10": 1.0,
+          "ndcg@10": 1.0,
+          "hook_hit": 1.0,
+          "hook_tokens": 300.25,
+          "hook_hits_per_1k_tokens": 3.3305578684429644,
+          "n": 4
+        },
+        "context": {
+          "hit@1": 1.0,
+          "hit@5": 1.0,
+          "hit@10": 1.0,
+          "mrr@10": 1.0,
+          "recall_all@10": 1.0,
+          "ndcg@10": 1.0,
+          "hook_hit": 1.0,
+          "hook_tokens": 320.35,
+          "hook_hits_per_1k_tokens": 3.1215857655689088,
+          "n": 5
+        },
+        "decision": {
+          "hit@1": 0.5925925925925926,
+          "hit@5": 0.9259259259259259,
+          "hit@10": 0.9259259259259259,
+          "mrr@10": 0.7358024691358025,
+          "recall_all@10": 0.9259259259259259,
+          "ndcg@10": 0.786478814026263,
+          "hook_hit": 0.8888888888888888,
+          "hook_tokens": 285.9537037037037,
+          "hook_hits_per_1k_tokens": 3.108506297963281,
+          "n": 27
+        },
+        "error": {
+          "hit@1": 0.7894736842105263,
+          "hit@5": 0.9473684210526315,
+          "hit@10": 1.0,
+          "mrr@10": 0.8671679197994987,
+          "recall_all@10": 0.9473684210526315,
+          "ndcg@10": 0.8795025604563886,
+          "hook_hit": 0.9473684210526315,
+          "hook_tokens": 301.8421052631579,
+          "hook_hits_per_1k_tokens": 3.138622493461203,
+          "n": 19
+        },
+        "rule": {
+          "hit@1": 1.0,
+          "hit@5": 1.0,
+          "hit@10": 1.0,
+          "mrr@10": 1.0,
+          "recall_all@10": 1.0,
+          "ndcg@10": 1.0,
+          "hook_hit": 1.0,
+          "hook_tokens": 379.5,
+          "hook_hits_per_1k_tokens": 2.635046113306983,
+          "n": 2
+        }
+      },
+      "per_question": [
+        {
+          "id": "q01",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q02",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q03",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q04",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q05",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q06",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q07",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q08",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q09",
+          "first_rank": 5,
+          "hook_hit": 0.0
+        },
+        {
+          "id": "q10",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q11",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q12",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q13",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q14",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q15",
+          "first_rank": null,
+          "hook_hit": 0.0
+        },
+        {
+          "id": "q16",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q17",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q18",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q19",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q20",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q21",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q22",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q23",
+          "first_rank": null,
+          "hook_hit": 0.0
+        },
+        {
+          "id": "q24",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q25",
+          "first_rank": 3,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q26",
+          "first_rank": 3,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q27",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q28",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q29",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q30",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q31",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q32",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q33",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q34",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q35",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q36",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q37",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q38",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q39",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q40",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q41",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q42",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q43",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q44",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q45",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q46",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q47",
+          "first_rank": 7,
+          "hook_hit": 0.0
+        },
+        {
+          "id": "q48",
+          "first_rank": 3,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q49",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q50",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q51",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q52",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q53",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q54",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q55",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q56",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q57",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        }
+      ],
+      "label": "new --rerank cross-encoder --rerank-weight 0.3"
+    },
+    "new-ce-w0.2": {
+      "benchmark": "dogfood-recall",
+      "via": "recall",
+      "cutoff": "2026-09-28T02:00:00Z",
+      "top_k": 10,
+      "fetch": 10,
+      "rerank": "cross-encoder",
+      "rerank_weight": 0.2,
+      "overall": {
+        "hit@1": 0.7368421052631579,
+        "hit@5": 0.9298245614035088,
+        "hit@10": 0.9649122807017544,
+        "mrr@10": 0.8256056808688388,
+        "recall_all@10": 0.9473684210526315,
+        "ndcg@10": 0.8546417159957176,
+        "hook_hit": 0.9298245614035088,
+        "hook_tokens": 298.7324561403509,
+        "hook_hits_per_1k_tokens": 3.11256625214723,
+        "n": 57
+      },
+      "by_kind": {
+        "commit": {
+          "hit@1": 1.0,
+          "hit@5": 1.0,
+          "hit@10": 1.0,
+          "mrr@10": 1.0,
+          "recall_all@10": 1.0,
+          "ndcg@10": 1.0,
+          "hook_hit": 1.0,
+          "hook_tokens": 292.375,
+          "hook_hits_per_1k_tokens": 3.4202650705429667,
+          "n": 4
+        },
+        "context": {
+          "hit@1": 1.0,
+          "hit@5": 1.0,
+          "hit@10": 1.0,
+          "mrr@10": 1.0,
+          "recall_all@10": 1.0,
+          "ndcg@10": 1.0,
+          "hook_hit": 1.0,
+          "hook_tokens": 319.35,
+          "hook_hits_per_1k_tokens": 3.131360576170346,
+          "n": 5
+        },
+        "decision": {
+          "hit@1": 0.5925925925925926,
+          "hit@5": 0.8888888888888888,
+          "hit@10": 0.9259259259259259,
+          "mrr@10": 0.7283950617283951,
+          "recall_all@10": 0.9259259259259259,
+          "ndcg@10": 0.780494540926338,
+          "hook_hit": 0.8888888888888888,
+          "hook_tokens": 292.3796296296296,
+          "hook_hits_per_1k_tokens": 3.040187478227824,
+          "n": 27
+        },
+        "error": {
+          "hit@1": 0.7894736842105263,
+          "hit@5": 0.9473684210526315,
+          "hit@10": 1.0,
+          "mrr@10": 0.862781954887218,
+          "recall_all@10": 0.9473684210526315,
+          "ndcg@10": 0.875853958249725,
+          "hook_hit": 0.9473684210526315,
+          "hook_tokens": 296.3157894736842,
+          "hook_hits_per_1k_tokens": 3.1971580817051506,
+          "n": 19
+        },
+        "rule": {
+          "hit@1": 1.0,
+          "hit@5": 1.0,
+          "hit@10": 1.0,
+          "mrr@10": 1.0,
+          "recall_all@10": 1.0,
+          "ndcg@10": 1.0,
+          "hook_hit": 1.0,
+          "hook_tokens": 368.625,
+          "hook_hits_per_1k_tokens": 2.712783994574432,
+          "n": 2
+        }
+      },
+      "per_question": [
+        {
+          "id": "q01",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q02",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q03",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q04",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q05",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q06",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q07",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q08",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q09",
+          "first_rank": 6,
+          "hook_hit": 0.0
+        },
+        {
+          "id": "q10",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q11",
+          "first_rank": 3,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q12",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q13",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q14",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q15",
+          "first_rank": null,
+          "hook_hit": 0.0
+        },
+        {
+          "id": "q16",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q17",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q18",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q19",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q20",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q21",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q22",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q23",
+          "first_rank": null,
+          "hook_hit": 0.0
+        },
+        {
+          "id": "q24",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q25",
+          "first_rank": 3,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q26",
+          "first_rank": 3,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q27",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q28",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q29",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q30",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q31",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q32",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q33",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q34",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q35",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q36",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q37",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q38",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q39",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q40",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q41",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q42",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q43",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q44",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q45",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q46",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q47",
+          "first_rank": 7,
+          "hook_hit": 0.0
+        },
+        {
+          "id": "q48",
+          "first_rank": 4,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q49",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q50",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q51",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q52",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q53",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q54",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q55",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q56",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q57",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        }
+      ],
+      "label": "new --rerank cross-encoder --rerank-weight 0.2"
+    },
+    "new-ce-w0.1": {
+      "benchmark": "dogfood-recall",
+      "via": "recall",
+      "cutoff": "2026-09-28T02:00:00Z",
+      "top_k": 10,
+      "fetch": 10,
+      "rerank": "cross-encoder",
+      "rerank_weight": 0.1,
+      "overall": {
+        "hit@1": 0.7192982456140351,
+        "hit@5": 0.9122807017543859,
+        "hit@10": 0.9649122807017544,
+        "mrr@10": 0.8190267335004178,
+        "recall_all@10": 0.9473684210526315,
+        "ndcg@10": 0.8456101206580099,
+        "hook_hit": 0.9122807017543859,
+        "hook_tokens": 302.17543859649123,
+        "hook_hits_per_1k_tokens": 3.0190431955411055,
+        "n": 57
+      },
+      "by_kind": {
+        "commit": {
+          "hit@1": 1.0,
+          "hit@5": 1.0,
+          "hit@10": 1.0,
+          "mrr@10": 1.0,
+          "recall_all@10": 1.0,
+          "ndcg@10": 1.0,
+          "hook_hit": 1.0,
+          "hook_tokens": 304.1875,
+          "hook_hits_per_1k_tokens": 3.2874460653379907,
+          "n": 4
+        },
+        "context": {
+          "hit@1": 1.0,
+          "hit@5": 1.0,
+          "hit@10": 1.0,
+          "mrr@10": 1.0,
+          "recall_all@10": 1.0,
+          "ndcg@10": 1.0,
+          "hook_hit": 1.0,
+          "hook_tokens": 335.2,
+          "hook_hits_per_1k_tokens": 2.983293556085919,
+          "n": 5
+        },
+        "decision": {
+          "hit@1": 0.5925925925925926,
+          "hit@5": 0.8888888888888888,
+          "hit@10": 0.9259259259259259,
+          "mrr@10": 0.7367724867724867,
+          "recall_all@10": 0.9259259259259259,
+          "ndcg@10": 0.7814903316872266,
+          "hook_hit": 0.8888888888888888,
+          "hook_tokens": 292.4074074074074,
+          "hook_hits_per_1k_tokens": 3.0398986700443316,
+          "n": 27
+        },
+        "error": {
+          "hit@1": 0.7894736842105263,
+          "hit@5": 0.8947368421052632,
+          "hit@10": 1.0,
+          "mrr@10": 0.8574561403508772,
+          "recall_all@10": 0.9473684210526315,
+          "ndcg@10": 0.8667688509673678,
+          "hook_hit": 0.8947368421052632,
+          "hook_tokens": 299.94736842105266,
+          "hook_hits_per_1k_tokens": 2.9829794700824706,
+          "n": 19
+        },
+        "rule": {
+          "hit@1": 0.5,
+          "hit@5": 1.0,
+          "hit@10": 1.0,
+          "mrr@10": 0.75,
+          "recall_all@10": 1.0,
+          "ndcg@10": 0.8154648767857288,
+          "hook_hit": 1.0,
+          "hook_tokens": 368.625,
+          "hook_hits_per_1k_tokens": 2.712783994574432,
+          "n": 2
+        }
+      },
+      "per_question": [
+        {
+          "id": "q01",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q02",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q03",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q04",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q05",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q06",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q07",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q08",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q09",
+          "first_rank": 7,
+          "hook_hit": 0.0
+        },
+        {
+          "id": "q10",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q11",
+          "first_rank": 4,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q12",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q13",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q14",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q15",
+          "first_rank": null,
+          "hook_hit": 0.0
+        },
+        {
+          "id": "q16",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q17",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q18",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q19",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q20",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q21",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q22",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q23",
+          "first_rank": null,
+          "hook_hit": 0.0
+        },
+        {
+          "id": "q24",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q25",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q26",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q27",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q28",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q29",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q30",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q31",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q32",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q33",
+          "first_rank": 2,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q34",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q35",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q36",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q37",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q38",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q39",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q40",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q41",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q42",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q43",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q44",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q45",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q46",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q47",
+          "first_rank": 6,
+          "hook_hit": 0.0
+        },
+        {
+          "id": "q48",
+          "first_rank": 8,
+          "hook_hit": 0.0
+        },
+        {
+          "id": "q49",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q50",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q51",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q52",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q53",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q54",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q55",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q56",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        },
+        {
+          "id": "q57",
+          "first_rank": 1,
+          "hook_hit": 1.0
+        }
+      ],
+      "label": "new --rerank cross-encoder --rerank-weight 0.1"
+    }
+  }
+}
