@@ -815,6 +815,7 @@ fn the_hot_commands_print_nothing_into_the_log() {
             None,
             fx.vectors && cfg!(feature = "graph"),
         ),
+        (vec!["worker", "run"], None, !cfg!(feature = "decide")),
         (vec!["checkpoint", cp], None, cfg!(feature = "checkpoint")),
         (
             vec!["checkpoint", "-"],

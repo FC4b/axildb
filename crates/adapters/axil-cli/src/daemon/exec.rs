@@ -678,6 +678,9 @@ pub fn writes(command: &Command) -> bool {
         Command::AutoCapture { dry_run, .. } => !dry_run,
         #[cfg(all(feature = "embed", feature = "graph"))]
         Command::AutoLink { .. } => true,
+        Command::Worker {
+            command: crate::WorkerCommand::Run { .. },
+        } => true,
         #[cfg(feature = "checkpoint")]
         Command::Checkpoint { arg, .. } => arg.as_deref() != Some("show"),
         #[cfg(feature = "embed")]

@@ -1513,6 +1513,17 @@ pub(crate) mod tests {
                     i = j;
                     continue;
                 }
+                // How long the command took.
+                const DURATION: &[u8] = b"\"duration_ms\":";
+                if b[i..].starts_with(DURATION) {
+                    let mut j = i + DURATION.len();
+                    while j < b.len() && (b[j].is_ascii_digit() || b[j] == b'.') {
+                        j += 1;
+                    }
+                    out.push_str("\"duration_ms\":<MS>");
+                    i = j;
+                    continue;
+                }
                 let ch = text[i..].chars().next().unwrap();
                 out.push(ch);
                 i += ch.len_utf8();
@@ -1717,6 +1728,7 @@ pub(crate) mod tests {
                     &["--db", db, "extract-entities", "-"],
                 )
                 .stdin(b"Fixed the auth timeout in validate_token (src/auth.rs)"),
+                case("worker run", &["--db", db, "worker", "run"]).volatile(),
                 case("clap usage error", &["store"]),
                 case("clap unknown flag", &["boot", "--bogus"]),
                 case("--help", &["--help"]),
