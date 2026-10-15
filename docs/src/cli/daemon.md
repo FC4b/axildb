@@ -61,12 +61,15 @@ to 8 s in all. The hook uses what a run that exited 0 printed. It injects
 nothing when the run failed, the database is leased or opening, the daemon
 is shutting down or the deadline passed. With no daemon, a command it
 doesn't run, or a daemon of another build, the hook runs the lookup in a
-child process as before, which leases the database.
+child process as before, which leases the database; the child does not ask
+the daemon to run it again.
 
 Each hook has a budget inside the timeout `axil install` gives its
 event: 2.5 s for a prompt, 4 s for a post-tool or session-end hook, 9 s for
 a session start or pre-tool hook, 14 s for a stop. No deadline above runs
-past it, and no lookup starts once it ran out.
+past it, a lookup's child waits for a lease only as long as the budget has
+left, and a child still running when it runs out is killed, so the hook
+prints what it has instead of being killed by the harness.
 
 The hooks' queued writes are still run by `hook drain`, a process of its own
 that runs each queued command as a child: a `store` goes to the daemon, and

@@ -1517,6 +1517,27 @@ fn a_hook_recall_under_a_lease_returns_nothing_at_once() {
     fx.warm_again();
 }
 
+/// A hook's lookup child runs the lookup itself, leasing the database: the
+/// hook asked the daemon already, and found it would not run it.
+#[test]
+fn a_hook_lookup_child_does_not_ask_the_daemon_again() {
+    let fx = fixture();
+    fx.start();
+    let until = std::time::SystemTime::now() + Duration::from_secs(30);
+    let until = until
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis()
+        .to_string();
+    let env = [("AXIL_HOOK_DEADLINE_MS", until.as_str())];
+    let boot = axil_env(BIN, &fx.proj, &["boot"], None, &env);
+    assert!(boot.status.success(), "{}", text(&boot.stderr));
+    assert!(text(&boot.stdout).contains("512 bytes"));
+    assert_eq!(fx.served("boot"), 0, "{}", fx.live());
+    assert_eq!(fx.live()["leases_granted"], 1, "{}", fx.live());
+    fx.warm_again();
+}
+
 /// A lease held by a process that is killed ends with it: the daemon opens
 /// the database again and serves.
 #[test]

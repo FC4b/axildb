@@ -20,7 +20,9 @@
 //!   leaves the hook without context at once, except that a boot waits a
 //!   while for a daemon opening the database. With no daemon, or a command
 //!   it does not run, the hook runs its lookup in a child process, which
-//!   leases as any command does.
+//!   leases as any command does. The child does not send its command to
+//!   the daemon again, and waits for a lease only as long as the hook has
+//!   left.
 //!
 //! A client of another build than the daemon's runs the command itself, so
 //! a command runs only on the code of the binary it was typed into.
@@ -252,7 +254,8 @@ fn ask(
 /// the command, or none answers. Stdin read to send is given back to the
 /// command then.
 pub fn forward_cli(cli: &Cli) -> Option<i32> {
-    if control::mode() == Mode::Off {
+    // A hook's lookup child: the hook asked the daemon already.
+    if control::mode() == Mode::Off || crate::hook_brain::hook_time_left().is_some() {
         return None;
     }
     exec::route(&cli.command).ok()?;
