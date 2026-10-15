@@ -34,6 +34,8 @@ struct Fixture {
     proj: PathBuf,
     db: PathBuf,
     vectors: bool,
+    /// The ids of the records the fixture stored.
+    ids: Vec<String>,
 }
 
 fn model_available() -> bool {
@@ -65,13 +67,14 @@ fn fixture() -> Fixture {
     let fx = |args: &[&str]| {
         let out = axil_in(BIN, &proj, args, None);
         assert!(out.status.success(), "{args:?}: {}", text(&out.stderr));
+        out
     };
     fx(&["init", db.to_str().unwrap()]);
     let vectors = model_available();
     if !vectors {
         let _ = std::fs::remove_file(proj.join(".axil/memory.axil.vec"));
     }
-    for (table, data) in [
+    let ids = [
         (
             "decisions",
             r#"{"summary":"Cap login tokens at 512 bytes"}"#,
@@ -84,14 +87,17 @@ fn fixture() -> Fixture {
             "context",
             r#"{"type":"architecture","summary":"auth.rs validates tokens"}"#,
         ),
-    ] {
-        fx(&["store", table, data]);
-    }
+    ]
+    .map(|(table, data)| {
+        let stored: Value = serde_json::from_slice(&fx(&["store", table, data]).stdout).unwrap();
+        stored["id"].as_str().unwrap().to_string()
+    });
     Fixture {
         _tmp: tmp,
         proj,
         db,
         vectors,
+        ids: ids.to_vec(),
     }
 }
 
@@ -378,60 +384,82 @@ fn copy_dir(from: &Path, to: &Path) {
     }
 }
 
-/// What differs between two runs of the same commands: ULIDs, renumbered
-/// in order of appearance, ISO-8601 times, and the line the embedder prints
-/// once per process, which a daemon prints once in its life.
-fn normalize(bytes: &[u8]) -> String {
-    const CROCKFORD: &[u8] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
-    let text = text(bytes);
-    let text: String = text
-        .split_inclusive('\n')
-        .filter(|line| !line.starts_with("[axil-vector]"))
-        .collect();
-    let b = text.as_bytes();
-    let mut ids: Vec<&[u8]> = Vec::new();
-    let mut out = String::new();
-    let mut i = 0;
-    while i < b.len() {
-        let boundary = i == 0 || !b[i - 1].is_ascii_alphanumeric();
-        let ulid = b.get(i..i + 26).filter(|w| {
-            w[0] == b'0'
-                && w.iter().all(|c| CROCKFORD.contains(c))
-                && b.get(i + 26).is_none_or(|c| !c.is_ascii_alphanumeric())
-        });
-        if let (true, Some(id)) = (boundary, ulid) {
-            let n = ids.iter().position(|seen| *seen == id).unwrap_or_else(|| {
-                ids.push(id);
-                ids.len() - 1
-            });
-            out.push_str(&format!("<ID{n}>"));
-            i += 26;
-            continue;
+/// What differs between two runs of the same commands, made the same: the
+/// ULIDs of records made during a run, numbered in the order they first
+/// appear in any of its outputs, ISO-8601 times, and the line the embedder
+/// prints once per process, which a daemon prints once in its life. The
+/// fixture's own ids are left as they are: both runs must print the same
+/// records.
+struct Normalizer {
+    fixed: Vec<String>,
+    seen: Vec<String>,
+}
+
+impl Normalizer {
+    fn new(fixed: &[String]) -> Normalizer {
+        Normalizer {
+            fixed: fixed.to_vec(),
+            seen: Vec::new(),
         }
-        let digits = |at: usize, n: usize| {
-            b.get(at..at + n)
-                .is_some_and(|w| w.iter().all(u8::is_ascii_digit))
-        };
-        if digits(i, 4)
-            && b.get(i + 4) == Some(&b'-')
-            && digits(i + 5, 2)
-            && b.get(i + 10) == Some(&b'T')
-            && digits(i + 11, 2)
-            && b.get(i + 13) == Some(&b':')
-        {
-            let mut j = i + 19;
-            while j < b.len() && (b[j].is_ascii_digit() || b"+-:.Z".contains(&b[j])) {
-                j += 1;
-            }
-            out.push_str("<TS>");
-            i = j;
-            continue;
-        }
-        let ch = text[i..].chars().next().unwrap();
-        out.push(ch);
-        i += ch.len_utf8();
     }
-    out
+
+    fn apply(&mut self, bytes: &[u8]) -> String {
+        const CROCKFORD: &[u8] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+        let text = text(bytes);
+        let text: String = text
+            .split_inclusive('\n')
+            .filter(|line| !line.starts_with("[axil-vector]"))
+            .collect();
+        let b = text.as_bytes();
+        let mut out = String::new();
+        let mut i = 0;
+        while i < b.len() {
+            let boundary = i == 0 || !b[i - 1].is_ascii_alphanumeric();
+            let ulid = b.get(i..i + 26).filter(|w| {
+                w[0] == b'0'
+                    && w.iter().all(|c| CROCKFORD.contains(c))
+                    && b.get(i + 26).is_none_or(|c| !c.is_ascii_alphanumeric())
+            });
+            if let (true, Some(id)) = (boundary, ulid) {
+                let id = std::str::from_utf8(id).unwrap();
+                if self.fixed.iter().any(|fixed| fixed == id) {
+                    out.push_str(id);
+                } else {
+                    let n = self.seen.iter().position(|seen| seen == id);
+                    let n = n.unwrap_or_else(|| {
+                        self.seen.push(id.to_string());
+                        self.seen.len() - 1
+                    });
+                    out.push_str(&format!("<ID{n}>"));
+                }
+                i += 26;
+                continue;
+            }
+            let digits = |at: usize, n: usize| {
+                b.get(at..at + n)
+                    .is_some_and(|w| w.iter().all(u8::is_ascii_digit))
+            };
+            if digits(i, 4)
+                && b.get(i + 4) == Some(&b'-')
+                && digits(i + 5, 2)
+                && b.get(i + 10) == Some(&b'T')
+                && digits(i + 11, 2)
+                && b.get(i + 13) == Some(&b':')
+            {
+                let mut j = i + 19;
+                while j < b.len() && (b[j].is_ascii_digit() || b"+-:.Z".contains(&b[j])) {
+                    j += 1;
+                }
+                out.push_str("<TS>");
+                i = j;
+                continue;
+            }
+            let ch = text[i..].chars().next().unwrap();
+            out.push(ch);
+            i += ch.len_utf8();
+        }
+        out
+    }
 }
 
 fn wait_for(timeout: Duration, mut done: impl FnMut() -> bool) -> bool {
@@ -1223,23 +1251,20 @@ fn the_hot_commands_go_to_the_daemon_and_print_as_without_one() {
     let saved = fx._tmp.path().join("saved");
     copy_dir(&fx.proj.join(".axil"), &saved);
     let run_all = |env: &[(&str, &str)]| -> Vec<(String, String, Option<i32>)> {
-        let apart = cases.iter().map(|(args, stdin)| {
+        // One numbering for the whole run, so an id printed by two commands
+        // is the same id in both.
+        let mut ids = Normalizer::new(&fx.ids);
+        let mut outputs = Vec::new();
+        for (args, stdin) in &cases {
             let out = axil_env(BIN, &fx.proj, args, *stdin, env);
-            (
-                normalize(&out.stdout),
-                normalize(&out.stderr),
-                out.status.code(),
-            )
-        });
-        let together = merged.iter().map(|args| {
+            let stdout = ids.apply(&out.stdout);
+            outputs.push((stdout, ids.apply(&out.stderr), out.status.code()));
+        }
+        for args in &merged {
             let (both, code) = axil_merged(&fx.proj, args, env);
-            (normalize(&both), "(merged)".to_string(), code)
-        });
-        apart
-            .collect::<Vec<_>>()
-            .into_iter()
-            .chain(together)
-            .collect()
+            outputs.push((ids.apply(&both), "(merged)".to_string(), code));
+        }
+        outputs
     };
 
     fx.start();
