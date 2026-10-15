@@ -1369,9 +1369,10 @@ enum Command {
         /// With --rerank cross-encoder: the cross-encoder's share of the
         /// final order, 0.0–1.0. Below 1.0 each candidate is ranked by
         /// W × cross-encoder + (1 − W) × recall score, both min-max
-        /// normalized over the pool. 1.0 (default) uses the cross-encoder's
-        /// order alone.
-        #[arg(long, default_value = "1.0")]
+        /// normalized over the pool; 1.0 uses the cross-encoder's order
+        /// alone. The default, 0.3, ranked best on the dogfood eval
+        /// (benchmarks/results/dogfood-recall-2026-10-14-rerank.json).
+        #[arg(long, default_value = "0.3")]
         rerank_weight: f32,
         /// Expand the query with graph neighbors + alias synonyms before retrieval (12.5).
         #[arg(long)]

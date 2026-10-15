@@ -14,7 +14,7 @@
 //!   --limit N               Max questions to evaluate (default: all)
 //!   --strategy vector|fts|ask|recall  Retrieval strategy (default: vector)
 //!   --rerank off|cross-encoder        Optional reranking for recall results
-//!   --rerank-weight W[,W..] Cross-encoder share when blending with recall's score (default 1.0)
+//!   --rerank-weight W[,W..] Cross-encoder share when blending with recall's score (default 0.3)
 //!   --compare-no-rerank     With --rerank, also report the unreranked order of the same candidates
 //!   --top-k N               Results per query (default: 5)
 
@@ -126,10 +126,11 @@ struct Args {
     /// The cross-encoder's share of the reranked order, 0.0–1.0: below 1.0
     /// each candidate is ranked by W × cross-encoder + (1 − W) × recall
     /// score, both min-max normalized over the reranked window. 1.0 uses the
-    /// cross-encoder's order alone. Several comma-separated weights each get
+    /// cross-encoder's order alone; the default, 0.3, is `axil recall`'s.
+    /// Several comma-separated weights each get
     /// a report, all scored on the same retrieved candidates (one ingest per
     /// question), and the reports are printed as a JSON array.
-    #[arg(long, value_delimiter = ',', default_value = "1.0")]
+    #[arg(long, value_delimiter = ',', default_value = "0.3")]
     rerank_weight: Vec<f32>,
 
     /// With `--rerank`, also report the same candidates in recall's order,

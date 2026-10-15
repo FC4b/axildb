@@ -204,9 +204,9 @@ Two rerankers share this name and run at different points.
 **The CLI's `--rerank`** is not a stage inside `db.recall()`: it runs after
 recall has returned, so after query-time chunk rescoring (Step 4c) and the
 post-filter. `axil recall --rerank cross-encoder` re-scores a pool of
-recall's hits with an ONNX cross-encoder, reorders the pool by that score
-(recall's order is replaced unless `--rerank-weight` blends the two), and
-prints the first `--top-k` of the new order.
+recall's hits with an ONNX cross-encoder, reorders the pool by a blend of
+that score and recall's (`--rerank-weight`; at 1.0 the cross-encoder's order
+replaces recall's), and prints the first `--top-k` of the new order.
 
 - **What the rerank receives.** A pool of max(4 × `--top-k`, 20) of recall's
   final, QTC-scored hits: 20 at the default `--top-k 5`, the depth the
@@ -223,10 +223,11 @@ prints the first `--top-k` of the new order.
   relaxed (and query-time chunks off), recall on the expanded query, then
   direct FTS; `--no-cascade` turns all three off. `--profile` prints the pool
   size to stderr.
-- **Blending.** `--rerank-weight W` (cross-encoder only, default 1.0) ranks
+- **Blending.** `--rerank-weight W` (cross-encoder only, default 0.3) ranks
   each pooled hit by W × cross-encoder score + (1 − W) × recall score, both
   min-max normalized over the pool. At 1.0 the cross-encoder's order stands
-  alone; at 0.0 recall's order comes back.
+  alone; at 0.0 recall's order comes back. The default is the best weight
+  measured below.
 - **What is printed.** The first `--top-k` of the reranked pool, minus hits
   the `--recall-format` has nothing to show for (`compact`, `oneline` and
   `context-block` skip them; `context-block` also lists code hits before
@@ -281,9 +282,10 @@ same day:
 So the blend at 0.3 ranks better on both and leaves LongMemEval recall where
 it was, while the cross-encoder's order alone costs LongMemEval ranking.
 The weight was picked on the dogfood eval; the LongMemEval run reports the
-same weight. Rerank still stays opt-in: it needs the `rerank` build and a
-model Axil does not download, and it adds a cross-encoder pass over the
-pool to every recall.
+same weight. It is `--rerank-weight`'s default, and `axil ask --rerank`
+blends at the same weight. Rerank still stays opt-in: it needs the `rerank`
+build and a model Axil does not download, and it adds a cross-encoder pass
+over the pool to every recall.
 
 Earlier runs on a 30-question subset reported the cross-encoder lowering
 Recall-QTC from 0.933 to 0.667
