@@ -50,7 +50,7 @@ use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock, PoisonError, RwLock};
 use std::time::Duration;
 
@@ -87,6 +87,10 @@ pub struct Request {
     pub stdin: Option<Vec<u8>>,
     /// Whether the command may record a slow query in the database's log.
     pub slow_query_log: bool,
+    /// A step of a job the hooks queued, run by the host's drain thread. A
+    /// write a client sent goes ahead of the queue's between its steps
+    /// (see [`WarmState::writers_waiting`]).
+    pub queued: bool,
 }
 
 impl Request {
@@ -180,6 +184,8 @@ pub struct WarmState {
     path: PathBuf,
     /// Held by a request that writes, so writes run one at a time.
     writer: Mutex<()>,
+    /// The writes clients sent that wait for [`WarmState::writer`].
+    writers_waiting: AtomicUsize,
     /// Set for good by a request that panicked; see [`WarmState::poisoned`].
     poisoned: AtomicBool,
     /// Held by the one [`WarmState::reopen`] running.
@@ -300,6 +306,7 @@ impl WarmState {
             path: warm.key().to_path_buf(),
             warm: RwLock::new(Some(warm)),
             writer: Mutex::new(()),
+            writers_waiting: AtomicUsize::new(0),
             poisoned: AtomicBool::new(false),
             reopening: AtomicBool::new(false),
             #[cfg(test)]
@@ -310,6 +317,13 @@ impl WarmState {
     /// The open handle, if there is one.
     pub fn handle(&self) -> Option<WarmDb> {
         self.slot_read().clone()
+    }
+
+    /// How many writes clients sent are waiting for the one running. The
+    /// queue's drain thread lets them go first: it starts its next step
+    /// only once none waits.
+    pub fn writers_waiting(&self) -> usize {
+        self.writers_waiting.load(Ordering::Acquire)
     }
 
     /// Whether a request panicked on the handle. Nothing is served after
@@ -517,7 +531,12 @@ fn execute(
     let writes = writes(&cli.command);
     // A write waits for the writes before it without holding the handle,
     // so a queue of writes never keeps a reopen waiting on it.
-    let _writing = writes.then(|| state.writer.lock().unwrap_or_else(PoisonError::into_inner));
+    let _writing = writes.then(|| {
+        let waiting = (!req.queued).then(|| Waiting::new(&state.writers_waiting));
+        let lock = state.writer.lock().unwrap_or_else(PoisonError::into_inner);
+        drop(waiting);
+        lock
+    });
     // A write that waited on the lock behind one that panicked.
     if state.poisoned() {
         return Err(NotServed::Unavailable);
@@ -552,6 +571,23 @@ fn execute(
             state.poison(held);
             Ok(panicked(printed, &*payload))
         }
+    }
+}
+
+/// A write a client sent, counted in [`WarmState::writers_waiting`] until
+/// dropped.
+struct Waiting<'a>(&'a AtomicUsize);
+
+impl<'a> Waiting<'a> {
+    fn new(count: &'a AtomicUsize) -> Self {
+        count.fetch_add(1, Ordering::AcqRel);
+        Self(count)
+    }
+}
+
+impl Drop for Waiting<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
@@ -602,6 +638,18 @@ pub fn route(command: &Command) -> Result<Vec<Need>, NotServed> {
         return Err(NotServed::Command);
     }
     crate::hot_needs(command).ok_or(NotServed::Command)
+}
+
+/// Whether a host runs the command line `argv` (program name first)
+/// in-process at all, as far as [`route`] tells without a handle; one that
+/// does not parse it doesn't. Parsing needs `main`'s stack (see
+/// [`REQUEST_STACK`]).
+pub fn routes(argv: &[String]) -> bool {
+    let parser = parser();
+    let Ok(matches) = parser.command.clone().try_get_matches_from(argv) else {
+        return false;
+    };
+    Cli::from_arg_matches(&matches).is_ok_and(|cli| route(&cli.command).is_ok())
 }
 
 /// Whether `db` can serve `command` in-process: [`route`] accepts it and
@@ -775,6 +823,7 @@ mod tests {
                 .unwrap_or_default(),
             stdin: Some(stdin.unwrap_or_default().to_vec()),
             slow_query_log: true,
+            queued: false,
         }
     }
 

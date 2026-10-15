@@ -267,6 +267,7 @@ impl RunHeader {
                 .collect(),
             stdin,
             slow_query_log: self.slow_query_log,
+            queued: false,
         }
     }
 }

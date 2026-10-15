@@ -79,6 +79,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use axil_core::GraphState;
 use serde_json::{json, Value};
 
+use super::drain::QueueStats;
 use super::exec::{self, NotServed, ReopenError, WarmState};
 use super::paths::{self, write_atomic, RunDir};
 use super::proto::{
@@ -171,6 +172,8 @@ pub struct Options {
     /// This is the daemon process: bind under umask 077 and rotate the log
     /// at fd 1 and 2. Both are process-wide.
     pub process: bool,
+    /// Drain the hook queue (see [`super::drain`]).
+    pub drain_queue: bool,
 }
 
 /// Why the daemon stops.
@@ -238,7 +241,7 @@ pub enum Finish {
 
 /// One entry in the daemon's log, each of its lines stamped. Unit tests
 /// run daemons in the test process, whose stderr is not a log.
-fn log(message: impl std::fmt::Display) {
+pub(super) fn log(message: impl std::fmt::Display) {
     if cfg!(test) {
         return;
     }
@@ -282,6 +285,9 @@ struct Holder {
     pid: u32,
     since: Instant,
     granted: bool,
+    /// The daemon's own, for the queue's steps that run in their own
+    /// process (see [`Server::yield_db`]).
+    queue: bool,
 }
 
 /// The open handle's view of when its files last matched it.
@@ -334,8 +340,29 @@ pub struct Server {
     background: Mutex<Option<Vec<JoinHandle<()>>>>,
     /// [`Options::launch_path`], when it leads to this binary.
     launch: Option<PathBuf>,
+    /// Set to wake the queue's drain thread: a job was queued, or the
+    /// database opened again.
+    woken: Mutex<bool>,
+    wake: Condvar,
+    /// The queue's drain thread, once the database first opened.
+    drain: Mutex<Option<JoinHandle<()>>>,
+    queue: QueueStats,
     #[cfg(test)]
     panic_prewarm: AtomicBool,
+}
+
+/// What a step of a queued job came to; see [`Server::run_queued`].
+pub(super) enum Queued {
+    /// It ran on the open handle.
+    Ran(exec::Response),
+    /// The daemon does not run it on its handle; it runs in a process of
+    /// its own.
+    NotServed(NotServed),
+    /// Not now: the database is opening, opening again or leased.
+    Wait,
+    /// Not at all: the daemon is stopping with the database closed, or a
+    /// request panicked.
+    Stopped,
 }
 
 /// A run request counted against [`MAX_IN_FLIGHT`] until dropped.
@@ -440,6 +467,10 @@ impl Server {
             accept: Mutex::new(None),
             background: Mutex::new(Some(Vec::new())),
             launch,
+            woken: Mutex::new(false),
+            wake: Condvar::new(),
+            drain: Mutex::new(None),
+            queue: QueueStats::default(),
             #[cfg(test)]
             panic_prewarm: AtomicBool::new(false),
         });
@@ -512,6 +543,14 @@ impl Server {
         // Whatever kept an earlier daemon from serving is gone.
         let _ = fs::remove_file(self.run.blocked());
         self.prewarm();
+        if self.opts.drain_queue {
+            match super::drain::spawn(self.clone()) {
+                Ok(handle) => {
+                    *self.drain.lock().unwrap_or_else(PoisonError::into_inner) = Some(handle)
+                }
+                Err(e) => log(format!("can't start draining the hook queue: {e}")),
+            }
+        }
         Ok(())
     }
 
@@ -620,12 +659,22 @@ impl Server {
         {
             let _ = accept.join();
         }
-        let background = self
+        let mut background = self
             .background
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .take()
             .unwrap_or_default();
+        // The queue's drain thread finishes the job it is on, and stops.
+        self.wake_drain();
+        if let Some(drain) = self
+            .drain
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+        {
+            background.push(drain);
+        }
         let working = || background.iter().filter(|h| !h.is_finished()).count();
         let deadline = Instant::now() + self.opts.drain_wait;
         while (self.in_flight.load(Ordering::SeqCst) > 0 || working() > 0)
@@ -636,7 +685,7 @@ impl Server {
         let (left, busy) = (self.in_flight.load(Ordering::SeqCst), working());
         if left > 0 || busy > 0 {
             log(format!(
-                "{left} requests and {busy} warm-ups or reloads still running after {:?}",
+                "{left} requests and {busy} warm-ups, reloads or queued jobs still running after {:?}",
                 self.opts.drain_wait
             ));
         }
@@ -943,9 +992,10 @@ impl Server {
             }
             Op::Lease { db, wait_ms, pid } => self.handle_lease(&mut stream, &db, wait_ms, pid),
             Op::Poke => {
+                self.wake_drain();
                 let ack = Ack {
                     op: "poke".into(),
-                    ok: false,
+                    ok: self.drains(),
                 };
                 write_json(&mut stream, &ack)
             }
@@ -1001,7 +1051,7 @@ impl Server {
             return write_json(stream, &LeaseReply::refused("wrong_db"));
         }
         let wait = Duration::from_millis(wait_ms).min(MAX_LEASE_WAIT);
-        let id = self.ask_lease(pid);
+        let id = self.ask_lease(pid, false);
         let result = self.let_go(wait);
         let sent = match result {
             Ok(()) => {
@@ -1033,8 +1083,9 @@ impl Server {
         sent
     }
 
-    /// Count process `pid` in as asking for a lease; see [`Server::end_lease`].
-    fn ask_lease(&self, pid: u32) -> u64 {
+    /// Count process `pid` in as asking for a lease, the queue's own when
+    /// `queue`; see [`Server::end_lease`].
+    fn ask_lease(&self, pid: u32, queue: bool) -> u64 {
         let mut leases = self.leases.lock().unwrap_or_else(PoisonError::into_inner);
         leases.next_id += 1;
         leases.generation += 1;
@@ -1044,6 +1095,7 @@ impl Server {
             pid,
             since: Instant::now(),
             granted: false,
+            queue,
         });
         id
     }
@@ -1218,6 +1270,7 @@ impl Server {
                     self.phase.advance(Phase::Reloading, Phase::Ready);
                 }
                 self.prewarm_on(state);
+                self.wake_drain();
             }
             Err(failed) => self.stop_blocked(format!("reopening after a lease: {failed}")),
         }
@@ -1543,10 +1596,12 @@ impl Server {
                 self.phase.advance(Phase::Reloading, Phase::Ready);
                 log("reloaded");
                 self.prewarm_on(state);
+                self.wake_drain();
             }
             Outcome::Postponed => {
                 log("reload postponed: requests still hold the database");
                 self.phase.advance(Phase::Reloading, Phase::Ready);
+                self.wake_drain();
             }
             Outcome::Failed(failed) => {
                 self.stop_blocked(format!("reopening after {why}: {failed}"))
@@ -1647,6 +1702,165 @@ impl Server {
         });
     }
 
+    /// The database the daemon serves.
+    pub(super) fn key(&self) -> &Path {
+        &self.key
+    }
+
+    /// The queue's figures.
+    pub(super) fn queue(&self) -> &QueueStats {
+        &self.queue
+    }
+
+    /// Whether the daemon is shutting down.
+    pub(super) fn stopping(&self) -> bool {
+        self.phase.get() == Phase::Stopping
+    }
+
+    /// Whether the daemon serves: the database open and ready.
+    pub(super) fn serving(&self) -> bool {
+        self.phase.get() == Phase::Ready
+            && self
+                .state
+                .get()
+                .is_some_and(|state| !state.poisoned() && state.handle().is_some())
+    }
+
+    /// Whether the daemon drains the hook queue, and goes on to.
+    fn drains(&self) -> bool {
+        !self.stopping()
+            && self
+                .drain
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .as_ref()
+                .is_some_and(|drain| !drain.is_finished())
+    }
+
+    /// The writes clients sent waiting for the one running.
+    pub(super) fn writers_waiting(&self) -> usize {
+        self.state.get().map_or(0, WarmState::writers_waiting)
+    }
+
+    /// Wake the queue's drain thread.
+    pub(super) fn wake_drain(&self) {
+        *self.woken.lock().unwrap_or_else(PoisonError::into_inner) = true;
+        self.wake.notify_all();
+    }
+
+    /// For the queue's drain thread: wait until woken, or `timeout`.
+    pub(super) fn wait_for_wake(&self, timeout: Duration) {
+        let woken = self.woken.lock().unwrap_or_else(PoisonError::into_inner);
+        let (mut woken, _) = self
+            .wake
+            .wait_timeout_while(woken, timeout, |woken| !*woken)
+            .unwrap_or_else(PoisonError::into_inner);
+        *woken = false;
+    }
+
+    /// Run one step of a queued job, `argv` run in `cwd` with `stdin`, on
+    /// the open handle, as a client's request runs (see [`Server::run`]),
+    /// for the queue's drain thread. It is not refused for the cap on
+    /// requests, nor once shutting down has begun while the database is
+    /// still open: the job it belongs to finishes first. It counts as use,
+    /// as a served request does.
+    pub(super) fn run_queued(
+        self: &Arc<Self>,
+        argv: &[String],
+        cwd: &Path,
+        stdin: &[u8],
+    ) -> Queued {
+        let Some(state) = self.state.get() else {
+            return Queued::Wait;
+        };
+        if state.poisoned() {
+            return Queued::Stopped;
+        }
+        match self.phase.get() {
+            Phase::Ready => {}
+            Phase::Stopping if state.handle().is_some() => {}
+            Phase::Stopping => return Queued::Stopped,
+            Phase::Starting | Phase::Reloading | Phase::Leasing | Phase::Leased => {
+                return Queued::Wait
+            }
+        }
+        match self.check(FRESH_FOR, 0) {
+            Some(Change::Reload(why)) => {
+                if self.phase.get() == Phase::Ready {
+                    self.spawn_background("axil-reload", move |server| server.reload(&why));
+                }
+                return Queued::Wait;
+            }
+            Some(Change::Overwritten(why)) => {
+                self.abandon(&why);
+                self.request_stop(StopReason::Overwritten(why));
+                return Queued::Stopped;
+            }
+            None => {}
+        }
+        // Counted in, so shutting down waits for it.
+        let Some(_admitted) = Admitted::new(&self.in_flight, usize::MAX) else {
+            return Queued::Wait;
+        };
+        let op = op_label(argv);
+        let request = exec::Request {
+            argv: argv.iter().map(std::ffi::OsString::from).collect(),
+            cwd: cwd.to_path_buf(),
+            env: Vec::new(),
+            stdin: Some(stdin.to_vec()),
+            slow_query_log: true,
+            queued: true,
+        };
+        let started = Instant::now();
+        let gate = |writes: bool| self.gate(None, writes);
+        let result = {
+            let _busy = self.busy();
+            exec::execute_gated(request, state, &gate)
+        };
+        if state.poisoned() {
+            self.request_stop(StopReason::Panicked);
+            return Queued::Stopped;
+        }
+        match result {
+            Ok(response) => {
+                self.touch();
+                self.stats.served(op, started.elapsed());
+                Queued::Ran(response)
+            }
+            Err(NotServed::Unavailable | NotServed::Expired | NotServed::Leased) => Queued::Wait,
+            Err(why) => {
+                self.stats.not_served(op);
+                Queued::NotServed(why)
+            }
+        }
+    }
+
+    /// Let go of the database for the queue's drain thread, to run steps
+    /// the daemon does not run in a process of their own: a lease the
+    /// daemon holds itself, granted as another process's is (see
+    /// [`Server::let_go`]). Returns the lease's id, for [`Server::unyield`].
+    pub(super) fn yield_db(self: &Arc<Self>) -> Result<u64, &'static str> {
+        let id = self.ask_lease(std::process::id(), true);
+        match self.let_go(super::lease::LEASE_WAIT) {
+            Ok(()) => {
+                self.grant_lease(id);
+                log("let go of the database to run queued steps in their own process");
+                Ok(id)
+            }
+            Err(why) => {
+                self.end_lease(id);
+                Err(why)
+            }
+        }
+    }
+
+    /// End the lease [`Server::yield_db`] took: the database opens again
+    /// once no other process holds one.
+    pub(super) fn unyield(self: &Arc<Self>, id: u64) {
+        log("the queued steps run in their own process are done");
+        self.end_lease(id);
+    }
+
     fn hello(&self) -> Hello {
         Hello {
             op: "hello".into(),
@@ -1699,6 +1913,7 @@ impl Server {
                         "pid": h.pid,
                         "granted": h.granted,
                         "secs": h.since.elapsed().as_secs(),
+                        "queue": h.queue,
                     })
                 })
                 .collect();
@@ -1739,6 +1954,7 @@ impl Server {
             "engines": engines,
             "graph": graph,
             "prewarm": self.stats.prewarm(),
+            "queue": self.queue.report(),
         })
     }
 }
@@ -1926,13 +2142,20 @@ pub fn run_daemon(
         drain_wait: DRAIN_WAIT,
         launch_path,
         process: true,
+        drain_queue: true,
     };
-    let server = match Server::start(key, run, opts) {
+    let server = match Server::start(key.clone(), run, opts) {
         Ok(server) => server,
         Err(_) => return Ok(crate::EXIT_ERROR),
     };
     let reason = server.serve();
-    match server.shutdown(&reason) {
+    let finish = server.shutdown(&reason);
+    // Jobs queued since the drain thread stopped go to a drainer of their
+    // own, once the queue's lock is free.
+    if !server.queue.holding() {
+        super::drain::hand_back(&key);
+    }
+    match finish {
         Finish::Exit(code) => {
             drop(server);
             drop(lock);
@@ -1967,6 +2190,7 @@ mod tests {
             drain_wait: DRAIN_WAIT,
             launch_path: None,
             process: false,
+            drain_queue: false,
         }
     }
 
@@ -3077,7 +3301,7 @@ mod tests {
         let proj = build_fixture(tmp.path());
         let server = start(&proj.join(".axil/memory.axil"));
         quiet(&server);
-        let id = server.ask_lease(std::process::id());
+        let id = server.ask_lease(std::process::id(), false);
         server.prewarm();
         assert!(server.unwarmed.load(Ordering::Acquire));
         assert!(server

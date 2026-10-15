@@ -2299,10 +2299,22 @@ impl Job {
 }
 
 /// Hook jobs wait next to the database they change: `<db dir>/hook-queue/`.
-fn queue_dir(db: &Path) -> PathBuf {
+pub(crate) fn queue_dir(db: &Path) -> PathBuf {
     db.parent()
         .unwrap_or_else(|| Path::new("."))
         .join("hook-queue")
+}
+
+/// The project the database at `db` belongs to: the directory holding its
+/// `.axil/`, else the database's own directory. A drainer the daemon starts
+/// runs there, as one a hook in the project starts does.
+#[cfg_attr(not(unix), allow(dead_code))] // the daemon's
+pub(crate) fn project_dir_of(db: &Path) -> PathBuf {
+    let dir = db.parent().unwrap_or_else(|| Path::new("."));
+    match (dir.file_name(), dir.parent()) {
+        (Some(name), Some(parent)) if name == ".axil" => parent.to_path_buf(),
+        _ => dir.to_path_buf(),
+    }
 }
 
 /// Write `job` to the queue atomically (temp file, then rename), so the
@@ -2338,7 +2350,7 @@ fn write_job(db: &Path, job: &Job, own_drainer: bool) -> bool {
         && std::fs::rename(&tmp, dir.join(format!("{name}.job"))).is_ok()
 }
 
-fn spawn_drainer(exe: &Path, db: &Path, cwd: &Path) {
+pub(crate) fn spawn_drainer(exe: &Path, db: &Path, cwd: &Path) {
     let args = [
         "--db".to_string(),
         db.to_string_lossy().into_owned(),
@@ -2381,7 +2393,7 @@ pub(crate) fn drain(db: &Path) -> Result<i32> {
         set_aside_interrupted(&dir);
         while let Some(job) = next_job(&dir) {
             lock.touch();
-            run_job_file(&mut runner, &exe, db, &dir, &job);
+            let _ = run_job_file(&mut runner, &exe, db, &dir, &job);
         }
         drop(lock);
         // A job queued after the last scan but before the lock dropped saw a
@@ -2416,7 +2428,7 @@ fn wait_for_handover(dir: &Path, until: Instant) -> Option<DrainLock> {
 
 /// Whether the queued job at `path` is for a drainer of its hook's own
 /// (see [`Job`]).
-fn for_own_drainer(path: &Path) -> bool {
+pub(crate) fn for_own_drainer(path: &Path) -> bool {
     #[derive(Deserialize)]
     struct Flag {
         #[serde(default)]
@@ -2456,7 +2468,7 @@ fn for_own_drainer(path: &Path) -> bool {
 /// from one thread while another takes or drops this lock, the lock can
 /// outlive the drop by that moment, and a drainer that checks then sees it
 /// held.
-struct DrainLock {
+pub(crate) struct DrainLock {
     path: PathBuf,
     /// The OS-locked handle, or `None` when the lock is held by the file's
     /// existence alone. On Windows it is closed before the file is removed.
@@ -2469,7 +2481,7 @@ struct DrainLock {
 const DRAIN_LOCK_TAG: &str = "flock";
 
 impl DrainLock {
-    fn acquire(dir: &Path) -> Option<Self> {
+    pub(crate) fn acquire(dir: &Path) -> Option<Self> {
         Self::acquire_with(dir, std::fs::File::try_lock)
     }
 
@@ -2555,7 +2567,7 @@ impl DrainLock {
     /// Rewrite the tag and pid, which also refreshes the mtime an older axil
     /// reads as liveness. Without an OS lock it writes the bare pid, the
     /// form every drainer reads as a lock judged by age.
-    fn touch(&self) {
+    pub(crate) fn touch(&self) {
         use std::io::{Seek as _, Write as _};
         let Some(mut file) = self.file.as_ref() else {
             let _ = std::fs::write(&self.path, std::process::id().to_string());
@@ -2696,7 +2708,7 @@ fn queue_files(dir: &Path, ext: &str) -> Vec<PathBuf> {
     files
 }
 
-fn next_job(dir: &Path) -> Option<PathBuf> {
+pub(crate) fn next_job(dir: &Path) -> Option<PathBuf> {
     queue_files(dir, "job").into_iter().next()
 }
 
@@ -2704,7 +2716,7 @@ fn next_job(dir: &Path) -> Option<PathBuf> {
 /// mid-job, so some of its writes may have landed. It is never retried
 /// (that could write twice): it moves to `interrupted/` for a person to
 /// look at.
-fn set_aside_interrupted(dir: &Path) {
+pub(crate) fn set_aside_interrupted(dir: &Path) {
     for path in queue_files(dir, "running") {
         let dest = dir.join("interrupted");
         let _ = std::fs::create_dir_all(&dest);
@@ -2721,7 +2733,7 @@ fn set_aside_interrupted(dir: &Path) {
     }
 }
 
-fn drain_log(dir: &Path, line: &str) {
+pub(crate) fn drain_log(dir: &Path, line: &str) {
     let path = dir.join("drain.log");
     if std::fs::metadata(&path).is_ok_and(|m| m.len() > DRAIN_LOG_MAX_BYTES) {
         let _ = std::fs::remove_file(&path);
@@ -2730,17 +2742,18 @@ fn drain_log(dir: &Path, line: &str) {
 }
 
 /// Claim a job (rename to `.running`, the in-flight mark), run it, and
-/// remove it. A failed job is logged and dropped, not retried.
+/// remove it. A failed job is logged and dropped, not retried. Returns
+/// whether it ran and succeeded.
 pub(crate) fn run_job_file(
     runner: &mut impl JobRunner,
     exe: &Path,
     db: &Path,
     dir: &Path,
     job_path: &Path,
-) {
+) -> bool {
     let running = job_path.with_extension("running");
     if std::fs::rename(job_path, &running).is_err() {
-        return;
+        return false;
     }
     let name = running
         .file_stem()
@@ -2751,10 +2764,11 @@ pub(crate) fn run_job_file(
         .and_then(|body| serde_json::from_slice::<Job>(&body).ok())
         .ok_or_else(|| "unreadable job file".to_string())
         .and_then(|job| run_job(runner, exe, db, &job));
-    if let Err(e) = result {
+    if let Err(e) = &result {
         drain_log(dir, &format!("job {name} failed: {e}"));
     }
     let _ = std::fs::remove_file(&running);
+    result.is_ok()
 }
 
 /// What runs the steps of a queued job, each one axil command line: a
@@ -2782,6 +2796,8 @@ pub(crate) struct SubprocessRunner<'a> {
     db: &'a Path,
     /// Set on every child.
     env: Vec<(&'static str, &'static str)>,
+    /// Where each child runs; this process's working directory when `None`.
+    cwd: Option<&'a Path>,
 }
 
 impl<'a> SubprocessRunner<'a> {
@@ -2790,6 +2806,7 @@ impl<'a> SubprocessRunner<'a> {
             exe,
             db,
             env: Vec::new(),
+            cwd: None,
         }
     }
 
@@ -2799,6 +2816,22 @@ impl<'a> SubprocessRunner<'a> {
         self.env.push((name, value));
         self
     }
+
+    /// The same, each child run in `cwd`.
+    #[cfg_attr(not(unix), allow(dead_code))] // the daemon's
+    pub(crate) fn in_dir(mut self, cwd: &'a Path) -> Self {
+        self.cwd = Some(cwd);
+        self
+    }
+
+    fn command(&self) -> Command {
+        let mut cmd = Command::new(self.exe);
+        cmd.envs(self.env.iter().copied());
+        if let Some(cwd) = self.cwd {
+            cmd.current_dir(cwd);
+        }
+        cmd
+    }
 }
 
 impl JobRunner for SubprocessRunner<'_> {
@@ -2807,16 +2840,11 @@ impl JobRunner for SubprocessRunner<'_> {
         args: &[String],
         stdin: Option<&str>,
     ) -> std::result::Result<String, String> {
-        run_write(self.exe, self.db, args, stdin, &self.env)
+        run_write(|| self.command(), self.db, args, stdin)
     }
 
     fn read(&mut self, args: &[&str], stdin: &[u8]) -> Option<String> {
-        run_capture_stdin(
-            Command::new(self.exe)
-                .envs(self.env.iter().copied())
-                .args(args),
-            stdin,
-        )
+        run_capture_stdin(self.command().args(args), stdin)
     }
 }
 
@@ -2875,18 +2903,16 @@ fn run_job(
 /// the writer lock. Retrying a busy open is safe: it fails before anything
 /// is written.
 fn run_write(
-    exe: &Path,
+    command: impl Fn() -> Command,
     db: &Path,
     args: &[String],
     stdin: Option<&str>,
-    env: &[(&str, &str)],
 ) -> std::result::Result<String, String> {
     use std::io::Write as _;
     let mut delay = Duration::from_millis(250);
     let mut waited = Duration::ZERO;
     loop {
-        let child = Command::new(exe)
-            .envs(env.iter().copied())
+        let child = command()
             .arg("--db")
             .arg(db)
             .args(args)
@@ -5541,9 +5567,11 @@ mod tests {
         }
         let mut runner = Recorder::new(&queue);
         runner.failing = vec!["auto-capture"];
+        let mut ran = Vec::new();
         while let Some(job) = next_job(&queue) {
-            run_job_file(&mut runner, exe, &db, &queue, &job);
+            ran.push(run_job_file(&mut runner, exe, &db, &queue, &job));
         }
+        assert_eq!(ran, [true, true, false]);
         assert_eq!(
             runner.steps,
             [
@@ -5571,7 +5599,7 @@ mod tests {
         // An unreadable job is logged and removed, and runs nothing.
         std::fs::write(queue.join("4-d.job"), b"{nope").unwrap();
         let job = next_job(&queue).unwrap();
-        run_job_file(&mut runner, exe, &db, &queue, &job);
+        assert!(!run_job_file(&mut runner, exe, &db, &queue, &job));
         assert_eq!(runner.steps.len(), 3);
         assert!(next_job(&queue).is_none());
         let log = std::fs::read_to_string(queue.join("drain.log")).unwrap();

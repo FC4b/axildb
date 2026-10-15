@@ -4,6 +4,7 @@
 //!
 //! - [`client`] sends a command line to the database's daemon: the CLI's
 //!   hot commands and the hooks' lookups.
+//! - [`drain`] runs the hooks' queued writes inside the daemon.
 //! - [`exec`] runs one request against the open database.
 //! - [`lease`] asks a database's daemon to let go of it, for a process
 //!   about to open it.
@@ -16,6 +17,7 @@
 
 pub mod client;
 pub mod control;
+pub mod drain;
 pub mod exec;
 pub mod lease;
 pub mod paths;
