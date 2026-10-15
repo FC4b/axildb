@@ -105,7 +105,7 @@
     "reasons": [
       "Dogfood (57 coding-memory questions, the CLI path agents use): the three models are within one or two questions of each other. NDCG@10 is 0.821 for bge-small, 0.820 for granite and 0.814 for gte. granite and gte each answer 2 more questions in the prompt hook's block (0.895 -> 0.930).",
       "LongMemEval s20 (single-session-user only): granite finds the same sessions as bge-small and ranks them better (NDCG@10 0.857 -> 0.912). gte finds one more (recall_all 0.90 -> 0.95, NDCG@10 0.919). That is one question type of six, 20 questions.",
-      "Cost on this machine, every figure taken under load: granite takes about 4x bge-small's embedding time per stored session on LongMemEval and 3.6x per vector on dogfood; gte takes about 9x and 12x. The prompt hook's recall p50 is 1.3x (granite) and 3.5x (gte) bge-small's; gte's 8.9 s is far past the hook's 1.8 s deadline.",
+      "Cost on this machine, every figure taken under load: granite takes about 4x bge-small's embedding time per stored session on LongMemEval and 3.6x per vector on dogfood; gte takes about 9x and 12x. The prompt hook's recall p50 is 1.2-1.3x bge-small's for granite and 3.5-3.8x for gte across two passes (load 10-27: 1,098 / 1,350 / 4,153 ms). gte's p50 is far past the hook's 1.8 s deadline, and granite's p90 (2,113 ms) crosses it where bge-small's (1,481 ms) does not.",
       "granite places unrelated text much closer than bge-small: the median same-table cosine is 0.80 vs 0.66, every pair clears the 0.65 conflict-candidate floor, and 1.8x as many pairs clear the 0.92 supersede threshold. Switching to it needs those thresholds re-tuned first, plus a re-embed, which no dimension check forces since both are 384-d."
     ],
     "granite": "the only candidate worth a decision. Decide after s60 (all six question types) and m5 come back: switch only if granite leads bge-small on s60 NDCG@10 by more than 0.02 across types without losing hits, and only together with re-tuned supersede and candidate thresholds",
@@ -665,37 +665,82 @@
     }
   },
   "cli_latency": {
-    "command": "axil recall <q> --recall-format context-block --budget 2000 --top-k 5 (one-shot)",
-    "questions": 57,
-    "load_1m": {
-      "min": 30.1,
-      "max": 109.5,
-      "mean": 68.3
-    },
-    "ms": {
-      "bge": {
-        "p50": 2521.0,
-        "p90": 3244.0,
-        "mean": 2570.0,
-        "min": 1193.0,
-        "max": 5137.0
+    "command": "axil recall <q> --recall-format context-block --budget 2000 --top-k 5 (one-shot, the prompt hook's call)",
+    "note": "loaded machine; compare the models within a pass, not with quiet-machine hook figures (daemon-hook-latency.json: prompt recall p50 1,466 ms at load ~7). The prompt hook's recall deadline is 1,800 ms.",
+    "passes": [
+      {
+        "questions": 57,
+        "load_1m": {
+          "min": 30.1,
+          "max": 109.5,
+          "mean": 68.3
+        },
+        "ms": {
+          "bge": {
+            "p50": 2521.0,
+            "p90": 3244.0,
+            "mean": 2570.0,
+            "min": 1193.0,
+            "max": 5137.0
+          },
+          "granite": {
+            "p50": 3387.0,
+            "p90": 4483.0,
+            "mean": 3528.0,
+            "min": 1470.0,
+            "max": 9086.0
+          },
+          "gte": {
+            "p50": 8946.0,
+            "p90": 12633.0,
+            "mean": 9569.0,
+            "min": 5032.0,
+            "max": 23898.0
+          }
+        },
+        "ratio_p50_vs_bge": {
+          "bge": 1.0,
+          "granite": 1.34,
+          "gte": 3.55
+        }
       },
-      "granite": {
-        "p50": 3387.0,
-        "p90": 4483.0,
-        "mean": 3528.0,
-        "min": 1470.0,
-        "max": 9086.0
-      },
-      "gte": {
-        "p50": 8946.0,
-        "p90": 12633.0,
-        "mean": 9569.0,
-        "min": 5032.0,
-        "max": 23898.0
+      {
+        "questions": 57,
+        "load_1m": {
+          "min": 10.0,
+          "max": 27.1,
+          "mean": 18.3
+        },
+        "ms": {
+          "bge": {
+            "p50": 1098.0,
+            "p90": 1481.0,
+            "mean": 1093.0,
+            "min": 673.0,
+            "max": 1844.0
+          },
+          "granite": {
+            "p50": 1350.0,
+            "p90": 2113.0,
+            "mean": 1448.0,
+            "min": 749.0,
+            "max": 3402.0
+          },
+          "gte": {
+            "p50": 4153.0,
+            "p90": 5358.0,
+            "mean": 4329.0,
+            "min": 2587.0,
+            "max": 6793.0
+          }
+        },
+        "ratio_p50_vs_bge": {
+          "bge": 1.0,
+          "granite": 1.23,
+          "gte": 3.78
+        }
       }
-    },
-    "note": "loaded machine; compare the models with each other, not with quiet-machine hook figures (daemon-hook-latency.json: prompt recall p50 1,466 ms at load ~7). The prompt hook's recall deadline is 1,800 ms."
+    ]
   },
   "longmemeval": {
     "s20": {
