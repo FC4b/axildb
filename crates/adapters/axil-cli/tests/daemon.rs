@@ -2060,6 +2060,14 @@ fn a_sessions_hooks_need_no_lease() {
         assert_eq!(live["leases_granted"], 0, "{live}");
         assert_eq!(queue["own_process_steps"], 0, "{live}");
     }
+    // The lookups were the daemon's too, not one-shot runs beside it.
+    let mut lookups = vec!["boot", "recall-for-file"];
+    if cfg!(feature = "embed") {
+        lookups.push("recall");
+    }
+    for op in lookups {
+        assert!(fx.served(op) >= 1, "{op} was not served: {live}");
+    }
     let sessions = fx.axil(&["list", "_sessions"]);
     assert!(
         text(&sessions.stdout).contains(session),
