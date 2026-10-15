@@ -983,6 +983,31 @@ fn the_commands_it_does_not_serve_lease_the_database() {
     assert_eq!(fx.live()["reloads"], 0, "{}", fx.live());
 }
 
+/// `AXIL_DAEMON=off` turns the lease off with the rest: the command opens
+/// as with no daemon, and finds the database the daemon has open busy.
+#[test]
+fn with_the_daemon_off_a_command_asks_for_no_lease() {
+    let fx = fixture();
+    fx.start();
+    let mut cmd = Command::new(BIN);
+    cmd.args([
+        "store",
+        "decisions",
+        r#"{"summary":"stored with the daemon off"}"#,
+    ])
+    .current_dir(&fx.proj)
+    .stdin(Stdio::null());
+    for name in ENV {
+        cmd.env_remove(name);
+    }
+    let out = cmd.env("AXIL_DAEMON", "off").output().unwrap();
+    assert!(!out.status.success(), "{}", text(&out.stdout));
+    assert!(text(&out.stderr).contains("busy"), "{}", text(&out.stderr));
+    let live = fx.live();
+    assert_eq!(live["leases_granted"], 0, "{live}");
+    assert_eq!(live["state"], "ready", "{live}");
+}
+
 /// `reembed` has the database leased before it touches the vector store,
 /// even to put back the copy an interrupted run left: here one it cannot
 /// move into place.
