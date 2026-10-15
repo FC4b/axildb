@@ -1,0 +1,14 @@
+label: s60-bge
+commit: 615af6dd73a34de8781a95c3a7c913a84bffb8c2
+harness_sha256: 474c2ee67ed448ac8d47c19ec1fc3d08ac092cb5a361ccbedf5a6ee1ed2174cb
+lockfile_sha256: 2da16fc49957042c908f999af4572e90be2ec2b87ae0bd1f86656ed662bca6e0
+rustc: rustc 1.92.0 (ded5c06cf 2025-12-08)
+command: longmemeval-bench --variant s --limit 0 --strategy recall-qtc --top-k 5 --model bge-small --data-dir benchmarks/longmemeval/data --jobs 1 --question-ids benchmarks/longmemeval/model-ab/s60-question-ids.json
+cpu: AMD Ryzen 7 5800X 8-Core Processor
+cores: 16
+memory: 19.5 GiB
+os: Ubuntu 24.04.5 LTS
+kernel: Linux 6.18.40.1-microsoft-standard-WSL2 x86_64
+wsl: yes
+start: 2026-10-15T08:19:57Z load1 2.79
+end: 2026-10-15T09:39:03Z load1 17.73 exit 0

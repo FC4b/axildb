@@ -1,7 +1,7 @@
 {
   "item": "Embedding-model A/B on Axil's own harnesses: bge-small-en-v1.5 (default) vs granite-embedding-small-english-r2 vs gte-modernbert-base, all unprompted",
   "date": "2026-10-15",
-  "status": "partial: dogfood, CLI latency and LongMemEval s20 measured for all three models on the Mac; m5 and s60 run on a second machine (benchmarks/longmemeval/model-ab/)",
+  "status": "complete: dogfood, CLI latency and LongMemEval s20 on the Mac; LongMemEval m5 and s60 on the second machine",
   "raw_outputs": {
     "mac": "benchmarks/results/model-ab-mac/ (per-question dogfood reports, store rebuild reports, LongMemEval reports with .meta/.load/.err, CLI latency, parity oracle, and the scripts that made them)",
     "second_machine": "benchmarks/results/model-ab-pc/ (written by benchmarks/longmemeval/model-ab/run.sh)"
@@ -100,15 +100,17 @@
     "latency": "axil recall <q> --recall-format context-block --budget 2000 --top-k 5 (the prompt hook's call), one-shot process per question, the three snapshots interleaved question by question, one warm-up"
   },
   "recommendation": {
-    "status": "preliminary: m5 and s60 are still to run on the second machine; switching the default is the user's decision",
-    "default": "keep bge-small-en-v1.5 for now",
+    "status": "final",
+    "default": "keep bge-small-en-v1.5",
     "reasons": [
       "Dogfood (57 coding-memory questions, the CLI path agents use): the three models are within one or two questions of each other. NDCG@10 is 0.821 for bge-small, 0.820 for granite and 0.814 for gte. granite and gte each answer a net 2 more questions in the prompt hook's block (0.895 -> 0.930).",
       "LongMemEval s20 (single-session-user only): granite finds the same sessions as bge-small and ranks them better (NDCG@10 0.857 -> 0.912). gte finds one more (recall_all 0.90 -> 0.95, NDCG@10 0.919). That is one question type of six, 20 questions.",
       "Cost on this machine, every figure taken under load: granite takes about 4x bge-small's embedding time per stored session on LongMemEval and 3.6x per vector on dogfood; gte takes about 9x and 12x. The prompt hook's recall p50 is 1.2-1.3x bge-small's for granite and 3.5-3.8x for gte across two passes (load 10-27: 1,098 / 1,350 / 4,153 ms). gte's p50 is far past the hook's 1.8 s deadline, and granite's p90 (2,113 ms) crosses it where bge-small's (1,481 ms) does not.",
-      "granite places unrelated text much closer than bge-small: the median same-table cosine is 0.80 vs 0.66, every pair clears the 0.65 conflict-candidate floor, and 1.8x as many pairs clear the 0.92 supersede threshold. Switching to it needs those thresholds re-tuned first, plus a re-embed, which no dimension check forces since both are 384-d."
+      "granite places unrelated text much closer than bge-small: the median same-table cosine is 0.80 vs 0.66, every pair clears the 0.65 conflict-candidate floor, and 1.8x as many pairs clear the 0.92 supersede threshold. Switching to it needs those thresholds re-tuned first, plus a re-embed, which no dimension check forces since both are 384-d.",
+      "LongMemEval s60 (10 per question type, second machine): NDCG@10 0.946 for bge-small against 0.9369 for granite at equal hit rate; granite is ahead by more than 0.02 on single-session-user and behind by more than 0.02 on multi-session, temporal-reasoning, knowledge-update. The switch rule (more than 0.02 ahead across types, no lost hits) is not met. m5: equal NDCG@10 (0.9262).",
+      "Cost on the second machine: granite's s60 took 2:56:52 against 1:18:47 with peak RSS 9.39 against 1.7 GiB; its m5 peaked at 18.92 GiB."
     ],
-    "granite": "the only candidate worth a decision. Decide after s60 (all six question types) and m5 come back: switch only if granite leads bge-small on s60 NDCG@10 by more than 0.02 across types without losing hits, and only together with re-tuned supersede and candidate thresholds",
+    "granite": "stays opt-in and experimental: the s60 run on the second machine does not show it ahead of bge-small, and it costs more time and memory",
     "gte-modernbert-base": "not as a default: its quality edge over granite on s20 is within one question, and it costs 2x (LongMemEval) to 3.4x (dogfood) granite's embedding time, a 2.2x larger vector store and a 572 MB model. Keep it registered (now with correct [CLS] pooling) for GPU users who want 768-d"
   },
   "dogfood": {
@@ -847,12 +849,236 @@
       "bge_reproduces_committed_baseline": "same hit_rate, recall_all, ndcg_at_10 (0.8565) and misses as benchmarks/longmemeval/baselines/s-recall-qtc-k5-n20.json"
     },
     "m5": {
-      "status": "to run on a second machine with benchmarks/longmemeval/model-ab/run.sh (all arms on one machine); gte not run, see gte_m5_gate",
-      "questions": "first 5 of LongMemEval-M, all single-session-assistant"
+      "status": "measured on the second machine",
+      "questions": "first 5 of LongMemEval-M, all single-session-assistant",
+      "provenance": {
+        "machine": "AMD Ryzen 7 5800X 8-Core Processor, 16 threads, 19.5 GiB given to WSL2, Ubuntu 24.04.5 LTS, Linux 6.18.40.1-microsoft-standard-WSL2 x86_64, CPU execution provider",
+        "commit": "615af6dd73a34de8781a95c3a7c913a84bffb8c2",
+        "harness_sha256": "474c2ee67ed448ac8d47c19ec1fc3d08ac092cb5a361ccbedf5a6ee1ed2174cb",
+        "lockfile_sha256": "2da16fc49957042c908f999af4572e90be2ec2b87ae0bd1f86656ed662bca6e0",
+        "toolchain": "rustc 1.92.0 (ded5c06cf 2025-12-08)",
+        "concurrency": "two lanes (m5, s60) at once, as run.sh runs them; m5-granite was rerun alone (see m5.note)",
+        "load": "the 1-minute load average every 30 s is in each <arm>.load; other jobs shared the machine at times (load up to about 19 on 16 threads), so compare timings within this machine only, and with care"
+      },
+      "bge-small": {
+        "overall": {
+          "hit_rate": 1.0,
+          "avg_recall": 1.0,
+          "recall_all": 1.0,
+          "ndcg_at_10": 0.9262,
+          "turn_recall_full": 1.0,
+          "tokens_compact": 250.0,
+          "tokens_full": 13040.45
+        },
+        "by_category": {
+          "single-session-assistant": {
+            "n": 5,
+            "hits": 5,
+            "ndcg_at_10": 0.9262,
+            "recall_all": 1.0
+          }
+        },
+        "misses": [],
+        "timing": {
+          "wall_clock": "1:05:34",
+          "peak_rss_gib": 6.29,
+          "seconds_per_question_mean": 783.4
+        },
+        "run": {
+          "start": "2026-10-15T08:19:57Z load1 2.79",
+          "end": "2026-10-15T09:25:32Z load1 17.79 exit 0",
+          "command": "longmemeval-bench --variant m --limit 5 --strategy recall-qtc --top-k 5 --model bge-small --data-dir benchmarks/longmemeval/data --jobs 1"
+        }
+      },
+      "granite": {
+        "overall": {
+          "hit_rate": 1.0,
+          "avg_recall": 1.0,
+          "recall_all": 1.0,
+          "ndcg_at_10": 0.9262,
+          "turn_recall_full": 1.0,
+          "tokens_compact": 250.0,
+          "tokens_full": 11461.9
+        },
+        "by_category": {
+          "single-session-assistant": {
+            "n": 5,
+            "hits": 5,
+            "ndcg_at_10": 0.9262,
+            "recall_all": 1.0
+          }
+        },
+        "misses": [],
+        "timing": {
+          "wall_clock": "2:06:53",
+          "peak_rss_gib": 18.92,
+          "seconds_per_question_mean": 1455.9
+        },
+        "run": {
+          "start": "2026-10-15T12:36:23Z load1 4.58",
+          "end": "2026-10-15T14:43:31Z load1 3.99 exit 0",
+          "command": "longmemeval-bench --variant m --limit 5 --strategy recall-qtc --top-k 5 --model granite-small --data-dir benchmarks/longmemeval/data --jobs 1"
+        }
+      },
+      "granite_minus_bge": {
+        "hit_rate": 0.0,
+        "recall_all": 0.0,
+        "ndcg_at_10": 0.0
+      },
+      "granite_minus_bge_ndcg_by_category": {
+        "single-session-assistant": 0.0
+      },
+      "note": "The first m5-granite run was killed by the kernel's OOM killer at question 2 (exit 137 in run.log): it shared the 20 GiB VM with s60-granite. It was rerun alone after s60 finished (run2.log); its peak RSS is in timing.peak_rss_gib, and it needed swap beyond the VM's RAM to finish. The README's memory note (about 6 GB for an m arm) holds for bge-small, not for granite."
     },
     "s60": {
-      "status": "to run on a second machine with benchmarks/longmemeval/model-ab/run.sh, bge-small and granite",
-      "questions": "60 ids in benchmarks/longmemeval/model-ab/s60-question-ids.json, 10 per type"
+      "status": "measured on the second machine",
+      "questions": "60 ids in benchmarks/longmemeval/model-ab/s60-question-ids.json, 10 per type",
+      "provenance": {
+        "machine": "AMD Ryzen 7 5800X 8-Core Processor, 16 threads, 19.5 GiB given to WSL2, Ubuntu 24.04.5 LTS, Linux 6.18.40.1-microsoft-standard-WSL2 x86_64, CPU execution provider",
+        "commit": "615af6dd73a34de8781a95c3a7c913a84bffb8c2",
+        "harness_sha256": "474c2ee67ed448ac8d47c19ec1fc3d08ac092cb5a361ccbedf5a6ee1ed2174cb",
+        "lockfile_sha256": "2da16fc49957042c908f999af4572e90be2ec2b87ae0bd1f86656ed662bca6e0",
+        "toolchain": "rustc 1.92.0 (ded5c06cf 2025-12-08)",
+        "concurrency": "two lanes (m5, s60) at once, as run.sh runs them; m5-granite was rerun alone (see m5.note)",
+        "load": "the 1-minute load average every 30 s is in each <arm>.load; other jobs shared the machine at times (load up to about 19 on 16 threads), so compare timings within this machine only, and with care"
+      },
+      "bge-small": {
+        "overall": {
+          "hit_rate": 0.9833,
+          "avg_recall": 0.9792,
+          "recall_all": 0.9667,
+          "ndcg_at_10": 0.946,
+          "turn_recall_full": 0.9792,
+          "tokens_compact": 249.9958,
+          "tokens_full": 16322.125
+        },
+        "by_category": {
+          "multi-session": {
+            "n": 10,
+            "hits": 10,
+            "ndcg_at_10": 0.963,
+            "recall_all": 0.9
+          },
+          "temporal-reasoning": {
+            "n": 10,
+            "hits": 10,
+            "ndcg_at_10": 0.9453,
+            "recall_all": 1.0
+          },
+          "single-session-preference": {
+            "n": 10,
+            "hits": 10,
+            "ndcg_at_10": 0.9631,
+            "recall_all": 1.0
+          },
+          "knowledge-update": {
+            "n": 10,
+            "hits": 10,
+            "ndcg_at_10": 0.9544,
+            "recall_all": 1.0
+          },
+          "single-session-user": {
+            "n": 10,
+            "hits": 9,
+            "ndcg_at_10": 0.85,
+            "recall_all": 0.9
+          },
+          "single-session-assistant": {
+            "n": 10,
+            "hits": 10,
+            "ndcg_at_10": 1.0,
+            "recall_all": 1.0
+          }
+        },
+        "misses": [
+          "726462e0"
+        ],
+        "timing": {
+          "wall_clock": "1:18:47",
+          "peak_rss_gib": 1.7,
+          "seconds_per_question_mean": 78.8
+        },
+        "run": {
+          "start": "2026-10-15T08:19:57Z load1 2.79",
+          "end": "2026-10-15T09:39:03Z load1 17.73 exit 0",
+          "command": "longmemeval-bench --variant s --limit 0 --strategy recall-qtc --top-k 5 --model bge-small --data-dir benchmarks/longmemeval/data --jobs 1 --question-ids benchmarks/longmemeval/model-ab/s60-question-ids.json"
+        }
+      },
+      "granite": {
+        "overall": {
+          "hit_rate": 0.9833,
+          "avg_recall": 0.9792,
+          "recall_all": 0.9667,
+          "ndcg_at_10": 0.9369,
+          "turn_recall_full": 0.9792,
+          "tokens_compact": 249.7542,
+          "tokens_full": 16405.2125
+        },
+        "by_category": {
+          "single-session-preference": {
+            "n": 10,
+            "hits": 10,
+            "ndcg_at_10": 0.9631,
+            "recall_all": 1.0
+          },
+          "single-session-assistant": {
+            "n": 10,
+            "hits": 10,
+            "ndcg_at_10": 1.0,
+            "recall_all": 1.0
+          },
+          "multi-session": {
+            "n": 10,
+            "hits": 10,
+            "ndcg_at_10": 0.9267,
+            "recall_all": 0.9
+          },
+          "temporal-reasoning": {
+            "n": 10,
+            "hits": 10,
+            "ndcg_at_10": 0.9184,
+            "recall_all": 1.0
+          },
+          "single-session-user": {
+            "n": 10,
+            "hits": 9,
+            "ndcg_at_10": 0.8789,
+            "recall_all": 0.9
+          },
+          "knowledge-update": {
+            "n": 10,
+            "hits": 10,
+            "ndcg_at_10": 0.9341,
+            "recall_all": 1.0
+          }
+        },
+        "misses": [
+          "726462e0"
+        ],
+        "timing": {
+          "wall_clock": "2:56:52",
+          "peak_rss_gib": 9.39,
+          "seconds_per_question_mean": 173.2
+        },
+        "run": {
+          "start": "2026-10-15T09:39:04Z load1 17.73",
+          "end": "2026-10-15T12:36:14Z load1 5.32 exit 0",
+          "command": "longmemeval-bench --variant s --limit 0 --strategy recall-qtc --top-k 5 --model granite-small --data-dir benchmarks/longmemeval/data --jobs 1 --question-ids benchmarks/longmemeval/model-ab/s60-question-ids.json"
+        }
+      },
+      "granite_minus_bge": {
+        "hit_rate": 0.0,
+        "recall_all": 0.0,
+        "ndcg_at_10": -0.0091
+      },
+      "granite_minus_bge_ndcg_by_category": {
+        "multi-session": -0.0363,
+        "temporal-reasoning": -0.0269,
+        "single-session-preference": 0.0,
+        "knowledge-update": -0.0203,
+        "single-session-user": 0.0289,
+        "single-session-assistant": 0.0
+      }
     },
     "gte_m5_gate": {
       "rule": "run gte m5 only if gte's s20 NDCG@10 beats both bge-small's and granite's s20 NDCG@10 by more than 0.02 (bar set before gte's s20 finished)",
