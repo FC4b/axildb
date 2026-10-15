@@ -316,6 +316,9 @@ pub struct Server {
     leases: Mutex<Leases>,
     graph_reloads: AtomicU32,
     fail_graph: AtomicBool,
+    /// The warm-up of the open handle was put off for a lease asked for
+    /// meanwhile; see [`Server::prewarm_on`].
+    unwarmed: AtomicBool,
     accept: Mutex<Option<JoinHandle<()>>>,
     /// The warm-ups and reloads started, which shutting down waits for;
     /// `None` once it has begun, when nothing more starts.
@@ -423,6 +426,7 @@ impl Server {
             leases: Mutex::new(Leases::default()),
             graph_reloads: AtomicU32::new(0),
             fail_graph: AtomicBool::new(false),
+            unwarmed: AtomicBool::new(false),
             accept: Mutex::new(None),
             background: Mutex::new(Some(Vec::new())),
             launch,
@@ -1045,8 +1049,13 @@ impl Server {
             }
             leases.generation
         };
-        if self.phase.get() == Phase::Leased {
-            self.spawn_background("axil-unlease", move |server| server.unlease(generation));
+        match self.phase.get() {
+            Phase::Leased => {
+                self.spawn_background("axil-unlease", move |server| server.unlease(generation))
+            }
+            // The warm-up was put off for a lease that was then refused.
+            Phase::Ready if self.unwarmed.load(Ordering::Acquire) => self.prewarm(),
+            _ => {}
         }
     }
 
@@ -1491,11 +1500,13 @@ impl Server {
     /// nothing is warmed up: the reopen after its lease does it.
     fn prewarm_on(self: &Arc<Self>, state: &WarmState) {
         if self.lease_asked() {
+            self.unwarmed.store(true, Ordering::Release);
             return;
         }
         let Some(warm) = state.handle() else {
             return;
         };
+        self.unwarmed.store(false, Ordering::Release);
         self.spawn_background("axil-prewarm", move |server| {
             let _busy = server.busy();
             let started = Instant::now();
@@ -2657,6 +2668,32 @@ mod tests {
         assert_eq!(info_of(&server).state, "stopping");
         server.write_info();
         assert_eq!(info_of(&server).state, "stopping");
+        stop(server);
+    }
+
+    /// A warm-up put off for a lease runs once that lease is refused: the
+    /// daemon serves on, and should not pay the embedder's load on its next
+    /// recall.
+    #[test]
+    fn a_warm_up_put_off_for_a_refused_lease_runs_after_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = build_fixture(tmp.path());
+        let server = start(&proj.join(".axil/memory.axil"));
+        quiet(&server);
+        let id = server.ask_lease(std::process::id());
+        server.prewarm();
+        assert!(server.unwarmed.load(Ordering::Acquire));
+        assert!(server
+            .background
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .iter()
+            .all(|h| h.is_finished()));
+        server.end_lease(id);
+        assert!(!server.unwarmed.load(Ordering::Acquire));
+        quiet(&server);
         stop(server);
     }
 
