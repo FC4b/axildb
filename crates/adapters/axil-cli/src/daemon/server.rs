@@ -1235,16 +1235,18 @@ impl Server {
         let Some(_admitted) = Admitted::new(&self.in_flight, MAX_IN_FLIGHT) else {
             return refused(RunReply::Overloaded);
         };
+        // Before any reply a client of another protocol version may not
+        // know: it is told only that it does not match.
+        if let Some(reason) = self.identity.mismatch(&header) {
+            return refused(RunReply::Incompatible {
+                reason: reason.to_string(),
+            });
+        }
         match self.phase.get() {
             Phase::Starting => return refused(RunReply::Starting),
             Phase::Stopping => return refused(RunReply::Stopping),
             Phase::Leasing | Phase::Leased => return refused(RunReply::Leased),
             Phase::Ready | Phase::Reloading => {}
-        }
-        if let Some(reason) = self.identity.mismatch(&header) {
-            return refused(RunReply::Incompatible {
-                reason: reason.to_string(),
-            });
         }
         self.touch();
         if expired(header.deadline_ms) {
@@ -2519,6 +2521,25 @@ mod tests {
         drop(axil_core::Axil::open(&db).build().unwrap());
         let outcome = send(&server, &["boot"], &proj, None);
         assert_eq!(outcome.reply, RunReply::Leased);
+        // A client of the protocol from before `leased` is told only that
+        // it does not match.
+        let mut header = Identity::current()
+            .unwrap()
+            .header(parity::argv(&["boot"]), &proj, true);
+        header.proto = DAEMON_PROTO - 1;
+        let old = proto::run(
+            server.run.socket(),
+            &header,
+            Some(b""),
+            Duration::from_secs(30),
+        )
+        .unwrap();
+        assert_eq!(
+            old.reply,
+            RunReply::Incompatible {
+                reason: "proto".into()
+            }
+        );
 
         // A second holder is granted at once.
         let (reply, second) = ask(&server, &server.key, 1);

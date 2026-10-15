@@ -30,8 +30,9 @@ use serde::{Deserialize, Serialize};
 use super::exec::{self, NotServed};
 use super::paths::{fnv1a64, trusted_socket, uid};
 
-/// The protocol version a run header must carry.
-pub const DAEMON_PROTO: u32 = 1;
+/// The protocol version a run header must carry. 2 added the `leased` run
+/// reply.
+pub const DAEMON_PROTO: u32 = 2;
 
 /// The largest frame either side sends or accepts: 32 MiB.
 pub const MAX_FRAME: usize = 32 * 1024 * 1024;
@@ -715,7 +716,7 @@ mod tests {
         let more: LeaseReply =
             serde_json::from_str(r#"{"op":"lease","granted":true,"holders":2}"#).unwrap();
         assert_eq!(more, LeaseReply::granted());
-        assert_eq!(DAEMON_PROTO, 1);
+        assert_eq!(DAEMON_PROTO, 2);
     }
 
     #[test]
@@ -765,7 +766,14 @@ mod tests {
         let cases = [
             (
                 RunHeader {
-                    proto: 2,
+                    proto: DAEMON_PROTO + 1,
+                    ..ok.clone()
+                },
+                "proto",
+            ),
+            (
+                RunHeader {
+                    proto: DAEMON_PROTO - 1,
                     ..ok.clone()
                 },
                 "proto",
