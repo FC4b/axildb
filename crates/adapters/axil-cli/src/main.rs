@@ -3589,6 +3589,12 @@ enum HookCommand {
     /// a job queued for another database file.
     #[command(hide = true)]
     Drain,
+    /// Print the storage formats this build reads, one per line, so that a
+    /// newer build's `axil doctor` can tell whether the axil a hook runs can
+    /// open a database it wrote. A build from before this command fails it,
+    /// which reads as none.
+    #[command(hide = true)]
+    Formats,
 }
 
 /// Scheduled task operations (12.3).
@@ -4466,6 +4472,150 @@ fn resolve_axil_exe_with(
         return "axil".to_string();
     }
     current_exe().unwrap_or_else(|| "axil".to_string())
+}
+
+/// Storage formats this build writes that builds from before them can't
+/// open, as `axil hook formats` prints them.
+const STORAGE_FORMATS: &[&str] = &["table-index-keyed"];
+
+/// Agent config files, relative to a project, where `axil install` wires
+/// `axil hook run`.
+const HOOK_CONFIG_FILES: &[&str] = &[
+    ".claude/settings.json",
+    ".claude/settings.local.json",
+    ".codex/hooks.json",
+    ".github/hooks/axil.json",
+    ".factory/hooks.json",
+    ".qwen/settings.json",
+    ".agents/axil-plugin/hooks.json",
+];
+
+/// Add to `exes` the executable each `axil hook run` command in `value`
+/// starts, as the command names it: its first word, or a quoted path.
+fn hook_run_exes(value: &Value, exes: &mut Vec<String>) {
+    match value {
+        Value::String(cmd) if is_axil_hook_command(cmd) && cmd.contains(" hook run") => {
+            let cmd = cmd.trim_start();
+            let exe = match cmd.strip_prefix('"') {
+                Some(rest) => rest.split('"').next().unwrap_or_default(),
+                None => cmd.split_whitespace().next().unwrap_or_default(),
+            };
+            if !exe.is_empty() && !exes.iter().any(|e| e == exe) {
+                exes.push(exe.to_string());
+            }
+        }
+        Value::Array(items) => items.iter().for_each(|v| hook_run_exes(v, exes)),
+        Value::Object(map) => map.values().for_each(|v| hook_run_exes(v, exes)),
+        _ => {}
+    }
+}
+
+/// The file a hook command's executable `exe` resolves to: a bare name on
+/// `PATH`, a relative path against `project`.
+fn resolve_hook_exe(exe: &str, project: &Path) -> Option<PathBuf> {
+    let path = Path::new(exe);
+    if path.components().count() == 1 {
+        let name = if path.extension().is_none() {
+            format!("{exe}{}", std::env::consts::EXE_SUFFIX)
+        } else {
+            exe.to_string()
+        };
+        let dirs = std::env::var_os("PATH")?;
+        return std::env::split_paths(&dirs)
+            .map(|d| d.join(&name))
+            .find(|p| p.is_file());
+    }
+    let path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        project.join(path)
+    };
+    path.is_file().then_some(path)
+}
+
+/// Doctor's `hook_binary` checks: whether each axil the agent hooks
+/// configured in `projects` run can open a database this build has written.
+/// A hook exits 0 whatever happens, so that it never blocks the agent, and
+/// one whose axil can't open the database fails without a word: no memory
+/// injected, nothing captured. An axil that is this binary (`this_exe`) is
+/// not asked; any other is asked `axil hook formats`, a process each, which
+/// builds from before the keyed table index don't have.
+fn hook_binary_checks(
+    projects: &[&Path],
+    this_exe: Option<&Path>,
+) -> Vec<axil_core::diagnostics::CheckResult> {
+    use axil_core::diagnostics::{CheckResult, Severity};
+    let mut found: Vec<(String, &Path)> = Vec::new();
+    for project in projects {
+        for file in HOOK_CONFIG_FILES {
+            let Ok(text) = std::fs::read_to_string(project.join(file)) else {
+                continue;
+            };
+            let Ok(value) = serde_json::from_str::<Value>(&text) else {
+                continue;
+            };
+            let mut exes = Vec::new();
+            hook_run_exes(&value, &mut exes);
+            for exe in exes {
+                if !found.iter().any(|(e, _)| *e == exe) {
+                    found.push((exe, project));
+                }
+            }
+        }
+    }
+    let this = this_exe.and_then(|p| p.canonicalize().ok());
+    let mut checks = Vec::new();
+    for (exe, project) in found {
+        let Some(path) = resolve_hook_exe(&exe, project) else {
+            continue;
+        };
+        let named = if exe == path.display().to_string() {
+            format!("`{exe}`")
+        } else {
+            format!("`{exe}` ({})", path.display())
+        };
+        let is_this = this.is_some() && path.canonicalize().ok() == this;
+        let formats = if is_this {
+            STORAGE_FORMATS.join("\n")
+        } else {
+            std::process::Command::new(&path)
+                .args(["hook", "formats"])
+                .stdin(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .output()
+                .ok()
+                .filter(|out| out.status.success())
+                .map(|out| String::from_utf8_lossy(&out.stdout).into_owned())
+                .unwrap_or_default()
+        };
+        let reads_all = STORAGE_FORMATS
+            .iter()
+            .all(|f| formats.lines().any(|line| line.trim() == *f));
+        checks.push(if reads_all {
+            CheckResult {
+                name: "hook_binary".to_string(),
+                status: Severity::Ok,
+                detail: format!("agent hooks run {named}, which opens this database"),
+                fix: None,
+            }
+        } else {
+            CheckResult {
+                name: "hook_binary".to_string(),
+                status: Severity::Warning,
+                detail: format!(
+                    "agent hooks run {named}, a build older than this one that can't open \
+                     this database: every hook fails without a word (no memory injected, \
+                     nothing captured)"
+                ),
+                fix: Some(
+                    "upgrade that axil to this build (from a checkout: `cargo install --path \
+                     crates/adapters/axil-cli`)"
+                        .to_string(),
+                ),
+            }
+        });
+    }
+    checks
 }
 
 /// The executable to reference from agent configs. Prefers bare `axil` when a
@@ -8433,6 +8583,26 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
                 }
             }
 
+            // The axil the agent hooks run, which fail silently when it is
+            // a build that can't open this database.
+            {
+                let cwd = std::env::current_dir().ok();
+                let project = db_path
+                    .parent()
+                    .and_then(Path::parent)
+                    .map(Path::to_path_buf);
+                let mut projects: Vec<&Path> = Vec::new();
+                for dir in [project.as_deref(), cwd.as_deref()].into_iter().flatten() {
+                    if !projects.contains(&dir) {
+                        projects.push(dir);
+                    }
+                }
+                let this_exe = std::env::current_exe().ok();
+                for check in hook_binary_checks(&projects, this_exe.as_deref()) {
+                    report.add_check(check);
+                }
+            }
+
             let exit_code = report.exit_code();
             out.print(&serde_json::to_value(&report).unwrap());
             Ok(exit_code)
@@ -11564,6 +11734,14 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
         Command::Hook {
             command: HookCommand::Drain,
         } => hook_brain::drain(&require_db(&db_opt)?),
+        Command::Hook {
+            command: HookCommand::Formats,
+        } => {
+            for format in STORAGE_FORMATS {
+                outln!("{format}");
+            }
+            Ok(EXIT_OK)
+        }
 
         // ── Model management ────────────────────────────────────────
         #[cfg(feature = "vector")]
@@ -22387,6 +22565,82 @@ mod recall_summary_tests {
 #[cfg(test)]
 mod installer_tests {
     use super::*;
+
+    /// Each `axil hook run` command names its executable by its first word
+    /// or a quoted path; other hooks are passed over.
+    #[test]
+    fn hook_run_exes_reads_the_executable_of_each_axil_hook() {
+        let settings = json!({
+            "hooks": {
+                "SessionStart": [{ "hooks": [
+                    { "type": "command", "command": "axil hook run --dialect claude" },
+                    { "type": "command", "command": "my-own-hook --flag" },
+                ]}],
+                "Stop": [{ "hooks": [
+                    { "type": "command", "command": "\"/opt/my tools/axil\" hook run --dialect claude" },
+                    { "type": "command", "command": "axil hook run --dialect claude" },
+                ]}],
+            }
+        });
+        let mut exes = Vec::new();
+        hook_run_exes(&settings, &mut exes);
+        assert_eq!(exes, ["axil", "/opt/my tools/axil"]);
+    }
+
+    /// A hook binary that has no `hook formats`, as builds from before the
+    /// keyed table index don't, is reported; one that lists every format
+    /// this build writes is not, and this binary itself is not asked.
+    #[cfg(unix)]
+    #[test]
+    fn doctor_reports_a_hook_binary_that_cannot_open_the_database() {
+        use axil_core::diagnostics::Severity;
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let stub = |name: &str, body: &str| {
+            let path = dir.path().join(name);
+            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            path
+        };
+        let older = stub(
+            "axil-older",
+            "echo \"error: unrecognized subcommand\" >&2; exit 2",
+        );
+        let newer = stub("axil-newer", "echo table-index-keyed");
+        let this = stub("axil-this", "touch \"$0.ran\"; exit 2");
+        let settings = |exe: &Path| {
+            std::fs::create_dir_all(dir.path().join(".claude")).unwrap();
+            std::fs::write(
+                dir.path().join(".claude/settings.json"),
+                json!({ "hooks": { "Stop": [{ "hooks": [
+                    { "type": "command", "command": format!("{} hook run --dialect claude", exe.display()) }
+                ]}]}})
+                .to_string(),
+            )
+            .unwrap();
+        };
+
+        settings(&older);
+        let checks = hook_binary_checks(&[dir.path()], None);
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].status, Severity::Warning, "{}", checks[0].detail);
+        assert!(checks[0].fix.is_some());
+
+        settings(&newer);
+        let checks = hook_binary_checks(&[dir.path()], None);
+        assert_eq!(checks[0].status, Severity::Ok, "{}", checks[0].detail);
+
+        settings(&this);
+        let checks = hook_binary_checks(&[dir.path()], Some(&this));
+        assert_eq!(checks[0].status, Severity::Ok, "{}", checks[0].detail);
+        assert!(
+            !dir.path().join("axil-this.ran").exists(),
+            "this binary is not asked"
+        );
+
+        std::fs::remove_file(dir.path().join(".claude/settings.json")).unwrap();
+        assert!(hook_binary_checks(&[dir.path()], None).is_empty());
+    }
 
     #[test]
     fn claude_settings_route_the_whole_session_lifecycle() {
