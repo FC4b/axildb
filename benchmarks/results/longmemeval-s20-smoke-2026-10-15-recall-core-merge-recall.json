@@ -1,0 +1,58 @@
+{
+  "provenance": {
+    "measured": "2026-10-15",
+    "build": "benchmarks/longmemeval at integrate/recall-core ae9655b (review/recall-core merged onto dev 346d03e), release, default features (no rerank), built --locked against benchmarks/longmemeval/model-ab/Cargo.lock.pinned from branch feat/model-ab (sha256 2da16fc49957042c908f999af4572e90be2ec2b87ae0bd1f86656ed662bca6e0); harness binary sha256 ef6b61a90b3726ed44c4fd1b5ace5fba1d69b3af457830152055eb4643e3db72",
+    "sample": "the first 20 questions of LongMemEval-S (longmemeval_s_cleaned.json), all single-session-user",
+    "env": "AXIL_DAEMON=off; load averages 7-13 during the runs, timings not representative",
+    "command": "scripts/longmemeval-gate.sh --questions 20 --strategy recall --tolerance 0.1 (the PR smoke CI runs)",
+    "gate_baseline": "benchmarks/longmemeval/baselines/s-recall-k5-n20.json",
+    "gate_verdict": "PASS: avg_recall 0.900 -> 1.000, ndcg_at_10 0.889 -> 0.910; the baseline misses 5d3d2817 and 726462e0, this run none",
+    "note": "benchmarks/longmemeval/baseline.jsonl is the 500-question recall-qtc run; the gate compares it only with a 500-question run. On these 20 questions it misses 5d3d2817 and 726462e0."
+  },
+  "benchmark": "LongMemEval",
+  "variant": "s",
+  "strategy": "recall",
+  "model": "bge-small",
+  "rerank": "off",
+  "top_k": 5,
+  "total_questions": 20,
+  "overall": {
+    "hit_rate": 1.0,
+    "avg_recall": 1.0,
+    "avg_precision": 0.20000000000000004,
+    "recall_all": 1.0,
+    "ndcg_at_10": 0.9096268032608155,
+    "turn_recall_compact": 0.0,
+    "turn_recall_full": 1.0,
+    "tokens_compact": 250.0,
+    "tokens_full": 16265.4875,
+    "evidence_per_1k_tokens_compact": 0.0,
+    "evidence_per_1k_tokens_full": 0.0614798664964699,
+    "turn_recall_snippet": 0.0,
+    "tokens_snippet": 250.0,
+    "turn_recall_piece": 0.0,
+    "tokens_piece": 250.0
+  },
+  "by_category": {
+    "single-session-user": {
+      "total": 20,
+      "hits": 20,
+      "hit_rate": 1.0,
+      "avg_recall": 1.0,
+      "avg_precision": 0.20000000000000004,
+      "recall_all": 1.0,
+      "ndcg_at_10": 0.9096268032608155,
+      "turn_recall_compact": 0.0,
+      "turn_recall_full": 1.0,
+      "tokens_compact": 250.0,
+      "tokens_full": 16265.4875,
+      "evidence_per_1k_tokens_compact": 0.0,
+      "evidence_per_1k_tokens_full": 0.0614798664964699,
+      "turn_recall_snippet": 0.0,
+      "tokens_snippet": 250.0,
+      "turn_recall_piece": 0.0,
+      "tokens_piece": 250.0
+    }
+  },
+  "misses": []
+}

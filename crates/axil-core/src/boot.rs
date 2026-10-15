@@ -521,7 +521,10 @@ fn record_in_scope(record: &crate::record::Record, scope: Option<&[String]>) -> 
 
 /// Sort `records` highest effective importance first: stored importance
 /// decayed by age with `half_life_days` ([`crate::importance::effective_importance`]),
-/// the order boot ranks every table by.
+/// the order boot ranks every table by. Equal importance puts the newest
+/// record first (by id), so the order never depends on how the records were
+/// listed, and a tie orders two records as the age decay does once their
+/// ages fall in different seconds.
 ///
 /// Effective importance is computed here from age and half-life (a pure
 /// function), so the order reflects current decay without relying on a
@@ -541,6 +544,7 @@ pub fn sort_by_effective_importance(
         score(b)
             .partial_cmp(&score(a))
             .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| b.id.cmp(&a.id))
     });
 }
 

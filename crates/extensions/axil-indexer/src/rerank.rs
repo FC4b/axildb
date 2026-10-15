@@ -51,11 +51,15 @@ pub struct RerankConfig {
     pub model: String,
     /// Only rerank the top K candidates (reduces latency).
     pub top_k_rerank: usize,
-    /// Share of the cross-encoder in the final order, in `[0, 1]`. At 1.0
-    /// (the default) the cross-encoder's order replaces the incoming one.
-    /// Below it, each scored candidate is ranked by
+    /// Share of the cross-encoder in the final order, in `[0, 1]`. Below
+    /// 1.0 each scored candidate is ranked by
     /// `w · cross-encoder + (1 − w) · incoming score`, both min-max
-    /// normalized over the scored candidates; 0.0 keeps the incoming order.
+    /// normalized over the scored candidates; 0.0 keeps the incoming order
+    /// and 1.0 replaces it with the cross-encoder's. The default, 0.3, ranked
+    /// best on the dogfood eval and on a LongMemEval sample, where the
+    /// cross-encoder's order alone ranked below no rerank at all
+    /// (`benchmarks/results/dogfood-recall-2026-10-14-rerank.json`,
+    /// `benchmarks/results/longmemeval-s60-rerank-2026-10-14.json`).
     pub blend_weight: f32,
 }
 
@@ -65,7 +69,7 @@ impl Default for RerankConfig {
             enabled: false,
             model: "models/cross-encoder.onnx".to_string(),
             top_k_rerank: 20,
-            blend_weight: 1.0,
+            blend_weight: 0.3,
         }
     }
 }
@@ -468,7 +472,7 @@ mod tests {
         assert!(!config.enabled);
         assert_eq!(config.top_k_rerank, 20);
         assert_eq!(config.model, "models/cross-encoder.onnx");
-        assert_eq!(config.blend_weight, 1.0);
+        assert_eq!(config.blend_weight, 0.3);
     }
 
     fn ce(scores: &[(usize, f32)]) -> Vec<RerankScore> {
@@ -528,9 +532,11 @@ mod tests {
             json!({"id": "c", "score": 0.7}),
             json!({"id": "d", "score": 0.6}),
         ];
-        // A window of three; "b" had no text to score.
+        // A window of three; "b" had no text to score. The cross-encoder's
+        // order alone, so the window's order is the scores'.
         let config = RerankConfig {
             top_k_rerank: 3,
+            blend_weight: 1.0,
             ..Default::default()
         };
         let scores = ce(&[(0, -2.0), (2, 5.0)]);

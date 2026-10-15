@@ -1,0 +1,56 @@
+{
+  "what": "checks run on review/recall-core merged onto dev 346d03e (branch integrate/recall-core)",
+  "measured": "2026-10-15",
+  "release_binary": {
+    "commit": "ae9655b",
+    "sha256": "d621c4e557f2a1584a3019d478c5fe9447abbff73e36e28c56611240f9465b52",
+    "note": "commits after ae9655b change only result files and one #[cfg(test)] test"
+  },
+  "needle_gate": {
+    "command": "AXIL_BIN=<release axil> scripts/needle-recall-gate.sh",
+    "needles": 31,
+    "recall_at_5": 1.0,
+    "recalled": 31,
+    "retention": 1.0,
+    "verdict": "pass"
+  },
+  "warm_handle_parity": {
+    "test": "cli_io::tests::parity::warm_handle_output_matches_one_shot",
+    "runs": 10,
+    "passed": 10,
+    "runs_with_nocapture": 10,
+    "passed_with_nocapture": 10,
+    "mismatches_rerun": 0,
+    "note": "the test reruns a case that differed once and prints that it did; the 10 --nocapture runs printed no such line"
+  },
+  "daemon_served_vs_one_shot": {
+    "how": "two copies of the dogfood snap-prefix; `axil daemon start` on one and every recall sent to it, the other run with AXIL_DAEMON=off; stdout and exit code compared byte for byte",
+    "formats": [
+      "full --top-k 10",
+      "compact --top-k 10",
+      "context-block --budget 2000 --top-k 5"
+    ],
+    "queries": [
+      "Why is the published crate named axildb when the binary is called axil?",
+      "Which platforms do release archives ship for, and what happened to the Intel Mac build?",
+      "How do we make local builds link onnxruntime statically like the release binaries?",
+      "Should the engine lifecycle hooks be made generic in a single loop?",
+      "What is Axil's strategic moat against other agent memory products?",
+      "Is WASM plugin support in scope for the 1.0 release?",
+      "what did we decide in March about recall",
+      "errors since 2026-09-01 in `crates/axil-core/src/db.rs`",
+      "how does compute_graph_proximity score candidates",
+      "what changed in march.rs"
+    ],
+    "daemon_ops": {
+      "recall": {
+        "served": 30,
+        "not_served": 0
+      },
+      "refused": 0
+    },
+    "identical": 30,
+    "total": 30,
+    "also_covered_by": "crates/adapters/axil-cli/tests/daemon.rs::the_hot_commands_go_to_the_daemon_and_print_as_without_one (two recall queries on the test fixture)"
+  }
+}

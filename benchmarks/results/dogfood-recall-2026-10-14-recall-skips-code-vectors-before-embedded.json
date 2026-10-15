@@ -1,0 +1,375 @@
+{
+  "provenance": {
+    "measured": "2026-10-14",
+    "build": "dev 4f7e5f3, release",
+    "snapshot": "snap-prefix copy after axil heal --embed-internal (2,962 code-index vectors restored)",
+    "note": "baseline for the -after-embedded file"
+  },
+  "benchmark": "dogfood-recall",
+  "via": "recall",
+  "axil": "axil 2.3.1 (axildb-v2.3.1-172-g4f7e5f3)",
+  "cutoff": "2026-09-28T02:00:00Z",
+  "top_k": 10,
+  "fetch": 10,
+  "overall": {
+    "hit@1": 0.5789473684210527,
+    "hit@5": 0.8421052631578947,
+    "hit@10": 0.9122807017543859,
+    "mrr@10": 0.7092731829573935,
+    "recall_all@10": 0.8947368421052632,
+    "ndcg@10": 0.7396752125201436,
+    "hook_hit": 0.8421052631578947,
+    "hook_tokens": 325.81140350877195,
+    "hook_hits_per_1k_tokens": 2.5846402369253547,
+    "n": 57
+  },
+  "by_kind": {
+    "commit": {
+      "hit@1": 0.75,
+      "hit@5": 1.0,
+      "hit@10": 1.0,
+      "mrr@10": 0.875,
+      "recall_all@10": 1.0,
+      "ndcg@10": 0.9077324383928644,
+      "hook_hit": 1.0,
+      "hook_tokens": 334.5625,
+      "hook_hits_per_1k_tokens": 2.9889781430973286,
+      "n": 4
+    },
+    "context": {
+      "hit@1": 0.4,
+      "hit@5": 0.8,
+      "hit@10": 1.0,
+      "mrr@10": 0.6285714285714286,
+      "recall_all@10": 1.0,
+      "ndcg@10": 0.7190385680952497,
+      "hook_hit": 0.8,
+      "hook_tokens": 354.85,
+      "hook_hits_per_1k_tokens": 2.2544737212906862,
+      "n": 5
+    },
+    "decision": {
+      "hit@1": 0.4444444444444444,
+      "hit@5": 0.8148148148148148,
+      "hit@10": 0.8518518518518519,
+      "mrr@10": 0.6164021164021164,
+      "recall_all@10": 0.8518518518518519,
+      "ndcg@10": 0.6713724786545031,
+      "hook_hit": 0.8148148148148148,
+      "hook_tokens": 318.3611111111111,
+      "hook_hits_per_1k_tokens": 2.5594043568042344,
+      "n": 27
+    },
+    "error": {
+      "hit@1": 0.7894736842105263,
+      "hit@5": 0.8947368421052632,
+      "hit@10": 0.9473684210526315,
+      "mrr@10": 0.8408521303258145,
+      "recall_all@10": 0.8947368421052632,
+      "ndcg@10": 0.8132684425695197,
+      "hook_hit": 0.8947368421052632,
+      "hook_tokens": 322.25,
+      "hook_hits_per_1k_tokens": 2.776530153934098,
+      "n": 19
+    },
+    "rule": {
+      "hit@1": 0.5,
+      "hit@5": 0.5,
+      "hit@10": 1.0,
+      "mrr@10": 0.5833333333333334,
+      "recall_all@10": 1.0,
+      "ndcg@10": 0.6781035935540111,
+      "hook_hit": 0.5,
+      "hook_tokens": 370.125,
+      "hook_hits_per_1k_tokens": 1.3508949679162445,
+      "n": 2
+    }
+  },
+  "per_question": [
+    {
+      "id": "q01",
+      "first_rank": 1,
+      "hook_hit": 1.0
+    },
+    {
+      "id": "q02",
+      "first_rank": 2,
+      "hook_hit": 1.0
+    },
+    {
+      "id": "q03",
+      "first_rank": 1,
+      "hook_hit": 1.0
+    },
+    {
+      "id": "q04",
+      "first_rank": 1,
+      "hook_hit": 1.0
+    },
+    {
+      "id": "q05",
+      "first_rank": 1,
+      "hook_hit": 1.0
+    },
+    {
+      "id": "q06",
+      "first_rank": 3,
+      "hook_hit": 1.0
+    },
+    {
+      "id": "q07",
+      "first_rank": 2,
+      "hook_hit": 1.0
+    },
+    {
+      "id": "q08",
+      "first_rank": 1,
+      "hook_hit": 1.0
+    },
+    {
+      "id": "q09",
+      "first_rank": null,
+      "hook_hit": 0.0
+    },
+    {
+      "id": "q10",
+      "first_rank": 1,
+      "hook_hit": 1.0
+    },
+    {
+      "id": "q11",
+      "first_rank": null,
+      "hook_hit": 0.0
+    },
+    {
+      "id": "q12",
+      "first_rank": 1,
+      "hook_hit": 1.0
+    },
+    {
+      "id": "q13",
+      "first_rank": 1,
+      "hook_hit": 1.0
+    },
+    {
+      "id": "q14",
+      "first_rank": 2,
+      "hook_hit": 1.0
+    },
+    {
+      "id": "q15",
+      "first_rank": null,
+      "hook_hit": 0.0
+    },
+    {
+      "id": "q16",
+      "first_rank": 1,
+      "hook_hit": 1.0
+    },
+    {
+      "id": "q17",
+      "first_rank": 7,
+      "hook_hit": 0.0
+    },
+    {
+      "id": "q18",
+      "first_rank": 3,
+      "hook_hit": 1.0
+    },
+    {
+      "id": "q19",
+      "first_rank": 1,
+      "hook_hit": 1.0
+    },
+    {
+      "id": "q20",
+      "first_rank": 3,
+      "hook_hit": 1.0
+    },
+    {
+      "id": "q21",
+      "first_rank": 2,
+      "hook_hit": 1.0
+    },
+    {
+      "id": "q22",
+      "first_rank": 2,
+      "hook_hit": 1.0
+    },
+    {
+      "id": "q23",
+      "first_rank": null,
+      "hook_hit": 0.0
+    },
+    {
+      "id": "q24",
+      "first_rank": 2,
+      "hook_hit": 1.0
+    },
+    {
+      "id": "q25",
+      "first_rank": 2,
+      "hook_hit": 1.0
+    },
+    {
+      "id": "q26",
+      "first_rank": 2,
+      "hook_hit": 1.0
+    },
+    {
+      "id": "q27",
+      "first_rank": 2,
+      "hook_hit": 1.0
+    },
+    {
+      "id": "q28",
+      "first_rank": 1,
+      "hook_hit": 1.0
+    },
+    {
+      "id": "q29",
+      "first_rank": 6,
+      "hook_hit": 0.0
+    },
+    {
+      "id": "q30",
+      "first_rank": 1,
+      "hook_hit": 1.0
+    },
+    {
+      "id": "q31",
+      "first_rank": 1,
+      "hook_hit": 1.0
+    },
+    {
+      "id": "q32",
+      "first_rank": 2,
+      "hook_hit": 1.0
+    },
+    {
+      "id": "q33",
+      "first_rank": 1,
+      "hook_hit": 1.0
+    },
+    {
+      "id": "q34",
+      "first_rank": 1,
+      "hook_hit": 1.0
+    },
+    {
+      "id": "q35",
+      "first_rank": 1,
+      "hook_hit": 1.0
+    },
+    {
+      "id": "q36",
+      "first_rank": 3,
+      "hook_hit": 1.0
+    },
+    {
+      "id": "q37",
+      "first_rank": 1,
+      "hook_hit": 1.0
+    },
+    {
+      "id": "q38",
+      "first_rank": 1,
+      "hook_hit": 1.0
+    },
+    {
+      "id": "q39",
+      "first_rank": 1,
+      "hook_hit": 1.0
+    },
+    {
+      "id": "q40",
+      "first_rank": 1,
+      "hook_hit": 1.0
+    },
+    {
+      "id": "q41",
+      "first_rank": 1,
+      "hook_hit": 1.0
+    },
+    {
+      "id": "q42",
+      "first_rank": 1,
+      "hook_hit": 1.0
+    },
+    {
+      "id": "q43",
+      "first_rank": 1,
+      "hook_hit": 1.0
+    },
+    {
+      "id": "q44",
+      "first_rank": 1,
+      "hook_hit": 1.0
+    },
+    {
+      "id": "q45",
+      "first_rank": 1,
+      "hook_hit": 1.0
+    },
+    {
+      "id": "q46",
+      "first_rank": 1,
+      "hook_hit": 1.0
+    },
+    {
+      "id": "q47",
+      "first_rank": 7,
+      "hook_hit": 0.0
+    },
+    {
+      "id": "q48",
+      "first_rank": null,
+      "hook_hit": 0.0
+    },
+    {
+      "id": "q49",
+      "first_rank": 1,
+      "hook_hit": 1.0
+    },
+    {
+      "id": "q50",
+      "first_rank": 1,
+      "hook_hit": 1.0
+    },
+    {
+      "id": "q51",
+      "first_rank": 1,
+      "hook_hit": 1.0
+    },
+    {
+      "id": "q52",
+      "first_rank": 7,
+      "hook_hit": 0.0
+    },
+    {
+      "id": "q53",
+      "first_rank": 1,
+      "hook_hit": 1.0
+    },
+    {
+      "id": "q54",
+      "first_rank": 1,
+      "hook_hit": 1.0
+    },
+    {
+      "id": "q55",
+      "first_rank": 2,
+      "hook_hit": 1.0
+    },
+    {
+      "id": "q56",
+      "first_rank": 1,
+      "hook_hit": 1.0
+    },
+    {
+      "id": "q57",
+      "first_rank": 1,
+      "hook_hit": 1.0
+    }
+  ]
+}

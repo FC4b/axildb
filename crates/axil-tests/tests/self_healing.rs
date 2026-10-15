@@ -936,8 +936,8 @@ fn doctor_flags_code_proxies_without_a_vector_and_only_an_opt_in_restores_them()
     );
     assert!(!check.detail.contains("record(s)"), "{}", check.detail);
     assert!(
-        check.detail.contains("currently lowers memory recall"),
-        "the cost of backfilling must be stated: {}",
+        check.detail.contains("changes rankings"),
+        "the effect of backfilling must be stated: {}",
         check.detail
     );
     assert_eq!(check.fix.as_deref(), Some("axil heal --embed-internal"));
@@ -954,7 +954,7 @@ fn doctor_flags_code_proxies_without_a_vector_and_only_an_opt_in_restores_them()
     assert_eq!(problem.severity, Severity::Warning);
     assert!(!problem.auto_fixable, "automatic heals must leave it alone");
     assert!(
-        problem.recommendation.contains("lowers memory recall"),
+        problem.recommendation.contains("changes rankings"),
         "{}",
         problem.recommendation
     );
@@ -1030,8 +1030,8 @@ fn an_incremental_index_leaves_an_unchanged_proxy_without_a_vector() {
         after.data["proxy_text"], before.data["proxy_text"],
         "the proxy text did not change"
     );
-    // Embedded code-index rows lower memory recall, so a routine re-index
-    // must not add them; only the explicit opt-in does.
+    // Restoring code-index vectors changes code-search rankings, so a
+    // routine re-index must not add them; only the explicit opt-in does.
     assert_eq!(db.get_vector(&after.id).unwrap(), None);
     assert!(db.reembed_missing_internal().unwrap().0 > 0);
     assert!(db.get_vector(&after.id).unwrap().is_some());

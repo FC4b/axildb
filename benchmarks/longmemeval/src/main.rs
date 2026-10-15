@@ -14,7 +14,7 @@
 //!   --limit N               Max questions to evaluate (default: all)
 //!   --strategy vector|fts|ask|recall  Retrieval strategy (default: vector)
 //!   --rerank off|cross-encoder        Optional reranking for recall results
-//!   --rerank-weight W[,W..] Cross-encoder share when blending with recall's score (default 1.0)
+//!   --rerank-weight W[,W..] Cross-encoder share when blending with recall's score (default 0.3)
 //!   --compare-no-rerank     With --rerank, also report the unreranked order of the same candidates
 //!   --top-k N               Results per query (default: 5)
 
@@ -126,10 +126,11 @@ struct Args {
     /// The cross-encoder's share of the reranked order, 0.0–1.0: below 1.0
     /// each candidate is ranked by W × cross-encoder + (1 − W) × recall
     /// score, both min-max normalized over the reranked window. 1.0 uses the
-    /// cross-encoder's order alone. Several comma-separated weights each get
+    /// cross-encoder's order alone; the default, 0.3, is `axil recall`'s.
+    /// Several comma-separated weights each get
     /// a report, all scored on the same retrieved candidates (one ingest per
     /// question), and the reports are printed as a JSON array.
-    #[arg(long, value_delimiter = ',', default_value = "1.0")]
+    #[arg(long, value_delimiter = ',', default_value = "0.3")]
     rerank_weight: Vec<f32>,
 
     /// With `--rerank`, also report the same candidates in recall's order,
@@ -335,6 +336,14 @@ struct Harder {
     /// Tokens (bytes / 4) of the top-k hits in each format.
     tokens_compact: f64,
     tokens_full: f64,
+    /// Answer turns inside each hit's best-matching piece (`snippet`) cut
+    /// to compact output's 200 chars (the opening when recall returned
+    /// none), and its tokens...
+    turn_recall_snippet: f64,
+    tokens_snippet: f64,
+    /// ...and inside the whole best-matching piece.
+    turn_recall_piece: f64,
+    tokens_piece: f64,
 }
 
 #[derive(Debug, Default)]
@@ -352,6 +361,10 @@ impl HarderSums {
         self.sum.turn_recall_full += h.turn_recall_full;
         self.sum.tokens_compact += h.tokens_compact;
         self.sum.tokens_full += h.tokens_full;
+        self.sum.turn_recall_snippet += h.turn_recall_snippet;
+        self.sum.tokens_snippet += h.tokens_snippet;
+        self.sum.turn_recall_piece += h.turn_recall_piece;
+        self.sum.tokens_piece += h.tokens_piece;
     }
 
     fn report(&self) -> HarderReport {
@@ -378,6 +391,10 @@ impl HarderSums {
                 self.sum.tokens_compact,
             ),
             evidence_per_1k_tokens_full: per_1k(self.sum.turn_recall_full, self.sum.tokens_full),
+            turn_recall_snippet: mean(self.sum.turn_recall_snippet),
+            tokens_snippet: mean(self.sum.tokens_snippet),
+            turn_recall_piece: mean(self.sum.turn_recall_piece),
+            tokens_piece: mean(self.sum.tokens_piece),
         }
     }
 }
@@ -392,6 +409,10 @@ struct HarderReport {
     tokens_full: f64,
     evidence_per_1k_tokens_compact: f64,
     evidence_per_1k_tokens_full: f64,
+    turn_recall_snippet: f64,
+    tokens_snippet: f64,
+    turn_recall_piece: f64,
+    tokens_piece: f64,
 }
 
 #[derive(Debug, Serialize)]
@@ -838,6 +859,20 @@ fn evaluate_question(
     };
     let q_text = question_text.as_str();
 
+    // The best-matching piece recall returned for each session, if any.
+    // It belongs to the record, not to an ordering, so every variant reads
+    // the same pieces.
+    let mut pieces: HashMap<String, String> = HashMap::new();
+    let mut keep_pieces = |results: &[axil_core::RecallResult]| {
+        for r in results {
+            if let (Some(piece), Some(sid)) =
+                (&r.explanation.best_chunk, record_to_session.get(&r.record.id))
+            {
+                pieces.entry(sid.clone()).or_insert_with(|| piece.clone());
+            }
+        }
+    };
+
     // Query chunk records, then collapse to top-k unique sessions. Recall
     // strategies retrieve once and order the candidates once per variant;
     // the others have nothing to rerank, so every variant gets their hits.
@@ -878,7 +913,9 @@ fn evaluate_question(
             if let Some(now) = parse_question_now(q) {
                 cfg.now = now;
             }
-            recall_variants(db.recall(q_text, fetch_k, Some(cfg)).unwrap_or_default())
+            let results = db.recall(q_text, fetch_k, Some(cfg)).unwrap_or_default();
+            keep_pieces(&results);
+            recall_variants(results)
         }
         "recall-qtc" => {
             let mut cfg = axil_core::RecallConfig::default();
@@ -887,7 +924,9 @@ fn evaluate_question(
                 cfg.now = now;
             }
             cfg.qtc = Some(axil_core::scoring::QtcConfig::default());
-            recall_variants(db.recall(q_text, fetch_k, Some(cfg)).unwrap_or_default())
+            let results = db.recall(q_text, fetch_k, Some(cfg)).unwrap_or_default();
+            keep_pieces(&results);
+            recall_variants(results)
         }
         "oracle-answer" => {
             let oracle_query = oracle_answer_text(q);
@@ -941,6 +980,7 @@ fn evaluate_question(
                 &record_to_session,
                 &session_texts,
                 &answer_session_tags,
+                &pieces,
                 i == 0,
             )
         })
@@ -948,8 +988,9 @@ fn evaluate_question(
 }
 
 /// Score one ordering of a question's retrieved hits: collapse them to
-/// sessions and measure the top-k against the answer sessions. Only the
-/// first variant carries the `--dump-context` context.
+/// sessions and measure the top-k against the answer sessions. `pieces`
+/// holds each session's best-matching piece from recall. Only the first
+/// variant carries the `--dump-context` context.
 fn score_retrieval(
     q: &Question,
     args: &Args,
@@ -957,6 +998,7 @@ fn score_retrieval(
     record_to_session: &HashMap<axil_core::RecordId, String>,
     session_texts: &[String],
     answer_session_tags: &[String],
+    pieces: &HashMap<String, String>,
     with_context: bool,
 ) -> QuestionResult {
     let ranked = collapse_to_sessions(
@@ -972,6 +1014,7 @@ fn score_retrieval(
         &ranked,
         &retrieved_sessions,
         answer_session_tags,
+        pieces,
     );
 
     let context = (with_context && args.dump_context.is_some())
@@ -1099,6 +1142,7 @@ fn harder_metrics(
     ranked: &[String],
     top_k: &[String],
     answers: &[String],
+    pieces: &HashMap<String, String>,
 ) -> Harder {
     let index = |tag: &str| {
         tag.strip_prefix("session_")
@@ -1117,6 +1161,25 @@ fn harder_metrics(
     };
     let tokens_compact = tokens(&|t: &str| shown(t));
     let tokens_full = tokens(&|t: &str| t.to_string());
+    // A session's best-matching piece cut to compact output's 200 chars;
+    // the whole piece; the opening when recall returned none.
+    let piece_shown = |si: usize, cut: bool| -> String {
+        match pieces.get(&format!("session_{si}")) {
+            Some(piece) if cut => shown(piece),
+            Some(piece) => piece.clone(),
+            None => shown(&session_texts[si]),
+        }
+    };
+    let piece_tokens = |cut: bool| -> f64 {
+        top_k
+            .iter()
+            .filter_map(|t| index(t))
+            .filter(|i| *i < session_texts.len())
+            .map(|i| piece_shown(i, cut).len() as f64 / 4.0)
+            .sum()
+    };
+    let tokens_snippet = piece_tokens(true);
+    let tokens_piece = piece_tokens(false);
 
     if answers.is_empty() {
         return Harder {
@@ -1126,6 +1189,10 @@ fn harder_metrics(
             turn_recall_full: 1.0,
             tokens_compact,
             tokens_full,
+            turn_recall_snippet: 1.0,
+            tokens_snippet,
+            turn_recall_piece: 1.0,
+            tokens_piece,
         };
     }
 
@@ -1144,6 +1211,7 @@ fn harder_metrics(
     // Answer turns, and whether each is inside what the agent reads.
     let mut evidence = 0usize;
     let (mut in_compact, mut in_full) = (0usize, 0usize);
+    let (mut in_snippet, mut in_piece) = (0usize, 0usize);
     for (si, session) in q.haystack_sessions.iter().enumerate() {
         let tag = format!("session_{si}");
         let retrieved = top_k.contains(&tag);
@@ -1156,6 +1224,12 @@ fn harder_metrics(
             let line = format!("{}: {}", turn.role, turn.content);
             if shown(&session_texts[si]).contains(&line) {
                 in_compact += 1;
+            }
+            if piece_shown(si, true).contains(&line) {
+                in_snippet += 1;
+            }
+            if piece_shown(si, false).contains(&line) {
+                in_piece += 1;
             }
         }
     }
@@ -1174,6 +1248,10 @@ fn harder_metrics(
         turn_recall_full: share(in_full),
         tokens_compact,
         tokens_full,
+        turn_recall_snippet: share(in_snippet),
+        tokens_snippet,
+        turn_recall_piece: share(in_piece),
+        tokens_piece,
     }
 }
 

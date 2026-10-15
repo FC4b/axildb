@@ -49,6 +49,13 @@ axil --db ./memory.axil <command>
 - `context` records may carry an optional `type` facet (recommended:
   `architecture`, `gotcha`, `howto`, `reference`) to scope retrieval — filter with
   `axil recall "<q>" --type architecture`. Recommended, not enforced.
+- **Dated events get an `event_time`.** When a record is about something that
+  happened at a known time other than now (a release, a meeting, an incident),
+  add `"event_time": "2026-03-12"` (a date or RFC 3339): `axil store context
+  '{"summary":"Shipped v2.3 to customers","event_time":"2026-03-12"}'`. Time
+  questions ("what happened in March") read it before the time it was stored.
+- **One fact per record.** A question about one fact finds a record that states
+  it; it can miss a long note that mentions it among ten others.
 
 ### What NOT to Store
 - File contents already in git (use git, not Axil)

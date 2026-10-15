@@ -1369,9 +1369,10 @@ enum Command {
         /// With --rerank cross-encoder: the cross-encoder's share of the
         /// final order, 0.0–1.0. Below 1.0 each candidate is ranked by
         /// W × cross-encoder + (1 − W) × recall score, both min-max
-        /// normalized over the pool. 1.0 (default) uses the cross-encoder's
-        /// order alone.
-        #[arg(long, default_value = "1.0")]
+        /// normalized over the pool; 1.0 uses the cross-encoder's order
+        /// alone. The default, 0.3, ranked best on the dogfood eval
+        /// (benchmarks/results/dogfood-recall-2026-10-14-rerank.json).
+        #[arg(long, default_value = "0.3")]
         rerank_weight: f32,
         /// Expand the query with graph neighbors + alias synonyms before retrieval (12.5).
         #[arg(long)]
@@ -1740,12 +1741,17 @@ enum Command {
         orphans: bool,
         /// Embed rows of internal tables (code index, dep docs, recall
         /// chunks, checkpoints) that have no vector, as rows written while
-        /// the vector store was unavailable. Opt-in, and it currently lowers
-        /// memory recall: embedded, these rows compete with memories, and on
-        /// the dogfood eval (snap-prefix, 2026-10-04) restoring 2,962
-        /// code-index vectors took hit@1 from 0.70 to 0.51.
+        /// the vector store was unavailable. Opt-in, because it changes
+        /// rankings: code-search's for code-index rows, memory recall's for
+        /// the others (memory recall passes over code-index vectors).
         #[arg(long)]
         embed_internal: bool,
+        /// Split long records into recall units again with this version's
+        /// splitter (one per dialog turn or fact), replacing the units and
+        /// vectors written when they were stored. Re-embeds every long
+        /// record's units; a ranking change, so opt-in.
+        #[arg(long)]
+        rechunk: bool,
         /// Show what would be fixed without doing it.
         #[arg(long)]
         dry_run: bool,
@@ -10094,6 +10100,10 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
                 .iter()
                 .map(|rr| {
                     let mut v = scored_to_json(&rr.record, rr.score);
+                    // The piece of a long record that matched the query best.
+                    if let Some(snippet) = &rr.explanation.best_chunk {
+                        v["snippet"] = json!(snippet);
+                    }
                     // Include explanation when --explain is set
                     if explain {
                         let signals: Value = rr
@@ -10978,6 +10988,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
             reindex,
             orphans,
             embed_internal,
+            rechunk,
             dry_run,
         } => {
             let db_path = require_db(&db_opt)?;
@@ -10994,7 +11005,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
 
             let mut exit = EXIT_OK;
             // If specific flags are given, run only those actions
-            if compact || reindex || orphans || embed_internal {
+            if compact || reindex || orphans || embed_internal || rechunk {
                 let mut actions = Vec::new();
 
                 if dry_run {
@@ -11138,6 +11149,16 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
                         }
                     }
 
+                    if rechunk {
+                        let n = db
+                            .rebuild_recall_units()
+                            .context("rebuilding recall units failed")?;
+                        actions.push(json!({
+                            "action": "rebuild_recall_units",
+                            "result": format!("re-split {n} records into recall units"),
+                        }));
+                    }
+
                     if embed_internal {
                         let (embedded, failed) = db
                             .reembed_missing_internal()
@@ -11197,6 +11218,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
                 && !reindex
                 && !orphans
                 && !embed_internal
+                && !rechunk
                 && db.has_timeseries_index()
                 && config.timeseries.auto_downsample
             {
@@ -15147,7 +15169,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
                 }
             }
 
-            // Sort: exact matches first, then by importance
+            // Sort: exact matches first, then by importance, then by id
             hits.sort_by(|a, b| {
                 let a_exact = a["match"].as_str() == Some("exact");
                 let b_exact = b["match"].as_str() == Some("exact");
@@ -15156,7 +15178,9 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
                 }
                 let ia = a["importance"].as_f64().unwrap_or(0.0);
                 let ib = b["importance"].as_f64().unwrap_or(0.0);
-                ib.partial_cmp(&ia).unwrap_or(std::cmp::Ordering::Equal)
+                ib.partial_cmp(&ia)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a["id"].as_str().cmp(&b["id"].as_str()))
             });
             // Pass 3: related files from index graph (imports, same module)
             #[cfg(feature = "indexer")]
@@ -18957,7 +18981,11 @@ fn generate_brief(
         .chain(context_records.iter())
         .map(|r| (r.clone(), axil_core::importance::get_importance(&r.data)))
         .collect();
-    important.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    important.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.0.id.cmp(&b.0.id))
+    });
     important.truncate(5);
 
     // Narrative string used as a record summary if saved.
@@ -20918,11 +20946,15 @@ const AXIL_COMMANDS: &str = r#"- `axil boot` — load previous session context
 /// agents from one build say the same thing. Worded for any harness: some
 /// keep their own notes about the user (Claude Code's auto-memory, for one),
 /// and a note kept in both places drifts.
+/// How to store dated events and facts so time questions find them, shared
+/// by the agent instruction templates.
+const AXIL_DATED_FACTS: &str = "When a record is about something that happened at a known time other than now (a release, a meeting, an incident), give it an `event_time` (a date or RFC 3339), e.g. `axil store context '{\"summary\":\"Shipped v2.3\",\"event_time\":\"2026-03-12\"}'`: time questions read it before the time the record was stored. Store one fact per record.";
+
 const AXIL_MEMORY_SPLIT: &str = "Axil holds project knowledge: architecture, gotchas, file- and symbol-anchored facts, errors with their cause and fix, decisions with their reason, and the code graph. Notes about how the user likes you to work belong to your harness's own memory where it has one (such as Claude Code's auto-memory); don't mirror them into Axil.";
 
 fn agent_instructions_cursor(db_path: &Path) -> String {
-    format!("# Axil Agent Memory\n\nThis project uses Axil for persistent agent memory at `{db}`.\n\n## Commands\n{cmds}\n\n## Search/Query Gate\nBefore `rg`, `grep`, `git grep`, `find`, `fd`, `ls`, `tree`, or any broad project query, run `axil recall`, `axil code-search`, or `axil fts` first. Then open the files Axil returns and verify current code.\n\n## Workflow\n1. Start: run `axil boot`\n2. Work: store decisions and errors as you go\n3. End: write a checkpoint (run `axil checkpoint`)\n\n{split}\n",
-        db = db_path.display(), cmds = AXIL_COMMANDS, split = AXIL_MEMORY_SPLIT)
+    format!("# Axil Agent Memory\n\nThis project uses Axil for persistent agent memory at `{db}`.\n\n## Commands\n{cmds}\n\n## Search/Query Gate\nBefore `rg`, `grep`, `git grep`, `find`, `fd`, `ls`, `tree`, or any broad project query, run `axil recall`, `axil code-search`, or `axil fts` first. Then open the files Axil returns and verify current code.\n\n## Workflow\n1. Start: run `axil boot`\n2. Work: store decisions and errors as you go\n3. End: write a checkpoint (run `axil checkpoint`)\n\n{dated}\n\n{split}\n",
+        db = db_path.display(), cmds = AXIL_COMMANDS, dated = AXIL_DATED_FACTS, split = AXIL_MEMORY_SPLIT)
 }
 
 fn agent_instructions_windsurf(db_path: &Path) -> String {
@@ -20954,10 +20986,12 @@ Bypass Axil only for a user-named exact file/line, a command/test output you jus
 - Store bugs/gotchas immediately: `axil store errors '{{"error":"<what>","root_cause":"<why>","fix":"<how>"}}'`
 - Close an error once it is fixed: `axil resolve <error-id> --by <fix-record-id>`
 - Store architecture learned while reading: `axil store context '{{"type":"architecture","summary":"<what you learned>","files":["<path>"]}}'`
+- {dated}
 - Before a final response after substantive work, write a checkpoint: `axil checkpoint '{{"state":"<where things stand>","next_steps":["<remaining work>"],"references":[{{"kind":"file","ref":"<path>"}}]}}'`
 - {split}
 "#,
         db = db_path.display(),
+        dated = AXIL_DATED_FACTS,
         split = AXIL_MEMORY_SPLIT
     )
 }

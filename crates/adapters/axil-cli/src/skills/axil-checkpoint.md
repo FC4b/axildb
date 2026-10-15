@@ -77,6 +77,8 @@ axil checkpoint --final '{"summary":"phase complete","next_steps":["open PR"]}'
 
 Don't restate things already stored as `decisions` / `errors` / `context` — point at them. The checkpoint stays small; boot rehydrates them live.
 
+A dated event the next session needs (a release, a meeting, an incident) belongs in a record of its own with an `event_time` (`axil store context '{"summary":"…","event_time":"2026-03-12"}'`), referenced from here: time questions find it by that date.
+
 ## Redact
 
 Strip API keys, passwords, tokens, and PII before writing. The checkpoint lands in `_checkpoint_records` and surfaces at the top of every subsequent boot — assume it will be read by future you and possibly another agent.

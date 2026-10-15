@@ -1692,7 +1692,9 @@ mod tests {
         let fixture = build_fixture(&tmp.path().join("fixture"));
         // An undecodable edge whose id sorts after every real one, as if an
         // older binary had added it. The graph engine meets it on its first
-        // operation, inside recall, and says it is removing it.
+        // operation, inside recall, and says it is removing it. Recall reads
+        // the graph only for a query that names a stored entity, so the
+        // query names `validate_token`, which the fixture's decision links.
         {
             let graph = redb::Database::open(fixture.join(".axil/memory.axil.graph")).unwrap();
             let txn = graph.begin_write().unwrap();
@@ -1709,7 +1711,7 @@ mod tests {
         let results = check_parity_with(
             &fixture,
             &proj,
-            &[case("recall", &["recall", "auth timeout"])],
+            &[case("recall", &["recall", "auth timeout in validate_token"])],
             |c, args| {
                 let state = WarmState::open(&db_path).unwrap();
                 served(request(args, &cwd(), None, c.stdin), &state)

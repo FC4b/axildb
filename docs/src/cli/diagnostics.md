@@ -177,6 +177,8 @@ axil heal --reindex     # rebuild all indexes from the canonical records (slow);
 axil heal --orphans     # clean orphaned edges and vectors only
 axil heal --embed-internal  # embed code-index / dep-doc / chunk rows left
                         # without a vector (opt-in, see below)
+axil heal --rechunk     # re-split long records into recall units with this
+                        # version's splitter and re-embed them (opt-in)
 axil heal --dry-run     # print what would be fixed, change nothing
 axil heal               # also DOWNSAMPLES (see warning below)
 ```
@@ -184,15 +186,18 @@ axil heal               # also DOWNSAMPLES (see warning below)
 Rows of the internal tables written while the vector store was unavailable
 (a code index built then, for example) have no vector; `doctor` counts them per
 table. Nothing embeds them implicitly: not `heal --reindex`, a bare `heal`, the
-end-of-session heal, or an incremental `axil index`. Embedded, those rows
-compete with memories in recall's vector channel, and that currently lowers
-memory recall. On the dogfood eval (snap-prefix, 2026-10-04), restoring 2,962
-code-index vectors took hit@1 from 0.70 to 0.51, MRR@10 from 0.80 to 0.66 and
-the prompt hook's hit rate from 0.89 to 0.82
-(`benchmarks/results/dogfood-recall-2026-10-04-snap-prefix-orphans-removed.json`
-against `…-internal-embedded.json`). `axil heal --embed-internal` embeds them
-anyway, for when code search by meaning matters more. So does
-`axil index --full`, which rebuilds the code index with vectors.
+end-of-session heal, or an incremental `axil index`, because restoring them
+changes rankings. Code search ranks code-index rows by their vectors. Memory
+recall passes over code-index vectors: on the dogfood eval (snap-prefix,
+2026-10-14), restoring 2,962 of them changed no question's ranking
+(`benchmarks/results/dogfood-recall-2026-10-14-recall-skips-code-vectors-after.json`
+against `…-after-embedded.json`). Before recall passed over them, the same
+restore took hit@1 from 0.68 to 0.58, MRR@10 from 0.79 to 0.71 and the prompt
+hook's hit rate from 0.89 to 0.84 (`…-before.json` against
+`…-before-embedded.json`). Dep-doc, recall-chunk and checkpoint vectors do
+compete with memories in recall. `axil heal --embed-internal` embeds them all,
+for when code search by meaning matters more. So does `axil index --full`,
+which rebuilds the code index with vectors.
 
 > ⚠️ A bare `axil heal` **downsamples**: it deletes records older than
 > `full_retention_days` (default 90d), replacing each day's rows with a single
