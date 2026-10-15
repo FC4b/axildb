@@ -2323,6 +2323,143 @@ fn a_hook_the_daemon_does_not_serve_drains_its_own_write() {
     assert_eq!(fx.live()["queue"]["handed_over"], 1, "{}", fx.live());
 }
 
+/// A hook's PostToolUse for a failed `cargo test`, run with `env`: it
+/// queues the failure's capture.
+fn failed_cargo_test(fx: &Fixture, env: &[(&str, &str)]) {
+    let event = serde_json::json!({
+        "hook_event_name": "PostToolUse",
+        "session_id": "s-other",
+        "cwd": fx.proj,
+        "tool_name": "Bash",
+        "tool_input": {"command": "cargo test"},
+        "tool_response": {
+            "exit_code": 101,
+            "stdout": "error[E0425]: cannot find value timeout_ms in this scope",
+            "stderr": "",
+        },
+    });
+    let out = axil_env(
+        BIN,
+        &fx.proj,
+        &["hook", "run", "--dialect", "claude"],
+        Some(event.to_string().as_bytes()),
+        env,
+    );
+    assert!(out.status.success(), "{}", text(&out.stderr));
+}
+
+/// A hook run with `AXIL_DAEMON=off` never had the daemon check its build
+/// or environment, so its write is marked for its own drainer: the daemon
+/// lets go of the queue at that job and runs none of it. Like any command
+/// with the daemon off, the drainer finds the database busy while the
+/// daemon holds it, and runs the write once it is free.
+///
+/// A job the daemon can't read (a newer build's, here an op it doesn't
+/// know) that no drainer takes is set aside, never deleted.
+#[test]
+fn a_hook_with_the_daemon_off_leaves_its_write_to_its_own_drainer() {
+    let fx = fixture();
+    std::fs::create_dir_all(fx.queue()).unwrap();
+    fx.start_with(BIN, "300s");
+    let draining = || fx.live()["queue"]["draining"] == true;
+    assert!(wait_for(Duration::from_secs(10), draining), "{}", fx.live());
+
+    let newer =
+        serde_json::json!({"op": "close_session_v2", "session": "s-new", "own_drainer": true});
+    fx.queue_job(0, &newer);
+    let poke = fx.axil(&["hook", "drain"]);
+    assert!(poke.status.success(), "{}", text(&poke.stderr));
+    let set_aside = fx
+        .queue()
+        .join("interrupted/20260101T000000.000000000Z-1-0.job");
+    assert!(
+        wait_for(Duration::from_secs(30), || set_aside.is_file()),
+        "{}",
+        fx.live()
+    );
+    assert!(fx.drained(1), "{}", fx.live());
+    let log = || std::fs::read_to_string(fx.queue().join("drain.log")).unwrap_or_default();
+    assert!(
+        log().contains("unreadable job file (set aside, not run)"),
+        "{}",
+        log()
+    );
+
+    failed_cargo_test(&fx, &[("AXIL_DAEMON", "off")]);
+    let handed_over = |n: u64| fx.live()["queue"]["handed_over"] == n;
+    assert!(
+        wait_for(Duration::from_secs(30), || handed_over(2)),
+        "{}",
+        fx.live()
+    );
+    std::thread::sleep(Duration::from_secs(1));
+    assert_eq!(fx.live()["queue"]["jobs"], 1, "{}\n{}", fx.live(), log());
+    let stop = fx.axil(&["daemon", "stop", "--wait", "20"]);
+    assert!(stop.status.success(), "{}", text(&stop.stderr));
+    assert!(
+        wait_for(Duration::from_secs(60), || fx.queued().is_empty()),
+        "{:?}\n{}",
+        fx.queued(),
+        log()
+    );
+    let errors = text(&fx.axil(&["list", "errors"]).stdout);
+    assert!(errors.contains("timeout_ms"), "{errors}\n{}", log());
+}
+
+/// The daemon lets go of the queue at a job its hook's drainer is to run
+/// even while the database is leased to another process: that drainer
+/// takes the queue at once, rather than wait for the lease to end, and
+/// runs the job once the holder is done.
+#[test]
+fn a_job_for_its_hooks_drainer_is_handed_over_during_a_lease() {
+    let fx = fixture();
+    std::fs::create_dir_all(fx.queue()).unwrap();
+    // Served nothing, it must not idle out before the queue is done.
+    fx.start_with(BIN, "300s");
+    let draining = || fx.live()["queue"]["draining"] == true;
+    assert!(wait_for(Duration::from_secs(10), draining), "{}", fx.live());
+    let mut cmd = Command::new(BIN);
+    cmd.args(["worker", "daemon", "--interval", "60", "--duration", "8"])
+        .current_dir(&fx.proj)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    for name in ENV {
+        cmd.env_remove(name);
+    }
+    let mut holder = cmd.spawn().unwrap();
+    let pid = u64::from(holder.id());
+    assert!(
+        wait_for(Duration::from_secs(10), || fx.holders() == [pid]),
+        "{}",
+        fx.live()
+    );
+    // Another environment: a hook the daemon does not serve.
+    failed_cargo_test(&fx, &[("AXIL_LLM_API_KEY", "x")]);
+    assert!(
+        wait_for(Duration::from_secs(5), || fx.live()["queue"]["handed_over"]
+            == 1),
+        "{}",
+        fx.live()
+    );
+    assert!(
+        holder.try_wait().unwrap().is_none(),
+        "the lease ended first"
+    );
+    assert!(holder.wait().unwrap().success());
+    let log = || std::fs::read_to_string(fx.queue().join("drain.log")).unwrap_or_default();
+    assert!(
+        wait_for(Duration::from_secs(60), || fx.queued().is_empty()),
+        "{:?}\n{}\n{}",
+        fx.queued(),
+        log(),
+        fx.log()
+    );
+    assert_eq!(fx.live()["queue"]["jobs"], 0, "{}", fx.live());
+    let log = std::fs::read_to_string(fx.queue().join("drain.log")).unwrap_or_default();
+    assert!(!log.contains("failed"), "{log}");
+}
+
 /// A session start's `maintain --in-background`: the detached child it
 /// starts runs on the daemon's handle, so the daemon never lets go of the
 /// database for it.

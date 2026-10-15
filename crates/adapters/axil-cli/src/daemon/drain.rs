@@ -200,12 +200,8 @@ fn run(server: &Arc<Server>) {
             server.wait_for_wake(POLL);
             continue;
         };
-        // A job starts only while the daemon serves, or while it has let go
-        // of the database for the queue's own steps.
-        if runner.yielded.is_none() && !server.serving() {
-            server.wait_for_wake(POLL);
-            continue;
-        }
+        // Handed over whether or not the daemon serves now: the hook's
+        // drainer runs it in a process of its own either way.
         if for_own_drainer(&job) && not_taken.as_deref() != Some(job.as_path()) {
             runner.end_yield();
             server.queue().handed_over.fetch_add(1, Ordering::AcqRel);
@@ -229,6 +225,12 @@ fn run(server: &Arc<Server>) {
                     not_taken = Some(job);
                 }
             }
+            continue;
+        }
+        // A job starts only while the daemon serves, or while it has let go
+        // of the database for the queue's own steps.
+        if runner.yielded.is_none() && !server.serving() {
+            server.wait_for_wake(POLL);
             continue;
         }
         held.touch();

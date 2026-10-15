@@ -106,10 +106,15 @@ drainer was killed is still `.job`, and the next drainer runs it.
 
 A hook asks the daemon, before it queues, whether it serves the hook's
 process. When it does, the hook pokes it and starts no drainer. When it
-doesn't (another build or environment), the job is marked for the hook's own
-`hook drain`: the daemon lets go of the queue at that job, and takes it back
-once that drainer is done. When no drainer takes it within 5 s, the daemon
-runs the job itself.
+doesn't (another build or environment), isn't asked (`AXIL_DAEMON=off`) or
+doesn't answer in time, the job is marked for the hook's own `hook drain`:
+the daemon lets go of the queue at that job, even while it is not serving (a
+lease, a reload), and takes it back once that drainer is done. With
+`AXIL_DAEMON=off`, that drainer's write finds the database busy while the
+daemon holds it, as any command run with the daemon off does, and runs once
+the database is free. When no drainer takes the job within 5 s, the daemon
+runs it itself. A job it can't read (one a newer build queued) is moved to
+`interrupted/` and logged, never deleted.
 
 These steps run on the open handle, as these forms do when typed: `store`,
 `auto-capture`, `extract-entities`, `auto-link` (with a vector store), `worker

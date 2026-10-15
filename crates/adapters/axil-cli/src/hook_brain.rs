@@ -1352,7 +1352,11 @@ impl HookCtx {
         let served = crate::daemon::client::queue_served(db);
         #[cfg(not(unix))]
         let served: Option<bool> = None;
-        if !write_job(db, job, served == Some(false)) {
+        // Marked for this process's own drainer unless the daemon said it
+        // serves this process: one that would not, one not asked
+        // (`AXIL_DAEMON=off`) and one that did not answer in time all leave
+        // the job to it.
+        if !write_job(db, job, served != Some(true)) {
             return false;
         }
         #[cfg(unix)]
@@ -2268,10 +2272,11 @@ const DRAIN_LOG_MAX_BYTES: u64 = 1_048_576;
 /// A database write a hook asked for, run later by the database's daemon or
 /// by `axil hook drain`.
 ///
-/// Its file may also say `"own_drainer": true`: the hook that queued it is
-/// one the database's daemon does not serve (another build, or another
-/// environment), so the daemon leaves the job to a drainer of the hook's
-/// own. Drainers from before the daemon ignore the field.
+/// Its file may also say `"own_drainer": true`: the hook that queued it was
+/// not told the database's daemon serves it (the daemon is another build or
+/// environment's, was not asked with `AXIL_DAEMON=off`, did not answer in
+/// time, or there is none), so a daemon leaves the job to a drainer of the
+/// hook's own. Drainers from before the daemon ignore the field.
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "op", rename_all = "snake_case")]
 enum Job {
@@ -2423,8 +2428,13 @@ pub(crate) fn drain(db: &Path) -> Result<i32> {
     #[cfg(unix)]
     let handed_over = match crate::daemon::client::queue_served(db) {
         Some(true) if crate::daemon::client::poke(db) => return Ok(0),
+        Some(true) => None,
+        // A daemon that does not serve this process, or was not asked (or
+        // did not answer), and may be draining: it lets go of the queue at
+        // this process's jobs.
         Some(false) => Some(Instant::now() + HANDOVER_WAIT),
-        _ => None,
+        None if crate::daemon::client::may_have_daemon(db) => Some(Instant::now() + HANDOVER_WAIT),
+        None => None,
     };
     #[cfg(not(unix))]
     let handed_over: Option<Instant> = None;
@@ -2765,19 +2775,23 @@ pub(crate) fn next_job(dir: &Path) -> Option<PathBuf> {
 /// look at.
 pub(crate) fn set_aside_interrupted(dir: &Path) {
     for path in queue_files(dir, "running") {
-        let dest = dir.join("interrupted");
-        let _ = std::fs::create_dir_all(&dest);
-        if let Some(name) = path.file_name() {
-            let _ = std::fs::rename(&path, dest.join(name));
+        if let Some(name) = set_aside(dir, &path) {
             drain_log(
                 dir,
-                &format!(
-                    "set aside interrupted job {}, not retried",
-                    name.to_string_lossy()
-                ),
+                &format!("set aside interrupted job {name}, not retried"),
             );
         }
     }
+}
+
+/// Move the queued file at `path` into the queue's `interrupted/`, where no
+/// drainer runs it; its name, when it went.
+fn set_aside(dir: &Path, path: &Path) -> Option<String> {
+    let dest = dir.join("interrupted");
+    let _ = std::fs::create_dir_all(&dest);
+    let name = path.file_name()?;
+    std::fs::rename(path, dest.join(name)).ok()?;
+    Some(name.to_string_lossy().into_owned())
 }
 
 pub(crate) fn drain_log(dir: &Path, line: &str) {
@@ -2880,9 +2894,17 @@ pub(crate) fn run_job_file(
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
     let body = std::fs::read(&claim.job).ok()?;
-    let result = serde_json::from_slice::<Job>(&body)
-        .map_err(|_| "unreadable job file".to_string())
-        .and_then(|job| run_job(runner, claim, exe, db, &job));
+    let Ok(job) = serde_json::from_slice::<Job>(&body) else {
+        // Never deleted: one a newer build queued is kept for its owner to
+        // see, and the queue goes on past it.
+        set_aside(dir, &claim.job);
+        drain_log(
+            dir,
+            &format!("job {name} failed: unreadable job file (set aside, not run)"),
+        );
+        return Some(false);
+    };
+    let result = run_job(runner, claim, exe, db, &job);
     match claim.state() {
         Claim::Lost => return None,
         Claim::Withheld => {
@@ -5776,7 +5798,8 @@ mod tests {
             "{log}"
         );
 
-        // An unreadable job is logged and removed, and runs nothing.
+        // An unreadable job (a newer build's, say) is logged and set aside,
+        // and runs nothing.
         std::fs::write(queue.join("4-d.job"), b"{nope").unwrap();
         let job = next_job(&queue).unwrap();
         let claim = JobClaim::new(&job);
@@ -5786,6 +5809,7 @@ mod tests {
         );
         assert_eq!(runner.steps.len(), 3);
         assert!(next_job(&queue).is_none());
+        assert!(queue.join("interrupted/4-d.job").is_file(), "never deleted");
         let log = std::fs::read_to_string(queue.join("drain.log")).unwrap();
         assert!(log.contains("job 4-d failed: unreadable job file"), "{log}");
     }
