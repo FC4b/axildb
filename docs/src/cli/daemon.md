@@ -106,7 +106,13 @@ runs the jobs one at a time, in the order they were queued, each renamed to
 `.running` once its first write starts and removed after, a failed one logged
 in `drain.log`. A `.running` job a killed drainer left behind is moved to
 `interrupted/` and never run again; a job still waiting to start when its
-drainer was killed is still `.job`, and the next drainer runs it.
+drainer was killed is still `.job`, and the next drainer runs it. A step run
+in a process of its own that finds the database busy (another process holds
+it) is retried for up to 120 s, then given up: the job goes back to the queue
+as `.job`, in its place, recording the steps that ran, and the next drainer
+resumes it at the step that gave up, never running one of those again. A job
+given up that way by three drainers in turn is moved to `interrupted/` and
+logged instead. No job is deleted unrun.
 
 A hook asks the daemon, before it queues, whether it serves the hook's
 process. When it does, the hook pokes it and starts no drainer. When it
@@ -116,12 +122,14 @@ the daemon lets go of the queue at that job, even while it is not serving (a
 lease, a reload), and takes it back once that drainer is done. With
 `AXIL_DAEMON=off`, that drainer's write finds the database busy while the
 daemon holds it, as any command run with the daemon off does: `hook drain`
-waits up to 120 s for it, as for any other process holding the writer lock,
-then gives the step up and logs it in `drain.log`. So with a daemon running,
-leave `AXIL_DAEMON` unset for the hooks, or stop the daemon before turning
-it off. When no drainer takes the job within 5 s, the daemon
-runs it itself. A job it can't read (one a newer build queued) is moved to
-`interrupted/` and logged, never deleted.
+waits up to 120 s for it, then gives the step up, and the job goes back to the
+queue, no longer marked for that drainer. The write runs once a drainer finds
+the database free: the daemon, which takes the queue back and runs the job on
+its open handle, or a later hook's drainer. For it to run without that wait,
+leave `AXIL_DAEMON` unset for the hooks while a daemon runs, or stop the
+daemon before turning it off. When no drainer takes the job within 5 s, the
+daemon runs it itself. A job it can't read (one a newer build queued) is
+moved to `interrupted/` and logged, never deleted.
 
 These steps run on the open handle, as these forms do when typed: `store`,
 `auto-capture`, `extract-entities`, `auto-link` (which, without a vector

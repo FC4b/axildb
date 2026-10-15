@@ -3573,7 +3573,9 @@ enum HookCommand {
     /// (`<db dir>/hook-queue/` for `memory.axil`, `hook-queue.<file>/` for
     /// another database file). Hooks start this detached after queuing a
     /// write; it is safe to run by hand. A job cut off mid-run is moved to
-    /// the queue's `interrupted/` and never retried.
+    /// the queue's `interrupted/` and never retried. One whose step finds
+    /// the database busy past 120 s goes back to the queue, to resume at
+    /// that step; the third time, it is moved to `interrupted/` too.
     #[command(hide = true)]
     Drain,
 }

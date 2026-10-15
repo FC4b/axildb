@@ -1159,6 +1159,10 @@ mod tests {
         ),
         ("CLAUDE_PROJECT_DIR", "hook commands"),
         (
+            "AXIL_DEBUG_BUSY_WAIT_MS",
+            "debug builds only: how long a queued step run in a process of its own waits for a busy database",
+        ),
+        (
             "PATH",
             "install, hook setup and `daemon start` look for an installed axil",
         ),

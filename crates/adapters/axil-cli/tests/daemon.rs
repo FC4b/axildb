@@ -2470,6 +2470,46 @@ fn a_hook_with_the_daemon_off_leaves_its_write_to_its_own_drainer() {
     assert!(errors.contains("timeout_ms"), "{errors}\n{}", log());
 }
 
+/// The write of a hook run with `AXIL_DAEMON=off` beside a running daemon
+/// is not lost when its own drainer gives the step up, the database busy
+/// past the wait (cut to 1 s here): the job goes back to the queue, no
+/// longer marked for that drainer, and the daemon runs it on its open
+/// handle, once.
+#[test]
+fn a_write_its_drainer_gives_up_on_runs_in_the_daemon() {
+    let fx = fixture();
+    std::fs::create_dir_all(fx.queue()).unwrap();
+    fx.start_with(BIN, "300s");
+    let draining = || fx.live()["queue"]["draining"] == true;
+    assert!(wait_for(Duration::from_secs(10), draining), "{}", fx.live());
+
+    failed_cargo_test(
+        &fx,
+        &[("AXIL_DAEMON", "off"), ("AXIL_DEBUG_BUSY_WAIT_MS", "1000")],
+    );
+    let log = || std::fs::read_to_string(fx.queue().join("drain.log")).unwrap_or_default();
+    assert!(
+        wait_for(Duration::from_secs(60), || fx.queued().is_empty()
+            && fx.live()["queue"]["jobs"] == 1),
+        "{:?}\n{}\n{}",
+        fx.queued(),
+        fx.live(),
+        log()
+    );
+    assert_eq!(fx.live()["queue"]["handed_over"], 1, "{}", fx.live());
+    assert_eq!(fx.live()["queue"]["failed"], 0, "{}", fx.live());
+    assert_eq!(fx.live()["queue"]["warm_steps"], 1, "{}", fx.live());
+    assert!(
+        log().contains("queued again: the database was busy at `axil auto-capture`"),
+        "{}",
+        log()
+    );
+    assert!(!log().contains("failed"), "{}", log());
+    assert!(!fx.queue().join("interrupted").exists(), "{}", log());
+    let errors = text(&fx.axil(&["list", "errors"]).stdout);
+    assert!(errors.contains("timeout_ms"), "{errors}\n{}", log());
+}
+
 /// The daemon lets go of the queue at a job its hook's drainer is to run
 /// even while the database is leased to another process: that drainer
 /// takes the queue at once, rather than wait for the lease to end, and

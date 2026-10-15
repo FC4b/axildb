@@ -17,7 +17,9 @@
 //! - It claims a job by renaming it from `.job` to `.running` as the job's
 //!   first write starts, not before ([`JobClaim`]), runs it, and removes it,
 //!   whether or not its steps succeeded; jobs run in the order their names
-//!   sort, one at a time.
+//!   sort, one at a time. A job whose step gave up waiting for the
+//!   database goes back to the queue instead, the steps that ran recorded
+//!   in it, to resume at that step (see [`hook_brain::run_job_file`]).
 //!
 //! It wakes when a hook pokes it ([`super::proto::Op::Poke`]), when the
 //! database opens again, and every 2 s. A job is started only while the
@@ -72,7 +74,8 @@ use super::exec;
 use super::server::{Queued, Server};
 use crate::hook_brain::{
     self, drain_log, for_own_drainer, next_job, project_dir_of, queue_dir, run_job_file,
-    set_aside_interrupted, step_failed, DrainLock, JobClaim, JobRunner, SubprocessRunner, WITHHELD,
+    set_aside_interrupted, step_failed, Claim, DrainLock, JobClaim, JobRunner, SubprocessRunner,
+    WITHHELD,
 };
 
 /// How often the thread looks at the queue without being poked.
@@ -241,6 +244,12 @@ fn run(server: &Arc<Server>) {
         server.queue().on(None);
         if let Some(ok) = ran {
             server.queue().ran(!ok);
+        }
+        // A step run in a process of its own gave up waiting for the
+        // database, held by a process the daemon did not lease it to: the
+        // job is queued again, and tried again at the next look.
+        if claim.state() == Claim::Busy {
+            server.wait_for_wake(POLL);
         }
     }
     runner.end_yield();
