@@ -1245,6 +1245,11 @@ impl Server {
         match self.phase.get() {
             Phase::Starting => return refused(RunReply::Starting),
             Phase::Stopping => return refused(RunReply::Stopping),
+            // With no holder left, the database is about to be opened
+            // again: the client may wait for it as for a daemon starting.
+            Phase::Leasing | Phase::Leased if !self.lease_asked() => {
+                return refused(RunReply::Starting)
+            }
             Phase::Leasing | Phase::Leased => return refused(RunReply::Leased),
             Phase::Ready | Phase::Reloading => {}
         }
@@ -2690,6 +2695,35 @@ mod tests {
         let (out, _, exit) = served(send(&server, &["boot"], &proj, None));
         assert_eq!(exit, 0);
         assert!(String::from_utf8_lossy(&out).contains("written under the lease"));
+        stop(server);
+    }
+
+    /// While a lease is held a request is told so; once the last ended, it
+    /// is told the database is opening, as at the start, so a client waits
+    /// for the daemon rather than lease the database again.
+    #[test]
+    fn after_the_last_lease_a_request_is_told_the_database_is_opening() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = build_fixture(tmp.path());
+        let server = start(&proj.join(".axil/memory.axil"));
+        quiet(&server);
+        let (reply, held) = ask(&server, &server.key, 10_000);
+        assert_eq!(reply, LeaseReply::granted());
+        assert_eq!(
+            send(&server, &["boot"], &proj, None).reply,
+            RunReply::Leased
+        );
+        drop(held);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while holders(&server) > 0 {
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(1));
+        }
+        let outcome = send(&server, &["boot"], &proj, None);
+        assert_ne!(outcome.reply, RunReply::Leased);
+        wait_for_phase(&server, Phase::Ready);
+        let (_, _, exit) = served(send(&server, &["boot"], &proj, None));
+        assert_eq!(exit, 0);
         stop(server);
     }
 

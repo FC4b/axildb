@@ -281,7 +281,8 @@ pub enum RunReply {
         /// `proto`, `build`, `features` or `env`.
         reason: String,
     },
-    /// The database is still opening.
+    /// The database is opening: at the start, or again once the last
+    /// lease on it ended. Asked again shortly, the daemon serves.
     Starting,
     /// The database is closed while another process holds a lease on it
     /// (see [`Op::Lease`]).

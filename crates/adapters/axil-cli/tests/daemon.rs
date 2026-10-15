@@ -110,6 +110,17 @@ fn text(bytes: &[u8]) -> String {
 
 /// Run `exe` with `args` in `dir`, stdin from `stdin` or nothing.
 fn axil_in(exe: &str, dir: &Path, args: &[&str], stdin: Option<&[u8]>) -> Output {
+    axil_env(exe, dir, args, stdin, &[])
+}
+
+/// [`axil_in`] with the variables `env` set.
+fn axil_env(
+    exe: &str,
+    dir: &Path,
+    args: &[&str],
+    stdin: Option<&[u8]>,
+    env: &[(&str, &str)],
+) -> Output {
     let mut cmd = Command::new(exe);
     cmd.args(args)
         .current_dir(dir)
@@ -118,6 +129,7 @@ fn axil_in(exe: &str, dir: &Path, args: &[&str], stdin: Option<&[u8]>) -> Output
     for name in ENV {
         cmd.env_remove(name);
     }
+    cmd.envs(env.iter().copied());
     cmd.stdin(if stdin.is_some() {
         Stdio::piped()
     } else {
@@ -254,6 +266,11 @@ impl Fixture {
         Mcp { child, lines: rx }
     }
 
+    /// How many commands the daemon has run, by command.
+    fn served(&self, op: &str) -> u64 {
+        self.live()["ops"][op]["served"].as_u64().unwrap_or(0)
+    }
+
     /// The lease holders the daemon reports, by pid.
     fn holders(&self) -> Vec<u64> {
         self.live()["lease_holders"]
@@ -322,6 +339,77 @@ impl Mcp {
         drop(self.child.stdin.take());
         self.child.wait().unwrap()
     }
+}
+
+/// Copy the directory `from` to `to`, sockets left out.
+fn copy_dir(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let kind = entry.file_type().unwrap();
+        let dest = to.join(entry.file_name());
+        if kind.is_dir() {
+            copy_dir(&entry.path(), &dest);
+        } else if kind.is_file() {
+            std::fs::copy(entry.path(), dest).unwrap();
+        }
+    }
+}
+
+/// What differs between two runs of the same commands: ULIDs, renumbered
+/// in order of appearance, ISO-8601 times, and the line the embedder prints
+/// once per process, which a daemon prints once in its life.
+fn normalize(bytes: &[u8]) -> String {
+    const CROCKFORD: &[u8] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+    let text = text(bytes);
+    let text: String = text
+        .split_inclusive('\n')
+        .filter(|line| !line.starts_with("[axil-vector]"))
+        .collect();
+    let b = text.as_bytes();
+    let mut ids: Vec<&[u8]> = Vec::new();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < b.len() {
+        let boundary = i == 0 || !b[i - 1].is_ascii_alphanumeric();
+        let ulid = b.get(i..i + 26).filter(|w| {
+            w[0] == b'0'
+                && w.iter().all(|c| CROCKFORD.contains(c))
+                && b.get(i + 26).is_none_or(|c| !c.is_ascii_alphanumeric())
+        });
+        if let (true, Some(id)) = (boundary, ulid) {
+            let n = ids.iter().position(|seen| *seen == id).unwrap_or_else(|| {
+                ids.push(id);
+                ids.len() - 1
+            });
+            out.push_str(&format!("<ID{n}>"));
+            i += 26;
+            continue;
+        }
+        let digits = |at: usize, n: usize| {
+            b.get(at..at + n)
+                .is_some_and(|w| w.iter().all(u8::is_ascii_digit))
+        };
+        if digits(i, 4)
+            && b.get(i + 4) == Some(&b'-')
+            && digits(i + 5, 2)
+            && b.get(i + 10) == Some(&b'T')
+            && digits(i + 11, 2)
+            && b.get(i + 13) == Some(&b':')
+        {
+            let mut j = i + 19;
+            while j < b.len() && (b[j].is_ascii_digit() || b"+-:.Z".contains(&b[j])) {
+                j += 1;
+            }
+            out.push_str("<TS>");
+            i = j;
+            continue;
+        }
+        let ch = text[i..].chars().next().unwrap();
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
 }
 
 fn wait_for(timeout: Duration, mut done: impl FnMut() -> bool) -> bool {
@@ -1064,6 +1152,233 @@ fn with_the_daemon_off_a_command_asks_for_no_lease() {
     assert_eq!(live["state"], "ready", "{live}");
 }
 
+/// The hot commands typed as usual go to the daemon, which prints what each
+/// prints with no daemon: the same bytes as with `AXIL_DAEMON=off`, ids and
+/// times aside. None of them leases the database.
+#[test]
+fn the_hot_commands_go_to_the_daemon_and_print_as_without_one() {
+    let fx = fixture();
+    let cp = r#"{"goal":"g","state":"s","next_steps":["n"]}"#;
+    let mut cases: Vec<(Vec<&str>, Option<&[u8]>)> = vec![
+        (vec!["boot"], None),
+        (vec!["boot", "--boot-format", "narrative"], None),
+        (vec!["boot", "--files", "src/auth.rs"], None),
+        (vec!["recall-for-file", "src/auth.rs"], None),
+        (vec!["store", "decisions", r#"{"summary":"sent"}"#], None),
+        (
+            vec!["store", "context", "-"],
+            Some(br#"{"summary":"piped"}"#),
+        ),
+        (vec!["store", "decisions", "{nope"], None),
+    ];
+    if built_with(cfg!(feature = "embed"), "recall") {
+        cases.push((vec!["recall", "auth timeout"], None));
+        cases.push((
+            vec!["recall", "login tokens", "--recall-format", "context-block"],
+            None,
+        ));
+    }
+    if built_with(cfg!(feature = "indexer"), "code-search") {
+        cases.push((vec!["code-search", "validate token"], None));
+    }
+    if built_with(cfg!(feature = "fts"), "fts") {
+        cases.push((vec!["fts", "tokens"], None));
+    }
+    if built_with(cfg!(feature = "timeseries"), "since") {
+        cases.push((vec!["since", "1h"], None));
+    }
+    if built_with(cfg!(feature = "checkpoint"), "checkpoint") {
+        cases.push((vec!["checkpoint", cp], None));
+        cases.push((vec!["checkpoint", "-"], Some(cp.as_bytes())));
+    }
+    let saved = fx._tmp.path().join("saved");
+    copy_dir(&fx.proj.join(".axil"), &saved);
+    let run_all = |env: &[(&str, &str)]| -> Vec<(String, String, Option<i32>)> {
+        cases
+            .iter()
+            .map(|(args, stdin)| {
+                let out = axil_env(BIN, &fx.proj, args, *stdin, env);
+                (
+                    normalize(&out.stdout),
+                    normalize(&out.stderr),
+                    out.status.code(),
+                )
+            })
+            .collect()
+    };
+
+    fx.start();
+    let sent = run_all(&[]);
+    let live = fx.live();
+    let served: u64 = live["ops"]
+        .as_object()
+        .unwrap()
+        .values()
+        .map(|op| op["served"].as_u64().unwrap())
+        .sum();
+    assert_eq!(served, cases.len() as u64, "{live}");
+    assert_eq!(live["leases_granted"], 0, "{live}");
+    let stop = fx.axil(&["daemon", "stop"]);
+    assert!(stop.status.success(), "{}", text(&stop.stderr));
+
+    std::fs::remove_dir_all(fx.proj.join(".axil")).unwrap();
+    copy_dir(&saved, &fx.proj.join(".axil"));
+    let alone = run_all(&[("AXIL_DAEMON", "off")]);
+    for ((args, _), (sent, alone)) in cases.iter().zip(sent.iter().zip(&alone)) {
+        assert_eq!(sent, alone, "{args:?}");
+    }
+}
+
+/// A connection that breaks once the command went out: a write is not run
+/// again, since the daemon may have run it, and says so; a read runs here.
+#[test]
+fn a_lost_connection_fails_a_write_and_runs_a_read_here() {
+    let fx = fixture();
+    // A daemon that reads each request and hangs up.
+    let dir = fx.run_dir();
+    std::fs::create_dir_all(&dir).unwrap();
+    for d in [dir.parent().unwrap(), &dir] {
+        std::fs::set_permissions(d, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
+    }
+    let listener = std::os::unix::net::UnixListener::bind(dir.join("axil.sock")).unwrap();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { break };
+            let mut len = [0u8; 4];
+            if stream.read_exact(&mut len).is_ok() {
+                let mut body = vec![0u8; u32::from_be_bytes(len) as usize];
+                let _ = stream.read_exact(&mut body);
+            }
+        }
+    });
+
+    let store = fx.axil(&["store", "decisions", r#"{"summary":"lost on the way"}"#]);
+    assert_eq!(store.status.code(), Some(1));
+    assert_eq!(
+        text(&store.stderr),
+        "{\"error\":\"daemon connection lost; write status unknown\"}\n"
+    );
+    let boot = fx.axil(&["boot"]);
+    assert!(boot.status.success(), "{}", text(&boot.stderr));
+    assert!(
+        text(&boot.stdout).contains("512 bytes"),
+        "{}",
+        text(&boot.stdout)
+    );
+    let off = axil_env(
+        BIN,
+        &fx.proj,
+        &["list", "decisions"],
+        None,
+        &[("AXIL_DAEMON", "off")],
+    );
+    assert!(!text(&off.stdout).contains("lost on the way"));
+}
+
+/// A client of another build, or with another environment, runs the
+/// command itself and leases the database; one for another database never
+/// reaches this one's daemon, which refuses a command for one.
+#[test]
+fn another_build_environment_or_database_is_not_sent() {
+    let fx = fixture();
+    let copy = fx.proj.join("axil-copy");
+    std::fs::copy(BIN, &copy).unwrap();
+    fx.start_with(copy.to_str().unwrap(), "60s");
+    let boot = fx.leasing(&["boot"]);
+    assert!(text(&boot.stdout).contains("512 bytes"));
+    assert_eq!(fx.served("boot"), 0, "{}", fx.live());
+    assert_eq!(fx.live()["leases_granted"], 1, "{}", fx.live());
+    fx.warm_again();
+    let stop = fx.axil(&["daemon", "stop"]);
+    assert!(stop.status.success(), "{}", text(&stop.stderr));
+
+    fx.start();
+    let keyed = axil_env(BIN, &fx.proj, &["boot"], None, &[("AXIL_ENC_KEY", "x")]);
+    assert!(keyed.status.success(), "{}", text(&keyed.stderr));
+    assert_eq!(fx.served("boot"), 0, "{}", fx.live());
+    assert_eq!(fx.live()["leases_granted"], 1, "{}", fx.live());
+    fx.warm_again();
+    assert_eq!(fx.served("boot"), 1, "{}", fx.live());
+
+    let other = fx.proj.join("other.axil");
+    let init = fx.axil(&["init", other.to_str().unwrap()]);
+    assert!(init.status.success(), "{}", text(&init.stderr));
+    let elsewhere = fx.axil(&["--db", other.to_str().unwrap(), "boot"]);
+    assert!(elsewhere.status.success(), "{}", text(&elsewhere.stderr));
+    assert_eq!(fx.served("boot"), 1, "{}", fx.live());
+    let refused = fx.send(&["--db", other.to_str().unwrap(), "boot"], None);
+    assert_eq!(refused.status.code(), Some(125));
+    assert!(
+        text(&refused.stderr).contains("\"reason\":\"wrong_db\""),
+        "{}",
+        text(&refused.stderr)
+    );
+}
+
+/// Hook writes queued while the daemon runs: the drainer's commands that
+/// the daemon runs go to it, the others lease the database, and every job
+/// runs once, in the order queued, none of them finding the database busy.
+#[test]
+fn queued_hook_writes_run_once_in_order_beside_the_daemon() {
+    let fx = fixture();
+    fx.start();
+    let queue = fx.proj.join(".axil/hook-queue");
+    std::fs::create_dir_all(&queue).unwrap();
+    let mut stores = 0;
+    for n in 0..50 {
+        let job = match n % 5 {
+            // Not a command the daemon runs: it leases the database.
+            4 => serde_json::json!({"op": "axil", "args": ["list", "decisions"]}),
+            3 => {
+                stores += 1;
+                serde_json::json!({
+                    "op": "axil",
+                    "args": ["store", "context", "-"],
+                    "stdin": serde_json::json!({"summary": format!("queued {n}"), "seq": n}).to_string(),
+                })
+            }
+            _ => {
+                stores += 1;
+                let data = serde_json::json!({"summary": format!("queued {n}"), "seq": n});
+                serde_json::json!({"op": "axil", "args": ["store", "decisions", data.to_string()]})
+            }
+        };
+        let name = format!("20260101T000000.{n:09}Z-1-{n}.job");
+        std::fs::write(queue.join(name), job.to_string()).unwrap();
+    }
+    let drain = fx.axil(&["hook", "drain"]);
+    assert!(drain.status.success(), "{}", text(&drain.stderr));
+    let log = std::fs::read_to_string(queue.join("drain.log")).unwrap_or_default();
+    assert!(!log.contains("busy") && !log.contains("failed"), "{log}");
+    let left: Vec<_> = std::fs::read_dir(&queue)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.path()
+                .extension()
+                .is_some_and(|x| x == "job" || x == "running")
+        })
+        .collect();
+    assert!(left.is_empty(), "{left:?}");
+    assert_eq!(fx.served("store"), stores, "{}", fx.live());
+
+    // Every one once, and in order: ids rise with the time they were made.
+    let mut rows: Vec<(String, i64)> = Vec::new();
+    for table in ["decisions", "context"] {
+        let out = fx.axil(&["list", table]);
+        let list: Value = serde_json::from_slice(&out.stdout).unwrap();
+        for row in list.as_array().unwrap() {
+            if let Some(seq) = row["data"]["seq"].as_i64() {
+                rows.push((row["id"].as_str().unwrap().to_string(), seq));
+            }
+        }
+    }
+    rows.sort();
+    let seqs: Vec<i64> = rows.iter().map(|(_, seq)| *seq).collect();
+    let want: Vec<i64> = (0..50).filter(|n| n % 5 != 4).collect();
+    assert_eq!(seqs, want);
+}
+
 /// `reembed` has the database leased before it touches the vector store,
 /// even to put back the copy an interrupted run left: here one it cannot
 /// move into place.
@@ -1145,8 +1460,8 @@ fn a_store_the_daemon_lacks_is_created_under_a_lease() {
     }
 }
 
-/// While a server holds the lease, a hook's recall finds the database
-/// held and returns no context, at once.
+/// The daemon runs a hook's recall. While a server holds the lease, the
+/// hook's recall finds the database held and returns no context, at once.
 #[test]
 fn a_hook_recall_under_a_lease_returns_nothing_at_once() {
     let needs = cfg!(all(feature = "mcp", feature = "embed", feature = "fts"));
@@ -1172,11 +1487,12 @@ fn a_hook_recall_under_a_lease_returns_nothing_at_once() {
         assert!(out.status.success(), "{}", text(&out.stderr));
         (text(&out.stdout), started.elapsed())
     };
-    // With the daemon serving, the hook's recall leases it and finds the
-    // memory.
+    // With the daemon serving, it runs the hook's recall, which finds the
+    // memory and leases nothing.
     let (context, _) = hook("s-served");
     assert!(context.contains("auth timeout"), "{context}");
-    fx.warm_again();
+    assert_eq!(fx.served("recall"), 1, "{}", fx.live());
+    assert_eq!(fx.live()["leases_granted"], 0, "{}", fx.live());
 
     let mut mcp = fx.mcp();
     mcp.initialize();

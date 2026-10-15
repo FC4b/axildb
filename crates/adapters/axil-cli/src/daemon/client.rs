@@ -16,10 +16,11 @@
 //!   broke after it was sent is not run again: the daemon may have run it.
 //! - A hook's lookup ([`forward_lookup`]) is sent with the slow-query log
 //!   off and a deadline. A daemon that ran it answers it; one that is not
-//!   free to (the database leased, still opening, shutting down) leaves the
-//!   hook without context at once. With no daemon, or a command it does not
-//!   run, the hook runs its lookup in a child process, which leases as any
-//!   command does.
+//!   free to (the database leased or opening, the daemon shutting down)
+//!   leaves the hook without context at once, except that a boot waits a
+//!   while for a daemon opening the database. With no daemon, or a command
+//!   it does not run, the hook runs its lookup in a child process, which
+//!   leases as any command does.
 //!
 //! A client of another build than the daemon's runs the command itself, so
 //! a command runs only on the code of the binary it was typed into.
@@ -82,7 +83,7 @@ pub enum Forwarded {
     /// The daemon was still opening the database when the wait ran out.
     StartingTimeout,
     /// The daemon could not take it now: `stopping`, `overloaded`,
-    /// `expired` or `error`.
+    /// `unavailable` (opening the database again), `expired` or `error`.
     Refused(&'static str),
     /// The connection broke. `sent` when the whole request had gone out,
     /// so the daemon may have run it.
@@ -98,8 +99,8 @@ pub struct Opts {
     /// the answer; past it the daemon does not start the command. `None`
     /// waits as long as the command runs.
     pub deadline: Option<Duration>,
-    /// How long to keep asking a daemon that answers it is still opening
-    /// the database, or has every request slot taken.
+    /// How long to keep asking a daemon that answers it is opening the
+    /// database, or has every request slot taken.
     pub starting_wait: Duration,
 }
 
@@ -150,14 +151,17 @@ pub fn forward(
                 thread::sleep(RETRY_EVERY);
             }
             Ask::Again(RunReply::Starting) => return Forwarded::StartingTimeout,
-            Ask::Again(_) => return Forwarded::Refused("overloaded"),
+            Ask::Again(RunReply::Overloaded) => return Forwarded::Refused("overloaded"),
+            Ask::Again(_) => return Forwarded::Refused("unavailable"),
             Ask::Done(forwarded) => return forwarded,
         }
     }
 }
 
 enum Ask {
-    /// The daemon is opening the database, or has every slot taken.
+    /// The daemon is opening the database, is opening it again (after a
+    /// change under its handle, `unavailable`), or has every slot taken.
+    /// Each passes: a daemon that can't open its database stops.
     Again(RunReply),
     Done(Forwarded),
 }
@@ -200,6 +204,9 @@ fn ask(
             }
         }
         RunReply::Starting | RunReply::Overloaded => return Ask::Again(reply),
+        RunReply::NotServed { ref reason, .. } if reason == "unavailable" => {
+            return Ask::Again(reply)
+        }
         RunReply::NotServed { reason, .. } => Forwarded::NotServed(reason),
         RunReply::Incompatible { reason } => Forwarded::Incompatible(reason),
         RunReply::Leased => Forwarded::Leased,
@@ -485,6 +492,13 @@ mod tests {
             (RunReply::Starting, Some(None)),
             (RunReply::Stopping, Some(None)),
             (RunReply::Expired, Some(None)),
+            (
+                RunReply::NotServed {
+                    reason: "unavailable".into(),
+                    detail: String::new(),
+                },
+                Some(None),
+            ),
             (not_served, None),
             (incompatible, None),
         ];
