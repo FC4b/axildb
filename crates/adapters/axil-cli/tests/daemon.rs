@@ -810,6 +810,11 @@ fn the_hot_commands_print_nothing_into_the_log() {
             None,
             true,
         ),
+        (
+            vec!["auto-link", fx.ids[0].as_str()],
+            None,
+            fx.vectors && cfg!(feature = "graph"),
+        ),
         (vec!["checkpoint", cp], None, cfg!(feature = "checkpoint")),
         (
             vec!["checkpoint", "-"],

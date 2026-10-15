@@ -7253,6 +7253,8 @@ fn hot_needs(command: &Command) -> Option<Vec<cli_io::Need>> {
         Command::Checkpoint { .. } => Some(Vec::new()),
         Command::Boot { .. } | Command::RecallForFile { .. } => Some(Vec::new()),
         Command::AutoCapture { .. } | Command::ExtractEntities { .. } => Some(Vec::new()),
+        #[cfg(all(feature = "embed", feature = "graph"))]
+        Command::AutoLink { .. } => Some(vec![Need::Vectors, Need::Embedder]),
         _ => None,
     }
 }
@@ -12597,7 +12599,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
             if !(0.5..=1.0).contains(&threshold) {
                 anyhow::bail!("--threshold must be between 0.5 and 1.0");
             }
-            let db = open_with_embedder(&db_path)?;
+            let db = cli_io::hot_db(&db_path, &needs, || open_with_embedder(&db_path))?;
             let rid = RecordId::from_string(&id).context("invalid record ID")?;
             let report = db
                 .auto_link(&rid, Some(threshold))

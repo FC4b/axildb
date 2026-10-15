@@ -676,6 +676,8 @@ pub fn writes(command: &Command) -> bool {
     match command {
         Command::Store { .. } => true,
         Command::AutoCapture { dry_run, .. } => !dry_run,
+        #[cfg(all(feature = "embed", feature = "graph"))]
+        Command::AutoLink { .. } => true,
         #[cfg(feature = "checkpoint")]
         Command::Checkpoint { arg, .. } => arg.as_deref() != Some("show"),
         #[cfg(feature = "embed")]
