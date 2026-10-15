@@ -6821,10 +6821,7 @@ fn open_with_embedder(path: &Path) -> Result<Axil> {
         .is_none()
     {
         // Require an existing vector store — don't silently create one on read operations.
-        anyhow::bail!(
-            "no vector store found — run `axil init <path>` or store with \
-             `--embed <field>` to create one"
-        );
+        anyhow::bail!(NO_VECTOR_STORE);
     }
     // The store exists, so `attach_detected_engines` attaches the vector index
     // + embedder itself (unless the operator disabled the engine in axil.toml).
@@ -6834,12 +6831,31 @@ fn open_with_embedder(path: &Path) -> Result<Axil> {
         .build()
         .context("failed to open database")?;
     if !db.has_embedder() {
-        anyhow::bail!(
-            "the vector engine is disabled in axil.toml ([engines] disabled) — \
-             re-enable it to run embedding commands"
-        );
+        anyhow::bail!(VECTOR_ENGINE_DISABLED);
     }
     Ok(db)
+}
+
+const NO_VECTOR_STORE: &str = "no vector store found — run `axil init <path>` or store with \
+     `--embed <field>` to create one";
+
+const VECTOR_ENGINE_DISABLED: &str = "the vector engine is disabled in axil.toml \
+     ([engines] disabled) — re-enable it to run embedding commands";
+
+/// The error [`open_with_embedder`] fails with for the database at `path`
+/// whatever else is so, if it does: there is no vector store, or the vector
+/// engine is disabled in axil.toml. `None` when neither holds. It opens
+/// nothing, so a daemon can ask it of the database it holds.
+#[cfg(all(feature = "embed", feature = "graph"))]
+fn embedder_unavailable(path: &Path) -> Option<anyhow::Error> {
+    if !axil_vector::vector_db_path(path).exists() {
+        return Some(anyhow::anyhow!(NO_VECTOR_STORE));
+    }
+    let disabled = path
+        .parent()
+        .and_then(|dir| axil_core::load_config_from(dir).ok())
+        .is_some_and(|config| config.is_engine_disabled("vec"));
+    disabled.then(|| anyhow::anyhow!(VECTOR_ENGINE_DISABLED))
 }
 
 /// Like [`open_with_embedder`], but for write commands with an explicit
@@ -7263,8 +7279,10 @@ fn hot_needs(command: &Command) -> Option<Vec<cli_io::Need>> {
         Command::Checkpoint { .. } => Some(Vec::new()),
         Command::Boot { .. } | Command::RecallForFile { .. } => Some(Vec::new()),
         Command::AutoCapture { .. } | Command::ExtractEntities { .. } => Some(Vec::new()),
+        // It needs the vector store and the embedder, which its arm checks
+        // itself: a handle without them fails as the one-shot open does.
         #[cfg(all(feature = "embed", feature = "graph"))]
-        Command::AutoLink { .. } => Some(vec![Need::Vectors, Need::Embedder]),
+        Command::AutoLink { .. } => Some(Vec::new()),
         // The possible-contradiction review loads its model in the process
         // that runs the worker, which a daemon would then keep.
         #[cfg(not(feature = "decide"))]
@@ -12635,6 +12653,17 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
                 anyhow::bail!("--threshold must be between 0.5 and 1.0");
             }
             let db = cli_io::hot_db(&db_path, &needs, || open_with_embedder(&db_path))?;
+            // Only a warm handle can lack them, the one-shot open having
+            // failed first. When that open would fail (no vector store, or
+            // the engine disabled), so does this run, with its error, rather
+            // than leave the command to a process of its own that fails so.
+            let lacks = [cli_io::Need::Vectors, cli_io::Need::Embedder]
+                .into_iter()
+                .find(|need| !need.met_by(&db));
+            if let Some(need) = lacks {
+                return Err(embedder_unavailable(&db_path)
+                    .unwrap_or_else(|| cli_io::WarmLacks(need).into()));
+            }
             let rid = RecordId::from_string(&id).context("invalid record ID")?;
             let report = db
                 .auto_link(&rid, Some(threshold))

@@ -1780,6 +1780,14 @@ pub(crate) mod tests {
                     &["--db", db, "--format", "table", "recall", "auth timeout"],
                 ));
             }
+            // The fixture has no vector store: the command fails as its
+            // one-shot open does, before it reads the id.
+            if cfg!(all(feature = "embed", feature = "graph")) {
+                cases.push(case(
+                    "auto-link without a vector store",
+                    &["--db", db, "auto-link", "01ZZZZZZZZZZZZZZZZZZZZZZZZ"],
+                ));
+            }
             if cfg!(feature = "indexer") {
                 cases.push(case(
                     "code-search",

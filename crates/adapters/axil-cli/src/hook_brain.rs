@@ -3058,12 +3058,17 @@ fn run_job(
                     None,
                     claim,
                 )?;
+                // A build without `auto-link` has no step to run: one in a
+                // process of its own would only fail to parse.
+                #[cfg(all(feature = "embed", feature = "graph"))]
                 if let Some(id) = serde_json::from_str::<Value>(stored.trim())
                     .ok()
                     .and_then(|v| v.get("id").and_then(Value::as_str).map(str::to_string))
                 {
                     let _ = runner.write(&["auto-link".into(), id], None, None, claim);
                 }
+                #[cfg(not(all(feature = "embed", feature = "graph")))]
+                let _ = stored;
                 // Consolidation, connections, inference, decay — then beliefs.
                 let _ = runner.write(&["worker".into(), "run".into()], None, None, claim);
                 let _ = runner.write(&["beliefs".into(), "--generate".into()], None, None, claim);
@@ -5690,30 +5695,33 @@ mod tests {
         )
         .unwrap();
         let problems = queue.join("s1.problems");
-        assert_eq!(
-            runner.steps,
-            [
-                "extract-entities - <fn validate_token() {}".to_string(),
-                format!(
-                    "store _sessions {}",
-                    json!({
-                        "session": "s1",
-                        "files_changed": ["src/auth.rs"],
-                        "file_count": 1,
-                        "entities": [{"name": "validate_token", "type": "code"}],
-                        "entity_count": 1,
-                        "ended_at": "2026-10-15T00:00:00Z",
-                    })
-                ),
-                "auto-link 01M4Z06PE0FK6QVKK92X7R6JPE".to_string(),
-                "worker run".to_string(),
-                "beliefs --generate".to_string(),
-                format!(
-                    "session-heal --session s1 --problems-file {}",
-                    problems.display()
-                ),
-            ]
-        );
+        // A build without `auto-link` has no such step.
+        let linked = cfg!(all(feature = "embed", feature = "graph"));
+        let mut steps = vec![
+            "extract-entities - <fn validate_token() {}".to_string(),
+            format!(
+                "store _sessions {}",
+                json!({
+                    "session": "s1",
+                    "files_changed": ["src/auth.rs"],
+                    "file_count": 1,
+                    "entities": [{"name": "validate_token", "type": "code"}],
+                    "entity_count": 1,
+                    "ended_at": "2026-10-15T00:00:00Z",
+                })
+            ),
+            "auto-link 01M4Z06PE0FK6QVKK92X7R6JPE".to_string(),
+            "worker run".to_string(),
+            "beliefs --generate".to_string(),
+            format!(
+                "session-heal --session s1 --problems-file {}",
+                problems.display()
+            ),
+        ];
+        if !linked {
+            steps.remove(2);
+        }
+        assert_eq!(runner.steps, steps);
         assert!(!problems.exists(), "the problems file is removed after");
 
         // A session that wrote nothing is only healed.
@@ -5734,7 +5742,12 @@ mod tests {
         runner.failing = vec!["auto-link", "worker"];
         let claim = fresh_claim(&queue);
         run_job(&mut runner, &claim, exe, &db, &close_session(None)).unwrap();
-        assert_eq!(runner.steps.len(), 6, "{:?}", runner.steps);
+        assert_eq!(
+            runner.steps.len(),
+            5 + usize::from(linked),
+            "{:?}",
+            runner.steps
+        );
     }
 
     /// The queue protocol: jobs run in the order their names sort, each

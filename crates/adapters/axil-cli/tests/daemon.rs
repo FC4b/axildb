@@ -1887,7 +1887,7 @@ fn queued_hook_writes_run_once_in_order_in_the_daemon() {
     let yields = queue["yields"].as_u64().unwrap();
     assert!(yields >= 1, "{live}");
     assert_eq!(live["leases_granted"], yields, "{live}");
-    if every_queued_step_is_served(&fx) {
+    if every_queued_step_is_served() {
         assert_eq!(queue["own_process_steps"], 10, "{live}");
     }
     let human = text(&fx.axil(&["daemon", "status"]).stdout);
@@ -1923,11 +1923,61 @@ fn queued_hook_writes_run_once_in_order_in_the_daemon() {
 }
 
 /// Whether this build's daemon runs every step a hook queues on its open
-/// handle, given `fx`'s database: `auto-link` needs a vector store.
-fn every_queued_step_is_served(fx: &Fixture) -> bool {
-    fx.vectors
-        && cfg!(all(feature = "embed", feature = "graph", feature = "deps"))
-        && !cfg!(feature = "decide")
+/// handle: one with the `decide` feature runs `worker run` in a process of
+/// its own, and one without `deps` has no command for a manifest's job.
+fn every_queued_step_is_served() -> bool {
+    cfg!(feature = "deps") && !cfg!(feature = "decide")
+}
+
+/// On a database without a vector store, `auto-link` fails as the one-shot
+/// command does, with its error, on the open handle: a session's close
+/// never has the daemon let go of the database for a step sure to fail.
+#[test]
+fn auto_link_without_a_vector_store_fails_on_the_open_handle() {
+    if !built_with(cfg!(all(feature = "embed", feature = "graph")), "auto-link") {
+        return;
+    }
+    let fx = fixture();
+    let _ = std::fs::remove_file(fx.proj.join(".axil/memory.axil.vec"));
+    let id = fx.ids[0].as_str();
+    let own = fx.axil(&["auto-link", id]);
+    assert_eq!(own.status.code(), Some(1), "{}", text(&own.stderr));
+    fx.start();
+    let served = fx.send(&["auto-link", id], None);
+    assert_eq!(
+        (
+            served.status.code(),
+            text(&served.stdout),
+            text(&served.stderr)
+        ),
+        (Some(1), text(&own.stdout), text(&own.stderr))
+    );
+    fx.queue_job(
+        0,
+        &serde_json::json!({
+            "op": "close_session",
+            "session": "s-novec",
+            "project_dir": fx.proj,
+            "files": ["src/auth.rs"],
+            "content": "Fixed the auth timeout in validate_token",
+            "ended_at": "2026-01-01T00:00:00Z",
+        }),
+    );
+    let drain = fx.axil(&["hook", "drain"]);
+    assert!(drain.status.success(), "{}", text(&drain.stderr));
+    assert!(fx.drained(1), "{}", fx.live());
+    let live = fx.live();
+    let queue = &live["queue"];
+    assert_eq!(
+        (
+            &queue["failed"],
+            &queue["yields"],
+            &queue["own_process_steps"]
+        ),
+        (&Value::from(0), &Value::from(0), &Value::from(0)),
+        "{live}"
+    );
+    assert_eq!(live["leases_granted"], 0, "{live}");
 }
 
 /// A session's hooks with the daemon running, as Claude Code sends them:
@@ -2000,7 +2050,7 @@ fn a_sessions_hooks_need_no_lease() {
     let failed = u64::from(!cfg!(feature = "deps"));
     assert_eq!(queue["failed"], failed, "{live}");
     assert_eq!(live["leases_granted"], queue["yields"], "{live}");
-    if every_queued_step_is_served(&fx) {
+    if every_queued_step_is_served() {
         assert_eq!(live["leases_granted"], 0, "{live}");
         assert_eq!(queue["own_process_steps"], 0, "{live}");
     }
