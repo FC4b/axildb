@@ -1594,6 +1594,11 @@ fn queued_hook_writes_run_once_in_order_in_the_daemon() {
     if every_queued_step_is_served(&fx) {
         assert_eq!(queue["own_process_steps"], 10, "{live}");
     }
+    let human = text(&fx.axil(&["daemon", "status"]).stdout);
+    assert!(
+        human.contains("hook queue: drained here; 50 jobs run (0 failed)"),
+        "{human}"
+    );
 
     // Every one once, and in order: ids rise with the time they were made.
     let mut rows: Vec<(String, i64)> = Vec::new();

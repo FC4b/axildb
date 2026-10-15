@@ -4,12 +4,13 @@
 open, with the embedding model and the graph loaded, and runs the hot commands
 (`recall`, `boot`, `recall-for-file`, `code-search`, `fts`, `since`, `store`,
 `checkpoint`) sent to it over a local socket, so a command neither opens the
-database nor loads a model on each call. Unix only.
+database nor loads a model on each call. It also runs the hooks' queued
+writes on the same handle. Unix only.
 
-> **Started by hand only.** Once one runs, the hot commands you type and the
-> hooks' lookups go to it ([below](#how-commands-reach-it)). Every other
-> command, and the hooks' queued writes other than `store`, still run in their
-> own process and lease the database from the daemon
+> **Started by hand only.** Once one runs, the hot commands you type, the
+> hooks' lookups and the hooks' queued writes go to it
+> ([below](#how-commands-reach-it)). Every other command still runs in its own
+> process and leases the database from the daemon
 > ([below](#leasing-the-database)), which opens it again afterwards.
 
 ## Commands
@@ -35,8 +36,9 @@ adds whether a command from this shell is served (`this shell: not served,
 its environment differs from the daemon's in one of …`), the idle time left,
 the requests in flight, the requests refused and why (`refused: 4 (incompatible
 env 3, leased 1)`), each command's p50/p95 latency over its last 256
-requests, the reloads and why, the processes holding a lease, and the state
-of the engines and the graph.
+requests, the reloads and why, the processes holding a lease, what it has done
+with the hooks' queue ([below](#the-hooks-queued-writes)), and the state of the
+engines and the graph.
 
 `AXIL_DAEMON=off` keeps `start` from starting one.
 
@@ -44,7 +46,8 @@ of the engines and the graph.
 
 A hot command typed with a daemon running goes to it: `axil` sends the
 command line, its working directory and, for a command that reads it, its
-stdin (`store <table> -`, `checkpoint -`, `checkpoint` with input piped), and
+stdin (`store <table> -`, `auto-capture -`, `extract-entities -`,
+`checkpoint -`, `checkpoint` with input piped), and
 prints what the daemon's run printed, to stdout and stderr in the order it
 printed it, exiting with its code. A command given
 more than 32 MiB of stdin runs in its own process instead. Nothing reaches
@@ -82,9 +85,45 @@ past it, a lookup's child waits for a lease only as long as the budget has
 left, and a child still running when it runs out is killed, so the hook
 prints what it has instead of being killed by the harness.
 
-The hooks' queued writes are still run by `hook drain`, a process of its own
-that runs each queued command as a child: a `store` goes to the daemon, and
-the rest lease the database.
+## The hooks' queued writes
+
+Hooks queue their writes as job files in `.axil/hook-queue/`, for a drainer
+to run. While a daemon runs, it is that drainer. Its drain thread holds
+`hook-queue/drain.lock`, the OS lock `axil hook drain` takes, from the moment it
+first gets it until the daemon stops. Like `hook drain`, it runs the jobs one at
+a time, in the order they were queued, each renamed to `.running` while it runs
+and removed after, a failed one logged in `drain.log`. A `.running` job a
+killed drainer left behind is moved to `interrupted/` and never run again.
+
+A hook asks the daemon, before it queues, whether it serves the hook's
+process. When it does, the hook pokes it and starts no drainer. When it
+doesn't (another build or environment), the job is marked for the hook's own
+`hook drain`: the daemon lets go of the queue at that job, and takes it back
+once that drainer is done. When no drainer takes it within 5 s, the daemon
+runs the job itself.
+
+These steps run on the open handle, as these forms do when typed: `store`,
+`auto-capture`, `extract-entities`, `auto-link` (with a vector store), `worker
+run` (not in a build with the `decide` feature, whose review loads a model),
+`beliefs --generate`, `session-heal` (not `--dry-run`, and with an absolute
+`--problems-file` if any), `deps refresh` with an absolute `--path`, and
+`maintain` in the foreground, which is what the session start's
+`maintain --in-background` runs. Before running a step it doesn't run, the
+daemon lets go of the database as for a lease, one of its own (`leased to: the
+hook queue's own steps`). It then runs the step as `hook drain` would, in a
+process of its own with `AXIL_DAEMON=off`. It keeps the database closed for the
+steps after it that also run that way, and opens it again at the next step it
+runs or once the queue is empty.
+
+A job starts only while the daemon serves. During a lease, a reload or the
+opening, the queue waits between jobs, and a job's step waits for the database
+to open again. Writes sent by clients go ahead of the queue's between its steps.
+When the daemon stops, it finishes the job running, lets go of the queue, and
+starts `hook drain` for the jobs left once it has closed the database.
+
+`daemon status` reports it: `hook queue: drained here; 12 jobs run (0 failed),
+steps: 30 on the open handle, 0 in a process of their own (the database let go
+of 0 times); 0 jobs left to the drainer of a hook not served`.
 
 ## Leasing the database
 

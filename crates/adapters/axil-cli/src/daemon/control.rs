@@ -465,6 +465,28 @@ fn status(db: &Path, as_json: bool, out: &Output) -> Result<i32> {
 }
 
 /// `report` in lines of text.
+/// What the daemon's drain thread has done with the hook queue, from
+/// `daemon status`'s `queue` figures.
+fn queue_line(queue: &Value) -> Option<String> {
+    let n = |key: &str| queue[key].as_u64();
+    let jobs = n("jobs")?;
+    let holds = if queue["draining"] == true {
+        "drained here"
+    } else {
+        "not held here"
+    };
+    Some(format!(
+        "hook queue: {holds}; {jobs} jobs run ({} failed), steps: {} on the open handle, \
+         {} in a process of their own (the database let go of {} times); {} jobs left to \
+         the drainer of a hook not served",
+        n("failed")?,
+        n("warm_steps")?,
+        n("own_process_steps")?,
+        n("yields")?,
+        n("handed_over")?,
+    ))
+}
+
 fn describe(report: &Value) -> Vec<String> {
     let mut lines = Vec::new();
     let live = &report["live"];
@@ -553,7 +575,12 @@ fn describe(report: &Value) -> Vec<String> {
                 } else {
                     ", waiting"
                 };
-                format!("pid {} for {}s{waiting}", h["pid"], h["secs"])
+                let who = if h["queue"] == true {
+                    "the hook queue's own steps".to_string()
+                } else {
+                    format!("pid {}", h["pid"])
+                };
+                format!("{who} for {}s{waiting}", h["secs"])
             })
             .collect();
         lines.push(format!("leased to: {}", pids.join("; ")));
@@ -569,6 +596,9 @@ fn describe(report: &Value) -> Vec<String> {
             .map(|why| format!(" (last: {why})"))
             .unwrap_or_default()
     ));
+    if let Some(line) = queue_line(&live["queue"]) {
+        lines.push(line);
+    }
     let graph = serde_json::from_value(live["graph"].clone()).ok();
     let engines: Vec<&str> = ["vector", "embedder", "graph", "fts", "timeseries"]
         .into_iter()
