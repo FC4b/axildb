@@ -2698,6 +2698,43 @@ mod tests {
         stop(server);
     }
 
+    /// A client that goes away before its answer, with the command sent or
+    /// halfway through sending it, leaves the daemon serving; a write it
+    /// sent whole runs once.
+    #[test]
+    fn a_client_that_leaves_early_leaves_the_daemon_serving() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = build_fixture(tmp.path());
+        let server = start(&proj.join(".axil/memory.axil"));
+        let cwd = proj.canonicalize().unwrap();
+        let identity = Identity::current().unwrap();
+        let store = parity::argv(&["store", "decisions", r#"{"summary":"left early"}"#]);
+        let header = identity.header(store, &cwd, false);
+        let mut stream = proto::connect(server.run.socket(), Duration::from_secs(10)).unwrap();
+        write_json(&mut stream, &Op::Run(header)).unwrap();
+        drop(stream);
+        let piped = parity::argv(&["store", "context", "-"]);
+        let header = identity.header(piped, &cwd, true);
+        let mut stream = proto::connect(server.run.socket(), Duration::from_secs(10)).unwrap();
+        write_json(&mut stream, &Op::Run(header)).unwrap();
+        std::io::Write::write_all(&mut stream, &64u32.to_be_bytes()).unwrap();
+        drop(stream);
+
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while server.stats.ops().get("store").map_or(0, |s| s.served) < 1 {
+            assert!(Instant::now() < deadline, "the store was not run");
+            thread::sleep(Duration::from_millis(10));
+        }
+        let (out, _, exit) = served(send(&server, &["boot"], &cwd, None));
+        assert_eq!(exit, 0);
+        assert_eq!(
+            String::from_utf8_lossy(&out).matches("left early").count(),
+            1
+        );
+        assert_eq!(server.stats.ops()["store"].served, 1);
+        stop(server);
+    }
+
     /// While a lease is held a request is told so; once the last ended, it
     /// is told the database is opening, as at the start, so a client waits
     /// for the daemon rather than lease the database again.
