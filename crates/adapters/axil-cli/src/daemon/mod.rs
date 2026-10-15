@@ -2,6 +2,8 @@
 //! runs the hot commands against it in-process, so a client neither opens the
 //! database nor loads its engines on each call.
 //!
+//! - [`client`] sends a command line to the database's daemon: the CLI's
+//!   hot commands and the hooks' lookups.
 //! - [`exec`] runs one request against the open database.
 //! - [`lease`] asks a database's daemon to let go of it, for a process
 //!   about to open it.
@@ -12,10 +14,7 @@
 //! - [`server`] is the daemon process.
 //! - [`control`] is `axil daemon {start, stop, status, logs}`.
 
-// Clients that forward to the daemon come later; until then some of the
-// protocol is used only by tests.
-#![cfg_attr(not(test), allow(dead_code))]
-
+pub mod client;
 pub mod control;
 pub mod exec;
 pub mod lease;

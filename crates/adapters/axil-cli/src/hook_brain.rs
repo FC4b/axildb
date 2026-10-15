@@ -1255,10 +1255,15 @@ impl HookCtx {
     }
 
     /// Run an axil lookup against the resolved DB; Some(stdout) on success.
+    /// The database's daemon runs it when one does; otherwise a child does.
     /// Child stderr is discarded — hook noise must not leak. Writes go
     /// through [`HookCtx::enqueue`] instead.
     fn axil_db_out(&self, args: &[&str]) -> Option<String> {
         let db = self.db.as_ref()?;
+        #[cfg(unix)]
+        if let Some(answered) = crate::daemon::client::forward_lookup(db, args) {
+            return answered;
+        }
         run_capture(
             self.axil_cmd()
                 .arg("--db")

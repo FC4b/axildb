@@ -54,6 +54,9 @@ thread_local! {
 
 /// Set once a write finds the process's stdout closed by its reader.
 static STDOUT_CLOSED: AtomicBool = AtomicBool::new(false);
+/// Stdin the process read ahead to send to the database's daemon, which then
+/// did not run the command: the command reads these bytes instead.
+static READ_AHEAD: Mutex<Option<Vec<u8>>> = Mutex::new(None);
 /// Set once a write finds the process's stderr closed by its reader.
 static STDERR_CLOSED: AtomicBool = AtomicBool::new(false);
 
@@ -147,14 +150,23 @@ pub fn stdout_closed() -> bool {
 /// except for a reader that has gone away: the stream is marked closed and
 /// this write and every later one to it is dropped. See the module docs.
 fn write_process(to_err: bool, args: fmt::Arguments<'_>, newline: bool) {
-    fn write_args(w: &mut impl Write, args: fmt::Arguments<'_>, newline: bool) -> io::Result<()> {
+    write_process_with(to_err, |w| {
         if newline {
             writeln!(w, "{args}")
         } else {
             write!(w, "{args}")
         }
-    }
+    });
+}
 
+/// Write `bytes` to the process's stdout or stderr as [`write_process`]
+/// writes: what a command the database's daemon ran printed, byte for byte.
+#[cfg(unix)]
+pub fn write_process_bytes(to_err: bool, bytes: &[u8]) {
+    write_process_with(to_err, |w| w.write_all(bytes).and_then(|()| w.flush()));
+}
+
+fn write_process_with(to_err: bool, write: impl FnOnce(&mut dyn Write) -> io::Result<()>) {
     let (closed, label) = if to_err {
         (&STDERR_CLOSED, "stderr")
     } else {
@@ -164,9 +176,9 @@ fn write_process(to_err: bool, args: fmt::Arguments<'_>, newline: bool) {
         return;
     }
     let written = if to_err {
-        write_args(&mut io::stderr().lock(), args, newline)
+        write(&mut io::stderr().lock())
     } else {
-        write_args(&mut io::stdout().lock(), args, newline)
+        write(&mut io::stdout().lock())
     };
     match written {
         Ok(()) => {}
@@ -300,7 +312,7 @@ fn take_request_stdin(limit: u64) -> Option<Vec<u8>> {
 /// (invalid UTF-8 is `InvalidData`) when the bytes come from a request.
 pub fn read_stdin(limit: u64) -> io::Result<String> {
     let mut buf = String::new();
-    match take_request_stdin(limit) {
+    match take_request_stdin(limit).or_else(|| take_read_ahead(limit)) {
         Some(bytes) => bytes.as_slice().read_to_string(&mut buf)?,
         None => io::stdin().take(limit).read_to_string(&mut buf)?,
     };
@@ -309,10 +321,35 @@ pub fn read_stdin(limit: u64) -> io::Result<String> {
 
 /// Stdin as a buffered reader, for input consumed as a stream.
 pub fn stdin_reader() -> Box<dyn io::BufRead> {
-    match take_request_stdin(u64::MAX) {
+    match take_request_stdin(u64::MAX).or_else(|| take_read_ahead(u64::MAX)) {
         Some(bytes) => Box::new(io::Cursor::new(bytes)),
         None => Box::new(io::stdin().lock()),
     }
+}
+
+/// Read the process's stdin to its end, to send to the database's daemon.
+/// Should the daemon not run the command, [`put_back_stdin`] hands the bytes
+/// to the command.
+#[cfg(unix)]
+pub fn read_stdin_ahead() -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    io::stdin().read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+/// Give back stdin [`read_stdin_ahead`] read: the command reads these bytes,
+/// and then the end of stdin, as if nothing had been read ahead.
+#[cfg(unix)]
+pub fn put_back_stdin(bytes: Vec<u8>) {
+    *READ_AHEAD.lock().unwrap_or_else(PoisonError::into_inner) = Some(bytes);
+}
+
+/// Take up to `limit` bytes of the stdin read ahead, or `None` when none was.
+fn take_read_ahead(limit: u64) -> Option<Vec<u8>> {
+    let mut ahead = READ_AHEAD.lock().unwrap_or_else(PoisonError::into_inner);
+    let data = ahead.as_mut()?;
+    let n = usize::try_from(limit).unwrap_or(usize::MAX).min(data.len());
+    Some(data.drain(..n).collect())
 }
 
 /// Whether stdin is a terminal, i.e. nothing was piped in. A request

@@ -7130,7 +7130,13 @@ impl CliAdapter {
     /// entry — `main` calls this directly because the `Adapter::run` signature
     /// (`Result<()>`) cannot carry the exit code.
     fn dispatch(self) -> i32 {
-        run_cli(Cli::parse())
+        let cli = Cli::parse();
+        // A hot command goes to the database's daemon when one runs it.
+        #[cfg(unix)]
+        if let Some(code) = daemon::client::forward_cli(&cli) {
+            return code;
+        }
+        run_cli(cli)
     }
 }
 

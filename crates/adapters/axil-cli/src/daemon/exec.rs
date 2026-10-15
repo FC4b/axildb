@@ -456,6 +456,7 @@ impl WarmState {
 /// The command runs on a thread of its own with `main`'s stack. An error
 /// prints as the one-shot binary prints it and exits 1. A panic exits 1 too,
 /// and poisons `state` ([`WarmState::poisoned`]).
+#[cfg_attr(not(test), allow(dead_code))] // the daemon runs requests through its gate
 pub fn execute_captured(req: Request, state: &WarmState) -> Result<Response, NotServed> {
     execute_gated(req, state, &|_| Ok(()))
 }
@@ -616,7 +617,7 @@ pub fn warm_route(command: &Command, db: &Axil) -> Result<(), NotServed> {
 /// Whether `command` writes, and so runs under [`WarmState`]'s writer lock:
 /// `store`, a `checkpoint` other than `show`, and a `recall --fresh-only`,
 /// which may re-index the files it found stale.
-fn writes(command: &Command) -> bool {
+pub fn writes(command: &Command) -> bool {
     match command {
         Command::Store { .. } => true,
         #[cfg(feature = "checkpoint")]

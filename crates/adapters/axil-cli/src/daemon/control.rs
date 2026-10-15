@@ -1,7 +1,8 @@
 //! `axil daemon {start, stop, status, logs}`: running a database's daemon by
-//! hand. Nothing forwards commands to it on its own yet; `daemon send` sends
-//! one command line, to try it. Every other command leases the database from
-//! it (see [`super::lease`]).
+//! hand. The hot commands and the hooks' lookups are sent to it once it runs
+//! (see [`super::client`]), and `daemon send` sends one command line, to try
+//! it. Every other command leases the database from it (see
+//! [`super::lease`]).
 //!
 //! `AXIL_DAEMON` is the kill switch: `off` keeps `daemon start` from
 //! starting one. Unset, it is `on`: a daemon runs only when started by hand.
@@ -574,7 +575,7 @@ fn logs(db: &Path, lines: usize) -> Result<i32> {
 /// Whether the command line `argv` reads stdin, as the command would:
 /// one with a `-` argument (`store <table> -`, `checkpoint -`), or a
 /// `checkpoint` given no JSON. Another leaves stdin be.
-fn reads_stdin(argv: &[String]) -> bool {
+pub fn reads_stdin(argv: &[String]) -> bool {
     if argv.iter().any(|a| a == "-") {
         return true;
     }
