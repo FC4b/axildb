@@ -325,9 +325,7 @@ src/db.rs`), so a piece cut out of a record still says what the record is
 about; the stored and FTS-indexed text is the piece alone.
 
 The piece that scored best comes back with the hit
-(`ScoreExplanation::best_chunk`, `snippet` in the CLI's JSON), and compact
-recall output shows it, cut to 200 characters, in place of the record's
-opening. A database written before the splitter changed keeps its old
+(`ScoreExplanation::best_chunk`, `snippet` in the CLI's JSON). A database written before the splitter changed keeps its old
 pieces until `axil heal --rechunk` re-splits them.
 
 `Axil::recall` also draws a fixed candidate pool (80 per source, doubled for
