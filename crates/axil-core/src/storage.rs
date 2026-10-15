@@ -12,8 +12,291 @@ use crate::record::{Record, RecordId};
 /// redb table: record_id (string) → serialized Record (bytes).
 const RECORDS: TableDefinition<&str, &[u8]> = TableDefinition::new("records");
 
-/// redb table: table_name (string) → JSON array of record IDs.
-const TABLE_INDEX: TableDefinition<&str, &[u8]> = TableDefinition::new("table_index");
+/// redb table: table name → its [`TableCounts`].
+///
+/// It keeps the name the JSON id lists lived under (see
+/// [`LEGACY_TABLE_INDEX`]) with a value type older binaries do not know, and
+/// that is what stops them: their open checks `table_index` against
+/// `&str → &[u8]` and fails with an error that prints
+/// [`TABLE_COUNTS_TYPE_NAME`], where they would otherwise read lists that no
+/// longer change and miss every record written since.
+const TABLE_COUNTS: TableDefinition<&str, TableCounts> = TableDefinition::new("table_index");
+
+/// redb table: (table, position) → id of the record listed there.
+///
+/// Positions grow in the order ids joined the table, so a range scan over one
+/// table's keys is its list order: what `list` returns, and reversed, what
+/// `list_newest` returns. Record ids are not that order (ULIDs made in the
+/// same millisecond are random, and imports keep foreign ids).
+const TABLE_MEMBERS: TableDefinition<(&str, u64), &str> = TableDefinition::new("_table_members");
+
+/// redb table: (table, id) → the id's position in [`TABLE_MEMBERS`], so a
+/// write finds whether and where an id is listed without reading the list.
+const TABLE_MEMBER_POSITIONS: TableDefinition<(&str, &str), u64> =
+    TableDefinition::new("_table_member_positions");
+
+/// The layout binaries before the keyed one wrote: table name → JSON array
+/// of the ids listed under it, oldest first, rewritten whole on every insert
+/// and delete. A writable open migrates it (see [`Storage::open`]); a
+/// read-only handle on a file no writable handle of this version has opened
+/// yet reads it as it is.
+const LEGACY_TABLE_INDEX: TableDefinition<&str, &[u8]> = TableDefinition::new("table_index");
+
+/// Redb type name of [`TableCounts`], which an older binary prints when it
+/// refuses the file: "table_index is of type Table<&str, …>". It is part of
+/// the file format: a different name is a different type to redb, so
+/// changing it makes every existing file fail to open.
+const TABLE_COUNTS_TYPE_NAME: &str =
+    "axil_core::TableCounts (written by a newer axil; upgrade axil to open this database)";
+
+/// Membership counters of one table, the value of [`TABLE_COUNTS`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct TableCounts {
+    /// Ids listed under the table.
+    listed: u64,
+    /// Position the next id to join the table gets. Never reused, even after
+    /// the table empties (its entry stays, with `listed` 0), so the pair
+    /// changes with every insert or delete and never returns to an earlier
+    /// value.
+    next_position: u64,
+}
+
+impl redb::Value for TableCounts {
+    type SelfType<'a> = TableCounts;
+    type AsBytes<'a> = [u8; 16];
+
+    fn fixed_width() -> Option<usize> {
+        Some(16)
+    }
+
+    fn from_bytes<'a>(data: &'a [u8]) -> TableCounts
+    where
+        Self: 'a,
+    {
+        let half = |range: std::ops::Range<usize>| {
+            u64::from_le_bytes(data[range].try_into().expect("fixed width of 16"))
+        };
+        TableCounts {
+            listed: half(0..8),
+            next_position: half(8..16),
+        }
+    }
+
+    fn as_bytes<'a, 'b: 'a>(value: &'a TableCounts) -> [u8; 16]
+    where
+        Self: 'b,
+    {
+        let mut bytes = [0u8; 16];
+        bytes[..8].copy_from_slice(&value.listed.to_le_bytes());
+        bytes[8..].copy_from_slice(&value.next_position.to_le_bytes());
+        bytes
+    }
+
+    fn type_name() -> redb::TypeName {
+        redb::TypeName::new(TABLE_COUNTS_TYPE_NAME)
+    }
+}
+
+/// Where a file keeps table membership.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IndexLayout {
+    /// [`TABLE_COUNTS`], [`TABLE_MEMBERS`] and [`TABLE_MEMBER_POSITIONS`].
+    Keyed,
+    /// [`LEGACY_TABLE_INDEX`]. Only a read-only handle has this layout: a
+    /// writable open migrates the file before anything else touches it.
+    Legacy,
+}
+
+/// The layout a file's table index is in, or `None` when it has none yet (a
+/// new file). A `table_index` that is neither layout (a later format) is an
+/// error, never mistaken for the legacy one.
+fn detect_index_layout(txn: &ReadTransaction) -> Result<Option<IndexLayout>> {
+    match txn.open_table(TABLE_COUNTS) {
+        Ok(_) => Ok(Some(IndexLayout::Keyed)),
+        Err(redb::TableError::TableDoesNotExist(_)) => Ok(None),
+        Err(keyed @ redb::TableError::TableTypeMismatch { .. }) => {
+            match txn.open_table(LEGACY_TABLE_INDEX) {
+                Ok(_) => Ok(Some(IndexLayout::Legacy)),
+                Err(_) => Err(keyed.into()),
+            }
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// The three tables that hold table membership, open in one write
+/// transaction. Joining or leaving a table is a few point reads and writes,
+/// whatever the table's size.
+struct Membership<'txn> {
+    counts: redb::Table<'txn, &'static str, TableCounts>,
+    members: redb::Table<'txn, (&'static str, u64), &'static str>,
+    positions: redb::Table<'txn, (&'static str, &'static str), u64>,
+}
+
+impl<'txn> Membership<'txn> {
+    fn open(txn: &'txn WriteTransaction) -> Result<Self> {
+        Ok(Self {
+            counts: txn.open_table(TABLE_COUNTS)?,
+            members: txn.open_table(TABLE_MEMBERS)?,
+            positions: txn.open_table(TABLE_MEMBER_POSITIONS)?,
+        })
+    }
+
+    fn counts_of(&self, table: &str) -> Result<TableCounts> {
+        Ok(self
+            .counts
+            .get(table)?
+            .map(|guard| guard.value())
+            .unwrap_or_default())
+    }
+
+    /// List `id` last under `table`, unless it is listed there already, in
+    /// which case it keeps its place. Returns whether it joined.
+    fn join(&mut self, table: &str, id: &str) -> Result<bool> {
+        // A single insert is often an upsert of a listed id: look before
+        // writing, so that case dirties no page.
+        if self.positions.get((table, id))?.is_some() {
+            return Ok(false);
+        }
+        let mut counts = self.counts_of(table)?;
+        let joined = self.join_counted(&mut counts, table, id)?;
+        if joined {
+            self.counts.insert(table, counts)?;
+        }
+        Ok(joined)
+    }
+
+    /// [`Membership::join`] for each `(table, id)` in order, writing each
+    /// table's counters once rather than once per id. Meant for batches of
+    /// mostly new ids.
+    fn join_all<'a>(&mut self, rows: impl IntoIterator<Item = (&'a str, &'a str)>) -> Result<()> {
+        let mut changed: std::collections::HashMap<&str, TableCounts> =
+            std::collections::HashMap::new();
+        for (table, id) in rows {
+            let counts = match changed.entry(table) {
+                std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(self.counts_of(table)?)
+                }
+            };
+            self.join_counted(counts, table, id)?;
+        }
+        for (table, counts) in changed {
+            self.counts.insert(table, counts)?;
+        }
+        Ok(())
+    }
+
+    /// List `id` under `table` against `counts`, the table's counters, which
+    /// the caller writes back.
+    fn join_counted(&mut self, counts: &mut TableCounts, table: &str, id: &str) -> Result<bool> {
+        let position = counts.next_position;
+        // One B-tree walk for a new id: the insert itself reports an id
+        // already listed, whose place is then put back.
+        let listed = self
+            .positions
+            .insert((table, id), position)?
+            .map(|guard| guard.value());
+        if let Some(listed) = listed {
+            self.positions.insert((table, id), listed)?;
+            return Ok(false);
+        }
+        self.members.insert((table, position), id)?;
+        counts.listed += 1;
+        counts.next_position += 1;
+        Ok(true)
+    }
+
+    /// Drop `id` from `table`'s list. Returns whether it was listed.
+    fn leave(&mut self, table: &str, id: &str) -> Result<bool> {
+        let Some(position) = self.positions.remove((table, id))?.map(|g| g.value()) else {
+            return Ok(false);
+        };
+        self.members.remove((table, position))?;
+        let mut counts = self.counts_of(table)?;
+        counts.listed = counts.listed.saturating_sub(1);
+        self.counts.insert(table, counts)?;
+        Ok(true)
+    }
+
+    /// Fingerprint of the `_entities` list as it stands in this transaction.
+    fn entity_fingerprint(&self) -> Result<String> {
+        Ok(keyed_entity_fingerprint(
+            self.counts.get(ENTITIES_TABLE)?.map(|g| g.value()),
+        ))
+    }
+}
+
+/// Ids listed under `table` in a keyed index, in list order, the first
+/// `offset` skipped and at most `limit` returned.
+fn keyed_listed_ids<M: ReadableTable<(&'static str, u64), &'static str>>(
+    members: &M,
+    table: &str,
+    offset: usize,
+    limit: usize,
+) -> Result<Vec<RecordId>> {
+    let mut ids = Vec::new();
+    for entry in members
+        .range((table, 0u64)..=(table, u64::MAX))?
+        .skip(offset)
+        .take(limit)
+    {
+        let (_, id) = entry?;
+        ids.push(RecordId(id.value().to_string()));
+    }
+    Ok(ids)
+}
+
+/// Decode one table's JSON id list from a legacy index.
+fn read_legacy_index<T: ReadableTable<&'static str, &'static [u8]>>(
+    index: &T,
+    name: &str,
+) -> Result<Vec<RecordId>> {
+    match index.get(name)? {
+        Some(guard) => Ok(serde_json::from_slice(guard.value())?),
+        None => Ok(Vec::new()),
+    }
+}
+
+/// Positions of ids in the `_entities` list, for breaking a tie between rows
+/// that share an entity key: a point read each in the keyed layout; in the
+/// legacy one, the JSON list decoded once, on the first tie.
+enum EntityPositions {
+    Unread,
+    Legacy(std::collections::HashMap<RecordId, u64>),
+}
+
+impl EntityPositions {
+    /// `rid`'s position in the `_entities` list (its last, for a legacy list
+    /// that repeats it), or `None` when it is not listed.
+    fn of(
+        &mut self,
+        storage: &Storage,
+        txn: &ReadTransaction,
+        rid: &RecordId,
+    ) -> Result<Option<u64>> {
+        if storage.layout == IndexLayout::Keyed {
+            return Ok(txn
+                .open_table(TABLE_MEMBER_POSITIONS)?
+                .get((ENTITIES_TABLE, rid.as_str()))?
+                .map(|guard| guard.value()));
+        }
+        if matches!(self, EntityPositions::Unread) {
+            let listed = read_legacy_index(&txn.open_table(LEGACY_TABLE_INDEX)?, ENTITIES_TABLE)?;
+            *self = EntityPositions::Legacy(
+                listed
+                    .into_iter()
+                    .enumerate()
+                    .map(|(pos, rid)| (rid, pos as u64))
+                    .collect(),
+            );
+        }
+        Ok(match self {
+            EntityPositions::Legacy(positions) => positions.get(rid).copied(),
+            EntityPositions::Unread => None,
+        })
+    }
+}
 
 /// Logical table whose rows the entity key index covers.
 const ENTITIES_TABLE: &str = "_entities";
@@ -28,8 +311,8 @@ const ENTITIES_TABLE: &str = "_entities";
 const ENTITY_KEY_INDEX: MultimapTableDefinition<&str, &str> =
     MultimapTableDefinition::new("_entity_key_index");
 
-/// redb table: record id → its current entity lookup key, for every id that
-/// the `_entities` entry of `table_index` lists.
+/// redb table: record id → its current entity lookup key, for every id
+/// listed under `_entities`.
 ///
 /// This mirrors membership in that id list rather than `record.table`: the two
 /// can disagree (a batch insert reusing an id from another table leaves the
@@ -54,12 +337,19 @@ const PENDING_VECTOR_DELETES: TableDefinition<&str, ()> =
 /// Marker naming the state of the entity key index.
 ///
 /// `ready:<fingerprint>` once the index has been built, where the fingerprint
-/// is of the `_entities` entry of `table_index` as it stood when the index
-/// last matched it. Every write that maintains the index and changes that
-/// entry re-stamps the fingerprint in the same transaction. A writer that
-/// predates the index (an older binary on the same file) changes the entry
-/// without re-stamping it, so the mismatch shows at the next lookup and the
-/// index is treated as stale rather than trusted.
+/// is of the `_entities` id list as it stood when the index last matched it
+/// (see [`keyed_entity_fingerprint`]). Every write that maintains the index
+/// and changes that list re-stamps the fingerprint in the same transaction.
+/// A writer that predates the index changes the list without re-stamping it,
+/// so the mismatch shows at the next lookup and the index is treated as stale
+/// rather than trusted.
+///
+/// Such writers are binaries that keep the legacy JSON id lists, which cannot
+/// open a file in the keyed layout, so their writes reach a file only before
+/// this version first opens it writable. Migrating the file carries the
+/// marker over only when it matches the list it is migrating (see
+/// [`Storage::migrate_legacy_index`]); a marker an older binary had already
+/// made stale stays stale.
 ///
 /// `failed:<fingerprint>:<id>` after a build stopped on row `<id>`, whose body
 /// does not decode, so later calls do not repeat the same doomed build until
@@ -239,17 +529,55 @@ pub struct EntityKeyIndexRebuild {
     pub written: bool,
 }
 
-/// Fingerprint of the raw `_entities` entry of `table_index` (`None` when the
-/// table has no rows): its byte length and CRC-32, so comparing it costs one
-/// read of that entry and a checksum, with no JSON decode. The length alone
-/// changes with every insert or delete of an id of a different length; the
-/// checksum covers the rest, such as one id deleted and another of the same
-/// length appended.
-fn entity_list_fingerprint(list: Option<&[u8]>) -> String {
+/// Fingerprint of the `_entities` id list in the keyed layout: its
+/// [`TableCounts`], so comparing it costs one point read. Every insert into
+/// the list advances `next_position` and every delete lowers `listed`, and
+/// `next_position` never goes back, so no sequence of changes returns it to
+/// an earlier value. The `m` prefix keeps it apart from every
+/// [`legacy_entity_fingerprint`], so a marker stamped against the legacy
+/// list never matches a keyed one.
+fn keyed_entity_fingerprint(counts: Option<TableCounts>) -> String {
+    let counts = counts.unwrap_or_default();
+    format!("m{}.{}", counts.listed, counts.next_position)
+}
+
+/// Fingerprint of the raw `_entities` entry of a legacy `table_index`
+/// (`None` when the table has no rows): its byte length and CRC-32, with no
+/// JSON decode. The length alone changes with every insert or delete of an
+/// id of a different length; the checksum covers the rest, such as one id
+/// deleted and another of the same length appended.
+fn legacy_entity_fingerprint(list: Option<&[u8]>) -> String {
     match list {
         Some(bytes) => format!("{:x}.{:08x}", bytes.len(), crc32fast::hash(bytes)),
         None => "empty".to_string(),
     }
+}
+
+/// Re-stamp the entity key index marker from fingerprint `from` to `to`,
+/// when the marker was stamped against `from`: the list it describes moved
+/// to another layout unchanged. A marker stamped against anything else (an
+/// older binary changed the list since) is left as it is, so it stays stale.
+fn restamp_entity_marker(txn: &WriteTransaction, from: &str, to: &str) -> Result<()> {
+    let mut markers = txn.open_table(STORAGE_MARKERS)?;
+    let restamped = match markers.get(ENTITY_KEY_INDEX_MARKER)? {
+        Some(guard) => {
+            let value = guard.value();
+            if value.strip_prefix(ENTITY_KEY_READY) == Some(from) {
+                Some(format!("{ENTITY_KEY_READY}{to}"))
+            } else {
+                value
+                    .strip_prefix(ENTITY_KEY_FAILED)
+                    .and_then(|rest| rest.split_once(':'))
+                    .filter(|(stamped, _)| *stamped == from)
+                    .map(|(_, row)| format!("{ENTITY_KEY_FAILED}{to}:{row}"))
+            }
+        }
+        None => None,
+    };
+    if let Some(value) = restamped {
+        markers.insert(ENTITY_KEY_INDEX_MARKER, value.as_str())?;
+    }
+    Ok(())
 }
 
 /// An `_entities` row whose body does not decode, which stops an index build.
@@ -334,24 +662,42 @@ pub struct Storage {
     /// Set by [`Storage::set_entity_key_index_enabled`]: this handle neither
     /// uses nor maintains the entity key index.
     entity_key_index_off: std::sync::atomic::AtomicBool,
+    /// Where this file keeps table membership. Fixed for the handle's life:
+    /// a writable handle migrated the file to [`IndexLayout::Keyed`] on open,
+    /// and nothing else can write the file while either kind of handle has
+    /// it open.
+    layout: IndexLayout,
 }
 
 impl Storage {
     /// Open (or create) a writable database at the given path. The installed
     /// open guard runs first (see [`crate::open_guard`]).
+    ///
+    /// A file whose table index is still in the legacy layout (one JSON id
+    /// list per table, rewritten whole on every insert and delete) is
+    /// migrated to the keyed layout first, in one write transaction: a crash
+    /// or error leaves it exactly as it was, and the next open tries again.
+    /// Once migrated it stays migrated, so later opens write nothing for it.
+    ///
+    /// Binaries that only know the legacy layout cannot open a migrated file:
+    /// their open fails with an error that says to upgrade axil (`table_index
+    /// is of type Table<&str, axil_core::TableCounts (written by a newer
+    /// axil; …)>`), rather than reading id lists that no longer change. To
+    /// hand a file back to one, see [`Storage::downgrade_table_index`].
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         crate::open_guard(path.as_ref());
         let db = Database::create(path.as_ref())?;
 
         #[allow(unused_mut)]
-        let mut tables = vec![RECORDS, TABLE_INDEX, SLOW_QUERIES, AUDIT_LOG, METRICS_HISTORY];
+        let mut tables = vec![RECORDS, SLOW_QUERIES, AUDIT_LOG, METRICS_HISTORY];
         #[cfg(feature = "cdc")]
         tables.push(CHANGELOG);
         #[cfg(feature = "event-log")]
         tables.push(EVENT_LOG);
-        // Only a store missing a table needs a write. Opening an existing one
-        // commits nothing, so a read-only command leaves the file untouched.
-        let complete = {
+        // Only a store missing a table, or still in the legacy layout, needs
+        // a write. Opening an existing one commits nothing, so a read-only
+        // command leaves the file untouched.
+        let (complete, layout) = {
             let txn = db.begin_read()?;
             let mut complete = true;
             for table in &tables {
@@ -364,14 +710,40 @@ impl Storage {
                     Err(e) => return Err(e.into()),
                 }
             }
-            complete
-        };
-        if !complete {
-            let txn = db.begin_write()?;
-            for table in &tables {
-                let _ = txn.open_table(*table)?;
+            let layout = detect_index_layout(&txn)?;
+            if layout == Some(IndexLayout::Keyed) {
+                for exists in [
+                    txn.open_table(TABLE_MEMBERS).map(|_| ()),
+                    txn.open_table(TABLE_MEMBER_POSITIONS).map(|_| ()),
+                ] {
+                    match exists {
+                        Ok(()) => {}
+                        Err(redb::TableError::TableDoesNotExist(_)) => complete = false,
+                        Err(e) => return Err(e.into()),
+                    }
+                }
             }
-            txn.commit()?;
+            (complete, layout)
+        };
+        if !complete || layout != Some(IndexLayout::Keyed) {
+            let txn = db.begin_write()?;
+            let created = (|| -> Result<()> {
+                for table in &tables {
+                    let _ = txn.open_table(*table)?;
+                }
+                if layout == Some(IndexLayout::Legacy) {
+                    Self::migrate_legacy_index(&txn)?;
+                }
+                drop(Membership::open(&txn)?);
+                Ok(())
+            })();
+            match created {
+                Ok(()) => txn.commit()?,
+                Err(e) => {
+                    txn.abort()?;
+                    return Err(e);
+                }
+            }
         }
 
         Ok(Self {
@@ -383,6 +755,7 @@ impl Storage {
             #[cfg(feature = "encryption")]
             cipher: None,
             entity_key_index_off: std::sync::atomic::AtomicBool::new(false),
+            layout: IndexLayout::Keyed,
         })
     }
 
@@ -397,9 +770,14 @@ impl Storage {
     /// `Busy` — a read-only handle cannot open a write transaction. The file
     /// must already exist (it is created only on the writable
     /// [`Storage::open`] path). The installed open guard runs first.
+    ///
+    /// A file still in the legacy table-index layout is read as it is, not
+    /// migrated: lists, counts and the entity key index answer from the JSON
+    /// id lists until a writable open migrates them.
     pub fn open_read_only(path: impl AsRef<Path>) -> Result<Self> {
         crate::open_guard(path.as_ref());
         let db = ReadOnlyDatabase::open(path.as_ref())?;
+        let layout = detect_index_layout(&db.begin_read()?)?.unwrap_or(IndexLayout::Keyed);
         Ok(Self {
             db: StorageDb::ReadOnly(db),
             #[cfg(feature = "cdc")]
@@ -409,7 +787,137 @@ impl Storage {
             #[cfg(feature = "encryption")]
             cipher: None,
             entity_key_index_off: std::sync::atomic::AtomicBool::new(false),
+            layout,
         })
+    }
+
+    /// Move a legacy table index (one JSON id list per table) to the keyed
+    /// layout inside `txn`, which the caller commits only if this succeeds.
+    ///
+    /// Each list keeps its order. An id a list holds more than once (a batch
+    /// insert that repeated an id could do that) is kept at its first place,
+    /// which is where a later insert of it would have left it. The legacy
+    /// `table_index` is deleted and the name taken by [`TABLE_COUNTS`], whose
+    /// value type older binaries refuse.
+    ///
+    /// A ready or failed entity key index marker stamped against the
+    /// `_entities` list being migrated is re-stamped against the keyed list,
+    /// so the index stays usable. One stamped against anything else means a
+    /// binary older than the index changed the list after it was built: it is
+    /// left as it is, and the index stays stale until it is rebuilt.
+    fn migrate_legacy_index(txn: &WriteTransaction) -> Result<()> {
+        let (lists, legacy_fingerprint) = {
+            let legacy = txn.open_table(LEGACY_TABLE_INDEX)?;
+            let mut lists = Vec::new();
+            for entry in legacy.iter()? {
+                let (name, bytes) = entry?;
+                lists.push((name.value().to_string(), bytes.value().to_vec()));
+            }
+            let fingerprint =
+                legacy_entity_fingerprint(legacy.get(ENTITIES_TABLE)?.as_ref().map(|g| g.value()));
+            (lists, fingerprint)
+        };
+        txn.delete_table(LEGACY_TABLE_INDEX)?;
+
+        let mut membership = Membership::open(txn)?;
+        for (table, bytes) in &lists {
+            // Decoded one table at a time, after earlier tables are written:
+            // a list that does not decode fails the whole transaction.
+            let ids: Vec<RecordId> = serde_json::from_slice(bytes).map_err(|e| {
+                AxilError::Storage(
+                    format!(
+                        "the table index entry of `{table}` is not a JSON id list ({e}); \
+                         the file was left in its legacy layout"
+                    )
+                    .into(),
+                )
+            })?;
+            let mut first_place: std::collections::HashMap<&str, u64> =
+                std::collections::HashMap::with_capacity(ids.len());
+            for rid in &ids {
+                let next = first_place.len() as u64;
+                first_place.entry(rid.as_str()).or_insert(next);
+            }
+            let mut in_order: Vec<(&str, u64)> =
+                first_place.iter().map(|(id, pos)| (*id, *pos)).collect();
+            in_order.sort_unstable_by_key(|(_, pos)| *pos);
+            for (id, position) in &in_order {
+                membership
+                    .members
+                    .insert((table.as_str(), *position), *id)?;
+            }
+            // Sorted by id, so the writes walk this B-tree in key order.
+            in_order.sort_unstable();
+            for (id, position) in &in_order {
+                membership
+                    .positions
+                    .insert((table.as_str(), *id), *position)?;
+            }
+            let listed = in_order.len() as u64;
+            membership.counts.insert(
+                table.as_str(),
+                TableCounts {
+                    listed,
+                    next_position: listed,
+                },
+            )?;
+        }
+        let keyed_fingerprint = membership.entity_fingerprint()?;
+        drop(membership);
+        restamp_entity_marker(txn, &legacy_fingerprint, &keyed_fingerprint)
+    }
+
+    /// Convert this file's table index back to the legacy layout (one JSON
+    /// id list per table), the only one binaries before the keyed layout can
+    /// open, and close the handle.
+    ///
+    /// Lists keep their order. A current entity key index stays current for
+    /// those binaries; a stale one stays stale. This is the way back to an
+    /// older binary: the next writable [`Storage::open`] by this version
+    /// migrates the file again, so run it last. One write transaction, so a
+    /// crash leaves the file as it was. Fails with [`AxilError::Busy`] on a
+    /// read-only handle.
+    pub fn downgrade_table_index(self) -> Result<()> {
+        let txn = self.begin_write()?;
+        let converted = (|| -> Result<()> {
+            let (lists, keyed_fingerprint) = {
+                let membership = Membership::open(&txn)?;
+                let mut lists = Vec::new();
+                for entry in membership.counts.iter()? {
+                    let (table, counts) = entry?;
+                    if counts.value().listed == 0 {
+                        continue;
+                    }
+                    let table = table.value().to_string();
+                    let ids = keyed_listed_ids(&membership.members, &table, 0, usize::MAX)?;
+                    lists.push((table, ids));
+                }
+                (lists, membership.entity_fingerprint()?)
+            };
+            txn.delete_table(TABLE_COUNTS)?;
+            txn.delete_table(TABLE_MEMBERS)?;
+            txn.delete_table(TABLE_MEMBER_POSITIONS)?;
+            let legacy_fingerprint = {
+                let mut legacy = txn.open_table(LEGACY_TABLE_INDEX)?;
+                for (table, ids) in &lists {
+                    let bytes = serde_json::to_vec(ids)?;
+                    legacy.insert(table.as_str(), bytes.as_slice())?;
+                }
+                let fingerprint = legacy_entity_fingerprint(
+                    legacy.get(ENTITIES_TABLE)?.as_ref().map(|g| g.value()),
+                );
+                fingerprint
+            };
+            restamp_entity_marker(&txn, &keyed_fingerprint, &legacy_fingerprint)
+        })();
+        match converted {
+            Ok(()) => txn.commit()?,
+            Err(e) => {
+                txn.abort()?;
+                return Err(e);
+            }
+        }
+        Ok(())
     }
 
     /// Attach an encryption-at-rest cipher to this storage handle.
@@ -560,48 +1068,32 @@ impl Storage {
             let left_entities =
                 old_table.as_deref() == Some(ENTITIES_TABLE) && record.table != ENTITIES_TABLE;
             let entities_listed = record.table == ENTITIES_TABLE || left_entities;
+            let mut membership = Membership::open(&txn)?;
             // Checked before the `_entities` list changes below: the marker's
             // fingerprint is of the list as the index last saw it.
-            let maintain = {
-                let idx = txn.open_table(TABLE_INDEX)?;
-                self.entity_index_write_begin(&txn, &idx, entities_listed)?
-            };
+            let listed_before = entities_listed
+                .then(|| membership.entity_fingerprint())
+                .transpose()?;
+            let maintain = self.entity_index_write_begin(&txn, listed_before.as_deref())?;
 
-            // If this ID already exists under a different table, clean up the old index.
+            // An id rewritten under another table leaves that table's list.
             if let Some(old_table) = old_table.filter(|t| *t != record.table) {
-                let mut idx = txn.open_table(TABLE_INDEX)?;
-                let mut old_ids = Self::read_index(&idx, &old_table)?;
-                old_ids.retain(|rid| rid != &record.id);
-                if old_ids.is_empty() {
-                    idx.remove(old_table.as_str())?;
-                } else {
-                    let old_idx_bytes = serde_json::to_vec(&old_ids)?;
-                    idx.insert(old_table.as_str(), old_idx_bytes.as_slice())?;
-                }
+                membership.leave(&old_table, id)?;
             }
 
             records.insert(id, bytes.as_slice())?;
+            membership.join(&record.table, id)?;
 
-            // Update table index (with dedup check using HashSet for O(1) lookup).
-            let mut idx = txn.open_table(TABLE_INDEX)?;
-            let mut ids = Self::read_index(&idx, &record.table)?;
-            let id_set: std::collections::HashSet<&RecordId> = ids.iter().collect();
-            if !id_set.contains(&record.id) {
-                ids.push(record.id.clone());
-            }
-            let idx_bytes = serde_json::to_vec(&ids)?;
-            idx.insert(record.table.as_str(), idx_bytes.as_slice())?;
-
-            let membership = if record.table == ENTITIES_TABLE {
+            let entity_membership = if record.table == ENTITIES_TABLE {
                 EntityMembership::Join
             } else if left_entities {
                 EntityMembership::Leave
             } else {
                 EntityMembership::Keep
             };
-            self.sync_entity_key(&txn, maintain, id, membership, Some(&record.data))?;
+            self.sync_entity_key(&txn, maintain, id, entity_membership, Some(&record.data))?;
             if maintain && entities_listed {
-                Self::entity_index_write_finish(&txn, &idx)?;
+                Self::entity_index_write_finish(&txn, &membership.entity_fingerprint()?)?;
             }
 
             #[cfg(feature = "cdc")]
@@ -631,27 +1123,22 @@ impl Storage {
         let txn = self.begin_write()?;
         {
             let mut tbl = txn.open_table(RECORDS)?;
-            let mut idx = txn.open_table(TABLE_INDEX)?;
+            let mut membership = Membership::open(&txn)?;
             let entities_listed = records.iter().any(|r| r.table == ENTITIES_TABLE);
-            let maintain = self.entity_index_write_begin(&txn, &idx, entities_listed)?;
-
-            // Group records by table to minimize index reads.
-            let mut table_ids: std::collections::HashMap<&str, Vec<RecordId>> =
-                std::collections::HashMap::new();
+            let listed_before = entities_listed
+                .then(|| membership.entity_fingerprint())
+                .transpose()?;
+            let maintain = self.entity_index_write_begin(&txn, listed_before.as_deref())?;
 
             for record in records {
                 let bytes = self.encode_body(record)?;
                 tbl.insert(record.id.as_str(), bytes.as_slice())?;
-                table_ids
-                    .entry(&record.table)
-                    .or_default()
-                    .push(record.id.clone());
 
                 // A batch never removes an id from another table's list, so
                 // an id only ever joins `_entities` here. Syncing per record,
                 // in order, leaves the key of the last body written for a
                 // repeated id — the body `records` ends up holding.
-                let membership = if record.table == ENTITIES_TABLE {
+                let entity_membership = if record.table == ENTITIES_TABLE {
                     EntityMembership::Join
                 } else {
                     EntityMembership::Keep
@@ -660,7 +1147,7 @@ impl Storage {
                     &txn,
                     maintain,
                     record.id.as_str(),
-                    membership,
+                    entity_membership,
                     Some(&record.data),
                 )?;
 
@@ -675,23 +1162,11 @@ impl Storage {
                 )?;
             }
 
-            // Append new IDs to each table's index with dedup.
-            for (table_name, new_ids) in &table_ids {
-                let ids = Self::read_index(&idx, table_name)?;
-                let existing: std::collections::HashSet<&RecordId> = ids.iter().collect();
-                let to_add: Vec<RecordId> = new_ids
-                    .iter()
-                    .filter(|id| !existing.contains(id))
-                    .cloned()
-                    .collect();
-                drop(existing);
-                let mut ids = ids;
-                ids.extend(to_add);
-                let idx_bytes = serde_json::to_vec(&ids)?;
-                idx.insert(*table_name, idx_bytes.as_slice())?;
-            }
+            // Listed in batch order; an id the batch repeats, or that the
+            // table already lists, keeps its first place.
+            membership.join_all(records.iter().map(|r| (r.table.as_str(), r.id.as_str())))?;
             if maintain && entities_listed {
-                Self::entity_index_write_finish(&txn, &idx)?;
+                Self::entity_index_write_finish(&txn, &membership.entity_fingerprint()?)?;
             }
         }
         txn.commit()?;
@@ -752,27 +1227,22 @@ impl Storage {
                     .insert(id.as_str(), ())?;
             }
 
-            // Remove from table index; drop the key if empty.
-            let mut idx = txn.open_table(TABLE_INDEX)?;
+            let mut membership = Membership::open(&txn)?;
             let entities_listed = table_name == ENTITIES_TABLE;
-            let maintain = self.entity_index_write_begin(&txn, &idx, entities_listed)?;
-            let mut ids = Self::read_index(&idx, &table_name)?;
-            ids.retain(|rid| rid != id);
-            if ids.is_empty() {
-                idx.remove(table_name.as_str())?;
-            } else {
-                let idx_bytes = serde_json::to_vec(&ids)?;
-                idx.insert(table_name.as_str(), idx_bytes.as_slice())?;
-            }
+            let listed_before = entities_listed
+                .then(|| membership.entity_fingerprint())
+                .transpose()?;
+            let maintain = self.entity_index_write_begin(&txn, listed_before.as_deref())?;
+            membership.leave(&table_name, id.as_str())?;
 
-            let membership = if table_name == ENTITIES_TABLE {
+            let entity_membership = if table_name == ENTITIES_TABLE {
                 EntityMembership::Leave
             } else {
                 EntityMembership::Keep
             };
-            self.sync_entity_key(&txn, maintain, id.as_str(), membership, None)?;
+            self.sync_entity_key(&txn, maintain, id.as_str(), entity_membership, None)?;
             if maintain && entities_listed {
-                Self::entity_index_write_finish(&txn, &idx)?;
+                Self::entity_index_write_finish(&txn, &membership.entity_fingerprint()?)?;
             }
 
             #[cfg(feature = "cdc")]
@@ -816,16 +1286,56 @@ impl Storage {
         Ok(())
     }
 
+    /// Whether a keyed index lists anything under `table`. One point read,
+    /// which spares the range scan for the many lookups of tables that are
+    /// empty or were never written (per-table settings read on every insert).
+    fn keyed_lists_any(&self, txn: &ReadTransaction, table: &str) -> Result<bool> {
+        Ok(txn
+            .open_table(TABLE_COUNTS)?
+            .get(table)?
+            .is_some_and(|guard| guard.value().listed > 0))
+    }
+
+    /// Ids listed under `table`, in list order, the first `offset` skipped
+    /// and at most `limit` returned.
+    fn listed_ids(
+        &self,
+        txn: &ReadTransaction,
+        table: &str,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<RecordId>> {
+        match self.layout {
+            IndexLayout::Keyed => {
+                if !self.keyed_lists_any(txn, table)? {
+                    return Ok(Vec::new());
+                }
+                keyed_listed_ids(&txn.open_table(TABLE_MEMBERS)?, table, offset, limit)
+            }
+            IndexLayout::Legacy => {
+                let ids = read_legacy_index(&txn.open_table(LEGACY_TABLE_INDEX)?, table)?;
+                Ok(ids.into_iter().skip(offset).take(limit).collect())
+            }
+        }
+    }
+
     /// List records in a table with optional limit and offset.
+    ///
+    /// Records come in list order: the order their ids first joined the
+    /// table (a re-insert keeps an id's place; an id moved in from another
+    /// table joins last). `offset` and `limit` count listed ids, so a listed
+    /// id whose record is gone takes a slot and yields nothing.
     pub fn list(&self, table: &str, limit: usize, offset: usize) -> Result<Vec<Record>> {
         let txn = self.begin_read()?;
-        let idx_table = txn.open_table(TABLE_INDEX)?;
-        let ids = Self::read_index(&idx_table, table)?;
+        let ids = self.listed_ids(&txn, table, offset, limit)?;
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
 
         let records_table = txn.open_table(RECORDS)?;
         let mut results = Vec::new();
 
-        for rid in ids.into_iter().skip(offset).take(limit) {
+        for rid in ids {
             if let Some(guard) = records_table.get(rid.as_str())? {
                 let bytes: &[u8] = guard.value();
                 let record = self.decode_body(rid.as_str(), bytes)?;
@@ -836,21 +1346,42 @@ impl Storage {
         Ok(results)
     }
 
-    /// The newest `limit` records of a table, newest first. The table index
-    /// holds ids in insertion order, so this reads only the tail.
+    /// The newest `limit` records of a table, newest first: the end of
+    /// [`Storage::list`]'s order, reversed, skipping listed ids whose record
+    /// is gone. Reads only that tail.
     pub fn list_newest(&self, table: &str, limit: usize) -> Result<Vec<Record>> {
         let txn = self.begin_read()?;
-        let idx_table = txn.open_table(TABLE_INDEX)?;
-        let ids = Self::read_index(&idx_table, table)?;
-
+        if self.layout == IndexLayout::Keyed && !self.keyed_lists_any(&txn, table)? {
+            return Ok(Vec::new());
+        }
         let records_table = txn.open_table(RECORDS)?;
-        let mut results = Vec::with_capacity(limit.min(ids.len()));
-        for rid in ids.iter().rev() {
+        let mut results = Vec::new();
+        let mut push = |rid: &str| -> Result<bool> {
             if results.len() == limit {
-                break;
+                return Ok(false);
             }
-            if let Some(guard) = records_table.get(rid.as_str())? {
-                results.push(self.decode_body(rid.as_str(), guard.value())?);
+            if let Some(guard) = records_table.get(rid)? {
+                results.push(self.decode_body(rid, guard.value())?);
+            }
+            Ok(true)
+        };
+        match self.layout {
+            IndexLayout::Keyed => {
+                let members = txn.open_table(TABLE_MEMBERS)?;
+                for entry in members.range((table, 0u64)..=(table, u64::MAX))?.rev() {
+                    let (_, id) = entry?;
+                    if !push(id.value())? {
+                        break;
+                    }
+                }
+            }
+            IndexLayout::Legacy => {
+                let ids = read_legacy_index(&txn.open_table(LEGACY_TABLE_INDEX)?, table)?;
+                for rid in ids.iter().rev() {
+                    if !push(rid.as_str())? {
+                        break;
+                    }
+                }
             }
         }
         Ok(results)
@@ -886,10 +1417,7 @@ impl Storage {
             // The table (and so the id's list membership) is unchanged; only
             // the key can move, e.g. a provisional entity upgraded to its
             // canonical id.
-            let maintain = {
-                let idx = txn.open_table(TABLE_INDEX)?;
-                self.entity_index_write_begin(&txn, &idx, false)?
-            };
+            let maintain = self.entity_index_write_begin(&txn, None)?;
             self.sync_entity_key(
                 &txn,
                 maintain,
@@ -943,38 +1471,64 @@ impl Storage {
         Ok(record)
     }
 
-    /// Count all record IDs in a given table.
+    /// Count all record IDs in a given table (the ids it lists, including any
+    /// whose record is gone).
     pub fn count(&self, table: &str) -> Result<usize> {
         let txn = self.begin_read()?;
-        let idx = txn.open_table(TABLE_INDEX)?;
-        let ids = Self::read_index(&idx, table)?;
-        Ok(ids.len())
+        match self.layout {
+            IndexLayout::Keyed => Ok(txn
+                .open_table(TABLE_COUNTS)?
+                .get(table)?
+                .map_or(0, |guard| guard.value().listed as usize)),
+            IndexLayout::Legacy => {
+                Ok(read_legacy_index(&txn.open_table(LEGACY_TABLE_INDEX)?, table)?.len())
+            }
+        }
     }
 
-    /// List all table names that have records.
+    /// List all table names that have records, in name order.
     pub fn tables(&self) -> Result<Vec<String>> {
+        if self.layout == IndexLayout::Keyed {
+            return Ok(self
+                .tables_with_counts()?
+                .into_iter()
+                .map(|(name, _)| name)
+                .collect());
+        }
+        // A legacy index drops a table's entry when its list empties, so
+        // the names alone answer, with no list decoded.
         let txn = self.begin_read()?;
-        let idx = txn.open_table(TABLE_INDEX)?;
         let mut names = Vec::new();
-        let iter = idx.iter()?;
-        for entry in iter {
-            let (key, _): (redb::AccessGuard<'_, &str>, redb::AccessGuard<'_, &[u8]>) = entry?;
-            names.push(key.value().to_string());
+        for entry in txn.open_table(LEGACY_TABLE_INDEX)?.iter()? {
+            let (name, _) = entry?;
+            names.push(name.value().to_string());
         }
         Ok(names)
     }
 
-    /// List all table names with their record counts in a single transaction.
+    /// List all table names with their record counts in a single
+    /// transaction, in name order.
     pub fn tables_with_counts(&self) -> Result<Vec<(String, usize)>> {
         let txn = self.begin_read()?;
-        let idx = txn.open_table(TABLE_INDEX)?;
         let mut result = Vec::new();
-        let iter = idx.iter()?;
-        for entry in iter {
-            let (key, val): (redb::AccessGuard<'_, &str>, redb::AccessGuard<'_, &[u8]>) = entry?;
-            let bytes: &[u8] = val.value();
-            let ids: Vec<RecordId> = serde_json::from_slice(bytes)?;
-            result.push((key.value().to_string(), ids.len()));
+        match self.layout {
+            IndexLayout::Keyed => {
+                for entry in txn.open_table(TABLE_COUNTS)?.iter()? {
+                    let (name, counts) = entry?;
+                    let listed = counts.value().listed;
+                    // A table that emptied keeps its counters, unlisted.
+                    if listed > 0 {
+                        result.push((name.value().to_string(), listed as usize));
+                    }
+                }
+            }
+            IndexLayout::Legacy => {
+                for entry in txn.open_table(LEGACY_TABLE_INDEX)?.iter()? {
+                    let (name, bytes) = entry?;
+                    let ids: Vec<RecordId> = serde_json::from_slice(bytes.value())?;
+                    result.push((name.value().to_string(), ids.len()));
+                }
+            }
         }
         Ok(result)
     }
@@ -1018,9 +1572,10 @@ impl Storage {
     }
 
     /// Decide, at the start of a write transaction, whether it maintains the
-    /// entity key index. `idx` is the `table_index` table as it stands before
-    /// this write changes it; `lists_entities` says whether the write changes
-    /// the `_entities` entry.
+    /// entity key index. `listed_before` is the fingerprint of the
+    /// `_entities` list as it stands before this write changes it (see
+    /// [`Membership::entity_fingerprint`]), or `None` when the write does not
+    /// change that list.
     ///
     /// The index is maintained only while the marker says it is ready. A write
     /// that changes the `_entities` list first compares the marker's
@@ -1034,11 +1589,10 @@ impl Storage {
     /// tables go in this transaction, so a later cleartext handle cannot trust
     /// an index that missed this write, and entity names and canonical ids a
     /// cleartext store indexed do not outlive a re-seal made under a cipher.
-    fn entity_index_write_begin<T: ReadableTable<&'static str, &'static [u8]>>(
+    fn entity_index_write_begin(
         &self,
         txn: &WriteTransaction,
-        idx: &T,
-        lists_entities: bool,
+        listed_before: Option<&str>,
     ) -> Result<bool> {
         if !self.entity_key_index_enabled() {
             {
@@ -1057,37 +1611,40 @@ impl Storage {
             },
             None => return Ok(false),
         };
-        if !lists_entities {
+        let Some(current) = listed_before else {
             return Ok(true);
-        }
-        if Self::entity_list_fingerprint_in(idx)? == stamped {
+        };
+        if current == stamped {
             return Ok(true);
         }
         markers.remove(ENTITY_KEY_INDEX_MARKER)?;
         Ok(false)
     }
 
-    /// Re-stamp the ready marker with the fingerprint of the `_entities` list
-    /// a maintained write has just produced.
-    fn entity_index_write_finish<T: ReadableTable<&'static str, &'static [u8]>>(
-        txn: &WriteTransaction,
-        idx: &T,
-    ) -> Result<()> {
-        let value = format!(
-            "{ENTITY_KEY_READY}{}",
-            Self::entity_list_fingerprint_in(idx)?
-        );
+    /// Re-stamp the ready marker with `fingerprint`, that of the `_entities`
+    /// list a maintained write has just produced.
+    fn entity_index_write_finish(txn: &WriteTransaction, fingerprint: &str) -> Result<()> {
+        let value = format!("{ENTITY_KEY_READY}{fingerprint}");
         let mut markers = txn.open_table(STORAGE_MARKERS)?;
         markers.insert(ENTITY_KEY_INDEX_MARKER, value.as_str())?;
         Ok(())
     }
 
-    fn entity_list_fingerprint_in<T: ReadableTable<&'static str, &'static [u8]>>(
-        idx: &T,
-    ) -> Result<String> {
-        Ok(match idx.get(ENTITIES_TABLE)? {
-            Some(guard) => entity_list_fingerprint(Some(guard.value())),
-            None => entity_list_fingerprint(None),
+    /// Fingerprint of the `_entities` list as a read transaction sees it, in
+    /// this file's layout.
+    fn entity_fingerprint_read(&self, txn: &ReadTransaction) -> Result<String> {
+        Ok(match self.layout {
+            IndexLayout::Keyed => keyed_entity_fingerprint(
+                txn.open_table(TABLE_COUNTS)?
+                    .get(ENTITIES_TABLE)?
+                    .map(|guard| guard.value()),
+            ),
+            IndexLayout::Legacy => legacy_entity_fingerprint(
+                txn.open_table(LEGACY_TABLE_INDEX)?
+                    .get(ENTITIES_TABLE)?
+                    .as_ref()
+                    .map(|guard| guard.value()),
+            ),
         })
     }
 
@@ -1157,12 +1714,11 @@ impl Storage {
             .map(|guard| guard.value().to_string()))
     }
 
-    fn entity_key_status_in(txn: &ReadTransaction) -> Result<EntityKeyIndexStatus> {
+    fn entity_key_status_in(&self, txn: &ReadTransaction) -> Result<EntityKeyIndexStatus> {
         let Some(marker) = Self::entity_key_marker(txn)? else {
             return Ok(EntityKeyIndexStatus::Absent);
         };
-        let idx = txn.open_table(TABLE_INDEX)?;
-        let current = Self::entity_list_fingerprint_in(&idx)?;
+        let current = self.entity_fingerprint_read(txn)?;
         if let Some(stamped) = marker.strip_prefix(ENTITY_KEY_READY) {
             return Ok(if stamped == current {
                 EntityKeyIndexStatus::Current
@@ -1193,7 +1749,7 @@ impl Storage {
             return Ok(EntityKeyIndexStatus::Absent);
         }
         let txn = self.begin_read()?;
-        Self::entity_key_status_in(&txn)
+        self.entity_key_status_in(&txn)
     }
 
     /// True while the entity key index is built and in step with the
@@ -1287,9 +1843,10 @@ impl Storage {
         &self,
         txn: &WriteTransaction,
     ) -> Result<std::result::Result<EntityKeyIndexRebuild, UndecodableEntityRow>> {
-        let idx = txn.open_table(TABLE_INDEX)?;
+        let membership = Membership::open(txn)?;
+        let listed = keyed_listed_ids(&membership.members, ENTITIES_TABLE, 0, usize::MAX)?;
         let records = txn.open_table(RECORDS)?;
-        let keyed = match self.entity_keys_of_rows(&idx, &records)? {
+        let keyed = match self.entity_keys_of_rows(listed, &records)? {
             Ok(keyed) => keyed,
             Err(row) => return Ok(Err(row)),
         };
@@ -1308,10 +1865,7 @@ impl Storage {
         for (key, id) in &diff.pair_inserts {
             keys.insert(key.as_str(), id.as_str())?;
         }
-        let ready = format!(
-            "{ENTITY_KEY_READY}{}",
-            Self::entity_list_fingerprint_in(&idx)?
-        );
+        let ready = format!("{ENTITY_KEY_READY}{}", membership.entity_fingerprint()?);
         let mut markers = txn.open_table(STORAGE_MARKERS)?;
         let restamp = match markers.get(ENTITY_KEY_INDEX_MARKER)? {
             Some(guard) => guard.value() != ready,
@@ -1333,11 +1887,8 @@ impl Storage {
     fn record_entity_key_failure(&self, row: &str) -> Result<()> {
         let txn = self.begin_write()?;
         {
-            let idx = txn.open_table(TABLE_INDEX)?;
-            let value = format!(
-                "{ENTITY_KEY_FAILED}{}:{row}",
-                Self::entity_list_fingerprint_in(&idx)?
-            );
+            let fingerprint = Membership::open(&txn)?.entity_fingerprint()?;
+            let value = format!("{ENTITY_KEY_FAILED}{fingerprint}:{row}");
             let mut markers = txn.open_table(STORAGE_MARKERS)?;
             markers.insert(ENTITY_KEY_INDEX_MARKER, value.as_str())?;
         }
@@ -1345,13 +1896,13 @@ impl Storage {
         Ok(())
     }
 
-    /// Each distinct id the `_entities` list holds, with the key its body
-    /// carries (`None`: the body has no key, or is gone). The inner error
-    /// names the first row whose body does not decode.
+    /// Each distinct id of `listed` (the `_entities` list), with the key its
+    /// body carries (`None`: the body has no key, or is gone). The inner
+    /// error names the first row whose body does not decode.
     #[allow(clippy::type_complexity)]
-    fn entity_keys_of_rows<I, R>(
+    fn entity_keys_of_rows<R>(
         &self,
-        idx: &I,
+        listed: Vec<RecordId>,
         records: &R,
     ) -> Result<
         std::result::Result<
@@ -1360,10 +1911,8 @@ impl Storage {
         >,
     >
     where
-        I: ReadableTable<&'static str, &'static [u8]>,
         R: ReadableTable<&'static str, &'static [u8]>,
     {
-        let listed = Self::read_index(idx, ENTITIES_TABLE)?;
         let mut keyed = std::collections::HashMap::with_capacity(listed.len());
         for rid in listed {
             if keyed.contains_key(rid.as_str()) {
@@ -1479,12 +2028,12 @@ impl Storage {
             return Ok(None);
         }
         let txn = self.begin_read()?;
-        if Self::entity_key_status_in(&txn)? != EntityKeyIndexStatus::Current {
+        if self.entity_key_status_in(&txn)? != EntityKeyIndexStatus::Current {
             return Ok(None);
         }
-        let idx = txn.open_table(TABLE_INDEX)?;
+        let listed = self.listed_ids(&txn, ENTITIES_TABLE, 0, usize::MAX)?;
         let records = txn.open_table(RECORDS)?;
-        let keyed = match self.entity_keys_of_rows(&idx, &records)? {
+        let keyed = match self.entity_keys_of_rows(listed, &records)? {
             Ok(keyed) => keyed,
             Err(row) => return Err(row.error),
         };
@@ -1508,7 +2057,7 @@ impl Storage {
     /// `list("_entities")` and files each row under its key (`canonical_id`,
     /// else `name`), later rows overwriting earlier ones: keys with no row are
     /// absent, and a key several rows share maps to the row listed last. The
-    /// list order is read from `table_index` only when a key is shared.
+    /// list positions of those rows are read only when a key is shared.
     ///
     /// Before answering, the index is checked against the rows, so a writer
     /// that does not maintain it (an older binary on the same file) cannot
@@ -1516,8 +2065,9 @@ impl Storage {
     ///
     /// - The `_entities` list must still have the fingerprint the index was
     ///   stamped with. Any insert or delete of an `_entities` row changes it.
-    ///   This costs one read of that entry and a CRC-32 over it, with no JSON
-    ///   decode.
+    ///   This costs one point read (a read-only handle on a file still in the
+    ///   legacy layout reads that list's JSON entry and takes a CRC-32 of it,
+    ///   with no JSON decode).
     /// - Every row returned is read back and must still carry the key it was
     ///   found under. This catches an in-place rewrite of that row.
     ///
@@ -1534,7 +2084,7 @@ impl Storage {
             return Ok(EntityKeyLookup::Unavailable);
         }
         let txn = self.begin_read()?;
-        match Self::entity_key_status_in(&txn)? {
+        match self.entity_key_status_in(&txn)? {
             EntityKeyIndexStatus::Current => {}
             EntityKeyIndexStatus::Stale => return Ok(EntityKeyLookup::Stale),
             EntityKeyIndexStatus::Absent | EntityKeyIndexStatus::Failed { .. } => {
@@ -1548,9 +2098,7 @@ impl Storage {
         };
         let records = txn.open_table(RECORDS)?;
         let mut found = std::collections::HashMap::with_capacity(keys.len());
-        // Last position of each id in the `_entities` list, loaded on the
-        // first shared key.
-        let mut positions: Option<std::collections::HashMap<RecordId, usize>> = None;
+        let mut positions = EntityPositions::Unread;
         for &key in keys {
             let mut ids = Vec::new();
             for value in index.get(key)? {
@@ -1560,20 +2108,14 @@ impl Storage {
                 0 => continue,
                 1 => ids.pop(),
                 _ => {
-                    if positions.is_none() {
-                        let idx = txn.open_table(TABLE_INDEX)?;
-                        let listed = Self::read_index(&idx, ENTITIES_TABLE)?;
-                        positions = Some(
-                            listed
-                                .into_iter()
-                                .enumerate()
-                                .map(|(pos, rid)| (rid, pos))
-                                .collect(),
-                        );
+                    let mut ranked = Vec::with_capacity(ids.len());
+                    for rid in ids {
+                        ranked.push((positions.of(self, &txn, &rid)?, rid));
                     }
-                    let positions = positions.as_ref().expect("positions loaded above");
-                    ids.into_iter()
-                        .max_by_key(|rid| positions.get(rid).copied())
+                    ranked
+                        .into_iter()
+                        .max_by_key(|(pos, _)| *pos)
+                        .map(|(_, rid)| rid)
                 }
             };
             let Some(id) = winner else { continue };
@@ -2099,60 +2641,38 @@ impl Storage {
         let log = txn.open_table(EVENT_LOG)?;
         Ok(log.len()? as usize)
     }
-
-    // ── helpers ──────────────────────────────────────────────────────
-
-    fn read_index<T: ReadableTable<&'static str, &'static [u8]>>(
-        table: &T,
-        name: &str,
-    ) -> Result<Vec<RecordId>> {
-        match table.get(name)? {
-            Some(guard) => {
-                let bytes: &[u8] = guard.value();
-                let ids: Vec<RecordId> = serde_json::from_slice(bytes)?;
-                Ok(ids)
-            }
-            None => Ok(Vec::new()),
-        }
-    }
 }
 
 /// Writes that bypass the entity key index the way a binary that predates it
 /// does, so tests can put a store in the state such a binary leaves.
+///
+/// Such binaries keep the legacy id lists and cannot open a keyed file, so
+/// for real their writes land only before a migration (the `legacy_layout`
+/// tests cover that). These helpers make the same writes on the keyed layout,
+/// mid-session, which exercises the staleness checks against any writer that
+/// changes the `_entities` list without maintaining the index.
 #[cfg(test)]
 impl Storage {
     /// Insert the way a binary that predates the entity key index does:
-    /// `records` and `table_index` only, leaving the index and its marker
+    /// `records` and table membership only, leaving the index and its marker
     /// untouched.
     pub(crate) fn older_writer_insert(&self, record: &Record) {
         let txn = self.begin_write().unwrap();
         {
             let mut records = txn.open_table(RECORDS).unwrap();
-            let mut idx = txn.open_table(TABLE_INDEX).unwrap();
+            let mut membership = Membership::open(&txn).unwrap();
             let old_table = records
                 .get(record.id.as_str())
                 .unwrap()
                 .map(|g| Record::from_bytes(g.value()).unwrap().table);
             if let Some(old_table) = old_table.filter(|t| *t != record.table) {
-                let mut old_ids = Storage::read_index(&idx, &old_table).unwrap();
-                old_ids.retain(|rid| rid != &record.id);
-                if old_ids.is_empty() {
-                    idx.remove(old_table.as_str()).unwrap();
-                } else {
-                    let bytes = serde_json::to_vec(&old_ids).unwrap();
-                    idx.insert(old_table.as_str(), bytes.as_slice()).unwrap();
-                }
+                membership.leave(&old_table, record.id.as_str()).unwrap();
             }
             let bytes = record.to_bytes().unwrap();
             records
                 .insert(record.id.as_str(), bytes.as_slice())
                 .unwrap();
-            let mut ids = Storage::read_index(&idx, &record.table).unwrap();
-            if !ids.contains(&record.id) {
-                ids.push(record.id.clone());
-            }
-            let bytes = serde_json::to_vec(&ids).unwrap();
-            idx.insert(record.table.as_str(), bytes.as_slice()).unwrap();
+            membership.join(&record.table, record.id.as_str()).unwrap();
         }
         txn.commit().unwrap();
     }
@@ -2167,15 +2687,10 @@ impl Storage {
                 None => return,
             };
             records.remove(id.as_str()).unwrap();
-            let mut idx = txn.open_table(TABLE_INDEX).unwrap();
-            let mut ids = Storage::read_index(&idx, &table).unwrap();
-            ids.retain(|rid| rid != id);
-            if ids.is_empty() {
-                idx.remove(table.as_str()).unwrap();
-            } else {
-                let bytes = serde_json::to_vec(&ids).unwrap();
-                idx.insert(table.as_str(), bytes.as_slice()).unwrap();
-            }
+            Membership::open(&txn)
+                .unwrap()
+                .leave(&table, id.as_str())
+                .unwrap();
         }
         txn.commit().unwrap();
     }
@@ -2213,11 +2728,10 @@ impl Storage {
         {
             let mut records = txn.open_table(RECORDS).unwrap();
             records.remove(id.as_str()).unwrap();
-            let mut idx = txn.open_table(TABLE_INDEX).unwrap();
-            let mut ids = Storage::read_index(&idx, ENTITIES_TABLE).unwrap();
-            ids.retain(|rid| rid != id);
-            let bytes = serde_json::to_vec(&ids).unwrap();
-            idx.insert(ENTITIES_TABLE, bytes.as_slice()).unwrap();
+            Membership::open(&txn)
+                .unwrap()
+                .leave(ENTITIES_TABLE, id.as_str())
+                .unwrap();
         }
         txn.commit().unwrap();
     }
@@ -3423,5 +3937,699 @@ mod tests {
         );
         assert!(storage.ensure_entity_key_index().unwrap());
         assert_index_matches_scan(&storage, "after switching back on");
+    }
+
+    // ── table index layouts ────────────────────────────────────────────
+
+    /// Files in the legacy table-index layout, as binaries before the keyed
+    /// one leave them, and what this version does with them.
+    mod legacy_layout {
+        use super::*;
+        use std::collections::{BTreeMap, HashMap};
+
+        /// Write a file the way a binary with the legacy table index leaves
+        /// it: `records` plus one JSON id list per table. The lists are raw,
+        /// so one can repeat an id or name an id whose record is gone.
+        fn write_legacy(path: &Path, rows: &[Record], lists: &[(&str, Vec<&str>)]) {
+            let db = Database::create(path).unwrap();
+            let txn = db.begin_write().unwrap();
+            {
+                let mut records = txn.open_table(RECORDS).unwrap();
+                for row in rows {
+                    let bytes = row.to_bytes().unwrap();
+                    records.insert(row.id.as_str(), bytes.as_slice()).unwrap();
+                }
+                let mut index = txn.open_table(LEGACY_TABLE_INDEX).unwrap();
+                for (table, ids) in lists {
+                    let bytes = serde_json::to_vec(ids).unwrap();
+                    index.insert(*table, bytes.as_slice()).unwrap();
+                }
+            }
+            txn.commit().unwrap();
+        }
+
+        /// Overwrite one table's legacy entry with raw bytes.
+        fn put_legacy_entry(path: &Path, table: &str, bytes: &[u8]) {
+            let db = Database::create(path).unwrap();
+            let txn = db.begin_write().unwrap();
+            txn.open_table(LEGACY_TABLE_INDEX)
+                .unwrap()
+                .insert(table, bytes)
+                .unwrap();
+            txn.commit().unwrap();
+        }
+
+        /// The legacy id lists in a file, or `None` once it is keyed.
+        fn legacy_lists(path: &Path) -> Option<BTreeMap<String, Vec<String>>> {
+            let db = Database::create(path).unwrap();
+            let txn = db.begin_read().unwrap();
+            let index = txn.open_table(LEGACY_TABLE_INDEX).ok()?;
+            let mut lists = BTreeMap::new();
+            for entry in index.iter().unwrap() {
+                let (table, bytes) = entry.unwrap();
+                lists.insert(
+                    table.value().to_string(),
+                    serde_json::from_slice(bytes.value()).unwrap(),
+                );
+            }
+            Some(lists)
+        }
+
+        /// The first thing an older binary's open does with the table index:
+        /// open `table_index` as `&str → &[u8]`.
+        fn older_binary_open(path: &Path) -> std::result::Result<(), redb::TableError> {
+            let db = Database::create(path).unwrap();
+            let txn = db.begin_read().unwrap();
+            txn.open_table(LEGACY_TABLE_INDEX).map(|_| ())
+        }
+
+        /// An older binary's insert of a fresh record: the record, and its id
+        /// appended to its table's JSON list.
+        fn older_binary_insert(path: &Path, record: &Record) {
+            let db = Database::create(path).unwrap();
+            let txn = db.begin_write().unwrap();
+            {
+                let bytes = record.to_bytes().unwrap();
+                txn.open_table(RECORDS)
+                    .unwrap()
+                    .insert(record.id.as_str(), bytes.as_slice())
+                    .unwrap();
+                let mut index = txn.open_table(LEGACY_TABLE_INDEX).unwrap();
+                let mut ids = read_legacy_index(&index, &record.table).unwrap();
+                ids.push(record.id.clone());
+                let bytes = serde_json::to_vec(&ids).unwrap();
+                index
+                    .insert(record.table.as_str(), bytes.as_slice())
+                    .unwrap();
+            }
+            txn.commit().unwrap();
+        }
+
+        /// An older binary's delete: the record, and its id dropped from its
+        /// table's JSON list (the entry goes when the list empties).
+        fn older_binary_delete(path: &Path, id: &RecordId) {
+            let db = Database::create(path).unwrap();
+            let txn = db.begin_write().unwrap();
+            {
+                let mut records = txn.open_table(RECORDS).unwrap();
+                let table = Record::from_bytes(records.get(id.as_str()).unwrap().unwrap().value())
+                    .unwrap()
+                    .table;
+                records.remove(id.as_str()).unwrap();
+                let mut index = txn.open_table(LEGACY_TABLE_INDEX).unwrap();
+                let mut ids = read_legacy_index(&index, &table).unwrap();
+                ids.retain(|rid| rid != id);
+                if ids.is_empty() {
+                    index.remove(table.as_str()).unwrap();
+                } else {
+                    let bytes = serde_json::to_vec(&ids).unwrap();
+                    index.insert(table.as_str(), bytes.as_slice()).unwrap();
+                }
+            }
+            txn.commit().unwrap();
+        }
+
+        fn ids_of(records: &[Record]) -> Vec<String> {
+            records.iter().map(|r| r.id.as_str().to_string()).collect()
+        }
+
+        fn row(table: &str, id: &str) -> Record {
+            record_with(table, RecordId(id.to_string()), json!({ "id": id }))
+        }
+
+        /// Ids sorted against their list order, a repeated id, and an id
+        /// whose record is gone: the shapes a legacy list can hold.
+        fn sample_legacy(path: &Path) {
+            let rows = [
+                row("notes", "zzzz-first"),
+                row("notes", "0000-second"),
+                row("notes", "mmmm-third"),
+                row("notes", "aaaa-fourth"),
+                row("decisions", "only-decision"),
+            ];
+            write_legacy(
+                path,
+                &rows,
+                &[
+                    (
+                        "notes",
+                        vec![
+                            "zzzz-first",
+                            "0000-second",
+                            "mmmm-third",
+                            "0000-second",
+                            "gone-record",
+                            "aaaa-fourth",
+                        ],
+                    ),
+                    ("decisions", vec!["only-decision"]),
+                ],
+            );
+        }
+
+        /// A read-only handle reads a file nothing of this version has opened
+        /// writable from its JSON lists, exactly as the legacy code did, and
+        /// leaves the file byte for byte as it was.
+        #[test]
+        fn a_read_only_open_reads_a_legacy_file_and_writes_nothing() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("legacy.axil");
+            sample_legacy(&path);
+            let before = std::fs::read(&path).unwrap();
+
+            let ro = Storage::open_read_only(&path).unwrap();
+            assert_eq!(
+                ids_of(&ro.list("notes", usize::MAX, 0).unwrap()),
+                [
+                    "zzzz-first",
+                    "0000-second",
+                    "mmmm-third",
+                    "0000-second",
+                    "aaaa-fourth"
+                ],
+                "the legacy list as it stands, repeat included"
+            );
+            assert_eq!(
+                ids_of(&ro.list("notes", 2, 3).unwrap()),
+                ["0000-second"],
+                "offset and limit count listed ids, the gone one included"
+            );
+            assert_eq!(
+                ids_of(&ro.list_newest("notes", 3).unwrap()),
+                ["aaaa-fourth", "0000-second", "mmmm-third"]
+            );
+            assert_eq!(ro.count("notes").unwrap(), 6);
+            assert_eq!(ro.tables().unwrap(), ["decisions", "notes"]);
+            assert_eq!(
+                ro.tables_with_counts().unwrap(),
+                [("decisions".to_string(), 1), ("notes".to_string(), 6)]
+            );
+            assert!(matches!(
+                ro.insert(&row("notes", "new")),
+                Err(AxilError::Busy)
+            ));
+            drop(ro);
+
+            assert_eq!(std::fs::read(&path).unwrap(), before, "nothing written");
+            assert!(legacy_lists(&path).is_some(), "still legacy");
+        }
+
+        /// A writable open migrates the lists in order, each id at its first
+        /// place, and later writes keep the legacy semantics: a new id joins
+        /// last, a re-inserted id keeps its place, an id moved from another
+        /// table joins last.
+        #[test]
+        fn migration_keeps_list_order_and_later_writes_keep_its_rules() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("legacy.axil");
+            sample_legacy(&path);
+
+            drop(Storage::open(&path).unwrap());
+            assert!(legacy_lists(&path).is_none(), "migrated");
+            let storage = Storage::open(&path).unwrap();
+            assert_eq!(
+                ids_of(&storage.list("notes", usize::MAX, 0).unwrap()),
+                ["zzzz-first", "0000-second", "mmmm-third", "aaaa-fourth"]
+            );
+            assert_eq!(
+                ids_of(&storage.list("notes", 2, 3).unwrap()),
+                ["aaaa-fourth"],
+                "the gone id keeps its slot"
+            );
+            assert_eq!(storage.count("notes").unwrap(), 5);
+            assert_eq!(
+                ids_of(&storage.list_newest("notes", 2).unwrap()),
+                ["aaaa-fourth", "mmmm-third"]
+            );
+
+            storage.insert(&row("notes", "0001-fifth")).unwrap();
+            storage.insert(&row("notes", "zzzz-first")).unwrap();
+            storage.insert(&row("notes", "only-decision")).unwrap();
+            storage.delete(&RecordId("mmmm-third".to_string())).unwrap();
+            assert_eq!(
+                ids_of(&storage.list("notes", usize::MAX, 0).unwrap()),
+                [
+                    "zzzz-first",
+                    "0000-second",
+                    "aaaa-fourth",
+                    "0001-fifth",
+                    "only-decision"
+                ]
+            );
+            assert_eq!(
+                ids_of(&storage.list_newest("notes", 2).unwrap()),
+                ["only-decision", "0001-fifth"]
+            );
+            assert_eq!(storage.tables().unwrap(), ["notes"], "decisions emptied");
+            assert_eq!(storage.count("decisions").unwrap(), 0);
+        }
+
+        /// The migration is one write transaction: a list that does not
+        /// decode, met after earlier tables were already written, aborts it
+        /// and leaves the legacy file exactly as it was. Once the entry is
+        /// fixed, the next open migrates, and opening again changes nothing.
+        #[test]
+        fn a_failed_migration_leaves_the_file_as_it_was_and_the_next_open_finishes() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("legacy.axil");
+            sample_legacy(&path);
+            put_legacy_entry(&path, "zz_last", b"[\"not closed\"");
+            let lists_before = {
+                let db = Database::create(&path).unwrap();
+                let txn = db.begin_read().unwrap();
+                let index = txn.open_table(LEGACY_TABLE_INDEX).unwrap();
+                let mut raw = BTreeMap::new();
+                for entry in index.iter().unwrap() {
+                    let (table, bytes) = entry.unwrap();
+                    raw.insert(table.value().to_string(), bytes.value().to_vec());
+                }
+                raw
+            };
+
+            let err = Storage::open(&path).err().expect("migration must fail");
+            assert!(err.to_string().contains("zz_last"), "{err}");
+            let lists_after = {
+                let db = Database::create(&path).unwrap();
+                let txn = db.begin_read().unwrap();
+                assert!(matches!(
+                    txn.open_table(TABLE_MEMBERS),
+                    Err(redb::TableError::TableDoesNotExist(_))
+                ));
+                let index = txn.open_table(LEGACY_TABLE_INDEX).unwrap();
+                let mut raw = BTreeMap::new();
+                for entry in index.iter().unwrap() {
+                    let (table, bytes) = entry.unwrap();
+                    raw.insert(table.value().to_string(), bytes.value().to_vec());
+                }
+                raw
+            };
+            assert_eq!(lists_after, lists_before, "the legacy lists are untouched");
+            let ro = Storage::open_read_only(&path).unwrap();
+            assert_eq!(ro.count("notes").unwrap(), 6, "still readable as legacy");
+            drop(ro);
+
+            put_legacy_entry(&path, "zz_last", b"[\"only-decision\"]");
+            let storage = Storage::open(&path).unwrap();
+            assert_eq!(storage.count("zz_last").unwrap(), 1);
+            assert_eq!(storage.count("notes").unwrap(), 5);
+            // Positions now run ahead of the counts, as they do in use.
+            storage.insert(&row("notes", "0001-new")).unwrap();
+            storage.delete(&RecordId("zzzz-first".to_string())).unwrap();
+            drop(storage);
+            let migrated = keyed_dump(&path);
+            drop(Storage::open(&path).unwrap());
+            assert_eq!(
+                keyed_dump(&path),
+                migrated,
+                "opening a migrated file again leaves its index alone"
+            );
+        }
+
+        /// Every entry of the three keyed tables, raw.
+        #[allow(clippy::type_complexity)]
+        fn keyed_dump(
+            path: &Path,
+        ) -> (
+            Vec<(String, u64, String)>,
+            Vec<(String, String, u64)>,
+            Vec<(String, TableCounts)>,
+        ) {
+            let db = Database::create(path).unwrap();
+            let txn = db.begin_read().unwrap();
+            let mut members = Vec::new();
+            for entry in txn.open_table(TABLE_MEMBERS).unwrap().iter().unwrap() {
+                let (key, id) = entry.unwrap();
+                let (table, position) = key.value();
+                members.push((table.to_string(), position, id.value().to_string()));
+            }
+            let mut positions = Vec::new();
+            for entry in txn
+                .open_table(TABLE_MEMBER_POSITIONS)
+                .unwrap()
+                .iter()
+                .unwrap()
+            {
+                let (key, position) = entry.unwrap();
+                let (table, id) = key.value();
+                positions.push((table.to_string(), id.to_string(), position.value()));
+            }
+            let mut counts = Vec::new();
+            for entry in txn.open_table(TABLE_COUNTS).unwrap().iter().unwrap() {
+                let (table, value) = entry.unwrap();
+                counts.push((table.value().to_string(), value.value()));
+            }
+            (members, positions, counts)
+        }
+
+        /// A file this version has opened writable, new or migrated, is
+        /// refused by a binary that only knows the legacy layout, with an
+        /// error that says what to do; it never reads stale lists.
+        #[test]
+        fn an_older_binary_cannot_open_a_keyed_file() {
+            let dir = tempfile::tempdir().unwrap();
+            let fresh = dir.path().join("fresh.axil");
+            drop(Storage::open(&fresh).unwrap());
+            let migrated = dir.path().join("migrated.axil");
+            sample_legacy(&migrated);
+            assert!(older_binary_open(&migrated).is_ok());
+            drop(Storage::open(&migrated).unwrap());
+
+            for path in [&fresh, &migrated] {
+                let err = older_binary_open(path).unwrap_err();
+                assert!(
+                    matches!(err, redb::TableError::TableTypeMismatch { .. }),
+                    "{err}"
+                );
+                let message = AxilError::from(err).to_string();
+                assert!(message.contains("table_index"), "{message}");
+                assert!(message.contains("upgrade axil"), "{message}");
+            }
+        }
+
+        /// Downgrading writes the lists back in order (an emptied table has
+        /// none), and opening the result migrates it to the same lists.
+        #[test]
+        fn downgrade_writes_the_lists_back_and_a_reopen_migrates_them_again() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("round.axil");
+            let lists = {
+                let storage = Storage::open(&path).unwrap();
+                for id in ["zzzz-1", "0000-2", "mmmm-3"] {
+                    storage.insert(&row("notes", id)).unwrap();
+                }
+                let gone = storage.insert(&row("gone", "gone-1")).unwrap();
+                storage.delete(&gone).unwrap();
+                storage.insert(&row("decisions", "d-1")).unwrap();
+                storage.delete(&RecordId("0000-2".to_string())).unwrap();
+                storage.insert(&row("notes", "0000-2")).unwrap();
+                storage.downgrade_table_index().unwrap();
+                legacy_lists(&path).expect("legacy after a downgrade")
+            };
+            let expected: BTreeMap<String, Vec<String>> = [
+                ("decisions", vec!["d-1"]),
+                ("notes", vec!["zzzz-1", "mmmm-3", "0000-2"]),
+            ]
+            .into_iter()
+            .map(|(t, ids)| (t.to_string(), ids.into_iter().map(String::from).collect()))
+            .collect();
+            assert_eq!(lists, expected);
+            assert!(older_binary_open(&path).is_ok());
+
+            let storage = Storage::open(&path).unwrap();
+            for (table, ids) in &expected {
+                assert_eq!(&ids_of(&storage.list(table, usize::MAX, 0).unwrap()), ids);
+                assert_eq!(storage.count(table).unwrap(), ids.len());
+            }
+            assert_eq!(storage.tables().unwrap(), ["decisions", "notes"]);
+        }
+
+        /// Two entity rows, a built index, then the file handed back to the
+        /// legacy layout: the state a binary that had the index but not the
+        /// keyed layout leaves.
+        fn legacy_with_index(path: &Path) -> (RecordId, RecordId) {
+            let storage = Storage::open(path).unwrap();
+            let redis = storage
+                .insert(&Record::new("_entities", json!({"canonical_id": "redis"})))
+                .unwrap();
+            let kafka = storage
+                .insert(&Record::new("_entities", json!({"canonical_id": "kafka"})))
+                .unwrap();
+            assert!(storage.ensure_entity_key_index().unwrap());
+            storage.downgrade_table_index().unwrap();
+            (redis, kafka)
+        }
+
+        /// The marker moves with the list through a downgrade and a
+        /// migration, so an index nobody made stale stays usable: on a
+        /// read-only handle over the legacy file, and after migrating it.
+        #[test]
+        fn a_current_entity_index_stays_current_across_layouts() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("mixed.axil");
+            let (redis, _kafka) = legacy_with_index(&path);
+
+            let ro = Storage::open_read_only(&path).unwrap();
+            assert_eq!(
+                ro.entity_key_index_status().unwrap(),
+                EntityKeyIndexStatus::Current
+            );
+            assert_index_matches_scan(&ro, "read-only over the legacy file");
+            drop(ro);
+
+            let storage = Storage::open(&path).unwrap();
+            assert_eq!(
+                storage.entity_key_index_status().unwrap(),
+                EntityKeyIndexStatus::Current
+            );
+            assert_index_matches_scan(&storage, "after migrating");
+            // A shared key is broken by list position, read per id now.
+            let copy = storage
+                .insert(&Record::new("_entities", json!({"name": "redis"})))
+                .unwrap();
+            let found = storage
+                .lookup_entity_keys(&["redis"])
+                .unwrap()
+                .into_found()
+                .unwrap();
+            assert_eq!(found["redis"], copy);
+            assert_ne!(found["redis"], redis);
+            assert_index_matches_scan(&storage, "after a shared key");
+        }
+
+        /// An older binary that predates the index adds or deletes an entity
+        /// before this version first opens the file: the migration must not
+        /// carry the index's ready stamp over, or lookups would miss the new
+        /// row (a duplicate entity) or return the deleted one.
+        #[test]
+        fn an_older_binarys_entity_writes_before_migration_leave_the_index_stale() {
+            let dir = tempfile::tempdir().unwrap();
+            let added = dir.path().join("added.axil");
+            legacy_with_index(&added);
+            let broker = Record::new("_entities", json!({"canonical_id": "kafka_broker"}));
+            older_binary_insert(&added, &broker);
+
+            let deleted = dir.path().join("deleted.axil");
+            let (_redis, kafka) = legacy_with_index(&deleted);
+            older_binary_delete(&deleted, &kafka);
+
+            for (path, key) in [(&added, "kafka_broker"), (&deleted, "kafka")] {
+                let ro = Storage::open_read_only(path).unwrap();
+                assert_eq!(
+                    ro.entity_key_index_status().unwrap(),
+                    EntityKeyIndexStatus::Stale,
+                    "read-only over the legacy file"
+                );
+                drop(ro);
+
+                let storage = Storage::open(path).unwrap();
+                assert_eq!(
+                    storage.entity_key_index_status().unwrap(),
+                    EntityKeyIndexStatus::Stale,
+                    "after migrating"
+                );
+                assert_eq!(
+                    storage.lookup_entity_keys(&[key]).unwrap(),
+                    EntityKeyLookup::Stale
+                );
+                // A maintained write must not re-stamp over the gap.
+                storage
+                    .insert(&Record::new("_entities", json!({"canonical_id": "pool"})))
+                    .unwrap();
+                assert_ne!(
+                    storage.entity_key_index_status().unwrap(),
+                    EntityKeyIndexStatus::Current
+                );
+                assert!(storage.ensure_entity_key_index().unwrap());
+                assert_index_matches_scan(&storage, "after the rebuild");
+            }
+            let storage = Storage::open(&added).unwrap();
+            let found = storage
+                .lookup_entity_keys(&["kafka_broker"])
+                .unwrap()
+                .into_found()
+                .unwrap();
+            assert_eq!(found["kafka_broker"], broker.id);
+        }
+
+        /// The legacy table index's rules on plain vectors: what `list`
+        /// returned before the keyed layout, written out independently of
+        /// it. One rule changed on purpose: a batch that repeats an id lists
+        /// it once, at its first place (the legacy batch listed it twice).
+        #[derive(Default)]
+        struct LegacyModel {
+            lists: BTreeMap<String, Vec<String>>,
+            /// Table each live record's body names.
+            body_table: HashMap<String, String>,
+        }
+
+        impl LegacyModel {
+            fn drop_from(&mut self, table: &str, id: &str) {
+                if let Some(ids) = self.lists.get_mut(table) {
+                    ids.retain(|listed| listed != id);
+                    if ids.is_empty() {
+                        self.lists.remove(table);
+                    }
+                }
+            }
+
+            fn append(&mut self, table: &str, id: &str) {
+                let ids = self.lists.entry(table.to_string()).or_default();
+                if !ids.iter().any(|listed| listed == id) {
+                    ids.push(id.to_string());
+                }
+            }
+
+            fn insert(&mut self, table: &str, id: &str) {
+                if let Some(old) = self.body_table.get(id).cloned() {
+                    if old != table {
+                        self.drop_from(&old, id);
+                    }
+                }
+                self.append(table, id);
+                self.body_table.insert(id.to_string(), table.to_string());
+            }
+
+            fn insert_batch(&mut self, rows: &[(String, String)]) {
+                for (table, id) in rows {
+                    self.append(table, id);
+                    self.body_table.insert(id.clone(), table.clone());
+                }
+            }
+
+            fn delete(&mut self, id: &str) {
+                if let Some(table) = self.body_table.remove(id) {
+                    self.drop_from(&table, id);
+                }
+            }
+
+            fn assert_matches(&self, storage: &Storage, context: &str) {
+                assert_eq!(
+                    storage.tables().unwrap(),
+                    self.lists.keys().cloned().collect::<Vec<_>>(),
+                    "{context}: tables"
+                );
+                for (table, ids) in &self.lists {
+                    let live: Vec<String> = ids
+                        .iter()
+                        .filter(|id| self.body_table.contains_key(*id))
+                        .cloned()
+                        .collect();
+                    assert_eq!(
+                        ids_of(&storage.list(table, usize::MAX, 0).unwrap()),
+                        live,
+                        "{context}: list of {table}"
+                    );
+                    assert_eq!(storage.count(table).unwrap(), ids.len(), "{context}");
+                    let newest: Vec<String> = live.iter().rev().take(3).cloned().collect();
+                    assert_eq!(
+                        ids_of(&storage.list_newest(table, 3).unwrap()),
+                        newest,
+                        "{context}: list_newest of {table}"
+                    );
+                    let page: Vec<String> = ids
+                        .iter()
+                        .skip(1)
+                        .take(2)
+                        .filter(|id| self.body_table.contains_key(*id))
+                        .cloned()
+                        .collect();
+                    assert_eq!(
+                        ids_of(&storage.list(table, 2, 1).unwrap()),
+                        page,
+                        "{context}: page of {table}"
+                    );
+                }
+            }
+        }
+
+        /// Random inserts, upserts across tables, batches, deletes, reopens
+        /// and downgrade-then-migrate round trips, with ids whose sort order
+        /// has nothing to do with insertion order: every list, page,
+        /// `list_newest`, count and table name matches the legacy rules
+        /// after every step.
+        #[test]
+        fn list_order_matches_the_legacy_rules_under_random_writes() {
+            const TABLES: [&str; 3] = ["notes", "decisions", "_entities"];
+            for seed in 1..=6u64 {
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("order.axil");
+                let mut storage = Storage::open(&path).unwrap();
+                let mut model = LegacyModel::default();
+                let mut rng = XorShift(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+                let mut counter = 0u64;
+                let mut ids: Vec<RecordId> = Vec::new();
+                for step in 0..200 {
+                    let what = match rng.below(10) {
+                        0..=3 => {
+                            let id = random_new_id(&mut rng, &mut counter);
+                            let table = *rng.pick(&TABLES);
+                            storage
+                                .insert(&record_with(table, id.clone(), json!({})))
+                                .unwrap();
+                            model.insert(table, id.as_str());
+                            ids.push(id);
+                            "insert"
+                        }
+                        4 if !ids.is_empty() => {
+                            let id = rng.pick(&ids).clone();
+                            let table = *rng.pick(&TABLES);
+                            storage
+                                .insert(&record_with(table, id.clone(), json!({})))
+                                .unwrap();
+                            model.insert(table, id.as_str());
+                            "upsert"
+                        }
+                        5 => {
+                            let mut batch: Vec<(String, RecordId)> = Vec::new();
+                            for _ in 0..(1 + rng.below(4)) {
+                                let id = if !ids.is_empty() && rng.below(3) == 0 {
+                                    rng.pick(&ids).clone()
+                                } else if !batch.is_empty() && rng.below(4) == 0 {
+                                    rng.pick(&batch).1.clone()
+                                } else {
+                                    random_new_id(&mut rng, &mut counter)
+                                };
+                                batch.push((rng.pick(&TABLES).to_string(), id.clone()));
+                                ids.push(id);
+                            }
+                            let records: Vec<Record> = batch
+                                .iter()
+                                .map(|(t, id)| record_with(t, id.clone(), json!({})))
+                                .collect();
+                            storage.insert_batch(&records).unwrap();
+                            let rows: Vec<(String, String)> = batch
+                                .iter()
+                                .map(|(t, id)| (t.clone(), id.as_str().to_string()))
+                                .collect();
+                            model.insert_batch(&rows);
+                            "insert_batch"
+                        }
+                        6 | 7 if !ids.is_empty() => {
+                            let id = rng.pick(&ids).clone();
+                            storage.delete(&id).unwrap();
+                            model.delete(id.as_str());
+                            "delete"
+                        }
+                        8 => {
+                            drop(storage);
+                            storage = Storage::open(&path).unwrap();
+                            "reopen"
+                        }
+                        _ => {
+                            storage.downgrade_table_index().unwrap();
+                            let ro = Storage::open_read_only(&path).unwrap();
+                            model.assert_matches(
+                                &ro,
+                                &format!("seed {seed} step {step} legacy read-only"),
+                            );
+                            drop(ro);
+                            storage = Storage::open(&path).unwrap();
+                            "downgrade, migrate"
+                        }
+                    };
+                    model.assert_matches(&storage, &format!("seed {seed} step {step} ({what})"));
+                }
+            }
+        }
     }
 }
