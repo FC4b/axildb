@@ -2,7 +2,7 @@
   "provenance": {
     "measured": "2026-10-14",
     "build": "commit \"feat(recall): split long records into recall units per turn or fact\" (built from WIP commit 0fc70b9, the same code before the branch was squashed), release",
-    "snapshot": "LongMemEval s, 60-question sample (.claude/worktrees/_agent/lme/data60), recall-qtc, top-5, --jobs 3",
+    "snapshot": "LongMemEval s, 60-question sample (10 per question type; its question ids are listed in benchmarks/results/longmemeval-s60-rerank-2026-10-14.json), recall-qtc, top-5, --jobs 3",
     "note": "Over the sample's 2,909 sessions (2,810 over 1600 bytes) the unit splitter writes 58,851 chunk vectors where the window splitter wrote 25,215 (2.3x), embedding 29.6 MB of text instead of 38.6 MB (units do not overlap); an estimate from a Python re-implementation of both splitters (byte offsets, harness session text, no record header) run over the sample. Run 2026-10-14 22:20-23:31; its binary is byte-identical to a rebuild from the commit on 2026-10-15."
   },
   "benchmark": "LongMemEval",

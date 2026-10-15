@@ -2,7 +2,7 @@
   "provenance": {
     "measured": "2026-10-15",
     "build": "commit \"feat(cli): compact recall shows the matching piece (not recommended)\" (a544adc), release: its LongMemEval binary is byte-identical to the one built from commit \"feat(recall): return the piece of a long record that matched\", whose run (2026-10-15 01:00) this is",
-    "snapshot": "LongMemEval s, 60-question sample (.claude/worktrees/_agent/lme/data60), recall-qtc, top-5, --jobs 3",
+    "snapshot": "LongMemEval s, 60-question sample (10 per question type; its question ids are listed in benchmarks/results/longmemeval-s60-rerank-2026-10-14.json), recall-qtc, top-5, --jobs 3",
     "note": "baseline for the -after file"
   },
   "benchmark": "LongMemEval",

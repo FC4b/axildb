@@ -2,7 +2,7 @@
   "provenance": {
     "measured": "2026-10-15",
     "build": "commit \"fix(recall): break recall's score ties newest first\" (built from WIP commit 75161aa, the same code before the branch was squashed), release",
-    "snapshot": "LongMemEval s, 60-question sample (.claude/worktrees/_agent/lme/data60), recall-qtc, top-5, --jobs 3",
+    "snapshot": "LongMemEval s, 60-question sample (10 per question type; its question ids are listed in benchmarks/results/longmemeval-s60-rerank-2026-10-14.json), recall-qtc, top-5, --jobs 3",
     "note": "identical to -before"
   },
   "benchmark": "LongMemEval",

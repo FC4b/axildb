@@ -2,7 +2,7 @@
   "provenance": {
     "measured": "2026-10-15",
     "build": "commit \"feat(recall): a time span the query names filters the candidates\" (built from WIP commit c0bb459, the same code before the branch was squashed), release",
-    "snapshot": "LongMemEval s, 60-question sample (.claude/worktrees/_agent/lme/data60), recall-qtc, top-5, --jobs 3",
+    "snapshot": "LongMemEval s, 60-question sample (10 per question type; its question ids are listed in benchmarks/results/longmemeval-s60-rerank-2026-10-14.json), recall-qtc, top-5, --jobs 3",
     "note": "baseline for the -after file. Built from the time-span commit; the four commits between it and the recall-unit commit (event_time, graph gate / degree norm / fixed seeds) cannot change this harness's ranking: it writes no event_time and attaches no graph engine. Insert timing (in the run's log, not here) was taken at load average 80-290 and is not comparable between runs."
   },
   "benchmark": "LongMemEval",

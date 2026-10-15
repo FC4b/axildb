@@ -2,7 +2,7 @@
   "provenance": {
     "measured": "2026-10-15",
     "build": "commit \"feat(recall): a time span the query names filters the candidates\" (built from WIP commit c0bb459, the same code before the branch was squashed), release",
-    "snapshot": "LongMemEval s, 60-question sample (.claude/worktrees/_agent/lme/data60), recall-qtc, top-5, --jobs 3",
+    "snapshot": "LongMemEval s, 60-question sample (10 per question type; its question ids are listed in benchmarks/results/longmemeval-s60-rerank-2026-10-14.json), recall-qtc, top-5, --jobs 3",
     "note": "measured 2026-10-15 00:00-00:58 with a rebuilt binary; the first run of this file used a stale build identical to the baseline's"
   },
   "benchmark": "LongMemEval",

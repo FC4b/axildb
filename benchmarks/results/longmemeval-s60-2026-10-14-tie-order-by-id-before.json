@@ -2,7 +2,7 @@
   "provenance": {
     "measured": "2026-10-14",
     "build": "commit \"fix(recall): keep code-index vectors out of memory recall's candidates\" (built from WIP commit e865b1b: the same code but for that commit's doctor / heal / indexer message wording), release",
-    "snapshot": "LongMemEval s, 60-question sample (.claude/worktrees/_agent/lme/data60), recall-qtc, top-5, --jobs 3",
+    "snapshot": "LongMemEval s, 60-question sample (10 per question type; its question ids are listed in benchmarks/results/longmemeval-s60-rerank-2026-10-14.json), recall-qtc, top-5, --jobs 3",
     "note": "baseline for the -after file"
   },
   "benchmark": "LongMemEval",
