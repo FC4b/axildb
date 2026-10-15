@@ -498,23 +498,9 @@ fn read_cargo_workspace(dir: &Path, out: &mut ProjectManifest) {
         return;
     };
     let mut manifests = vec![root.clone()];
-    let members = root
-        .get("workspace")
-        .and_then(|w| w.get("members"))
-        .and_then(toml::Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    for member in members.iter().filter_map(toml::Value::as_str) {
-        let dirs: Vec<std::path::PathBuf> = match member.strip_suffix("/*") {
-            Some(parent) => std::fs::read_dir(dir.join(parent))
-                .map(|entries| entries.flatten().map(|e| e.path()).collect())
-                .unwrap_or_default(),
-            None => vec![dir.join(member)],
-        };
-        for member_dir in dirs {
-            if let Some(manifest) = read_toml(&member_dir.join("Cargo.toml")) {
-                manifests.push(manifest);
-            }
+    for member_dir in cargo_member_dirs(dir, &root) {
+        if let Some(manifest) = read_toml(&member_dir.join("Cargo.toml")) {
+            manifests.push(manifest);
         }
     }
     for manifest in &manifests {
@@ -527,6 +513,50 @@ fn read_cargo_workspace(dir: &Path, out: &mut ProjectManifest) {
         }
         cargo_dependencies(manifest, &mut out.dependencies);
     }
+}
+
+/// The directories the workspace `root` (the `Cargo.toml` at `dir`) names as
+/// members, a `dir/*` member expanded to what is in `dir` now.
+fn cargo_member_dirs(dir: &Path, root: &toml::Value) -> Vec<std::path::PathBuf> {
+    let members = root
+        .get("workspace")
+        .and_then(|w| w.get("members"))
+        .and_then(toml::Value::as_array);
+    let mut dirs = Vec::new();
+    for member in members
+        .into_iter()
+        .flatten()
+        .filter_map(toml::Value::as_str)
+    {
+        match member.strip_suffix("/*") {
+            Some(parent) => dirs.extend(
+                std::fs::read_dir(dir.join(parent))
+                    .map(|entries| entries.flatten().map(|e| e.path()).collect::<Vec<_>>())
+                    .unwrap_or_default(),
+            ),
+            None => dirs.push(dir.join(member)),
+        }
+    }
+    dirs
+}
+
+/// The manifest files [`Gazetteer::load_project_dir`] reads for the project
+/// at `dir`, as they are now, whether or not each is there: `Cargo.toml` and
+/// each workspace member's, `package.json` and `pyproject.toml`. A change
+/// to any of them changes the names it loads, so a long-lived holder of a
+/// handle (the warm daemon) watches them to know its gazetteer is stale.
+pub fn project_manifests(dir: &Path) -> Vec<std::path::PathBuf> {
+    let root = dir.join("Cargo.toml");
+    let mut files = Vec::new();
+    if let Some(manifest) = read_toml(&root) {
+        for member in cargo_member_dirs(dir, &manifest) {
+            files.push(member.join("Cargo.toml"));
+        }
+    }
+    files.insert(0, root);
+    files.push(dir.join("package.json"));
+    files.push(dir.join("pyproject.toml"));
+    files
 }
 
 /// `package.json` at `dir`: its name and the keys of its dependency maps.

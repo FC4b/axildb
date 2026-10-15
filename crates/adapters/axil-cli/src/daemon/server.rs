@@ -351,6 +351,24 @@ pub struct Server {
     panic_prewarm: AtomicBool,
 }
 
+/// Why the handle is opened again after a `deps refresh` changed the
+/// database's dependencies (see [`Server::noting_dependencies`]).
+const DEPENDENCIES_CHANGED: &str = "the dependencies in _deps changed";
+
+/// The dependencies the entity gazetteer adds from the `_deps` rows on
+/// `state`'s handle: the names of those not removed. `None` without a
+/// handle, or when the rows can't be read.
+fn dependency_names(state: &WarmState) -> Option<std::collections::BTreeSet<String>> {
+    let warm = state.handle()?;
+    let rows = warm.db().list("_deps").ok()?;
+    let names = rows
+        .iter()
+        .filter(|row| row.data.get("status").and_then(Value::as_str) != Some("removed"))
+        .filter_map(|row| row.data.get("name")?.as_str().map(str::to_string))
+        .collect();
+    Some(names)
+}
+
 /// What a step of a queued job came to; see [`Server::run_queued`].
 pub(super) enum Queued {
     /// It ran on the open handle.
@@ -1406,10 +1424,10 @@ impl Server {
         let started = Instant::now();
         let deadline = header.deadline_ms;
         let gate = |writes: bool| self.gate(deadline, writes);
-        let result = {
+        let result = self.noting_dependencies(op, state, || {
             let _busy = self.busy();
             exec::execute_gated(header.to_request(stdin), state, &gate)
-        };
+        });
         let took = started.elapsed();
         if state.poisoned() {
             self.request_stop(StopReason::Panicked);
@@ -1437,6 +1455,31 @@ impl Server {
                 (RunReply::not_served(not_served), None)
             }
         }
+    }
+
+    /// Run `request`, a command labelled `op`. For `deps refresh` (`deps`):
+    /// when the dependencies it leaves differ from those before, the handle
+    /// is found stale and opened again, since its entity gazetteer, built
+    /// once per handle, knows a dependency only from the `_deps` rows there
+    /// were when it was built.
+    fn noting_dependencies<T>(
+        &self,
+        op: &str,
+        state: &WarmState,
+        request: impl FnOnce() -> T,
+    ) -> T {
+        if op != "deps" {
+            return request();
+        }
+        let before = dependency_names(state);
+        let result = request();
+        if dependency_names(state) != before {
+            let mut fresh = self.fresh.lock().unwrap_or_else(PoisonError::into_inner);
+            if fresh.stale.is_none() {
+                fresh.stale = Some(DEPENDENCIES_CHANGED.to_string());
+            }
+        }
+        result
     }
 
     /// Asked last before a request runs, once a write holds the writer
@@ -1547,7 +1590,8 @@ impl Server {
         let still = if graph {
             self.graph_failed()
         } else {
-            self.files_changed()
+            // Found by the request that changed them, not in the files.
+            why == DEPENDENCIES_CHANGED || self.files_changed()
         };
         if !still {
             self.fresh
@@ -1846,10 +1890,10 @@ impl Server {
             withheld.store(true, Ordering::Release);
             Err(NotServed::Unavailable)
         };
-        let result = {
+        let result = self.noting_dependencies(op, state, || {
             let _busy = self.busy();
             exec::execute_gated(request, state, &gate)
-        };
+        });
         if withheld.load(Ordering::Acquire) {
             return Queued::Withheld;
         }
@@ -2552,6 +2596,38 @@ mod tests {
             );
         }
         assert_eq!(server.phase.get(), Phase::Ready);
+        stop(server);
+    }
+
+    /// A `deps refresh` that changes the database's dependencies leaves the
+    /// handle stale, so it is opened again with an entity gazetteer that
+    /// knows them; one that changes nothing leaves it be, and so does any
+    /// other command.
+    #[test]
+    fn a_deps_refresh_that_changes_the_dependencies_reloads_the_handle() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = build_fixture(tmp.path());
+        let server = start(&proj.join(".axil/memory.axil"));
+        let cwd = proj.canonicalize().unwrap();
+        let state = server.state.get().unwrap();
+        let add = |name: &str| {
+            let warm = state.handle().unwrap();
+            let row = json!({"name": name, "status": "current"});
+            warm.db().insert("_deps", row).unwrap();
+        };
+        let stale = || server.fresh.lock().unwrap().stale.clone();
+
+        server.noting_dependencies("deps", state, || {});
+        server.noting_dependencies("store", state, || add("left-pad"));
+        assert_eq!(stale(), None);
+        server.noting_dependencies("deps", state, || add("frobnicator"));
+        assert_eq!(stale().as_deref(), Some(DEPENDENCIES_CHANGED));
+        served(send_settled(&server, &["boot"], &cwd));
+        assert_eq!(server.stats.reloads.load(Ordering::Acquire), 1);
+        assert_eq!(
+            server.stats.last_reload().as_deref(),
+            Some(DEPENDENCIES_CHANGED)
+        );
         stop(server);
     }
 

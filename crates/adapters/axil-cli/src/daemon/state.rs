@@ -179,6 +179,14 @@ const OPS: &[&str] = &[
     "since",
     "store",
     "checkpoint",
+    "auto-capture",
+    "extract-entities",
+    "auto-link",
+    "worker",
+    "beliefs",
+    "session-heal",
+    "maintain",
+    "deps",
 ];
 
 /// The command a command line runs, as [`Stats`] files it: the first word
@@ -316,6 +324,10 @@ impl Stats {
 /// old one at every commit, so its inode changes with each write the handle
 /// makes. A rebuilt or restored index replaces the directory.
 ///
+/// The project manifests the handle's entity gazetteer reads, too (size and
+/// modification time): it is built once per handle, so a dependency an edit
+/// adds is known only to a handle opened after it.
+///
 /// Apart from those, the size and modification time of each redb store
 /// ([`FileFp::content`]): a backup copied over a store in place keeps its
 /// inode. The handle's own writes change them too, so they are compared
@@ -326,6 +338,7 @@ pub struct FileFp {
     config: Option<(PathBuf, u64, i128)>,
     stores: Vec<(&'static str, Option<(u64, u64)>)>,
     plugins: Option<i128>,
+    manifests: Vec<(PathBuf, Option<(u64, i128)>)>,
     content: Vec<(&'static str, Option<(u64, i128)>)>,
 }
 
@@ -373,6 +386,21 @@ impl FileFp {
         let plugins = std::fs::metadata(dir.join("plugins"))
             .ok()
             .map(|m| mtime_ns(&m));
+        // As the handle finds its project: the directory holding `.axil/`.
+        let project = (dir.file_name() == Some(std::ffi::OsStr::new(".axil")))
+            .then(|| dir.parent())
+            .flatten();
+        let manifests = project
+            .map(axil_core::gazetteer::project_manifests)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|path| {
+                let stat = std::fs::metadata(&path)
+                    .ok()
+                    .map(|m| (m.len(), mtime_ns(&m)));
+                (path, stat)
+            })
+            .collect();
         let content = REDB_STORES
             .iter()
             .map(|suffix| {
@@ -387,6 +415,7 @@ impl FileFp {
             config,
             stores,
             plugins,
+            manifests,
             content,
         }
     }
@@ -413,6 +442,18 @@ impl FileFp {
         }
         if self.plugins != now.plugins {
             return Some(Change::Reload("the plugins directory changed".to_string()));
+        }
+        if self.manifests != now.manifests {
+            let edited = self
+                .manifests
+                .iter()
+                .zip(&now.manifests)
+                .find(|(was, is)| was != is)
+                .map(|((path, _), _)| path);
+            return Some(Change::Reload(match edited {
+                Some(path) => format!("{} changed", path.display()),
+                None => "the project's workspace members changed".to_string(),
+            }));
         }
         if !content {
             return None;
@@ -539,5 +580,20 @@ mod tests {
             with_ts.changed(&configured, false),
             Some(Change::Reload(why)) if why.ends_with("axil.toml changed")
         ));
+
+        // A manifest the entity gazetteer reads, and a workspace member's
+        // that appears with it.
+        let cargo = "[workspace]\nmembers = [\"crates/*\"]\n";
+        std::fs::write(tmp.path().join("Cargo.toml"), cargo).unwrap();
+        let with_manifest = FileFp::read(&key);
+        assert!(matches!(
+            configured.changed(&with_manifest, false),
+            Some(Change::Reload(why)) if why.ends_with("Cargo.toml changed")
+        ));
+        std::fs::create_dir_all(tmp.path().join("crates/a")).unwrap();
+        std::fs::write(tmp.path().join("crates/a/Cargo.toml"), b"[package]\n").unwrap();
+        let with_member = FileFp::read(&key);
+        assert!(with_manifest.changed(&with_member, false).is_some());
+        assert_eq!(with_member.changed(&FileFp::read(&key), true), None);
     }
 }

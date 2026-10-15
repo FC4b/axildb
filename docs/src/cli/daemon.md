@@ -245,9 +245,13 @@ Before a request, again before a write once it is next in line, and once a
 second, the daemon checks whether the files behind its open handle changed
 without it: the config file it reads, the inode of the database or of any
 companion store (a backup renamed over it, a store removed by `compact
---drop-engine` or created by another command), and the plugins directory. Any
-change, or a graph that failed to load, makes it finish the requests running
-on the old handle and open the database again. Until it has, every command is
+--drop-engine` or created by another command), the plugins directory, and the
+project manifests entity extraction reads its known names from (`Cargo.toml`
+and its workspace members', `package.json`, `pyproject.toml`). Any change, a
+graph that failed to load, or a `deps refresh` it ran that changed the
+database's dependencies makes it finish the requests running on the old
+handle and open the database again, so the names a new dependency adds are
+known to the commands after it. Until it has, every command is
 handed back unrun, so a write never lands in a file that is no longer the
 database.
 
