@@ -307,6 +307,38 @@ impl Fixture {
             .unwrap_or_default()
     }
 
+    /// The hook queue.
+    fn queue(&self) -> PathBuf {
+        self.proj.join(".axil/hook-queue")
+    }
+
+    /// Queue `job` as a hook does, its name placing it `n`th.
+    fn queue_job(&self, n: usize, job: &Value) {
+        std::fs::create_dir_all(self.queue()).unwrap();
+        let name = format!("20260101T000000.{n:09}Z-1-{n}.job");
+        std::fs::write(self.queue().join(name), job.to_string()).unwrap();
+    }
+
+    /// The jobs queued or running.
+    fn queued(&self) -> Vec<PathBuf> {
+        std::fs::read_dir(self.queue())
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .map(|e| e.path())
+                    .filter(|p| p.extension().is_some_and(|x| x == "job" || x == "running"))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Until the daemon has run `jobs` queued jobs and none is left.
+    fn drained(&self, jobs: u64) -> bool {
+        wait_for(Duration::from_secs(120), || {
+            self.queued().is_empty() && self.live()["queue"]["jobs"] == jobs
+        })
+    }
+
     /// The stores no handle has open any more: each opens read-only, which
     /// redb refuses for a file a writer left without closing.
     fn closed_cleanly(&self) -> Result<(), String> {
@@ -1473,19 +1505,35 @@ fn another_build_environment_or_database_is_not_sent() {
     );
 }
 
-/// Hook writes queued while the daemon runs: the drainer's commands that
-/// the daemon runs go to it, the others lease the database, and every job
-/// runs once, in the order queued, none of them finding the database busy.
+/// Hook writes queued while the daemon runs, a session's close among them:
+/// its drain thread runs every job once, in the order queued, none of them
+/// finding the database busy. The steps it does not run in-process run in
+/// a process of their own, the database let go of for them and opened
+/// again after.
 #[test]
-fn queued_hook_writes_run_once_in_order_beside_the_daemon() {
+fn queued_hook_writes_run_once_in_order_in_the_daemon() {
     let fx = fixture();
+    // Distinct events, not one fact restated: none supersedes another, so
+    // the session's heal finds none to purge.
+    std::fs::write(
+        fx.proj.join("axil.toml"),
+        "[lifecycle.tables.decisions]\nsupersede = false\n\n\
+         [lifecycle.tables.context]\nsupersede = false\n",
+    )
+    .unwrap();
     fx.start();
-    let queue = fx.proj.join(".axil/hook-queue");
-    std::fs::create_dir_all(&queue).unwrap();
     let mut stores = 0;
     for n in 0..50 {
         let job = match n % 5 {
-            // Not a command the daemon runs: it leases the database.
+            _ if n == 27 => serde_json::json!({
+                "op": "close_session",
+                "session": "s-queued",
+                "project_dir": fx.proj,
+                "files": ["src/auth.rs"],
+                "content": "Fixed the auth timeout in validate_token",
+                "ended_at": "2026-01-01T00:00:00Z",
+            }),
+            // Not a command the daemon runs in-process.
             4 => serde_json::json!({"op": "axil", "args": ["list", "decisions"]}),
             3 => {
                 stores += 1;
@@ -1501,24 +1549,23 @@ fn queued_hook_writes_run_once_in_order_beside_the_daemon() {
                 serde_json::json!({"op": "axil", "args": ["store", "decisions", data.to_string()]})
             }
         };
-        let name = format!("20260101T000000.{n:09}Z-1-{n}.job");
-        std::fs::write(queue.join(name), job.to_string()).unwrap();
+        fx.queue_job(n, &job);
     }
+    // A hook's drainer pokes the daemon and leaves the queue to it.
     let drain = fx.axil(&["hook", "drain"]);
     assert!(drain.status.success(), "{}", text(&drain.stderr));
-    let log = std::fs::read_to_string(queue.join("drain.log")).unwrap_or_default();
+    assert!(fx.drained(50), "{}", fx.live());
+    let log = std::fs::read_to_string(fx.queue().join("drain.log")).unwrap_or_default();
     assert!(!log.contains("busy") && !log.contains("failed"), "{log}");
-    let left: Vec<_> = std::fs::read_dir(&queue)
-        .unwrap()
-        .filter_map(|e| e.ok())
-        .filter(|e| {
-            e.path()
-                .extension()
-                .is_some_and(|x| x == "job" || x == "running")
-        })
-        .collect();
-    assert!(left.is_empty(), "{left:?}");
-    assert_eq!(fx.served("store"), stores, "{}", fx.live());
+    let live = fx.live();
+    let queue = &live["queue"];
+    assert_eq!(queue["failed"], 0, "{live}");
+    // The stores, and the session's own, ran in-process.
+    assert!(fx.served("store") > stores, "{live}");
+    // Each run of `list` steps had the database let go of, and only those.
+    let yields = queue["yields"].as_u64().unwrap();
+    assert!(yields >= 1, "{live}");
+    assert_eq!(live["leases_granted"], yields, "{live}");
 
     // Every one once, and in order: ids rise with the time they were made.
     let mut rows: Vec<(String, i64)> = Vec::new();
@@ -1533,8 +1580,170 @@ fn queued_hook_writes_run_once_in_order_beside_the_daemon() {
     }
     rows.sort();
     let seqs: Vec<i64> = rows.iter().map(|(_, seq)| *seq).collect();
-    let want: Vec<i64> = (0..50).filter(|n| n % 5 != 4).collect();
+    let want: Vec<i64> = (0..50).filter(|n| n % 5 != 4 && *n != 27).collect();
     assert_eq!(seqs, want);
+    let out = fx.axil(&["list", "_sessions"]);
+    let sessions: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let closed = sessions
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| row["data"]["session"] == "s-queued")
+        .count();
+    assert_eq!(closed, 1, "{sessions}");
+}
+
+/// The daemon killed in the middle of a job: the job, left `.running`, is
+/// set aside into `interrupted/` by the next drainer, here the next
+/// daemon, and never run again; the job after it runs.
+#[test]
+fn a_job_the_killed_daemon_was_running_is_set_aside() {
+    if !built_with(cfg!(debug_assertions), "the debug ops") {
+        return;
+    }
+    let fx = fixture();
+    let started = fx.start();
+    let socket = PathBuf::from(started["socket"].as_str().unwrap());
+    // A write can't start while the writer lock is held.
+    let hold = raw_call(&socket, r#"{"op":"debug_hold","ms":60000,"writer":true}"#);
+    assert_eq!(hold["ok"], true);
+    for (n, summary) in ["the interrupted write", "the write after it"]
+        .iter()
+        .enumerate()
+    {
+        let data = serde_json::json!({ "summary": summary });
+        fx.queue_job(
+            n,
+            &serde_json::json!({"op": "axil", "args": ["store", "decisions", data.to_string()]}),
+        );
+    }
+    let drain = fx.axil(&["hook", "drain"]);
+    assert!(drain.status.success(), "{}", text(&drain.stderr));
+    let running = fx.queue().join("20260101T000000.000000000Z-1-0.running");
+    assert!(
+        wait_for(Duration::from_secs(10), || running.is_file()),
+        "{}",
+        fx.live()
+    );
+    signal(started["pid"].as_u64().unwrap(), "-KILL");
+    assert!(wait_for(Duration::from_secs(10), || !fx.locked()));
+    assert!(running.is_file());
+
+    fx.start();
+    assert!(fx.drained(1), "{}", fx.live());
+    assert!(!running.exists());
+    assert!(fx
+        .queue()
+        .join("interrupted/20260101T000000.000000000Z-1-0.running")
+        .is_file());
+    let listed = text(&fx.axil(&["list", "decisions"]).stdout);
+    assert!(!listed.contains("the interrupted write"), "{listed}");
+    assert!(listed.contains("the write after it"), "{listed}");
+}
+
+/// A drainer from before OS locks takes the queue by creating `drain.lock`,
+/// and leaves it while the file is there and fresh. The daemon leaves the
+/// queue to a live one, and while it holds the queue itself it keeps the
+/// file there and fresh, so such a drainer exits.
+#[test]
+fn the_daemon_and_a_drainer_from_before_os_locks_leave_the_queue_to_each_other() {
+    let fx = fixture();
+    std::fs::create_dir_all(fx.queue()).unwrap();
+    let lock = fx.queue().join("drain.lock");
+    // A live one: its pid, written a moment ago.
+    std::fs::write(&lock, std::process::id().to_string()).unwrap();
+    fx.start();
+    let data = serde_json::json!({"summary": "queued beside an old drainer"});
+    fx.queue_job(
+        0,
+        &serde_json::json!({"op": "axil", "args": ["store", "decisions", data.to_string()]}),
+    );
+    let drain = fx.axil(&["hook", "drain"]);
+    assert!(drain.status.success(), "{}", text(&drain.stderr));
+    // Past the thread's poll.
+    std::thread::sleep(Duration::from_secs(3));
+    assert_eq!(fx.queued().len(), 1, "{}", fx.live());
+    assert_eq!(fx.live()["queue"]["draining"], false, "{}", fx.live());
+
+    // It is done: the daemon takes the queue.
+    std::fs::remove_file(&lock).unwrap();
+    assert!(fx.drained(1), "{}", fx.live());
+    assert_eq!(fx.live()["queue"]["draining"], true, "{}", fx.live());
+    let body = std::fs::read_to_string(&lock).unwrap();
+    assert!(body.starts_with("flock "), "{body}");
+    let created = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&lock);
+    assert_eq!(
+        created.unwrap_err().kind(),
+        std::io::ErrorKind::AlreadyExists
+    );
+    let age = std::fs::metadata(&lock)
+        .unwrap()
+        .modified()
+        .unwrap()
+        .elapsed()
+        .unwrap();
+    assert!(age < Duration::from_secs(60), "{age:?}");
+}
+
+/// A hook the daemon does not serve (here another environment) marks the
+/// write it queues for its own drainer: the daemon lets go of the queue at
+/// that job, the hook's drainer runs it, and the daemon takes the queue
+/// back for the jobs of the hooks it serves.
+#[test]
+fn a_hook_the_daemon_does_not_serve_drains_its_own_write() {
+    let fx = fixture();
+    std::fs::create_dir_all(fx.queue()).unwrap();
+    fx.start();
+    assert!(
+        wait_for(Duration::from_secs(10), || fx.live()["queue"]["draining"]
+            == true),
+        "{}",
+        fx.live()
+    );
+    let failed_command = |env: &[(&str, &str)]| {
+        let event = serde_json::json!({
+            "hook_event_name": "PostToolUse",
+            "session_id": "s-other",
+            "cwd": fx.proj,
+            "tool_name": "Bash",
+            "tool_input": {"command": "cargo test"},
+            "tool_response": {
+                "exit_code": 101,
+                "stdout": "error[E0425]: cannot find value timeout_ms in this scope",
+                "stderr": "",
+            },
+        });
+        let out = axil_env(
+            BIN,
+            &fx.proj,
+            &["hook", "run", "--dialect", "claude"],
+            Some(event.to_string().as_bytes()),
+            env,
+        );
+        assert!(out.status.success(), "{}", text(&out.stderr));
+    };
+    failed_command(&[("AXIL_LLM_API_KEY", "x")]);
+    assert!(
+        wait_for(Duration::from_secs(60), || fx.queued().is_empty()
+            && fx.live()["queue"]["handed_over"] == 1
+            && fx.live()["queue"]["draining"] == true),
+        "{}",
+        fx.live()
+    );
+    assert_eq!(fx.live()["queue"]["jobs"], 0, "{}", fx.live());
+    let log = std::fs::read_to_string(fx.queue().join("drain.log")).unwrap_or_default();
+    assert!(
+        log.contains("to the drainer of the hook that queued it"),
+        "{log}"
+    );
+    assert!(!log.contains("failed"), "{log}");
+
+    failed_command(&[]);
+    assert!(fx.drained(1), "{}", fx.live());
+    assert_eq!(fx.live()["queue"]["handed_over"], 1, "{}", fx.live());
 }
 
 /// `reembed` has the database leased before it touches the vector store,

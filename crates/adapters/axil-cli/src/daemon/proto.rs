@@ -143,9 +143,14 @@ pub enum Op {
     DebugFailGraph,
     /// Debug builds only: hold the open database in the background for
     /// `ms` milliseconds, as a slow warm-up would, so a test can watch a
-    /// shutdown wait for it. Answered by `{"op":"debug_hold","ok":true}`.
+    /// shutdown wait for it; with `writer`, hold the writer lock too, as a
+    /// slow write would. Answered by `{"op":"debug_hold","ok":true}`.
     #[cfg(debug_assertions)]
-    DebugHold { ms: u64 },
+    DebugHold {
+        ms: u64,
+        #[serde(default)]
+        writer: bool,
+    },
     /// Debug builds only: run the open guard on the database the daemon
     /// serves, as a command that opened it would, so a test can see that
     /// the guard's check is armed in the daemon. Answered by

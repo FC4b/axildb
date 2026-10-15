@@ -1013,11 +1013,14 @@ impl Server {
                 write_json(&mut stream, &ack)
             }
             #[cfg(debug_assertions)]
-            Op::DebugHold { ms } => {
+            Op::DebugHold { ms, writer } => {
                 self.spawn_background("axil-debug-hold", move |server| {
                     let _busy = server.busy();
-                    let held = server.state.get().and_then(WarmState::handle);
+                    let state = server.state.get();
+                    let held = state.and_then(WarmState::handle);
+                    let writing = state.filter(|_| writer).map(WarmState::debug_writer);
                     thread::sleep(Duration::from_millis(ms));
+                    drop(writing);
                     drop(held);
                 });
                 let ack = Ack {

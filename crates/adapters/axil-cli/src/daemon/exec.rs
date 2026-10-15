@@ -319,6 +319,12 @@ impl WarmState {
         self.slot_read().clone()
     }
 
+    /// Debug builds only: the writer lock, held as a write holds it.
+    #[cfg(debug_assertions)]
+    pub fn debug_writer(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.writer.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
     /// How many writes clients sent are waiting for the one running. The
     /// queue's drain thread lets them go first: it starts its next step
     /// only once none waits.
