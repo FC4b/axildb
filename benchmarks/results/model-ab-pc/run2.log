@@ -1,0 +1,19 @@
+commit: 615af6dd73a34de8781a95c3a7c913a84bffb8c2
+  [ok] data longmemeval_s_cleaned.json
+  [ok] data longmemeval_m_cleaned.json
+  [ok] model bge-small-en-v1.5/model.onnx
+  [ok] model bge-small-en-v1.5/tokenizer.json
+  [ok] model granite-embedding-small-english-r2/model.onnx
+  [ok] model granite-embedding-small-english-r2/model.onnx_data
+  [ok] model granite-embedding-small-english-r2/tokenizer.json
+  [ok] model gte-modernbert-base/model.onnx
+  [ok] model gte-modernbert-base/tokenizer.json
+  [ok] Cargo.lock is the pinned one
+  [ok] harness 474c2ee67ed448ac8d47c19ec1fc3d08ac092cb5a361ccbedf5a6ee1ed2174cb
+check passed
+m5-bge: benchmarks/results/model-ab-pc/m5-bge.json exists, skipped
+s60-bge: benchmarks/results/model-ab-pc/s60-bge.json exists, skipped
+s60-granite: benchmarks/results/model-ab-pc/s60-granite.json exists, skipped
+19:36:23 m5-granite: start (load 4.58)
+21:43:31 m5-granite: exit 0 (load 3.99)
+done; results in benchmarks/results/model-ab-pc

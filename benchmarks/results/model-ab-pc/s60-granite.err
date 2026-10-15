@@ -1,0 +1,162 @@
+╔══════════════════════════════════════════════════╗
+║  LongMemEval Benchmark for Axil                 ║
+╠══════════════════════════════════════════════════╣
+║  Variant:  s                                     ║
+║  Strategy: recall-qtc                            ║
+║  Rerank:   off                                   ║
+║  Top-K:    5                                     ║
+║  Data:     benchmarks/longmemeval/data/longmemeval_s_cleaned.json║
+╚══════════════════════════════════════════════════╝
+
+[1/3] Loading dataset...
+       60 questions loaded, evaluating 60
+[2/3] Loading embedder (granite-small)...
+       1 worker thread(s)
+[3/4] Evaluating 60 questions...
+[axil-vector] CPU execution provider (no GPU feature compiled in)
+    [timing] db=0.1s prep=0.0s insert=281.7s fts=0.0s sessions=53
+    [timing] query=0.2s total=282.0s
+       1/60    [timing] db=0.0s prep=0.0s insert=284.0s fts=0.0s sessions=50
+    [timing] query=0.2s total=284.2s
+    [timing] db=0.0s prep=0.0s insert=278.4s fts=0.0s sessions=48
+    [timing] query=0.0s total=278.5s
+    [timing] db=0.0s prep=0.0s insert=284.6s fts=0.0s sessions=48
+    [timing] query=0.0s total=284.7s
+    [timing] db=0.0s prep=0.0s insert=267.3s fts=0.0s sessions=53
+    [timing] query=0.0s total=267.4s
+    [timing] db=0.1s prep=0.0s insert=261.6s fts=0.0s sessions=51
+    [timing] query=0.0s total=261.7s
+    [timing] db=0.0s prep=0.0s insert=251.0s fts=0.0s sessions=48
+    [timing] query=0.0s total=251.1s
+    [timing] db=0.0s prep=0.0s insert=236.8s fts=0.0s sessions=51
+    [timing] query=0.3s total=237.2s
+    [timing] db=0.0s prep=0.0s insert=275.3s fts=0.0s sessions=47
+    [timing] query=0.0s total=275.4s
+    [timing] db=0.0s prep=0.0s insert=277.2s fts=0.0s sessions=47
+    [timing] query=0.1s total=277.3s
+       10/60    [timing] db=0.0s prep=0.0s insert=285.6s fts=0.0s sessions=44
+    [timing] query=0.1s total=285.7s
+    [timing] db=0.0s prep=0.0s insert=264.4s fts=0.0s sessions=50
+    [timing] query=0.1s total=264.5s
+    [timing] db=0.1s prep=0.0s insert=215.8s fts=0.0s sessions=53
+    [timing] query=0.1s total=215.9s
+    [timing] db=0.0s prep=0.0s insert=156.9s fts=0.0s sessions=44
+    [timing] query=0.1s total=157.0s
+    [timing] db=0.0s prep=0.0s insert=139.8s fts=0.0s sessions=52
+    [timing] query=0.0s total=139.9s
+    [timing] db=0.0s prep=0.0s insert=175.8s fts=0.0s sessions=50
+    [timing] query=0.1s total=175.9s
+    [timing] db=0.0s prep=0.0s insert=152.9s fts=0.0s sessions=46
+    [timing] query=0.0s total=153.0s
+    [timing] db=0.0s prep=0.1s insert=144.0s fts=0.0s sessions=46
+    [timing] query=0.0s total=144.2s
+    [timing] db=0.0s prep=0.0s insert=152.3s fts=0.0s sessions=49
+    [timing] query=0.0s total=152.4s
+    [timing] db=0.0s prep=0.1s insert=148.5s fts=0.0s sessions=48
+    [timing] query=0.0s total=148.7s
+       20/60    [timing] db=0.0s prep=0.1s insert=151.1s fts=0.0s sessions=44
+    [timing] query=0.0s total=151.2s
+    [timing] db=0.0s prep=0.0s insert=142.3s fts=0.0s sessions=53
+    [timing] query=0.0s total=142.4s
+    [timing] db=0.0s prep=0.0s insert=149.1s fts=0.0s sessions=47
+    [timing] query=0.0s total=149.2s
+    [timing] db=0.0s prep=0.0s insert=143.7s fts=0.0s sessions=49
+    [timing] query=0.0s total=143.8s
+    [timing] db=0.0s prep=0.0s insert=139.4s fts=0.0s sessions=52
+    [timing] query=0.1s total=139.5s
+    [timing] db=0.0s prep=0.0s insert=161.9s fts=0.0s sessions=50
+    [timing] query=0.0s total=162.0s
+    [timing] db=0.0s prep=0.0s insert=163.0s fts=0.0s sessions=44
+    [timing] query=0.1s total=163.1s
+    [timing] db=0.0s prep=0.0s insert=159.2s fts=0.0s sessions=51
+    [timing] query=0.1s total=159.3s
+    [timing] db=0.0s prep=0.1s insert=168.0s fts=0.0s sessions=48
+    [timing] query=0.0s total=168.2s
+    [timing] db=0.0s prep=0.0s insert=158.6s fts=0.0s sessions=50
+    [timing] query=0.0s total=158.6s
+       30/60    [timing] db=0.0s prep=0.0s insert=152.9s fts=0.0s sessions=48
+    [timing] query=0.1s total=153.1s
+    [timing] db=0.0s prep=0.0s insert=145.2s fts=0.0s sessions=51
+    [timing] query=0.0s total=145.2s
+    [timing] db=0.0s prep=0.1s insert=146.4s fts=0.0s sessions=48
+    [timing] query=0.0s total=146.6s
+    [timing] db=0.0s prep=0.0s insert=149.1s fts=0.0s sessions=48
+    [timing] query=0.1s total=149.2s
+    [timing] db=0.0s prep=0.0s insert=144.3s fts=0.0s sessions=48
+    [timing] query=0.0s total=144.3s
+    [timing] db=0.0s prep=0.0s insert=140.8s fts=0.0s sessions=53
+    [timing] query=0.1s total=141.0s
+    [timing] db=0.0s prep=0.0s insert=151.1s fts=0.0s sessions=47
+    [timing] query=0.1s total=151.2s
+    [timing] db=0.0s prep=0.0s insert=147.7s fts=0.0s sessions=42
+    [timing] query=0.0s total=147.7s
+    [timing] db=0.0s prep=0.1s insert=138.9s fts=0.0s sessions=50
+    [timing] query=0.0s total=139.0s
+    [timing] db=0.0s prep=0.0s insert=156.4s fts=0.0s sessions=41
+    [timing] query=0.0s total=156.4s
+       40/60    [timing] db=0.0s prep=0.0s insert=151.6s fts=0.0s sessions=40
+    [timing] query=0.0s total=151.6s
+    [timing] db=0.0s prep=0.0s insert=144.1s fts=0.0s sessions=51
+    [timing] query=0.0s total=144.2s
+    [timing] db=0.0s prep=0.1s insert=156.9s fts=0.0s sessions=52
+    [timing] query=0.1s total=157.2s
+    [timing] db=0.0s prep=0.0s insert=159.0s fts=0.0s sessions=49
+    [timing] query=0.0s total=159.0s
+    [timing] db=0.0s prep=0.1s insert=160.1s fts=0.0s sessions=47
+    [timing] query=0.0s total=160.2s
+    [timing] db=0.0s prep=0.0s insert=165.1s fts=0.0s sessions=49
+    [timing] query=0.0s total=165.1s
+    [timing] db=0.0s prep=0.1s insert=161.1s fts=0.0s sessions=47
+    [timing] query=0.0s total=161.2s
+    [timing] db=0.0s prep=0.0s insert=150.8s fts=0.0s sessions=47
+    [timing] query=0.0s total=150.9s
+    [timing] db=0.0s prep=0.0s insert=128.1s fts=0.0s sessions=55
+    [timing] query=0.0s total=128.2s
+    [timing] db=0.0s prep=0.0s insert=128.7s fts=0.0s sessions=48
+    [timing] query=0.0s total=128.7s
+       50/60    [timing] db=0.0s prep=0.0s insert=127.6s fts=0.0s sessions=48
+    [timing] query=0.0s total=127.7s
+    [timing] db=0.0s prep=0.0s insert=134.5s fts=0.0s sessions=48
+    [timing] query=0.0s total=134.6s
+    [timing] db=0.0s prep=0.0s insert=136.2s fts=0.0s sessions=46
+    [timing] query=0.0s total=136.3s
+    [timing] db=0.0s prep=0.0s insert=137.0s fts=0.0s sessions=47
+    [timing] query=0.0s total=137.0s
+    [timing] db=0.0s prep=0.0s insert=136.1s fts=0.0s sessions=48
+    [timing] query=0.1s total=136.2s
+    [timing] db=0.0s prep=0.0s insert=139.2s fts=0.0s sessions=47
+    [timing] query=0.1s total=139.3s
+    [timing] db=0.0s prep=0.0s insert=140.9s fts=0.0s sessions=44
+    [timing] query=0.0s total=141.0s
+    [timing] db=0.0s prep=0.0s insert=132.6s fts=0.0s sessions=49
+    [timing] query=0.1s total=132.8s
+    [timing] db=0.0s prep=0.0s insert=124.9s fts=0.0s sessions=52
+    [timing] query=0.0s total=125.0s
+    [timing] db=0.0s prep=0.0s insert=128.8s fts=0.0s sessions=53
+    [timing] query=0.0s total=128.9s
+       60/60       60/60 done.          
+[4/4] Results:
+
+	Command being timed: "benchmarks/longmemeval/target/release/longmemeval-bench --variant s --limit 0 --strategy recall-qtc --top-k 5 --model granite-small --data-dir benchmarks/longmemeval/data --jobs 1 --question-ids benchmarks/longmemeval/model-ab/s60-question-ids.json"
+	User time (seconds): 72538.78
+	System time (seconds): 70.73
+	Percent of CPU this job got: 684%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 2:56:52
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 9844692
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 157043
+	Minor (reclaiming a frame) page faults: 2949219
+	Voluntary context switches: 331724
+	Involuntary context switches: 391439
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 0
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0
