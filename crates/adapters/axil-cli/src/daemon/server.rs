@@ -531,6 +531,9 @@ impl Server {
             return Err(Unopened::Unservable(why));
         }
         let _ = self.state.set(state);
+        // Whatever kept an earlier daemon from serving is gone, which a
+        // client that finds this one ready must not be told otherwise.
+        let _ = fs::remove_file(self.run.blocked());
         // On disk before any client can see it: `daemon status` must not
         // report a daemon that served as one still starting.
         {
@@ -540,8 +543,6 @@ impl Server {
         self.write_info_as(Phase::Ready.name());
         self.phase.advance(Phase::Starting, Phase::Ready);
         log("ready");
-        // Whatever kept an earlier daemon from serving is gone.
-        let _ = fs::remove_file(self.run.blocked());
         self.prewarm();
         if self.opts.drain_queue {
             match super::drain::spawn(self.clone()) {
