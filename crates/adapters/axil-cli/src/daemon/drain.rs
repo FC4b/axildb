@@ -39,7 +39,8 @@
 //!
 //! When the daemon stops, the thread finishes the job it is on and lets go
 //! of the lock; the daemon then starts `hook drain` for the jobs left, once
-//! it has closed the database.
+//! it has closed the database. A step of that job the closing database can
+//! no longer run runs in a process of its own, as `hook drain` runs it.
 //!
 //! The thread is the only one in the daemon that starts processes, and the
 //! only one that lets go of the lock, so no process it starts can hold a
@@ -75,10 +76,6 @@ const TOUCH_EVERY: Duration = Duration::from_secs(60);
 /// How long the thread waits, once it let go of the queue at a job queued
 /// by a hook it does not serve, for that hook's drainer to take it.
 const HANDOVER_GRACE: Duration = Duration::from_secs(5);
-
-/// How many times a step that the daemon does not run asks the daemon to let
-/// go of the database before it gives up.
-const YIELD_TRIES: u32 = 3;
 
 /// The stack the thread runs on: `main`'s, since it parses command lines.
 const STACK: usize = 32 * 1024 * 1024;
@@ -311,22 +308,19 @@ impl WarmRunner<'_> {
         if self.yielded.is_some() {
             return true;
         }
-        for _ in 0..YIELD_TRIES {
-            if self.server.stopping() {
-                break;
+        match self.server.yield_db() {
+            Ok(id) => {
+                self.yielded = Some(id);
+                self.server.queue().yields.fetch_add(1, Ordering::AcqRel);
+                true
             }
-            match self.server.yield_db() {
-                Ok(id) => {
-                    self.yielded = Some(id);
-                    self.server.queue().yields.fetch_add(1, Ordering::AcqRel);
-                    return true;
-                }
-                Err(why) => super::server::log(format!(
+            Err(why) => {
+                super::server::log(format!(
                     "the queue could not have the database let go of: {why}"
-                )),
+                ));
+                false
             }
         }
-        false
     }
 
     /// Have the daemon open the database again, if it let go of it for the
@@ -389,10 +383,7 @@ impl JobRunner for WarmRunner<'_> {
                     self.server.wait_for_wake(POLL);
                 }
                 Queued::Wait | Queued::Stopped => {
-                    return Err(format!(
-                        "`axil {}` not run: the daemon stopped",
-                        args.first().map(String::as_str).unwrap_or("")
-                    ));
+                    return self.own_process(args, stdin, "the daemon is stopping");
                 }
             }
         }
@@ -423,7 +414,9 @@ impl JobRunner for WarmRunner<'_> {
 
 impl WarmRunner<'_> {
     /// Run a step the daemon does not run in a process of its own, once the
-    /// daemon has let go of the database.
+    /// daemon has let go of the database. Once the daemon is stopping, the
+    /// database is closing, if not closed: the step runs without waiting
+    /// for it, as `hook drain` runs it, waiting out the close.
     fn own_process(
         &mut self,
         args: &[String],
@@ -434,11 +427,9 @@ impl WarmRunner<'_> {
             "running queued `axil {}` in a process of its own: {why}",
             args.first().map(String::as_str).unwrap_or("")
         ));
-        if !self.start_yield() {
-            return Err(format!(
-                "`axil {}` not run: the daemon could not let go of the database",
-                args.first().map(String::as_str).unwrap_or("")
-            ));
+        while !self.server.stopping() && !self.start_yield() {
+            self.keep_lock_fresh();
+            self.server.wait_for_wake(POLL);
         }
         self.server
             .queue()
