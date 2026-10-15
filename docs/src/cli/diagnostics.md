@@ -81,8 +81,9 @@ reports its state from a marker, without reading the rows:
 
 - **ok, not built yet**: the first insert that auto-links builds it.
 - **warning, stale**: an axil binary that predates the index added or deleted
-  `_entities` rows. Auto-linking scans until the next insert that auto-links
-  repairs the index; `axil heal --reindex` repairs it too.
+  `_entities` rows (which it can do only before a newer binary first opens
+  the database writable). Auto-linking scans until the next insert that
+  auto-links repairs the index; `axil heal --reindex` repairs it too.
 - **warning, build failed on row `<id>`**: that row's body does not decode
   (corrupt, or sealed under an encryption key the process lacks), so
   auto-linking scans every row, as it did before the index. The build is

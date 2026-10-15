@@ -86,8 +86,38 @@ your `PATH` at the same time:
 cargo install --path crates/adapters/axil-cli   # from the same checkout
 ```
 
-Mixing versions doesn't corrupt anything, but the graph file makes it cost
-time. Newer builds keep per-node adjacency tables next to the edges in
+### Builds from before the keyed table index
+
+Newer builds keep the list of each table's record ids as one entry per id
+(see [Table membership](../concepts/storage.md#table-membership)); older
+builds kept one JSON array per table. The first time a newer build opens a
+database for writing, it converts the table index, in one transaction. A
+read-only open (a hot read command falls back to one while another process
+holds the database) reads the old layout as it is and converts nothing.
+
+From then on, a build from before the change refuses the database instead of
+opening it:
+
+```
+storage error: table_index is of type Table<&str, axil_core::TableCounts (written by a newer axil; upgrade axil to open this database)>
+```
+
+It would otherwise read id lists that no longer change: it would miss every
+record written since, and its auto-linking would create duplicate entities.
+Nothing is lost. Install the newer build on your `PATH`, as above.
+
+To keep using an older build on a database, copy the database's files before
+a newer build first opens it (see
+[Portability](../concepts/storage.md#portability--what-to-copy)). A database a
+newer build has already converted can be converted back with
+`Storage::downgrade_table_index` in the Rust API; there is no CLI command for
+it. The next writable open by a newer build converts it again.
+
+### Adjacency tables in the graph file
+
+Among builds that can open the same database, mixing versions doesn't corrupt
+anything, but the graph file makes it cost time. Newer builds keep per-node
+adjacency tables next to the edges in
 `memory.axil.graph`, and older builds write edges without updating them. The
 first graph operation of a newer build after an older one has written brings
 the tables up to date:

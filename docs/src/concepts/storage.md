@@ -21,6 +21,39 @@ sessions, entities, etc. Tier-2 Extensions own prefixed tables in the
 core `.axil` file (e.g. `_checkpoint_records`, `_dep_docs`,
 `_idx_code_proxies`).
 
+### Table membership
+
+A table lists its records in the order their ids first joined it: `list`
+returns them in that order (a re-insert keeps an id's place; an id moved in
+from another table joins last), and `list_newest` reads the end of it
+backwards. Record ids do not give that order, since ULIDs made in the same
+millisecond sort at random and an import keeps foreign ids, so the core file
+keeps it explicitly:
+
+- **One entry per listed id.** `_table_members` maps (table, position) to the
+  id and `_table_member_positions` maps (table, id) back to its position;
+  `table_index` holds each table's count and next position. An insert or
+  delete changes a few entries whatever the table's size. Builds before this
+  kept each table's ids as one JSON array, read, deduplicated and rewritten
+  whole on every insert and delete. With the array, the median insert into an
+  85,000-row table took 19.1 ms against 1.4 ms into a 100-row table in the
+  same file, and the median delete 16.1 ms against 1.3 ms
+  (`benchmarks/results/write-cost-vs-table-size-2026-10-15.json`). With the
+  keyed index the same comparison is 3.3 ms against 3.2 ms and 2.9 ms against
+  2.8 ms (`benchmarks/results/write-cost-vs-table-size-2026-10-16-keyed.json`,
+  same machine, both runs while other builds were loading it, the second run
+  more heavily, so compare the two tables within a run rather than across
+  runs).
+- **Converted on the first writable open.** The first writable open by a build
+  with the keyed index converts the JSON arrays in one write transaction: a
+  crash or an error leaves the file as it was, and the next open tries again.
+  It took 0.70 s for a file listing about 85,100 ids in the run above, and the
+  next open 10 ms. A read-only open converts nothing: it reads the arrays as
+  they are.
+- **Older builds refuse a converted file**, with an error saying to upgrade,
+  rather than read arrays that no longer change. See
+  [Mixing binary versions](../getting-started/installation.md#builds-from-before-the-keyed-table-index).
+
 ### The `_entities` key index
 
 Auto-linking resolves each entity it extracts from a new memory against the
@@ -47,8 +80,11 @@ transaction.
   `scripts/entity-key-index-measure.sh`).
 - **Older binaries on the same file.** An `axil` built before the index (for
   example the one on PATH that the hooks run, while an agent runs a newer
-  build) writes `_entities` without updating it. The marker holds a
-  fingerprint of the `_entities` id list, so once an older binary adds or
+  build) writes `_entities` without updating it. Such builds also predate the
+  [keyed table index](#table-membership), so they can only write a file a
+  newer build has not yet opened writable. The marker holds a fingerprint of
+  the `_entities` id list, and converting the table index carries it over
+  only when it still matches the list, so once an older binary adds or
   deletes an entity row the index is treated as stale: lookups scan, and the
   next insert that auto-links repairs it. Each row a lookup returns is also
   read back, so a row an older binary rewrote is not trusted either. One
