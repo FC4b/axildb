@@ -105,8 +105,9 @@ def auroc(scores, labels):
 
 def clusters_of(rows):
     """Group rows that are not independent: the same issue or record (the part
-    of `source` before '->') or the same text in any field. A PR title scored
-    once as one issue's fix and once as another's other_fix lands in one group."""
+    of `source` before '->') or the same text in any field, whichever field it
+    sits in. A PR title scored once as one issue's fix and once as another's
+    other_fix lands in one group."""
     parent = list(range(len(rows)))
 
     def find(i):
@@ -118,7 +119,7 @@ def clusters_of(rows):
     first = {}
     for i, r in enumerate(rows):
         keys = [("source", r["source"].split("->")[0])]
-        keys += [(f, " ".join(r[f].lower().split())) for f in ("error", "later", "old", "new") if f in r]
+        keys += [("text", " ".join(r[f].lower().split())) for f in ("error", "later", "old", "new") if f in r]
         for k in keys:
             if k in first:
                 parent[find(i)] = find(first[k])
@@ -314,7 +315,7 @@ def main():
                                        key=lambda kv: kv[1])[0] == target for r in rows]
                 res = evaluate(scores, rows, argmax_hits)
                 # Per-row scores, for paired comparisons between arms.
-                res["scores"] = {r["id"]: round(s, 6) for r, s in zip(rows, scores)}
+                res["scores"] = {r["id"]: float(s) for r, s in zip(rows, scores)}
                 res["latency_ms_p50"] = round(statistics.median(lat), 2)
                 res["latency_ms_p95"] = round(sorted(lat)[int(0.95 * (len(lat) - 1))], 2)
                 entry[decision + ("+sym" if sym else "")] = res

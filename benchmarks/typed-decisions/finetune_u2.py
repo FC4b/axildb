@@ -47,9 +47,12 @@ MAX_ONNX_PROB_DIFF = 1e-4
 
 
 def load_pairs(drop_repos):
-    rows = [json.loads(line) for line in PAIRS.read_text().splitlines() if line.strip()]
+    """Train and dev rows, plus the sha256 of the bytes they were read from."""
+    raw = PAIRS.read_bytes()
+    rows = [json.loads(line) for line in raw.decode("utf-8").splitlines() if line.strip()]
     rows = [r for r in rows if r["repo"].lower() not in drop_repos]
-    return [r for r in rows if r["split"] == "train"], [r for r in rows if r["split"] == "dev"]
+    return ([r for r in rows if r["split"] == "train"], [r for r in rows if r["split"] == "dev"],
+            hashlib.sha256(raw).hexdigest())
 
 
 def count_truncated(tok, rows):
@@ -139,7 +142,8 @@ def main():
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    train, dev = load_pairs(drop_repos)
+    train, dev, pairs_sha256 = load_pairs(drop_repos)
+    harvest_meta = json.loads(HARVEST_META.read_text()) if HARVEST_META.exists() else None
     tok = AutoTokenizer.from_pretrained(BASE, revision=BASE_REVISION)
     truncated = {"train": count_truncated(tok, train), "dev": count_truncated(tok, dev)}
     model = AutoModelForSequenceClassification.from_pretrained(BASE, revision=BASE_REVISION).to(args.device)
@@ -194,8 +198,7 @@ def main():
     meta = {
         "base": BASE, "base_revision": BASE_REVISION, "objective": "bce on P(entailment)",
         "u2_template": U2_TEMPLATE, "max_len": MAX_LEN, "truncated_pairs": truncated, "args": vars(args),
-        "pairs_sha256": hashlib.sha256(PAIRS.read_bytes()).hexdigest(),
-        "harvest_meta": json.loads(HARVEST_META.read_text()) if HARVEST_META.exists() else None,
+        "pairs_sha256": pairs_sha256, "harvest_meta": harvest_meta,
         "n_train": len(train), "n_train_pos": sum(r["label"] for r in train),
         "n_dev": len(dev), "dev_repos": sorted({r["repo"] for r in dev}),
         "dev_auroc_before": base_auc, "exported_dev_auroc": best[0], "exported_step": best[1],

@@ -88,6 +88,13 @@ REPOS = [
 POSITIVES_PER_REPO = 150
 DEV_SHARE = 10  # percent of repos
 RETRIES = 6
+# Errors no retry can fix: stop the whole run at once instead of waiting out
+# the backoff on every repo.
+FATAL = ("http 401", "gh auth login", "bad credentials", "doesn't exist on type", "parse error")
+
+
+class Fatal(Exception):
+    pass
 
 
 def gh_graphql(owner, name, cursor):
@@ -100,7 +107,9 @@ def gh_graphql(owner, name, cursor):
         if proc.returncode == 0:
             return json.loads(proc.stdout)
         err = proc.stderr.strip()
-        if "could not resolve to a repository" in err.lower():
+        if any(f in err.lower() for f in FATAL):
+            raise Fatal(f"{owner}/{name}: {err[:300]}")
+        if "could not resolve to a repository" in err.lower() or attempt == RETRIES - 1:
             break
         # Rate limits, resets and 5xx are transient; the primary GraphQL limit
         # resets hourly, so the last waits are long.
@@ -120,7 +129,7 @@ def fetch(owner, name, max_pages):
         issues = None
         if path.exists():
             try:
-                issues = valid_page(json.loads(path.read_text()))
+                issues = valid_page(json.loads(path.read_text(encoding="utf-8")))
             except json.JSONDecodeError:
                 issues = None
         if issues is None:
@@ -130,7 +139,7 @@ def fetch(owner, name, max_pages):
                 raise RuntimeError(f"{owner}/{name}: no issues in response page {k}")
             path.parent.mkdir(parents=True, exist_ok=True)
             tmp = path.with_suffix(".tmp")
-            tmp.write_text(json.dumps(page))
+            tmp.write_text(json.dumps(page), encoding="utf-8")
             os.replace(tmp, path)
         pages.append(issues["nodes"])
         if not issues["pageInfo"]["hasNextPage"]:
@@ -228,7 +237,7 @@ def main():
 
     seen_texts = set()
     for path in SETS:
-        for line in path.read_text().splitlines():
+        for line in path.read_text(encoding="utf-8").splitlines():
             row = json.loads(line)
             seen_texts.add(norm(row["error"]))
             seen_texts.add(norm(row["later"]))
@@ -238,6 +247,8 @@ def main():
     for owner, name in REPOS:
         try:
             issues, n_pages = fetch(owner, name, args.max_pages)
+        except Fatal as e:
+            sys.exit(f"stopping: {e}")
         except RuntimeError as e:
             failed.append(str(e))
             print(f"  FAILED {owner}/{name}: {e}", file=sys.stderr, flush=True)
@@ -256,7 +267,7 @@ def main():
     rows.sort(key=lambda r: r["id"])
     body = "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows)
     OUT.parent.mkdir(parents=True, exist_ok=True)
-    OUT.write_text(body)
+    OUT.write_text(body, encoding="utf-8")
     by = {}
     for r in rows:
         key = f"{r['split']}/{r['kind']}"

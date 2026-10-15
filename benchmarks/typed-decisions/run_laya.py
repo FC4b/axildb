@@ -67,7 +67,7 @@ def main():
             lat.append((time.perf_counter() - t) * 1000)
             scores.append(float(ans["noul"]))
         res = rb.evaluate(scores, rows, [s >= 0.5 for s in scores])
-        res["scores"] = {r["id"]: round(s, 6) for r, s in zip(rows, scores)}
+        res["scores"] = {r["id"]: float(s) for r, s in zip(rows, scores)}
         res["latency_ms_p50"] = round(statistics.median(lat), 2)
         res["latency_ms_p95"] = round(sorted(lat)[int(0.95 * (len(lat) - 1))], 2)
         res["question"] = q["instructions"]

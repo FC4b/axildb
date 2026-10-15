@@ -229,7 +229,7 @@ Raw outputs go to `out/`, which is gitignored. The committed summary is `benchma
 
 For the U2 fine-tune (`analyze_u2_finetune.py`), on top of the above:
 - **Paired AUROC difference** against a reference arm, with an interval from the same cluster resamples for both arms. Two arms' separate intervals overlapping says little; the paired interval is the comparison.
-- **Fixed against topic negatives** (a fix for a different bug) and **fixed against status negatives** (the same bug, not fixed: still broken, planned, not shipped, a workaround, a mention), reported separately. Axil's candidate search already filters by topic, so status negatives are the ones a deployed judge meets.
+- **Fixed against each kind of negative**, reported separately: *topic* (a fix for a different bug), *mention* (a PR that references the issue without fixing it, often about something else) and *state* (the same bug, not fixed: still broken, planned, not shipped). Axil's candidate search already filters by topic, so state negatives are the ones a deployed judge meets, and the sets hold only a handful of them.
 - **Mean and standard deviation over seeds** of one recipe; no seed is picked on test.
 
 For U5:
