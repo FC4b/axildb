@@ -88,12 +88,16 @@ prints what it has instead of being killed by the harness.
 ## The hooks' queued writes
 
 Hooks queue their writes as job files in `.axil/hook-queue/`, for a drainer
-to run. While a daemon runs, it is that drainer. Its drain thread holds
-`hook-queue/drain.lock`, the OS lock `axil hook drain` takes, from the moment it
-first gets it until the daemon stops. Like `hook drain`, it runs the jobs one at
-a time, in the order they were queued, each renamed to `.running` while it runs
-and removed after, a failed one logged in `drain.log`. A `.running` job a
-killed drainer left behind is moved to `interrupted/` and never run again.
+to run. Each database has a queue of its own: a database file other than
+`memory.axil` (a branch, or one `AXIL_DB` names) queues in
+`hook-queue.<file name>/` beside it, so a drainer or daemon for one database
+never runs another's jobs. While a daemon runs, it is that drainer. Its drain
+thread holds the queue's `drain.lock`, the OS lock `axil hook drain` takes,
+from the moment it first gets it until the daemon stops. Like `hook drain`, it
+runs the jobs one at a time, in the order they were queued, each renamed to
+`.running` while it runs and removed after, a failed one logged in
+`drain.log`. A `.running` job a killed drainer left behind is moved to
+`interrupted/` and never run again.
 
 A hook asks the daemon, before it queues, whether it serves the hook's
 process. When it does, the hook pokes it and starts no drainer. When it

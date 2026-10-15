@@ -34,7 +34,8 @@
 //!   session end      — queue the session close, clean up
 //!
 //! Hooks never write to the database themselves. Each write becomes a job
-//! file in `<db dir>/hook-queue/` (the intent log) and one detached
+//! file in the database's queue, `<db dir>/hook-queue/` for `memory.axil`
+//! (the intent log; see [`queue_dir`]), and one detached
 //! `axil hook drain` runs them, so a harness timeout can never kill a write
 //! mid-commit. Lookups run with the slow-query log off for the same reason.
 //!
@@ -2302,11 +2303,19 @@ impl Job {
     }
 }
 
-/// Hook jobs wait next to the database they change: `<db dir>/hook-queue/`.
+/// Hook jobs wait next to the database they change, in a queue of its own:
+/// `<db dir>/hook-queue/` for `memory.axil`, `<db dir>/hook-queue.<file>/`
+/// for any other database file. A job file does not name its database, so
+/// databases sharing a directory (a branch, an `AXIL_DB` sibling) must not
+/// share a queue: a drainer or daemon for one would run the other's jobs on
+/// its own handle. `memory.axil` keeps the queue's old name, so the jobs a
+/// hook of an earlier build left there still go to it.
 pub(crate) fn queue_dir(db: &Path) -> PathBuf {
-    db.parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join("hook-queue")
+    let dir = db.parent().unwrap_or_else(|| Path::new("."));
+    match db.file_name().and_then(|name| name.to_str()) {
+        None | Some("memory.axil") => dir.join("hook-queue"),
+        Some(name) => dir.join(format!("hook-queue.{name}")),
+    }
 }
 
 /// The project the database at `db` belongs to: the directory holding its
@@ -2444,7 +2453,7 @@ pub(crate) fn for_own_drainer(path: &Path) -> bool {
         .is_some_and(|flag| flag.own_drainer)
 }
 
-/// `hook-queue/drain.lock`, held by an OS file lock on the open handle.
+/// The queue's `drain.lock`, held by an OS file lock on the open handle.
 ///
 /// The OS drops that lock when the holder exits by any means, SIGKILL
 /// included, so a dead drainer's lock is free at once, and a live one is
@@ -5622,6 +5631,22 @@ mod tests {
         assert!(queue.join("interrupted/1-a.running").is_file());
         assert_eq!(next_job(&queue), Some(queue.join("2-b.job")));
         assert!(queue_files(&queue, "running").is_empty());
+    }
+
+    /// Each database file has a queue of its own; `memory.axil` keeps the
+    /// name its queue always had.
+    #[test]
+    fn databases_in_one_directory_queue_apart() {
+        let dir = Path::new("/p/.axil");
+        assert_eq!(queue_dir(&dir.join("memory.axil")), dir.join("hook-queue"));
+        assert_eq!(
+            queue_dir(&dir.join("memory.axil.branch.exp")),
+            dir.join("hook-queue.memory.axil.branch.exp")
+        );
+        assert_eq!(
+            queue_dir(&dir.join("other.axil")),
+            dir.join("hook-queue.other.axil")
+        );
     }
 
     /// A job queued by a hook the database's daemon does not serve says so

@@ -1,9 +1,10 @@
 //! The hook queue, drained inside the daemon.
 //!
-//! Hooks queue their writes as job files in `<db dir>/hook-queue/` (see
-//! [`hook_brain`]). While the daemon serves the database, its drain thread
-//! runs them on the open handle, so a session's writes neither open the
-//! database nor make the daemon let go of it.
+//! Hooks queue their writes as job files in the database's own queue,
+//! `<db dir>/hook-queue/` for `memory.axil` (see [`hook_brain::queue_dir`]).
+//! While the daemon serves the database, its drain thread runs them on the
+//! open handle, so a session's writes neither open the database nor make the
+//! daemon let go of it.
 //!
 //! The thread keeps the queue's protocol exactly as `hook drain` does:
 //! - It holds `drain.lock` ([`DrainLock`], an OS lock on that very file)

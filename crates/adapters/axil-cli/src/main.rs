@@ -3569,10 +3569,11 @@ enum HookCommand {
         #[arg(long)]
         event: Option<String>,
     },
-    /// Run the database writes hooks have queued in `<db dir>/hook-queue/`.
-    /// Hooks start this detached after queuing a write; it is safe to run by
-    /// hand. A job cut off mid-run is moved to `hook-queue/interrupted/`
-    /// and never retried.
+    /// Run the database writes hooks have queued in its queue
+    /// (`<db dir>/hook-queue/` for `memory.axil`, `hook-queue.<file>/` for
+    /// another database file). Hooks start this detached after queuing a
+    /// write; it is safe to run by hand. A job cut off mid-run is moved to
+    /// the queue's `interrupted/` and never retried.
     #[command(hide = true)]
     Drain,
 }

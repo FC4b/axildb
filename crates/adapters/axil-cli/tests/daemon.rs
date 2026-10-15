@@ -1008,6 +1008,112 @@ fn two_databases_in_one_directory_have_a_daemon_each() {
     assert_eq!(fx.status()["live"]["pid"], first["pid"]);
 }
 
+/// Stops the daemon of the database at `.0` when dropped, pass or fail.
+struct StopsDaemon<'a>(&'a str, &'a Path);
+
+impl Drop for StopsDaemon<'_> {
+    fn drop(&mut self) {
+        let _ = axil_in(
+            BIN,
+            self.1,
+            &["--db", self.0, "daemon", "stop", "--wait", "10"],
+            None,
+        );
+    }
+}
+
+/// Two databases in one directory queue their hooks' writes apart. A
+/// daemon for the sibling (here a branch) leaves `memory.axil`'s queue to
+/// `memory.axil`'s own drainer, which runs the job on `memory.axil`, and
+/// drains the sibling's queue on its own handle.
+#[test]
+fn a_daemon_drains_only_its_own_databases_queue() {
+    let fx = fixture();
+    let other = fx.proj.join(".axil/memory.axil.branch.exp");
+    let other = other.to_str().unwrap();
+    let init = fx.axil(&["init", other]);
+    assert!(init.status.success(), "{}", text(&init.stderr));
+    let on_other = |args: &[&str]| {
+        let mut argv = vec!["--db", other];
+        argv.extend_from_slice(args);
+        fx.axil(&argv)
+    };
+    let other_live = || -> Value {
+        let out = on_other(&["daemon", "status", "--json"]);
+        serde_json::from_slice::<Value>(&out.stdout).unwrap()["live"].clone()
+    };
+    let other_queue = fx.proj.join(".axil/hook-queue.memory.axil.branch.exp");
+    let queued_there = || {
+        std::fs::read_dir(&other_queue)
+            .map(|entries| {
+                entries.flatten().any(|e| {
+                    e.path()
+                        .extension()
+                        .is_some_and(|x| x == "job" || x == "running")
+                })
+            })
+            .unwrap_or(false)
+    };
+    // Both queues are there, as once hooks of each have queued.
+    std::fs::create_dir_all(fx.queue()).unwrap();
+    std::fs::create_dir_all(&other_queue).unwrap();
+    let out = on_other(&["daemon", "start", "--idle-timeout", "60s"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let _stops = StopsDaemon(other, &fx.proj);
+    let draining = || other_live()["queue"]["draining"] == true;
+    assert!(
+        wait_for(Duration::from_secs(10), draining),
+        "{}",
+        other_live()
+    );
+    let store = |summary: &str| {
+        let data = serde_json::json!({ "summary": summary });
+        serde_json::json!({"op": "axil", "args": ["store", "decisions", data.to_string()]})
+    };
+
+    fx.queue_job(0, &store("a hook write for memory.axil"));
+    // Past the thread's poll, so a daemon draining the wrong queue had
+    // taken the job.
+    std::thread::sleep(Duration::from_secs(3));
+    assert_eq!(fx.queued().len(), 1, "{}", other_live());
+    let drain = fx.axil(&["hook", "drain"]);
+    assert!(drain.status.success(), "{}", text(&drain.stderr));
+    assert!(
+        wait_for(Duration::from_secs(60), || fx.queued().is_empty()),
+        "{:?}",
+        fx.queued()
+    );
+    let mine = text(&fx.axil(&["list", "decisions"]).stdout);
+    assert_eq!(
+        mine.matches("a hook write for memory.axil").count(),
+        1,
+        "{mine}"
+    );
+    let theirs = text(&on_other(&["list", "decisions"]).stdout);
+    assert!(!theirs.contains("a hook write for memory.axil"), "{theirs}");
+    assert_eq!(other_live()["queue"]["jobs"], 0, "{}", other_live());
+
+    std::fs::write(
+        other_queue.join("20260101T000000.000000001Z-1-1.job"),
+        store("a hook write for the branch").to_string(),
+    )
+    .unwrap();
+    assert!(
+        wait_for(Duration::from_secs(60), || !queued_there()
+            && other_live()["queue"]["jobs"] == 1),
+        "{}",
+        other_live()
+    );
+    let theirs = text(&on_other(&["list", "decisions"]).stdout);
+    assert_eq!(
+        theirs.matches("a hook write for the branch").count(),
+        1,
+        "{theirs}"
+    );
+    let mine = text(&fx.axil(&["list", "decisions"]).stdout);
+    assert!(!mine.contains("a hook write for the branch"), "{mine}");
+}
+
 /// A daemon slow to shut down (here holding the database 7 s, as a long
 /// warm-up would): `status` says it is stopping, `stop` waits for it and
 /// reports it closed the database, and a `start` meanwhile waits for it to
