@@ -627,11 +627,15 @@ fn logs(db: &Path, lines: usize) -> Result<i32> {
     Ok(EXIT_OK)
 }
 
-/// Whether `command` reads stdin when it is piped: `store <table> -`, and
-/// `checkpoint` given `-` or no JSON. Another hot command leaves stdin be.
+/// Whether `command` reads stdin when it is piped: `store <table> -`,
+/// `auto-capture -`, `extract-entities -`, and `checkpoint` given `-` or no
+/// JSON. Another hot command leaves stdin be.
 pub fn reads_stdin(command: &crate::Command) -> bool {
     match command {
         crate::Command::Store { json_data, .. } => json_data == "-",
+        crate::Command::AutoCapture { text, .. } | crate::Command::ExtractEntities { text } => {
+            text == "-"
+        }
         #[cfg(feature = "checkpoint")]
         crate::Command::Checkpoint { arg, .. } => matches!(arg.as_deref(), None | Some("-")),
         _ => false,

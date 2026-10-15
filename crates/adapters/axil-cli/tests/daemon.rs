@@ -800,6 +800,16 @@ fn the_hot_commands_print_nothing_into_the_log() {
             true,
         ),
         (vec!["store", "decisions", "{nope"], None, true),
+        (
+            vec!["auto-capture", "-", "--min-confidence", "0.0"],
+            Some(b"Decided to cap login tokens at 512 bytes because of the DoS"),
+            true,
+        ),
+        (
+            vec!["extract-entities", "validate_token in src/auth.rs"],
+            None,
+            true,
+        ),
         (vec!["checkpoint", cp], None, cfg!(feature = "checkpoint")),
         (
             vec!["checkpoint", "-"],

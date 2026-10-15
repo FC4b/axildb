@@ -7252,6 +7252,7 @@ fn hot_needs(command: &Command) -> Option<Vec<cli_io::Need>> {
         #[cfg(feature = "checkpoint")]
         Command::Checkpoint { .. } => Some(Vec::new()),
         Command::Boot { .. } | Command::RecallForFile { .. } => Some(Vec::new()),
+        Command::AutoCapture { .. } | Command::ExtractEntities { .. } => Some(Vec::new()),
         _ => None,
     }
 }
@@ -14698,7 +14699,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
                 }));
             } else {
                 let db_path = require_db(&db_opt)?;
-                let db = open_with_all_detected(&db_path)?;
+                let db = cli_io::hot_db(&db_path, &needs, || open_with_all_detected(&db_path))?;
                 let mut stored = Vec::new();
                 for cap in &actionable {
                     let (table, data) = axil_core::auto_capture::capture_to_record(cap);

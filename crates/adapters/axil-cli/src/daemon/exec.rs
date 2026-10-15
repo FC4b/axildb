@@ -675,6 +675,7 @@ pub fn warm_route(command: &Command, db: &Axil) -> Result<(), NotServed> {
 pub fn writes(command: &Command) -> bool {
     match command {
         Command::Store { .. } => true,
+        Command::AutoCapture { dry_run, .. } => !dry_run,
         #[cfg(feature = "checkpoint")]
         Command::Checkpoint { arg, .. } => arg.as_deref() != Some("show"),
         #[cfg(feature = "embed")]
@@ -683,10 +684,15 @@ pub fn writes(command: &Command) -> bool {
     }
 }
 
-/// Whether `command` reads stdin whatever stdin is: `store <table> -`. A
-/// `checkpoint -` reads it only when it is not a terminal.
+/// Whether `command` reads stdin whatever stdin is: `store <table> -`,
+/// `auto-capture -` and `extract-entities -`. A `checkpoint -` reads it
+/// only when it is not a terminal.
 fn reads_stdin(command: &Command) -> bool {
-    matches!(command, Command::Store { json_data, .. } if json_data == "-")
+    match command {
+        Command::Store { json_data, .. } => json_data == "-",
+        Command::AutoCapture { text, .. } | Command::ExtractEntities { text } => text == "-",
+        _ => false,
+    }
 }
 
 /// The database a command line runs on in the client's process: its `--db`

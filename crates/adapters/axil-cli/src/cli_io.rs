@@ -1675,6 +1675,48 @@ pub(crate) mod tests {
                     "store stdin empty (Err)",
                     &["--db", db, "store", "context", "-"],
                 ),
+                case(
+                    "auto-capture dry run",
+                    &[
+                        "--db",
+                        db,
+                        "auto-capture",
+                        "Decided to cap login tokens at 512 bytes because of the DoS",
+                        "--dry-run",
+                    ],
+                ),
+                case(
+                    "auto-capture stdin",
+                    &[
+                        "--db",
+                        db,
+                        "auto-capture",
+                        "-",
+                        "--min-confidence",
+                        "0.0",
+                        "--source",
+                        "bash",
+                    ],
+                )
+                .stdin(
+                    b"error[E0425]: cannot find value `timeout_ms` in this scope\n\
+                      Decided to pass the timeout through the session config.",
+                )
+                .volatile(),
+                case(
+                    "extract-entities",
+                    &[
+                        "--db",
+                        db,
+                        "extract-entities",
+                        "validate_token in src/auth.rs uses PlanCache",
+                    ],
+                ),
+                case(
+                    "extract-entities stdin",
+                    &["--db", db, "extract-entities", "-"],
+                )
+                .stdin(b"Fixed the auth timeout in validate_token (src/auth.rs)"),
                 case("clap usage error", &["store"]),
                 case("clap unknown flag", &["boot", "--bogus"]),
                 case("--help", &["--help"]),
