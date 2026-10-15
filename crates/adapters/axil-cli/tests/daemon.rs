@@ -1288,7 +1288,14 @@ fn another_build_environment_or_database_is_not_sent() {
     assert!(text(&boot.stdout).contains("512 bytes"));
     assert_eq!(fx.served("boot"), 0, "{}", fx.live());
     assert_eq!(fx.live()["leases_granted"], 1, "{}", fx.live());
-    fx.warm_again();
+    // It serves only its own build again: this build is told so.
+    assert!(wait_for(Duration::from_secs(30), || fx.live()["state"] == "ready"));
+    let sent = fx.send(&["boot"], None);
+    assert!(
+        text(&sent.stderr).contains("\"reason\":\"build\""),
+        "{}",
+        text(&sent.stderr)
+    );
     let stop = fx.axil(&["daemon", "stop"]);
     assert!(stop.status.success(), "{}", text(&stop.stderr));
 
