@@ -9,6 +9,10 @@
 # <snapshot-dir> holds memory.axil and its companions (e.g.
 # benchmarks/dogfood-recall/data/snap-prefix); it is copied, never written.
 # <old-axil> is a binary that predates the index, <new-axil> one that has it.
+# Both must predate the keyed table index: a build with it converts the file
+# on its first writable open, after which <old-axil> refuses to open it, so the
+# old-store/new-repair rounds below cannot run. The committed results came from
+# two such binaries.
 #
 # Sizes: one copy is written only by OLD (the control). The other gets a NEW
 # lookup (which must not build the index), a NEW store (which builds it),

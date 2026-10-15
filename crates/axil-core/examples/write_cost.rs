@@ -1,21 +1,28 @@
 //! Per-write cost against table size.
 //!
-//! Every insert, update and delete reads, dedups and rewrites its table's whole
-//! id list (one JSON array in `table_index`), so a single write may slow down
-//! as its table grows. This fills one table to each target size, then times
-//! single writes into it interleaved with the same writes into a small control
-//! table in the same database. Both pay redb's commit; only the big table pays
-//! for a long id list, so the gap between the two is the per-table cost.
+//! A table index that keeps each table's ids as one JSON array makes every
+//! insert and delete read, dedup and rewrite the whole array, so a single
+//! write slows down as its table grows; the keyed index makes it a few point
+//! writes. This fills one table to each target size, then times single writes
+//! into it interleaved with the same writes into a small control table in the
+//! same database. Both pay redb's commit; only the big table pays for its
+//! size, so the gap between the two is the per-table cost.
+//!
+//! With `--migration`, it then hands each database back to the JSON-array
+//! layout (`Storage::downgrade_table_index`) and times the first writable
+//! open, which migrates it, against a second open, which has nothing to do,
+//! and records the file's length in both layouts.
 //!
 //! Usage:
 //!   cargo run --release -p axil-core --example write_cost -- \
-//!     [--sizes 0,1000,10000,30000,85000] [--samples 200]
+//!     [--sizes 0,1000,10000,30000,85000] [--samples 200] [--migration]
 //!
 //! Prints one JSON object on stdout; progress goes to stderr.
 
+use std::path::Path;
 use std::time::Instant;
 
-use axil_core::Axil;
+use axil_core::{Axil, Storage};
 use serde_json::{json, Value};
 
 const CONTROL_ROWS: usize = 100;
@@ -44,9 +51,47 @@ fn time_us(f: impl FnOnce()) -> f64 {
     t.elapsed().as_secs_f64() * 1e6
 }
 
-fn measure(size: usize, samples: usize) -> Value {
+/// File length, and on unix the disk allocated to it (redb grows a file
+/// without writing the new part, which stays sparse).
+fn file_bytes(path: &Path) -> Value {
+    let meta = std::fs::metadata(path).expect("metadata");
+    #[cfg(unix)]
+    let allocated = {
+        use std::os::unix::fs::MetadataExt;
+        Some(meta.blocks() * 512)
+    };
+    #[cfg(not(unix))]
+    let allocated: Option<u64> = None;
+    json!({ "length": meta.len(), "allocated": allocated })
+}
+
+/// Hand the database back to the JSON-array layout, then time the open that
+/// migrates it and an open after that.
+fn measure_migration(path: &Path) -> Value {
+    Storage::open(path)
+        .expect("open")
+        .downgrade_table_index()
+        .expect("downgrade");
+    let legacy = file_bytes(path);
+    let t = Instant::now();
+    drop(Storage::open(path).expect("migrating open"));
+    let migrating_ms = t.elapsed().as_secs_f64() * 1e3;
+    let keyed = file_bytes(path);
+    let t = Instant::now();
+    drop(Storage::open(path).expect("second open"));
+    let second_ms = t.elapsed().as_secs_f64() * 1e3;
+    json!({
+        "migrating_open_ms": (migrating_ms * 10.0).round() / 10.0,
+        "second_open_ms": (second_ms * 10.0).round() / 10.0,
+        "file_bytes_legacy": legacy,
+        "file_bytes_keyed": keyed,
+    })
+}
+
+fn measure(size: usize, samples: usize, migration: bool) -> Value {
     let dir = tempfile::TempDir::new().expect("temp dir");
-    let db = Axil::open(dir.path().join("cost.axil")).build().expect("open");
+    let path = dir.path().join("cost.axil");
+    let db = Axil::open(&path).build().expect("open");
 
     let fill = Instant::now();
     let mut done = 0;
@@ -92,19 +137,25 @@ fn measure(size: usize, samples: usize) -> Value {
     }
 
     eprintln!("size {size}: filled in {fill_s:.1}s, timed {samples} writes of each kind");
-    json!({
+    let mut result = json!({
         "table_rows": size,
         "id_list_bytes_approx": id_list_bytes,
         "fill_seconds": (fill_s * 10.0).round() / 10.0,
         "insert": { "big": summary(ins_big), "control": summary(ins_ctl) },
         "update": { "big": summary(upd_big), "control": summary(upd_ctl) },
         "delete": { "big": summary(del_big), "control": summary(del_ctl) },
-    })
+    });
+    if migration {
+        drop(db);
+        result["migration"] = measure_migration(&path);
+    }
+    result
 }
 
 fn main() {
     let mut sizes = vec![0, 1_000, 10_000, 30_000, 85_000];
     let mut samples = 200;
+    let mut migration = false;
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -118,11 +169,12 @@ fn main() {
                     .collect()
             }
             "--samples" => samples = it.next().expect("--samples needs a value").parse().expect("samples"),
+            "--migration" => migration = true,
             other => panic!("unknown argument {other}"),
         }
     }
 
-    let results: Vec<Value> = sizes.iter().map(|&s| measure(s, samples)).collect();
+    let results: Vec<Value> = sizes.iter().map(|&s| measure(s, samples, migration)).collect();
     let out = json!({
         "benchmark": "write-cost-vs-table-size",
         "samples_per_kind": samples,
