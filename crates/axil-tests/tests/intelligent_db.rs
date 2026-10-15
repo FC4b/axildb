@@ -197,10 +197,7 @@ fn temporal_no_match_returns_none() {
 #[test]
 fn temporal_boost_at_target_is_max() {
     let now = Utc::now();
-    let target = TemporalTarget {
-        target: now,
-        window_days: 7.0,
-    };
+    let target = TemporalTarget::around(now, 7.0);
     let boost = temporal_boost(&now, &target);
     assert!((boost - 0.40).abs() < 0.01);
 }
@@ -208,10 +205,7 @@ fn temporal_boost_at_target_is_max() {
 #[test]
 fn temporal_boost_outside_window_is_zero() {
     let now = Utc::now();
-    let target = TemporalTarget {
-        target: now,
-        window_days: 7.0,
-    };
+    let target = TemporalTarget::around(now, 7.0);
     let old = now - chrono::Duration::days(10);
     assert_eq!(temporal_boost(&old, &target), 0.0);
 }

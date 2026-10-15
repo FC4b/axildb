@@ -28,6 +28,38 @@ const DEDUP_OVER_FETCH: usize = 5;
 const BOOSTED_FIELDS: &[&str] = &["title", "summary", "name", "subject", "heading"];
 const BOOST_FACTOR: f32 = 2.0;
 
+/// Result order: highest score first, equal scores by record id, so ties
+/// come back in the same order in every process.
+fn best_first(a: (&RecordId, f32), b: (&RecordId, f32)) -> std::cmp::Ordering {
+    b.1.partial_cmp(&a.1)
+        .unwrap_or(std::cmp::Ordering::Equal)
+        .then_with(|| a.0.cmp(b.0))
+}
+
+/// One record's best document from a search (see
+/// `FtsIndex::best_doc_per_record`).
+struct RankedDoc {
+    id: RecordId,
+    /// Tantivy's BM25 score.
+    score: f32,
+    /// Whether the document's field is in [`BOOSTED_FIELDS`] and boosting
+    /// applies to this search.
+    boosted: bool,
+    doc: TantivyDocument,
+}
+
+impl RankedDoc {
+    /// The BM25 score mapped into [0, 1), with the field boost applied.
+    fn normalized_score(&self) -> f32 {
+        let normalized = self.score / (self.score + 1.0);
+        if self.boosted {
+            (normalized * BOOST_FACTOR).min(0.999)
+        } else {
+            normalized
+        }
+    }
+}
+
 /// Schema version marker for migration detection.
 /// v2: added field_name. v3: body STORED for snippet generation.
 const SCHEMA_VERSION: &str = "3";
@@ -307,7 +339,7 @@ impl FtsIndex {
         let boost_factor = 2;
         let top_docs = self.execute_search(&searcher, &*parsed, limit * boost_factor)?;
         let mut results = self.collect_deduped(&searcher, &top_docs, limit, true)?;
-        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        results.sort_by(|a, b| best_first((&a.0, a.1), (&b.0, b.1)));
         results.truncate(limit);
         Ok(results)
     }
@@ -347,27 +379,14 @@ impl FtsIndex {
         let boost_factor = 2;
         let top_docs = self.execute_search(&searcher, &*parsed, limit * boost_factor)?;
 
+        // Field boosting is applied as in search_internal.
         let mut results = Vec::with_capacity(limit);
-        let mut seen = std::collections::HashSet::new();
-        for (score, doc_address) in &top_docs {
-            let doc: TantivyDocument = searcher
-                .doc(*doc_address)
-                .map_err(|e| AxilError::plugin(format!("failed to retrieve FTS document: {e}")))?;
-            if let Some(rid) = self.extract_deduped_id(&doc, &mut seen)? {
-                let mut normalized = score / (score + 1.0);
-                // Apply field boosting (consistent with search_internal).
-                if let Some(field_val) = doc.get_first(self.field_name_field) {
-                    if let Some(fn_str) = field_val.as_str() {
-                        if BOOSTED_FIELDS.contains(&fn_str) {
-                            normalized = (normalized * BOOST_FACTOR).min(0.999);
-                        }
-                    }
-                }
-                let snippet = snippet_gen.snippet_from_doc(&doc);
-                results.push((rid, normalized, snippet.to_html()));
-            }
+        for hit in self.best_doc_per_record(&searcher, &top_docs, true)? {
+            let snippet = snippet_gen.snippet_from_doc(&hit.doc);
+            let score = hit.normalized_score();
+            results.push((hit.id, score, snippet.to_html()));
         }
-        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        results.sort_by(|a, b| best_first((&a.0, a.1), (&b.0, b.1)));
         results.truncate(limit);
         Ok(results)
     }
@@ -408,7 +427,7 @@ impl FtsIndex {
         let mut results = self.collect_deduped(&searcher, &top_docs, limit, apply_boost)?;
 
         if apply_boost {
-            results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            results.sort_by(|a, b| best_first((&a.0, a.1), (&b.0, b.1)));
             results.truncate(limit);
         }
 
@@ -448,28 +467,55 @@ impl FtsIndex {
 
     /// Extract a deduplicated RecordId from a tantivy document.
     /// Returns `None` if the record was already seen.
-    fn extract_deduped_id(
+    /// The best-scoring document of each record among `top_docs`, best
+    /// first. Tantivy returns equal scores in document-address order, which
+    /// a segment merge changes, so ties are settled here: on equal raw
+    /// scores a boosted field (when `apply_boost`) comes first, then the
+    /// lower record id. Without that, which of a record's fields counted,
+    /// and the order of equal-score records, differed between processes.
+    fn best_doc_per_record(
         &self,
-        doc: &TantivyDocument,
-        seen: &mut std::collections::HashSet<String>,
-    ) -> axil_core::Result<Option<RecordId>> {
-        if let Some(id_value) = doc.get_first(self.id_field) {
-            if let Some(id_str) = Value::as_str(&id_value) {
-                let id_string = id_str.to_string();
-                if seen.insert(id_string.clone()) {
-                    let rid = RecordId::from_string(&id_string).map_err(|e| {
-                        AxilError::plugin(format!("invalid record ID in FTS index: {e}"))
-                    })?;
-                    return Ok(Some(rid));
-                }
-            }
+        searcher: &tantivy::Searcher,
+        top_docs: &[(f32, tantivy::DocAddress)],
+        apply_boost: bool,
+    ) -> axil_core::Result<Vec<RankedDoc>> {
+        let mut docs = Vec::with_capacity(top_docs.len());
+        for (score, doc_address) in top_docs {
+            let doc: TantivyDocument = searcher
+                .doc(*doc_address)
+                .map_err(|e| AxilError::plugin(format!("failed to retrieve FTS document: {e}")))?;
+            let Some(id) = doc
+                .get_first(self.id_field)
+                .and_then(|v| Value::as_str(&v).map(str::to_string))
+            else {
+                continue;
+            };
+            let id = RecordId::from_string(&id)
+                .map_err(|e| AxilError::plugin(format!("invalid record ID in FTS index: {e}")))?;
+            let boosted = apply_boost
+                && doc
+                    .get_first(self.field_name_field)
+                    .and_then(|v| Value::as_str(&v).map(|f| BOOSTED_FIELDS.contains(&f)))
+                    .unwrap_or(false);
+            docs.push(RankedDoc {
+                id,
+                score: *score,
+                boosted,
+                doc,
+            });
         }
-        Ok(None)
+        docs.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| b.boosted.cmp(&a.boosted))
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        let mut seen = std::collections::HashSet::new();
+        docs.retain(|d| seen.insert(d.id.clone()));
+        Ok(docs)
     }
 
-    /// Collect deduplicated, normalized results from tantivy search output.
-    /// When `apply_boost` is true, high-value field names get a score multiplier.
-    /// Does NOT early-exit when boosting to ensure correct ordering after re-sort.
     fn collect_deduped(
         &self,
         searcher: &tantivy::Searcher,
@@ -477,30 +523,18 @@ impl FtsIndex {
         limit: usize,
         apply_boost: bool,
     ) -> axil_core::Result<Vec<(RecordId, f32)>> {
-        let mut results = Vec::with_capacity(limit);
-        let mut seen = std::collections::HashSet::new();
-        for (score, doc_address) in top_docs {
-            let doc: TantivyDocument = searcher
-                .doc(*doc_address)
-                .map_err(|e| AxilError::plugin(format!("failed to retrieve FTS document: {e}")))?;
-            if let Some(rid) = self.extract_deduped_id(&doc, &mut seen)? {
-                let mut normalized = score / (score + 1.0);
-                if apply_boost {
-                    if let Some(fn_value) = doc.get_first(self.field_name_field) {
-                        if let Some(fn_str) = Value::as_str(&fn_value) {
-                            if BOOSTED_FIELDS.contains(&fn_str) {
-                                normalized = (normalized * BOOST_FACTOR).min(0.999);
-                            }
-                        }
-                    }
-                }
-                results.push((rid, normalized));
-                // Only early-exit when not boosting (boosting requires full
-                // collection before re-sort to avoid missing higher-scored items).
-                if !apply_boost && results.len() >= limit {
-                    break;
-                }
-            }
+        let mut results: Vec<(RecordId, f32)> = self
+            .best_doc_per_record(searcher, top_docs, apply_boost)?
+            .into_iter()
+            .map(|hit| {
+                let score = hit.normalized_score();
+                (hit.id, score)
+            })
+            .collect();
+        // Boosting re-sorts and truncates in the caller; unboosted results
+        // are already in their final order.
+        if !apply_boost {
+            results.truncate(limit);
         }
         Ok(results)
     }

@@ -170,7 +170,7 @@ pub use feedback::{FeedbackEntry, FeedbackStore};
 pub use gazetteer::Gazetteer;
 pub use inference::{InferenceEngine, InferenceRule, InferredFact};
 pub use prefetch::{MaterializedRecall, PrefetchEngine, QueryLogEntry, QueryPattern};
-pub use temporal::{parse_temporal, temporal_boost, TemporalTarget};
+pub use temporal::{parse_temporal, temporal_boost, TemporalTarget, TimeRange};
 pub use token::{
     CharsPerTokenEstimator, TokenEstimator, CHARS_PER_TOKEN as TOKEN_CHARS_PER_TOKEN,
     DEFAULT_TOKEN_ESTIMATOR,

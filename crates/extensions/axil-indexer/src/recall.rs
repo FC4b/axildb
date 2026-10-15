@@ -692,10 +692,12 @@ pub fn recall(db: &Axil, query: &str, top_k: usize) -> axil_core::Result<Vec<Rec
         }
 
         let mut sorted: Vec<RecallResult> = fused.into_values().collect();
+        // Equal scores by id: the map's iteration order differs per process.
         sorted.sort_by(|a, b| {
             b.score
                 .partial_cmp(&a.score)
                 .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.id.cmp(&b.id))
         });
         let filtered: Vec<RecallResult> = sorted
             .into_iter()

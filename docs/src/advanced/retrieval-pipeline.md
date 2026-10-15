@@ -152,8 +152,8 @@ From `ScoreWeights::default()`:
 |--------------|--------|-------|
 | `vector`     | 0.40   | Cosine similarity from HNSW |
 | `recency`    | 0.15   | Exponential decay, half-life 168h (1 week) |
-| `graph`      | 0.15   | PageRank-style hop boost from active context |
-| `temporal`   | 0.10   | Boost when record falls near a parsed time target ("yesterday", "last week") |
+| `graph`      | 0.15   | Links to the top vector hits, for a candidate linked to an entity the query names; normalized by degree |
+| `temporal`   | 0.10   | Boost when a record falls near a parsed time target ("yesterday", "3 days ago") or inside a named span ("in March", "last 3 days") |
 | `keyword`    | 0.10   | Multiplicative overlap of query keywords vs. record text (MemPalace technique, +1.2%) |
 | `feedback`   | 0.05   | Learned boost from past relevance signals |
 | `preference` | 0.05   | Matches against `axil prefer` keys |
@@ -172,8 +172,20 @@ The signals are computed without an LLM — every weight comes from
 algorithmic patterns. `recency_decay` is a true half-life exponential
 (0.5 at the configured half-life). `keyword_overlap` uses overlapping
 1600-char windows with 400-char stride so long records aren't penalized
-for keyword sparsity. `graph_proximity` boosts records reachable in few
-hops from the active context (Phase 5e).
+for keyword sparsity. `graph_proximity` counts only when the query names an
+entity (a backticked or quoted name, a path, a CamelCase or snake_case
+identifier) that the candidate is linked to. It then scores the candidate's links to the ten
+candidates closest to the query by vector, `links / sqrt(degree × 10)`, so a
+hub linked to everything does not outscore a record whose few links all land
+on those seeds.
+
+A query that names a span of time (`in March`, `March 2026`, `between
+2026-03-01 and 2026-03-15`, `before 2026-04-01`, `since March`, `last 3 days`)
+also keeps only the candidates inside it, by when what they describe happened:
+a record's `event_time` field (a date or RFC 3339) when it has one, else when it
+was stored. When none are, the span is set aside and relevance alone decides. A point in time (`yesterday`,
+`3 days ago`, `March 15`) only boosts. `before`/`after` followed by anything but
+a date ("after the release") name no span.
 
 ### Inspecting scores
 
@@ -301,10 +313,22 @@ lets records whose only strength is a high cosine (file summaries, code
 proxies) outrank the answers, which cost the dogfood eval's hit@5 about
 three points.
 
-A record long enough to be chunked at insert (over 1600 bytes) is scored
-from its stored chunk vectors; a shorter one is cut into overlapping windows
-(default 1200 chars, 900-char stride = 25% overlap) and embedded at query
-time.
+A record longer than 1600 bytes gets a vector per recall unit at insert:
+one per line of its text (a dialog turn or a fact), a short line joined
+with the lines after it until the unit holds 400 bytes, a unit longer than
+1600 bytes cut into overlapping 1600-byte pieces. QTC scores such a record from those stored
+vectors; a shorter one is cut into overlapping windows (default 1200 chars,
+900-char stride = 25% overlap) and embedded at query time. Either way each
+piece is embedded under a one-line header with the record's table and date
+and the files and entities it lists (`decisions, 2026-03-12; files:
+src/db.rs`), so a piece cut out of a record still says what the record is
+about; the stored and FTS-indexed text is the piece alone.
+
+The piece that scored best comes back with the hit
+(`ScoreExplanation::best_chunk`, `snippet` in the CLI's JSON), and compact
+recall output shows it, cut to 200 characters, in place of the record's
+opening. A database written before the splitter changed keeps its old
+pieces until `axil heal --rechunk` re-splits them.
 
 `Axil::recall` also draws a fixed candidate pool (80 per source, doubled for
 the fetch) instead of one scaled by `top_k`, so a smaller `top_k` returns a

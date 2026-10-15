@@ -17,7 +17,6 @@ use crate::plugin::{
 };
 use crate::record::{Record, RecordId};
 use crate::storage::Storage;
-use crate::util::{RECALL_CHUNK_MAX_BYTES, RECALL_CHUNK_OVERLAP_BYTES};
 
 /// Scoped-alias table. Distinct from axil-memory's
 /// `_entity_aliases` (which uses the `{entity, alias}` schema for
@@ -31,6 +30,17 @@ const RECALL_CHUNKS_TABLE: &str = "_recall_chunks";
 /// same list. 80 is the pool a top-10 recall used to get; on the dogfood eval
 /// a pool of 40 cost top-10 recall a question.
 const RECALL_CANDIDATE_POOL: usize = 80;
+
+/// Candidates closest to the query by vector that graph proximity measures
+/// links to (see `compute_graph_proximity`).
+const GRAPH_SEEDS: usize = 10;
+
+/// Table-name prefix of the code index: proxies, file / module / project
+/// summaries and the code-ref reverse index. Its writers embed rows into the
+/// default vector index for code-search, which shares that index with memory
+/// recall; recall's vector stage passes over them (see
+/// [`Axil::recall_vector_hits`]).
+const CODE_INDEX_TABLE_PREFIX: &str = "_idx_";
 
 /// Marker row written once after `migrate_entity_canonical_id` finishes.
 /// Presence of the marker lets `Axil::open()` skip the full-table scan
@@ -802,14 +812,15 @@ const EMBEDDED_INTERNAL_FIELDS: &[(&str, &str)] = &[
     ("_checkpoint_records", "summary"),
 ];
 
-/// Why rows of [`EMBEDDED_INTERNAL_FIELDS`] tables without a vector are
-/// left alone, said wherever `doctor` and `detect_problems` report them so
-/// nobody backfills them blindly. The figures are the dogfood eval in
-/// `benchmarks/results/dogfood-recall-2026-10-04-snap-prefix-orphans-removed.json`
-/// and `…-internal-embedded.json`.
-const INTERNAL_EMBED_COST: &str = "embedding them currently lowers memory recall: on the \
-     dogfood eval (snap-prefix, 2026-10-04) restoring 2,962 code-index vectors took hit@1 \
-     from 0.70 to 0.51";
+/// What restoring the vectors of [`EMBEDDED_INTERNAL_FIELDS`] rows changes,
+/// said wherever `doctor` and `detect_problems` report rows without one, so
+/// nobody backfills them blindly. The dogfood figure is
+/// `benchmarks/results/dogfood-recall-2026-10-14-recall-skips-code-vectors-after.json`
+/// against `…-after-embedded.json`.
+const INTERNAL_EMBED_EFFECT: &str = "embedding them changes rankings: code-search ranks \
+     code-index rows by their vectors, and dep-doc, recall-chunk and checkpoint vectors \
+     compete with memories in recall. Memory recall passes over code-index vectors: on the \
+     dogfood eval (snap-prefix, 2026-10-14) restoring 2,962 of them left it unchanged";
 
 /// Rows of [`EMBEDDED_INTERNAL_FIELDS`] tables that
 /// [`Axil::reembed_missing_internal`] embeds and commits together.
@@ -1364,9 +1375,9 @@ impl Axil {
     /// Those writers ignore a failed embed, so rows written while the vector
     /// store was unavailable have none. Restoring them is not automatic:
     /// [`Axil::reembed_missing`], `heal_all`, the end-of-session heal and the
-    /// indexer all leave them alone, because once embedded these rows compete
-    /// with memories in recall's vector channel and lower memory recall (see
-    /// [`INTERNAL_EMBED_COST`]). Callers opt in (`axil heal --embed-internal`).
+    /// indexer all leave them alone, because restoring them changes rankings
+    /// (see [`INTERNAL_EMBED_EFFECT`]). Callers opt in
+    /// (`axil heal --embed-internal`).
     ///
     /// Rows are embedded in micro-batches with one `.vec` commit each, as
     /// their writers' bulk paths do. A batch that fails is retried row by
@@ -1410,6 +1421,41 @@ impl Axil {
             );
         }
         Ok((embedded, failed))
+    }
+
+    /// Split every record's text into recall units again, with the current
+    /// [`crate::util::recall_units`], replacing the units (and their
+    /// vectors and FTS documents) written when it was stored. Returns how
+    /// many records were re-split.
+    ///
+    /// Insert splits a record once, so a database written before the
+    /// splitter changed keeps the old units until this runs. Records with no
+    /// units before or after are left untouched. A no-op without a vector
+    /// or FTS index.
+    pub fn rebuild_recall_units(&self) -> Result<usize> {
+        if !self.has_vector_index() && !self.has_fts_index() {
+            return Ok(0);
+        }
+        let records: Vec<Record> = self
+            .storage
+            .scan_all_records()?
+            .into_iter()
+            .filter(|r| !r.table.starts_with('_'))
+            .filter(|r| {
+                !recall_chunk_ids(r).is_empty()
+                    || crate::util::recall_units(&crate::util::searchable_text(&r.data)).len() > 1
+            })
+            .collect();
+        for batch in records.chunks(REEMBED_BATCH) {
+            self.batch_sync_recall_chunks(batch)?;
+        }
+        if !records.is_empty() {
+            self.audit_heal_action(
+                "rebuild_recall_units",
+                &format!("re-split {} records into recall units", records.len()),
+            );
+        }
+        Ok(records.len())
     }
 
     /// Insert a new record into the given table.
@@ -3967,8 +4013,8 @@ impl Axil {
                         severity: Severity::Warning,
                         message: format!("{internal} have no vector embedding"),
                         recommendation: format!(
-                            "Leave them unless the cost is acceptable; {INTERNAL_EMBED_COST}. \
-                             To embed them anyway: axil heal --embed-internal"
+                            "Restore them on purpose: {INTERNAL_EMBED_EFFECT}. \
+                             To embed them: axil heal --embed-internal"
                         ),
                         auto_fixable: false,
                     });
@@ -4955,8 +5001,8 @@ impl Axil {
                 if let Some(internal) = gap.internal_summary() {
                     detail.push_str(&format!(
                         "; {internal} missing an embedding, so code search, dep docs and \
-                         recall match them only by keyword. Do not backfill them blindly: \
-                         {INTERNAL_EMBED_COST}"
+                         recall match them only by keyword. Backfilling is a ranking change: \
+                         {INTERNAL_EMBED_EFFECT}"
                     ));
                 }
                 checks.push(CheckResult {
@@ -5432,7 +5478,11 @@ impl Axil {
         {
             match embedder.embed_query(&effective_query) {
                 Ok(query_vec) => {
-                    let vector_results = vi.search(&query_vec, fetch_k.saturating_mul(2))?;
+                    let vector_results = self.recall_vector_hits(
+                        vi.as_ref(),
+                        &query_vec,
+                        fetch_k.saturating_mul(2),
+                    )?;
                     (Some(query_vec), vector_results)
                 }
                 // The embedder loads its model on first use, so a broken model
@@ -5475,8 +5525,8 @@ impl Axil {
 
         let mut candidates: std::collections::HashMap<RecordId, RecallCandidate> =
             std::collections::HashMap::new();
-        for (rank, (rid, vec_score)) in vector_results.iter().enumerate() {
-            let Some((source_id, source_record)) = self.resolve_recall_candidate(rid)? else {
+        for (rank, (resolved, vec_score)) in vector_results.into_iter().enumerate() {
+            let Some((source_id, source_record)) = resolved else {
                 continue;
             };
             let rrf = 1.0 / (RRF_K + rank as f32);
@@ -5484,14 +5534,14 @@ impl Axil {
                 .entry(source_id.clone())
                 .or_insert_with(|| RecallCandidate {
                     record: source_record,
-                    vector_score: *vec_score,
+                    vector_score: vec_score,
                     fts_score: 0.0,
                     first_rank: rank,
                     rrf_score: 0.0,
                     fts_rank: None,
                 });
-            if *vec_score > entry.vector_score {
-                entry.vector_score = *vec_score;
+            if vec_score > entry.vector_score {
+                entry.vector_score = vec_score;
             }
             entry.first_rank = entry.first_rank.min(rank);
             entry.rrf_score += rrf;
@@ -5534,12 +5584,16 @@ impl Axil {
             .map(|(rid, candidate)| (rid.clone(), candidate.vector_score))
             .collect();
 
-        // Step 3: Compute graph proximity for candidates
+        // Step 3: Compute graph proximity for the candidates linked to an
+        // entity the query names. Without that evidence the signal only said
+        // how well connected a record is, which lifted hubs over answers.
         let graph_scores: std::collections::HashMap<String, f32> =
-            if let Some(ref gi) = self.graph_index {
-                compute_graph_proximity(gi.as_ref(), &candidate_vector_results)
-            } else {
-                std::collections::HashMap::new()
+            match self.graph_index.as_ref() {
+                Some(gi) => {
+                    let named = self.query_entity_ids(&effective_query);
+                    compute_graph_proximity(gi.as_ref(), &candidate_vector_results, &named)
+                }
+                None => std::collections::HashMap::new(),
             };
 
         // Step 4: Compute feedback boosts from provided store
@@ -5557,7 +5611,11 @@ impl Axil {
         let mut scored_results = Vec::new();
         let mut aggregated_candidates: Vec<(RecordId, RecallCandidate)> =
             candidates.into_iter().collect();
-        aggregated_candidates.sort_by(|a, b| a.1.first_rank.cmp(&b.1.first_rank));
+        aggregated_candidates.sort_by(|a, b| {
+            a.1.first_rank
+                .cmp(&b.1.first_rank)
+                .then_with(|| a.0.cmp(&b.0))
+        });
         for (rid, candidate) in aggregated_candidates {
             let record = candidate.record;
             // Scope filter — skip records outside requested scope(s).
@@ -5624,6 +5682,9 @@ impl Axil {
                     const RRF_K_FTS_IDENTIFIER: f32 = 10.0;
                     let tilt = 1.0 / (RRF_K_FTS_IDENTIFIER + fr as f32);
                     score += tilt;
+                    if let Some(relevance) = explanation.relevance.as_mut() {
+                        *relevance += tilt;
+                    }
                     explanation
                         .signals
                         .push(("fts_identifier_tilt".to_string(), tilt));
@@ -5639,12 +5700,21 @@ impl Axil {
             });
         }
 
+        // A query that names a span of time ("in March", "last 3 days")
+        // keeps the candidates inside it, by when their event happened
+        // (`event_time`, else the store time). When none are, the span is
+        // set aside and relevance alone decides, as for a query without one.
+        if let Some(range) = cfg.temporal_target.as_ref().and_then(|t| t.range) {
+            let inside = |r: &crate::scoring::RecallResult| {
+                range.contains(&crate::temporal::record_time(&r.record))
+            };
+            if scored_results.iter().any(inside) {
+                scored_results.retain(inside);
+            }
+        }
+
         // Sort by fused score descending
-        scored_results.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        scored_results.sort_by(crate::scoring::RecallResult::rank_order);
 
         // Query-Time Chunk reranking (optional). Blends the best chunk cosine
         // into the scores of the most relevant candidates, then resorts.
@@ -5659,11 +5729,7 @@ impl Axil {
                     qtc,
                     &cfg,
                 );
-                scored_results.sort_by(|a, b| {
-                    b.score
-                        .partial_cmp(&a.score)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                });
+                scored_results.sort_by(crate::scoring::RecallResult::rank_order);
             }
         }
 
@@ -7188,37 +7254,54 @@ pub struct PrewarmReport {
     pub graph: Option<crate::plugin::GraphState>,
 }
 
-/// Compute graph proximity scores for a set of candidate records.
-///
-/// For each candidate, checks how many other candidates are reachable
-/// within 2 hops. More connections = higher graph proximity.
+/// Graph proximity of each candidate: its 1-hop neighbours among the seeds,
+/// the [`GRAPH_SEEDS`] candidates closest to the query by vector, normalized
+/// by its degree and the seed count, `links / sqrt(degree * seeds)`. Fixed
+/// seeds make the score independent of the pool's size and of whatever
+/// weakly matching records fill it; the degree keeps a hub linked to
+/// everything from outscoring a record whose few links all land on seeds.
+/// Only a candidate that is itself linked to an entity in `named` (the
+/// entities the query names) gets one; with none named, nobody does.
 fn compute_graph_proximity(
     gi: &dyn GraphIndex,
     candidates: &[(RecordId, f32)],
+    named: &std::collections::HashSet<String>,
 ) -> std::collections::HashMap<String, f32> {
     let mut scores = std::collections::HashMap::new();
-    let ids: std::collections::HashSet<String> = candidates
+    if candidates.len() <= 1 || named.is_empty() {
+        return scores;
+    }
+    let mut by_vector: Vec<&(RecordId, f32)> = candidates.iter().collect();
+    by_vector.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.0.cmp(&b.0))
+    });
+    let seeds: std::collections::HashSet<String> = by_vector
         .iter()
+        .take(GRAPH_SEEDS)
         .map(|(rid, _)| rid.as_str().to_string())
         .collect();
 
-    if ids.len() <= 1 {
-        return scores;
-    }
-
     for (rid, _) in candidates {
-        // Check 1-hop neighbors
-        let neighbors = gi
+        // Distinct 1-hop neighbours: parallel edges count once.
+        let neighbors: std::collections::HashSet<RecordId> = gi
             .neighbors(rid.clone(), None, Direction::Both)
-            .unwrap_or_default();
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+        if !neighbors.iter().any(|nid| named.contains(nid.as_str())) {
+            continue;
+        }
 
         let connected = neighbors
             .iter()
-            .filter(|nid| ids.contains(nid.as_str()))
+            .filter(|nid| *nid != rid && seeds.contains(nid.as_str()))
             .count();
 
         if connected > 0 {
-            let proximity = (connected as f32 / ids.len() as f32).min(1.0);
+            let norm = ((neighbors.len() * seeds.len()) as f32).sqrt();
+            let proximity = (connected as f32 / norm).min(1.0);
             scores.insert(rid.as_str().to_string(), proximity);
         }
     }
@@ -7448,6 +7531,39 @@ fn parse_source_record_id(record: &Record) -> Option<RecordId> {
         .and_then(|s| RecordId::from_string(s).ok())
 }
 
+/// The line put before a piece of a record's text when the piece is
+/// embedded on its own (a recall unit, or a chunk the query-time rerank
+/// cuts): the record's table and date, and the files and entities it names.
+/// A piece cut out of a long record no longer says what the record is
+/// about or when it happened; the header says it again. The stored and
+/// FTS-indexed text stays the piece alone.
+fn recall_unit_header(record: &Record) -> String {
+    let mut header = format!(
+        "{}, {}",
+        record.table,
+        crate::temporal::record_time(record).format("%Y-%m-%d")
+    );
+    let names = |key: &str| -> Vec<&str> {
+        match record.data.get(key) {
+            Some(Value::String(one)) => vec![one.as_str()],
+            Some(Value::Array(many)) => many.iter().filter_map(Value::as_str).take(5).collect(),
+            _ => Vec::new(),
+        }
+    };
+    for (key, label) in [("files", "files"), ("file", "files"), ("entities", "entities")] {
+        let found = names(key);
+        if !found.is_empty() {
+            header.push_str(&format!("; {label}: {}", found.join(", ")));
+        }
+    }
+    header
+}
+
+/// A recall unit's text as it is embedded: [`recall_unit_header`] first.
+fn with_unit_header(header: &str, piece: &str) -> String {
+    format!("{header}\n{piece}")
+}
+
 fn recall_chunk_ids(record: &Record) -> Vec<RecordId> {
     record
         .metadata
@@ -7514,11 +7630,7 @@ impl Axil {
             self.delete_recall_chunks_for_source(record)?;
 
             let text = crate::util::searchable_text(&record.data);
-            let chunks = crate::util::overlapping_chunks(
-                &text,
-                RECALL_CHUNK_MAX_BYTES,
-                RECALL_CHUNK_OVERLAP_BYTES,
-            );
+            let chunks = crate::util::recall_units(&text);
             if chunks.len() <= 1 {
                 self.persist_recall_chunk_ids(record, &[])?;
                 continue;
@@ -7545,10 +7657,14 @@ impl Axil {
                 })
                 .collect();
 
+            let header = recall_unit_header(record);
             plans.push(RecordPlan {
                 source_idx,
                 chunk_records,
-                chunk_texts: chunks,
+                chunk_texts: chunks
+                    .iter()
+                    .map(|chunk| with_unit_header(&header, chunk))
+                    .collect(),
             });
         }
 
@@ -7643,11 +7759,7 @@ impl Axil {
         self.delete_recall_chunks_for_source(record)?;
 
         let text = crate::util::searchable_text(&record.data);
-        let chunks = crate::util::overlapping_chunks(
-            &text,
-            RECALL_CHUNK_MAX_BYTES,
-            RECALL_CHUNK_OVERLAP_BYTES,
-        );
+        let chunks = crate::util::recall_units(&text);
         if chunks.len() <= 1 {
             self.persist_recall_chunk_ids(record, &[])?;
             return Ok(());
@@ -7681,7 +7793,12 @@ impl Axil {
 
         // Batch embed all chunks in one ONNX call.
         if has_vector {
-            let chunk_texts: Vec<&str> = chunks.iter().map(|s| s.as_str()).collect();
+            let header = recall_unit_header(record);
+            let embedded: Vec<String> = chunks
+                .iter()
+                .map(|chunk| with_unit_header(&header, chunk))
+                .collect();
+            let chunk_texts: Vec<&str> = embedded.iter().map(String::as_str).collect();
             if let (Ok(embedder), Ok(vi)) = (self.require_embedder(), self.require_vector_index()) {
                 let vectors = embedder.embed_batch(&chunk_texts).or_else(|_| {
                     chunk_texts
@@ -7759,14 +7876,15 @@ impl Axil {
     /// `alpha * best_chunk + (1 - alpha) * fused`.
     ///
     /// The window is the `qtc.top_k` most relevant candidates: ranked by fused
-    /// score with the recency term taken out. Recency still counts in every
-    /// final score, but it no longer decides who gets the blend. When the
-    /// window followed the plain fused order, recency dominated it (a
-    /// fresh commit gained about 0.14), so an old record that matched the query
-    /// best could sit outside and never be rescored. Blending every candidate
-    /// instead removed the window but also its gate: records with a high cosine
-    /// and nothing else in their favour (file summaries, code proxies) then
-    /// outranked the answers, and dogfood hit@5 fell from 0.91 to 0.88.
+    /// score without the recency term, equal ones by record id. Recency still
+    /// counts in every final score, but it no longer decides who gets the
+    /// blend. When the window followed the plain fused order, recency
+    /// dominated it (a fresh commit gained about 0.14), so an old record that
+    /// matched the query best could sit outside and never be rescored.
+    /// Blending every candidate instead removed the window but also its gate:
+    /// records with a high cosine and nothing else in their favour (file
+    /// summaries, code proxies) then outranked the answers, and dogfood hit@5
+    /// fell from 0.91 to 0.88.
     ///
     /// Records long enough to be chunked at insert are scored from their
     /// chunks' stored vectors; shorter ones have their `searchable_text`
@@ -7796,12 +7914,14 @@ impl Axil {
         let relevance: Vec<f32> = results
             .iter()
             .map(|r| {
-                let recency = crate::scoring::recency_decay(
-                    &r.record.created_at,
-                    &cfg.now,
-                    cfg.recency_half_life_hours,
-                );
-                r.score - cfg.weights.recency * recency
+                r.explanation.relevance.unwrap_or_else(|| {
+                    let recency = crate::scoring::recency_decay(
+                        &r.record.created_at,
+                        &cfg.now,
+                        cfg.recency_half_life_hours,
+                    );
+                    r.score - cfg.weights.recency * recency
+                })
             })
             .collect();
         let mut window: Vec<usize> = (0..results.len()).collect();
@@ -7809,6 +7929,7 @@ impl Axil {
             relevance[*b]
                 .partial_cmp(&relevance[*a])
                 .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| results[*a].record.id.cmp(&results[*b].record.id))
         });
         window.truncate(qtc.top_k);
 
@@ -7822,15 +7943,18 @@ impl Axil {
 
         // Window results without stored chunk vectors are chunked here and
         // embedded together in one batched call; a call per result cost up to
-        // `top_k` model runs per recall.
+        // `top_k` model runs per recall. `pieces` keeps each chunk's own text
+        // (`chunks` holds it as embedded, headed) for the snippet.
         let mut pending: Vec<(usize, std::ops::Range<usize>)> = Vec::new();
         let mut chunks: Vec<String> = Vec::new();
+        let mut pieces: Vec<String> = Vec::new();
         for i in window {
             let result = &mut results[i];
-            if let Some(best) =
+            if let Some((best, unit)) =
                 self.qtc_best_cosine_from_stored_chunks(&result.record, query_vec, q_norm)
             {
                 blend(result, best);
+                result.explanation.best_chunk = self.recall_unit_text(&unit);
                 continue;
             }
             let text = crate::util::searchable_text(&result.record.data);
@@ -7841,8 +7965,16 @@ impl Axil {
             if record_chunks.is_empty() {
                 continue;
             }
+            // Headed like the stored units, so both kinds of window result
+            // are scored against the same kind of text.
+            let header = recall_unit_header(&result.record);
             let start = chunks.len();
-            chunks.extend(record_chunks);
+            chunks.extend(
+                record_chunks
+                    .iter()
+                    .map(|chunk| with_unit_header(&header, chunk)),
+            );
+            pieces.extend(record_chunks);
             pending.push((i, start..chunks.len()));
         }
         if pending.is_empty() {
@@ -7855,6 +7987,7 @@ impl Axil {
             .ok()
             .filter(|vectors| vectors.len() == refs.len());
         for (i, range) in pending {
+            let (first, several) = (range.start, range.len() > 1);
             // One text that fails to embed fails the whole batch. Embed each
             // result on its own then, so only a result that fails by itself
             // keeps its unblended score.
@@ -7869,17 +8002,34 @@ impl Axil {
                     own.as_slice()
                 }
             };
-            let best = vectors
+            let (best_at, best) = vectors
                 .iter()
                 .map(|vec| cosine(query_vec, q_norm, vec))
-                .fold(0.0f32, f32::max);
+                .enumerate()
+                .fold((0, 0.0f32), |kept, (at, sim)| {
+                    if sim > kept.1 {
+                        (at, sim)
+                    } else {
+                        kept
+                    }
+                });
             blend(&mut results[i], best);
+            if several {
+                results[i].explanation.best_chunk = pieces.get(first + best_at).cloned();
+            }
         }
+    }
+
+    /// The stored text of a recall unit.
+    fn recall_unit_text(&self, unit: &RecordId) -> Option<String> {
+        let unit = self.storage.get(unit).ok()??;
+        unit.data.get("content")?.as_str().map(str::to_string)
     }
 
     /// If the source record has index-time chunks registered, pull each
     /// chunk's stored vector from the vector index and return the max
-    /// cosine against the query. Returns `None` when:
+    /// cosine against the query, with the chunk that scored it. Returns
+    /// `None` when:
     /// - the record has no registered chunks (short content → no chunking)
     /// - the vector index is missing or doesn't implement `get_vector`
     /// - every chunk vector lookup fails
@@ -7891,31 +8041,24 @@ impl Axil {
         source_record: &Record,
         query_vec: &[f32],
         query_norm: f32,
-    ) -> Option<f32> {
+    ) -> Option<(f32, RecordId)> {
         let chunk_ids = recall_chunk_ids(source_record);
         if chunk_ids.is_empty() {
             return None;
         }
         let vi = self.vector_index.as_ref()?;
 
-        let mut best: f32 = f32::NEG_INFINITY;
-        let mut any_hit = false;
-        for chunk_id in &chunk_ids {
-            let Ok(Some(chunk_vec)) = vi.get_vector(chunk_id) else {
+        let mut best: Option<(f32, RecordId)> = None;
+        for chunk_id in chunk_ids {
+            let Ok(Some(chunk_vec)) = vi.get_vector(&chunk_id) else {
                 continue;
             };
-            any_hit = true;
             let sim = cosine(query_vec, query_norm, &chunk_vec);
-            if sim > best {
-                best = sim;
+            if sim.is_finite() && best.as_ref().is_none_or(|(kept, _)| sim > *kept) {
+                best = Some((sim, chunk_id));
             }
         }
-
-        if any_hit && best.is_finite() {
-            Some(best)
-        } else {
-            None
-        }
+        best
     }
 
     fn resolve_recall_candidate(
@@ -7936,6 +8079,72 @@ impl Axil {
             return Ok(None);
         };
         Ok(Some((source_id, source_record)))
+    }
+
+    /// Ids of the `_entities` rows the query names, found through the entity
+    /// key index. Empty when the query names none, or when the index cannot
+    /// answer (not built, or left stale by another writer): recall then has
+    /// no evidence for graph proximity and leaves it out.
+    fn query_entity_ids(&self, query: &str) -> std::collections::HashSet<String> {
+        let entities = crate::entity::extract_entities(query);
+        if entities.is_empty() {
+            return std::collections::HashSet::new();
+        }
+        let keys: Vec<String> = entities
+            .iter()
+            .map(|e| entity_canonical_id(e, None))
+            .collect();
+        let key_refs: Vec<&str> = keys.iter().map(String::as_str).collect();
+        match self.storage.lookup_entity_keys(&key_refs) {
+            Ok(crate::storage::EntityKeyLookup::Found(found)) => {
+                found.into_values().map(|id| id.to_string()).collect()
+            }
+            _ => std::collections::HashSet::new(),
+        }
+    }
+
+    /// Recall's vector candidates: the `want` nearest hits in the default
+    /// vector index that are not code-index rows, each resolved as
+    /// [`Axil::resolve_recall_candidate`] does, in rank order. A hit whose
+    /// record is gone resolves to `None` and keeps its rank, as before.
+    ///
+    /// Code-search embeds code proxies and file / module / project summaries
+    /// into the same index, and memory recall must not rank them: on the
+    /// dogfood eval (snap-prefix, 2026-10-14), restoring the code-index
+    /// vectors a dead `.vec` had left out took memory recall's hit@1 from 0.68
+    /// to 0.58 while recall still ranked them
+    /// (`benchmarks/results/dogfood-recall-2026-10-14-recall-skips-code-vectors-before.json`
+    /// against `…-before-embedded.json`). Skipping them after
+    /// the search would shrink the pool instead, so the search widens until
+    /// `want` hits remain or the index runs out.
+    fn recall_vector_hits(
+        &self,
+        vi: &dyn VectorIndex,
+        query: &[f32],
+        want: usize,
+    ) -> Result<Vec<(Option<(RecordId, Record)>, f32)>> {
+        let mut fetch = want;
+        loop {
+            let hits = vi.search(query, fetch)?;
+            let exhausted = hits.len() < fetch;
+            let mut kept = Vec::with_capacity(want);
+            for (id, score) in hits {
+                let resolved = self.resolve_recall_candidate(&id)?;
+                if let Some((_, ref record)) = resolved {
+                    if record.table.starts_with(CODE_INDEX_TABLE_PREFIX) {
+                        continue;
+                    }
+                }
+                kept.push((resolved, score));
+                if kept.len() == want {
+                    return Ok(kept);
+                }
+            }
+            if exhausted || fetch == usize::MAX {
+                return Ok(kept);
+            }
+            fetch = fetch.saturating_mul(4);
+        }
     }
 }
 
@@ -8483,6 +8692,8 @@ mod tests {
                 signals: vec![],
                 summary: String::new(),
                 query_class: None,
+                best_chunk: None,
+                relevance: None,
             },
         }
     }
@@ -8969,6 +9180,8 @@ mod tests {
                     signals: Vec::new(),
                     summary: String::new(),
                     query_class: None,
+                    best_chunk: None,
+                    relevance: None,
                 },
             })
             .collect()
@@ -8986,7 +9199,11 @@ mod tests {
         if text.trim().is_empty() {
             return before.score;
         }
-        let chunks = chunk_by_chars(&text, qtc.chunk_chars, qtc.stride_chars);
+        let header = recall_unit_header(&before.record);
+        let chunks: Vec<String> = chunk_by_chars(&text, qtc.chunk_chars, qtc.stride_chars)
+            .iter()
+            .map(|chunk| with_unit_header(&header, chunk))
+            .collect();
         let refs: Vec<&str> = chunks.iter().map(String::as_str).collect();
         let Ok(vectors) = embedder.embed_batch(&refs) else {
             return before.score;
@@ -9068,6 +9285,33 @@ mod tests {
                 got[i].score
             );
         }
+    }
+
+    #[test]
+    fn a_unit_header_says_what_the_record_is_and_when() {
+        let mut record = Record::new(
+            "decisions",
+            json!({
+                "summary": "x",
+                "files": ["src/db.rs", "src/util.rs"],
+                "entities": ["Axil", "QTC"],
+            }),
+        );
+        record.created_at = chrono::DateTime::parse_from_rfc3339("2026-03-12T09:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        assert_eq!(
+            recall_unit_header(&record),
+            "decisions, 2026-03-12; files: src/db.rs, src/util.rs; entities: Axil, QTC"
+        );
+        record.data["event_time"] = json!("2025-12-01");
+        record.data["files"] = json!(null);
+        record.data["file"] = json!("README.md");
+        assert_eq!(
+            recall_unit_header(&record),
+            "decisions, 2025-12-01; files: README.md; entities: Axil, QTC"
+        );
+        assert_eq!(with_unit_header("h", "piece"), "h\npiece");
     }
 
     #[test]

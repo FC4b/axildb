@@ -23,13 +23,6 @@ static RE_TEMPORAL: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?:last|past|since)\s+\d+\s*(?:day|hour|minute|week|month)").unwrap()
 });
 
-static RE_DURATION_N: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?:last|past)\s+(\d+)\s*(day|hour|minute|week|month)s?").unwrap()
-});
-
-static RE_DURATION_SINGLE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?:last|past)\s+(day|hour|minute|week|month)").unwrap());
-
 // ── Intent ──────────────────────────────────────────────────────────
 
 /// The detected intent of a natural-language query.
@@ -311,15 +304,8 @@ pub fn execute_plan(
                     run_temporal(db, query, top_k, &mut step_results, &mut strategies);
                 } else {
                     strategies.push("time_filter".to_string());
-                    let duration = parse_duration_from_query(query).unwrap_or(7 * 86400);
-                    let cutoff = chrono::Utc::now() - chrono::Duration::seconds(duration as i64);
-                    let cutoff_str = cutoff.to_rfc3339();
-                    all_results.retain(|v| {
-                        v.get("created_at")
-                            .and_then(|t| t.as_str())
-                            .map(|t| t >= cutoff_str.as_str())
-                            .unwrap_or(true)
-                    });
+                    let window = time_window(query, chrono::Utc::now());
+                    all_results.retain(|v| created_in(v, &window));
                 }
             }
             _ => {
@@ -490,7 +476,9 @@ fn has_temporal_pattern(text: &str) -> bool {
 
 /// Parse a duration (in seconds) from natural language in a query string.
 ///
-/// Returns `None` if no recognizable duration is found.
+/// Returns `None` if no recognizable duration is found. Reads the query with
+/// core's temporal grammar ([`axil_core::temporal::lookback`]), so `ask` and
+/// recall agree on what a time phrase means.
 ///
 /// # Examples
 /// - "last 3 days" → `Some(259200)`
@@ -498,45 +486,32 @@ fn has_temporal_pattern(text: &str) -> bool {
 /// - "last hour" → `Some(3600)`
 /// - "recently" → `Some(604800)` (default: 1 week)
 pub fn parse_duration_from_query(query: &str) -> Option<u64> {
-    let q = query.to_lowercase();
+    axil_core::temporal::lookback(query).map(|d| d.num_seconds().max(0) as u64)
+}
 
-    if let Some(caps) = RE_DURATION_N.captures(&q) {
-        let n: u64 = caps[1].parse().ok()?;
-        let secs = match &caps[2] {
-            "minute" => 60,
-            "hour" => 3600,
-            "day" => 86400,
-            "week" => 7 * 86400,
-            "month" => 30 * 86400,
-            _ => return None,
-        };
-        return Some(n * secs);
-    }
+/// The span a time question keeps: the span the query names ("in March",
+/// "last 3 days", "before 2026-03-01"), else the lookback it names ending
+/// now, a week when it names none.
+fn time_window(query: &str, now: chrono::DateTime<chrono::Utc>) -> axil_core::TimeRange {
+    axil_core::parse_temporal(query, &now)
+        .and_then(|(target, _)| target.range)
+        .unwrap_or_else(|| {
+            let back = axil_core::temporal::lookback(query).unwrap_or(chrono::Duration::days(7));
+            axil_core::TimeRange {
+                start: Some(now - back),
+                end: None,
+            }
+        })
+}
 
-    if let Some(caps) = RE_DURATION_SINGLE.captures(&q) {
-        let secs = match &caps[1] {
-            "minute" => 60,
-            "hour" => 3600,
-            "day" => 86400,
-            "week" => 7 * 86400,
-            "month" => 30 * 86400,
-            _ => return None,
-        };
-        return Some(secs);
-    }
-
-    // Keywords
-    if q.contains("yesterday") {
-        return Some(86400);
-    }
-    if q.contains("today") {
-        return Some(86400);
-    }
-    if q.contains("recently") || q.contains("recent") {
-        return Some(7 * 86400);
-    }
-
-    None
+/// Whether a result's `created_at` falls in `window`. A result without a
+/// readable one stays.
+fn created_in(result: &Value, window: &axil_core::TimeRange) -> bool {
+    result
+        .get("created_at")
+        .and_then(Value::as_str)
+        .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+        .is_none_or(|t| window.contains(&t.with_timezone(&chrono::Utc)))
 }
 
 // ── Main Ask Function ───────────────────────────────────────────────
@@ -735,13 +710,8 @@ pub async fn ask_parallel(
         .map(|s| s.name.clone())
         .collect();
     if should_run("time") {
-        let window = parse_duration_from_query(&q).unwrap_or(7 * 86400);
-        let cutoff = (chrono::Utc::now() - chrono::Duration::seconds(window as i64)).to_rfc3339();
-        fused.retain(|v| {
-            v.get("created_at")
-                .and_then(Value::as_str)
-                .is_none_or(|t| t >= cutoff.as_str())
-        });
+        let window = time_window(&q, chrono::Utc::now());
+        fused.retain(|v| created_in(v, &window));
         strategies_used.push("time_window".to_string());
     }
     fused.truncate(top_k);
@@ -926,19 +896,25 @@ fn run_temporal(
     results: &mut Vec<Value>,
     strategies: &mut Vec<String>,
 ) {
-    let window = parse_duration_from_query(query).unwrap_or(7 * 86400);
-    let cutoff = chrono::Utc::now() - chrono::Duration::seconds(window as i64);
-    // Over-fetch: the window drops the older hits.
+    let now = chrono::Utc::now();
+    let window = time_window(query, now);
+    // Over-fetch: the window drops the hits outside it.
     let hits = recall_hits(db, query, top_k.saturating_mul(4).max(20));
     let in_window: Vec<&(Record, f32)> = hits
         .iter()
-        .filter(|(r, _)| r.created_at >= cutoff)
+        .filter(|(r, _)| window.contains(&r.created_at))
         .take(top_k)
         .collect();
     if hits.is_empty() {
         // No relevance signal at all (no vector or text engine): the window
         // is the only thing left to answer with.
-        if let Ok(records) = db.since(None, window) {
+        let micros = |t: chrono::DateTime<chrono::Utc>| t.timestamp_micros();
+        let in_span = db.time_range(
+            None,
+            window.start.map_or(0, micros),
+            window.end.map_or(micros(now), micros),
+        );
+        if let Ok(records) = in_span {
             strategies.push("time_window (no relevance signal)".to_string());
             results.extend(
                 records

@@ -53,13 +53,62 @@ pub fn value_text(data: &serde_json::Value) -> String {
 }
 
 /// Longest recall chunk, in bytes. A record whose [`searchable_text`] is
-/// longer gets one extra vector per [`overlapping_chunks`] piece at these
-/// sizes, besides its own; exported so diagnostics that rebuild a record's
-/// vectors split its text the same way insert does.
+/// longer gets one extra vector per [`recall_units`] piece, besides its
+/// own; exported so diagnostics that rebuild a record's vectors split its
+/// text the same way insert does.
 pub const RECALL_CHUNK_MAX_BYTES: usize = 1600;
 
-/// Bytes each recall chunk shares with the one before it.
+/// Bytes each recall chunk shares with the one before it, where a line
+/// longer than [`RECALL_CHUNK_MAX_BYTES`] is cut into overlapping pieces.
 pub const RECALL_CHUNK_OVERLAP_BYTES: usize = 400;
+
+/// Shortest recall unit, in bytes: a shorter line joins the line after it,
+/// so a one-word reply rides with the turn it answers instead of taking a
+/// vector of its own.
+pub const RECALL_UNIT_MIN_BYTES: usize = 400;
+
+/// The pieces of a record's text that get a vector of their own besides
+/// the record's: empty when the text fits in one [`RECALL_CHUNK_MAX_BYTES`]
+/// chunk.
+///
+/// Longer text splits at its lines, so each unit is a dialog turn or a fact
+/// (a line, joined with the next ones until it holds
+/// [`RECALL_UNIT_MIN_BYTES`]). A question about one turn then meets that
+/// turn alone, not a fixed window that cuts it in half and pads it with its
+/// neighbours. A unit longer than a chunk is cut into [`overlapping_chunks`],
+/// so text without line breaks splits as it did before.
+pub fn recall_units(text: &str) -> Vec<String> {
+    if text.len() <= RECALL_CHUNK_MAX_BYTES {
+        return Vec::new();
+    }
+    let mut units = Vec::new();
+    let mut flush = |unit: &mut String| {
+        if unit.len() > RECALL_CHUNK_MAX_BYTES {
+            units.extend(overlapping_chunks(
+                unit,
+                RECALL_CHUNK_MAX_BYTES,
+                RECALL_CHUNK_OVERLAP_BYTES,
+            ));
+        } else {
+            units.push(std::mem::take(unit));
+        }
+        unit.clear();
+    };
+    let mut unit = String::new();
+    for line in text.lines().filter(|line| !line.trim().is_empty()) {
+        if !unit.is_empty() {
+            unit.push('\n');
+        }
+        unit.push_str(line);
+        if unit.len() >= RECALL_UNIT_MIN_BYTES {
+            flush(&mut unit);
+        }
+    }
+    if !unit.is_empty() {
+        flush(&mut unit);
+    }
+    units
+}
 
 /// Split long text into overlapping chunks for retrieval scoring.
 ///
@@ -278,6 +327,40 @@ mod tests {
         let chunks = overlapping_chunks(&text, 1600, 400);
         assert!(chunks.len() > 1);
         assert!(chunks.iter().all(|c| !c.is_empty() && c.len() <= 1600));
+    }
+
+    #[test]
+    fn short_text_has_no_recall_units() {
+        assert!(recall_units("user: hi\nassistant: hello").is_empty());
+        assert!(recall_units(&"a".repeat(RECALL_CHUNK_MAX_BYTES)).is_empty());
+    }
+
+    #[test]
+    fn recall_units_follow_turns() {
+        let user = format!("user: {}", "where should we eat ".repeat(25));
+        let reply = format!("assistant: {}", "try the noodle place ".repeat(25));
+        let text = [user.as_str(), "user: ok", reply.as_str(), &user, &reply].join("\n");
+        let units = recall_units(&text);
+        assert_eq!(units.len(), 4, "{units:#?}");
+        assert_eq!(units[0], user);
+        // A short line joins the line after it.
+        assert_eq!(units[1], format!("user: ok\n{reply}"));
+        assert_eq!(units[2], user);
+        assert_eq!(units[3], reply);
+    }
+
+    #[test]
+    fn a_long_line_is_cut_into_overlapping_pieces() {
+        let long = "x".repeat(4000);
+        let units = recall_units(&long);
+        assert_eq!(
+            units,
+            overlapping_chunks(&long, RECALL_CHUNK_MAX_BYTES, RECALL_CHUNK_OVERLAP_BYTES)
+        );
+        let text = format!("{}\n{long}", "y".repeat(500));
+        let units = recall_units(&text);
+        assert_eq!(units[0], "y".repeat(500));
+        assert!(units[1..].iter().all(|u| u.len() <= RECALL_CHUNK_MAX_BYTES));
     }
 
     #[test]

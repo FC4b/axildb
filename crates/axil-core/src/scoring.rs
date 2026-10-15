@@ -111,6 +111,20 @@ pub struct ScoreExplanation {
     /// serialization when absent so existing JSON output is unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub query_class: Option<String>,
+    /// The piece of a long record's text that matched the query best: the
+    /// recall unit (or query-time chunk) the rerank scored it by. `Some`
+    /// only when the rerank saw the record as more than one piece. Skipped
+    /// from serialization when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub best_chunk: Option<String>,
+    /// The score without its recency term, summed the same way for every
+    /// record: two records that differ only in age get exactly the same
+    /// value. Taking recency back out of the final score instead left a
+    /// rounding residue that changed with the clock, so which of two such
+    /// records made the query-time chunk window changed from call to call.
+    /// `None` outside recall's scoring.
+    #[serde(skip)]
+    pub(crate) relevance: Option<f32>,
 }
 
 impl ScoreExplanation {
@@ -123,6 +137,8 @@ impl ScoreExplanation {
             signals,
             summary,
             query_class: None,
+            best_chunk: None,
+            relevance: None,
         }
     }
 }
@@ -136,6 +152,25 @@ pub struct RecallResult {
     pub score: f32,
     /// Scoring breakdown showing each signal's contribution.
     pub explanation: ScoreExplanation,
+}
+
+impl RecallResult {
+    /// Recall's result order: highest score first, equal scores newest
+    /// record first (record ids are ULIDs, so the higher id is the newer
+    /// record).
+    ///
+    /// The order candidates are gathered in (hash-map iteration, the FTS
+    /// index's segment layout) differs between processes, so ties settled by
+    /// it came back in a different order on every run. Newest first, not
+    /// oldest: the recency term only ever lifts the newer of two records, so
+    /// when two scores differ by nothing but a rounding step that depends on
+    /// the clock, a tie and that step put the two in the same order.
+    pub fn rank_order(a: &Self, b: &Self) -> std::cmp::Ordering {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| b.record.id.cmp(&a.record.id))
+    }
 }
 
 /// Configuration for the recall scoring engine.
@@ -364,11 +399,14 @@ pub fn fuse_signals(
         config.recency_half_life_hours,
     );
 
-    // Compute temporal proximity boost
+    // Compute temporal proximity boost, against when the record's event
+    // happened (`event_time`) where it says so
     let temporal = config
         .temporal_target
         .as_ref()
-        .map(|t| crate::temporal::temporal_boost(&record.created_at, t))
+        .map(|t| {
+            crate::temporal::temporal_boost(&crate::temporal::record_time(record), t)
+        })
         .unwrap_or(0.0);
 
     // Compute keyword overlap from record text
@@ -410,6 +448,15 @@ pub fn fuse_signals(
     // one-shot pre-computation if ever re-attempted, not per-record.
     let final_score = w.vector * signals.vector_similarity
         + w.recency * recency
+        + w.graph * signals.graph_proximity
+        + w.keyword * keyword_score
+        + w.feedback * signals.feedback_boost
+        + w.temporal * temporal
+        + w.preference * signals.preference_match
+        + w.activation * activation_score
+        + w.importance * importance_score
+        + w.rrf * signals.rrf;
+    let relevance = w.vector * signals.vector_similarity
         + w.graph * signals.graph_proximity
         + w.keyword * keyword_score
         + w.feedback * signals.feedback_boost
@@ -482,6 +529,8 @@ pub fn fuse_signals(
         // Set by the caller (recall) once the query is classified; fuse_signals
         // itself is query-class agnostic.
         query_class: None,
+        best_chunk: None,
+        relevance: Some(relevance),
     };
 
     (final_score, explanation)

@@ -674,11 +674,7 @@ fn what_if(
         }
         text_bytes.push(text.len() as f64);
         let mut vectors = vec![own];
-        let chunks = util::overlapping_chunks(
-            &text,
-            util::RECALL_CHUNK_MAX_BYTES,
-            util::RECALL_CHUNK_OVERLAP_BYTES,
-        );
+        let chunks = util::recall_units(&text);
         if chunks.len() > 1 {
             for chunk in &chunks {
                 vectors.push(normalize(

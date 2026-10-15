@@ -97,6 +97,15 @@ with `axil recall "<q>" --type architecture`. The vocabulary is a recommendation
 not enforced (any string is accepted). `decisions`/`errors` don't need a `type` —
 their field shape already encodes their function.
 
+### Dated events and single facts
+
+When a record is about something that happened at a known time other than now
+(a release, a meeting, an incident), give it an `event_time` (a date or
+RFC 3339): `axil store context '{"summary":"Shipped v2.3 to customers","event_time":"2026-03-12"}'`.
+Time questions ("what happened in March") read `event_time` before the time the
+record was stored. Store one fact per record: a question about one fact finds a
+record that states it, and can miss a long note that mentions it among others.
+
 ### Rules
 
 1. **Store immediately, not in batches.** Don't wait until the end of a session to dump 6 records. Store each decision/error/summary right after it happens.
