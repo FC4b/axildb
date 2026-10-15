@@ -207,8 +207,11 @@ pub fn op_label(argv: &[String]) -> &'static str {
 pub struct Stats {
     ops: Mutex<BTreeMap<&'static str, OpStats>>,
     /// Requests refused before running: incompatible, overloaded, expired,
-    /// starting or stopping.
+    /// starting, stopping or leased.
     pub refused: AtomicU64,
+    /// [`Stats::refused`] by reason: `overloaded`, `starting`, `leased`, …,
+    /// and `incompatible <what>` for each thing a client did not match in.
+    refused_by: Mutex<BTreeMap<String, u64>>,
     /// Times the database was reopened.
     pub reloads: AtomicU64,
     last_reload: Mutex<Option<String>>,
@@ -222,6 +225,24 @@ impl Stats {
             s.served += 1;
             s.record(latency);
         });
+    }
+
+    /// A request refused before running, for `reason`.
+    pub fn refused(&self, reason: String) {
+        self.refused.fetch_add(1, Ordering::AcqRel);
+        let mut by = self
+            .refused_by
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        *by.entry(reason).or_default() += 1;
+    }
+
+    /// [`Stats::refused`] counted by reason.
+    pub fn refused_by(&self) -> BTreeMap<String, u64> {
+        self.refused_by
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     /// A request for `op` handed back to the client.

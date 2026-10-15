@@ -31,8 +31,8 @@ use super::exec::{self, NotServed};
 use super::paths::{fnv1a64, trusted_socket, uid};
 
 /// The protocol version a run header must carry. 2 added the `leased` run
-/// reply.
-pub const DAEMON_PROTO: u32 = 2;
+/// reply, 3 the order a served command printed in.
+pub const DAEMON_PROTO: u32 = 3;
 
 /// The largest frame either side sends or accepts: 32 MiB.
 pub const MAX_FRAME: usize = 32 * 1024 * 1024;
@@ -125,6 +125,12 @@ pub enum Op {
     Run(RunHeader),
     /// What `daemon status` reports while the daemon runs.
     Status,
+    /// Whether a run with this header would get past the handshake,
+    /// without running anything: answered by
+    /// `{"op":"check","mismatch":null}`, or by what does not match
+    /// (`proto`, `build`, `features` or `env`). `daemon start` and `status`
+    /// ask it for the shell they run in.
+    Check(RunHeader),
     /// Debug builds only: report the graph as failed to load, so a test can
     /// watch the daemon reload. Answered by `{"op":"debug_fail_graph","ok":true}`.
     #[cfg(debug_assertions)]
@@ -267,8 +273,14 @@ pub enum RunReply {
     Served {
         /// Its exit code.
         exit: i32,
+        /// The order it printed in: runs of so many bytes of one stream,
+        /// `[["out",12],["err",40],["out",3]]`, which the client prints in.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        order: Vec<(Stream, u64)>,
     },
     /// The daemon did not run it and wrote nothing; the client runs it.
+    /// Except `too_large`: the daemon ran it, and what it printed is over
+    /// the frame limit; the client runs it unless it writes.
     NotServed {
         /// `parse`, `wrong_db`, `command`, `lacks`, `terminal`,
         /// `unavailable` or `too_large`.
@@ -276,15 +288,18 @@ pub enum RunReply {
         /// The reason in words.
         detail: String,
     },
-    /// The client and the daemon don't match; the client runs it.
+    /// The client and the daemon don't match; the client runs it. Frozen,
+    /// as `overloaded` and `error` are: a daemon answers them before it
+    /// compares protocol versions.
     Incompatible {
         /// `proto`, `build`, `features` or `env`.
         reason: String,
     },
-    /// The database is still opening.
+    /// The database is opening: at the start, or again once the last
+    /// lease on it ended. Asked again shortly, the daemon serves.
     Starting,
     /// The database is closed while another process holds a lease on it
-    /// (see [`Op::Lease`]).
+    /// (see [`Op::Lease`]), or has it open without one.
     Leased,
     /// The daemon is shutting down.
     Stopping,
@@ -299,7 +314,45 @@ pub enum RunReply {
     },
 }
 
+/// One of a command's two output streams.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Stream {
+    Out,
+    Err,
+}
+
 impl RunReply {
+    /// The reply for a command that ran, from what [`exec`] made of it.
+    pub fn served(response: &exec::Response) -> RunReply {
+        RunReply::Served {
+            exit: response.exit,
+            order: response
+                .order
+                .iter()
+                .map(|&(to_err, len)| {
+                    let stream = if to_err { Stream::Err } else { Stream::Out };
+                    (stream, u64::try_from(len).unwrap_or(u64::MAX))
+                })
+                .collect(),
+        }
+    }
+
+    /// The order of a served reply as [`crate::cli_io::Captured::order`]
+    /// keeps it; empty for any other reply.
+    pub fn order(&self) -> Vec<(bool, usize)> {
+        match self {
+            RunReply::Served { order, .. } => order
+                .iter()
+                .map(|&(stream, len)| {
+                    let len = usize::try_from(len).unwrap_or(usize::MAX);
+                    (stream == Stream::Err, len)
+                })
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
     /// The reply for a request [`exec::execute_captured`] did not serve.
     pub fn not_served(reason: NotServed) -> RunReply {
         let code = match reason {
@@ -320,10 +373,17 @@ impl RunReply {
 }
 
 /// The variables the environment fingerprint covers: each one changes what
-/// a command prints or the data it reads. A served command uses the
+/// a served command prints or the data it reads. A served command uses the
 /// daemon's values of these, so it is served only to a client whose values
 /// are the same. `AXIL_ENC_KEY_FILE` also covers the key file's size and
 /// modification time.
+///
+/// A variable only commands the daemon does not serve read is left out, so
+/// a shell that sets it differently is still served: `CARGO_HOME`,
+/// `GOPATH` and `GOMODCACHE`, where `deps` finds the dependency sources it
+/// reads docs from, and `XDG_CONFIG_HOME`, where `workspace` keeps its
+/// registry. A daemon that serves `deps refresh` must cover the first three
+/// again.
 pub const FP_ENV: &[&str] = &[
     "AXIL_ENC_KEY",
     "AXIL_ENC_KEY_FILE",
@@ -333,12 +393,8 @@ pub const FP_ENV: &[&str] = &[
     "AXIL_EMBED_SESSIONS",
     "HOME",
     "USERPROFILE",
-    "XDG_CONFIG_HOME",
     "APPDATA",
     "ORT_DYLIB_PATH",
-    "CARGO_HOME",
-    "GOPATH",
-    "GOMODCACHE",
 ];
 
 /// The variables the daemon removes from its own environment before it
@@ -738,7 +794,34 @@ mod tests {
         let more: LeaseReply =
             serde_json::from_str(r#"{"op":"lease","granted":true,"holders":2}"#).unwrap();
         assert_eq!(more, LeaseReply::granted());
-        assert_eq!(DAEMON_PROTO, 2);
+
+        // The run replies a daemon gives before it compares protocol
+        // versions: a client of any version must read them, or it would
+        // take a refusal for a connection lost after a write was sent.
+        let frozen = [
+            (
+                RunReply::Incompatible {
+                    reason: "proto".into(),
+                },
+                r#"{"reply":"incompatible","reason":"proto"}"#,
+            ),
+            (RunReply::Overloaded, r#"{"reply":"overloaded"}"#),
+            (
+                RunReply::Error {
+                    message: "bad request".into(),
+                },
+                r#"{"reply":"error","message":"bad request"}"#,
+            ),
+        ];
+        for (reply, json) in frozen {
+            assert_eq!(serde_json::to_string(&reply).unwrap(), json);
+            assert_eq!(serde_json::from_str::<RunReply>(json).unwrap(), reply);
+        }
+        assert_eq!(
+            serde_json::from_str::<RunReply>(r#"{"reply":"overloaded","in_flight":16}"#).unwrap(),
+            RunReply::Overloaded
+        );
+        assert_eq!(DAEMON_PROTO, 3);
     }
 
     #[test]
@@ -767,8 +850,21 @@ mod tests {
         assert_eq!(json["op"], "run");
         assert_eq!(json["argv"], serde_json::json!(["axil", "boot"]));
         assert_eq!(serde_json::from_value::<Op>(json).unwrap(), Op::Run(header));
-        let served = serde_json::to_string(&RunReply::Served { exit: 0 }).unwrap();
-        assert_eq!(served, r#"{"reply":"served","exit":0}"#);
+        let served = RunReply::Served {
+            exit: 0,
+            order: Vec::new(),
+        };
+        let json = r#"{"reply":"served","exit":0}"#;
+        assert_eq!(serde_json::to_string(&served).unwrap(), json);
+        assert_eq!(serde_json::from_str::<RunReply>(json).unwrap(), served);
+        let printed = RunReply::Served {
+            exit: 1,
+            order: vec![(Stream::Out, 12), (Stream::Err, 40), (Stream::Out, 3)],
+        };
+        let json = r#"{"reply":"served","exit":1,"order":[["out",12],["err",40],["out",3]]}"#;
+        assert_eq!(serde_json::to_string(&printed).unwrap(), json);
+        assert_eq!(serde_json::from_str::<RunReply>(json).unwrap(), printed);
+        assert_eq!(printed.order(), [(false, 12), (true, 40), (false, 3)]);
     }
 
     #[test]
@@ -870,6 +966,10 @@ mod tests {
         (
             "AXIL_DAEMON",
             "the kill switch, read where a daemon is started and where a process leases its database",
+        ),
+        (
+            "AXIL_HOOK_DEADLINE_MS",
+            "set on a hook's lookup child, which sends nothing to the daemon; read where it leases",
         ),
     ];
 
@@ -1030,6 +1130,19 @@ mod tests {
         ),
         ("USER", "the scheduled maintenance's log directory"),
         ("SystemRoot", "Windows only, where there is no daemon"),
+        (
+            "CARGO_HOME",
+            "`deps`, reading a crate's docs from its source",
+        ),
+        (
+            "GOPATH",
+            "`deps`, reading a Go module's docs from its source",
+        ),
+        (
+            "GOMODCACHE",
+            "`deps`, reading a Go module's docs from its source",
+        ),
+        ("XDG_CONFIG_HOME", "`workspace`, finding its registry"),
     ];
 
     /// The socket checks pass for a daemon of this user's, and the peer's

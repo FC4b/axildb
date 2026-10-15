@@ -45,11 +45,15 @@
 //! Every path is best-effort: a memory hook must never break the agent
 //! loop, so child failures are swallowed and the process always exits 0
 //! once the input parses.
+//!
+//! A hook has a budget ([`hook_budget`]), inside the harness's timeout for
+//! its event: no lookup is started past it, and a lookup's child is killed
+//! at it.
 
 use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -915,9 +919,45 @@ fn first_patch_path(patch: &str) -> Option<String> {
 
 // ── The brain ────────────────────────────────────────────────────────
 
+/// The variable a hook's lookup child gets: when, in milliseconds since
+/// the epoch, the hook must be done. The child does not send its command to
+/// the daemon (the hook did), and waits for a lease only until then.
+pub(crate) const HOOK_DEADLINE_ENV: &str = "AXIL_HOOK_DEADLINE_MS";
+
+/// In a hook's lookup child: how long until the hook must be done.
+#[cfg_attr(not(unix), allow(dead_code))] // read where a daemon may run
+pub(crate) fn hook_time_left() -> Option<Duration> {
+    let until: u64 = std::env::var(HOOK_DEADLINE_ENV).ok()?.parse().ok()?;
+    Some(Duration::from_millis(until.saturating_sub(epoch_ms())))
+}
+
+fn epoch_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+}
+
+/// How long a hook for `kind` may take: a margin inside the shortest
+/// timeout `axil install` gives the event in any harness (3 s for a
+/// prompt, 5 s for some post-tool matchers and Claude's session end, 10 s
+/// for a session start or pre-tool, 15 s for a stop), so the hook prints
+/// what it has before the harness kills it.
+fn hook_budget(kind: EventKind) -> Duration {
+    match kind {
+        EventKind::UserPrompt => Duration::from_millis(2500),
+        EventKind::PostTool | EventKind::SessionEnd => Duration::from_secs(4),
+        EventKind::SessionStart | EventKind::PreTool | EventKind::PreModel => {
+            Duration::from_secs(9)
+        }
+        EventKind::Stop => Duration::from_secs(14),
+    }
+}
+
 struct HookCtx {
     dialect: Dialect,
     event: HookEvent,
+    /// When the hook must be done ([`hook_budget`]).
+    until: Instant,
     sid: String,
     project_dir: PathBuf,
     exe: PathBuf,
@@ -1003,6 +1043,7 @@ impl SessionFiles {
 
 impl HookCtx {
     fn new(dialect: Dialect, event: HookEvent) -> Option<Self> {
+        let until = Instant::now() + hook_budget(event.kind);
         let sid = sanitize_id(&event.session_id);
         if sid.is_empty() {
             return None;
@@ -1022,6 +1063,7 @@ impl HookCtx {
         Some(Self {
             dialect,
             event,
+            until,
             sid,
             project_dir,
             exe,
@@ -1255,16 +1297,26 @@ impl HookCtx {
     }
 
     /// Run an axil lookup against the resolved DB; Some(stdout) on success.
-    /// Child stderr is discarded — hook noise must not leak. Writes go
-    /// through [`HookCtx::enqueue`] instead.
+    /// The database's daemon runs it when one does; otherwise a child does,
+    /// killed when the hook's budget runs out. Child stderr is discarded —
+    /// hook noise must not leak. Writes go through [`HookCtx::enqueue`]
+    /// instead.
     fn axil_db_out(&self, args: &[&str]) -> Option<String> {
         let db = self.db.as_ref()?;
-        run_capture(
+        let left = self.until.checked_duration_since(Instant::now())?;
+        #[cfg(unix)]
+        if let Some(answered) = crate::daemon::client::forward_lookup(db, args, self.until) {
+            return answered;
+        }
+        let deadline_ms = epoch_ms().saturating_add(u64::try_from(left.as_millis()).unwrap_or(0));
+        run_capture_until(
             self.axil_cmd()
+                .env(HOOK_DEADLINE_ENV, deadline_ms.to_string())
                 .arg("--db")
                 .arg(db)
                 .args(args)
                 .stdin(Stdio::null()),
+            self.until,
         )
     }
 
@@ -3620,6 +3672,39 @@ fn run_capture(cmd: &mut Command) -> Option<String> {
     Some(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// [`run_capture`] for a child that must be done by `until`: past it the
+/// child is killed, and nothing is captured.
+fn run_capture_until(cmd: &mut Command, until: Instant) -> Option<String> {
+    use std::io::Read as _;
+    let mut child = cmd
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let mut stdout = child.stdout.take()?;
+    let reader = std::thread::spawn(move || {
+        let mut out = Vec::new();
+        stdout.read_to_end(&mut out).map(|_| out)
+    });
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let out = reader.join().ok()?.ok()?;
+                if !status.success() {
+                    return None;
+                }
+                return Some(String::from_utf8_lossy(&out).into_owned());
+            }
+            Ok(None) if Instant::now() < until => std::thread::sleep(Duration::from_millis(10)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+}
+
 fn run_capture_stdin(cmd: &mut Command, stdin_bytes: &[u8]) -> Option<String> {
     use std::io::Write as _;
     let mut child = cmd
@@ -3719,6 +3804,7 @@ mod tests {
                 stop_hook_active: false,
                 tool: None,
             },
+            until: Instant::now() + Duration::from_secs(60),
             sid: sid.clone(),
             project_dir: project.to_path_buf(),
             exe: PathBuf::from("axil"),
@@ -4280,6 +4366,7 @@ mod tests {
     enum Since {
         Prints(&'static str),
         Fails,
+        Hangs,
     }
 
     /// A brain whose own binary is a stub script, so the narrative lookup
@@ -4292,11 +4379,16 @@ mod tests {
         let tail = match since {
             Since::Prints(out) => format!("cat <<'EOF'\n{out}\nEOF\n"),
             Since::Fails => "exit 1\n".to_string(),
+            Since::Hangs => "exec sleep 30\n".to_string(),
         };
         let exe = dir.join("axil-stub");
         std::fs::write(
             &exe,
-            format!("#!/bin/sh\necho \"$@\" >> '{}'\n{tail}", calls.display()),
+            format!(
+                "#!/bin/sh\necho \"$@\" >> '{}'\necho \"${HOOK_DEADLINE_ENV}\" > '{}'\n{tail}",
+                calls.display(),
+                dir.join("deadline").display()
+            ),
         )
         .unwrap();
         std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -4310,6 +4402,7 @@ mod tests {
                 stop_hook_active: false,
                 tool: None,
             },
+            until: Instant::now() + Duration::from_secs(60),
             sid: "s1".into(),
             project_dir: dir.to_path_buf(),
             exe,
@@ -4328,6 +4421,67 @@ mod tests {
         std::fs::read_to_string(dir.join("calls"))
             .map(|s| s.lines().map(str::to_string).collect())
             .unwrap_or_default()
+    }
+
+    /// Each hook's budget leaves a margin inside the shortest timeout the
+    /// Claude install gives its event, over every matcher.
+    #[test]
+    fn every_hook_budget_fits_inside_its_installed_timeout() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("settings.json");
+        crate::install_hooks_to_settings(&path).unwrap();
+        let settings: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let kinds = [
+            EventKind::UserPrompt,
+            EventKind::SessionStart,
+            EventKind::PreTool,
+            EventKind::PostTool,
+            EventKind::Stop,
+            EventKind::SessionEnd,
+        ];
+        for kind in kinds {
+            let name = claude_event_name(kind);
+            let shortest = settings["hooks"][name]
+                .as_array()
+                .unwrap()
+                .iter()
+                .flat_map(|group| group["hooks"].as_array().unwrap())
+                .filter_map(|hook| hook["timeout"].as_u64())
+                .min()
+                .unwrap();
+            let margin = Duration::from_millis(500);
+            assert!(
+                hook_budget(kind) + margin <= Duration::from_secs(shortest),
+                "{name}: {shortest}s"
+            );
+        }
+    }
+
+    /// A lookup's child still running when the hook's budget runs out is
+    /// killed, and the hook goes on without its output. The child is told
+    /// when the hook must be done; past it no lookup starts.
+    #[cfg(unix)]
+    #[test]
+    fn a_lookup_child_is_killed_when_the_hooks_budget_runs_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut brain = stub_brain(dir.path(), Since::Hangs);
+        let started = Instant::now();
+        // Long enough for the stub to start under a loaded machine.
+        brain.until = started + Duration::from_secs(2);
+        let until_ms = epoch_ms() + 2000;
+        assert_eq!(brain.count_recent_narrative(), None);
+        let took = started.elapsed();
+        assert!(took >= Duration::from_secs(2), "{took:?}");
+        assert!(took < Duration::from_secs(10), "{took:?}");
+        let told: u64 = std::fs::read_to_string(dir.path().join("deadline"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert!(told.abs_diff(until_ms) < 200, "{told} vs {until_ms}");
+        assert_eq!(brain.count_recent_narrative(), None);
+        assert_eq!(stub_calls(dir.path()).len(), 1);
     }
 
     #[cfg(unix)]

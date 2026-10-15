@@ -34,6 +34,8 @@ struct Fixture {
     proj: PathBuf,
     db: PathBuf,
     vectors: bool,
+    /// The ids of the records the fixture stored.
+    ids: Vec<String>,
 }
 
 fn model_available() -> bool {
@@ -65,13 +67,14 @@ fn fixture() -> Fixture {
     let fx = |args: &[&str]| {
         let out = axil_in(BIN, &proj, args, None);
         assert!(out.status.success(), "{args:?}: {}", text(&out.stderr));
+        out
     };
     fx(&["init", db.to_str().unwrap()]);
     let vectors = model_available();
     if !vectors {
         let _ = std::fs::remove_file(proj.join(".axil/memory.axil.vec"));
     }
-    for (table, data) in [
+    let ids = [
         (
             "decisions",
             r#"{"summary":"Cap login tokens at 512 bytes"}"#,
@@ -84,14 +87,17 @@ fn fixture() -> Fixture {
             "context",
             r#"{"type":"architecture","summary":"auth.rs validates tokens"}"#,
         ),
-    ] {
-        fx(&["store", table, data]);
-    }
+    ]
+    .map(|(table, data)| {
+        let stored: Value = serde_json::from_slice(&fx(&["store", table, data]).stdout).unwrap();
+        stored["id"].as_str().unwrap().to_string()
+    });
     Fixture {
         _tmp: tmp,
         proj,
         db,
         vectors,
+        ids: ids.to_vec(),
     }
 }
 
@@ -110,6 +116,17 @@ fn text(bytes: &[u8]) -> String {
 
 /// Run `exe` with `args` in `dir`, stdin from `stdin` or nothing.
 fn axil_in(exe: &str, dir: &Path, args: &[&str], stdin: Option<&[u8]>) -> Output {
+    axil_env(exe, dir, args, stdin, &[])
+}
+
+/// [`axil_in`] with the variables `env` set.
+fn axil_env(
+    exe: &str,
+    dir: &Path,
+    args: &[&str],
+    stdin: Option<&[u8]>,
+    env: &[(&str, &str)],
+) -> Output {
     let mut cmd = Command::new(exe);
     cmd.args(args)
         .current_dir(dir)
@@ -118,6 +135,7 @@ fn axil_in(exe: &str, dir: &Path, args: &[&str], stdin: Option<&[u8]>) -> Output
     for name in ENV {
         cmd.env_remove(name);
     }
+    cmd.envs(env.iter().copied());
     cmd.stdin(if stdin.is_some() {
         Stdio::piped()
     } else {
@@ -128,6 +146,28 @@ fn axil_in(exe: &str, dir: &Path, args: &[&str], stdin: Option<&[u8]>) -> Output
         child.stdin.take().unwrap().write_all(bytes).unwrap();
     }
     child.wait_with_output().unwrap()
+}
+
+/// [`axil_env`], with stdout and stderr on one pipe, as a terminal shows
+/// them: what is on it, and the exit code.
+fn axil_merged(dir: &Path, args: &[&str], env: &[(&str, &str)]) -> (Vec<u8>, Option<i32>) {
+    let (mut reader, writer) = std::io::pipe().unwrap();
+    let mut cmd = Command::new(BIN);
+    cmd.args(args)
+        .current_dir(dir)
+        .stdin(Stdio::null())
+        .stdout(writer.try_clone().unwrap())
+        .stderr(writer);
+    for name in ENV {
+        cmd.env_remove(name);
+    }
+    cmd.envs(env.iter().copied());
+    let mut child = cmd.spawn().unwrap();
+    // The pipe ends when the child's ends close, not this process's too.
+    drop(cmd);
+    let mut merged = Vec::new();
+    reader.read_to_end(&mut merged).unwrap();
+    (merged, child.wait().unwrap().code())
 }
 
 impl Fixture {
@@ -254,6 +294,11 @@ impl Fixture {
         Mcp { child, lines: rx }
     }
 
+    /// How many commands the daemon has run, by command.
+    fn served(&self, op: &str) -> u64 {
+        self.live()["ops"][op]["served"].as_u64().unwrap_or(0)
+    }
+
     /// The lease holders the daemon reports, by pid.
     fn holders(&self) -> Vec<u64> {
         self.live()["lease_holders"]
@@ -321,6 +366,99 @@ impl Mcp {
     fn close(mut self) -> std::process::ExitStatus {
         drop(self.child.stdin.take());
         self.child.wait().unwrap()
+    }
+}
+
+/// Copy the directory `from` to `to`, sockets left out.
+fn copy_dir(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let kind = entry.file_type().unwrap();
+        let dest = to.join(entry.file_name());
+        if kind.is_dir() {
+            copy_dir(&entry.path(), &dest);
+        } else if kind.is_file() {
+            std::fs::copy(entry.path(), dest).unwrap();
+        }
+    }
+}
+
+/// What differs between two runs of the same commands, made the same: the
+/// ULIDs of records made during a run, numbered in the order they first
+/// appear in any of its outputs, ISO-8601 times, and the line the embedder
+/// prints once per process, which a daemon prints once in its life. The
+/// fixture's own ids are left as they are: both runs must print the same
+/// records.
+struct Normalizer {
+    fixed: Vec<String>,
+    seen: Vec<String>,
+}
+
+impl Normalizer {
+    fn new(fixed: &[String]) -> Normalizer {
+        Normalizer {
+            fixed: fixed.to_vec(),
+            seen: Vec::new(),
+        }
+    }
+
+    fn apply(&mut self, bytes: &[u8]) -> String {
+        const CROCKFORD: &[u8] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+        let text = text(bytes);
+        let text: String = text
+            .split_inclusive('\n')
+            .filter(|line| !line.starts_with("[axil-vector]"))
+            .collect();
+        let b = text.as_bytes();
+        let mut out = String::new();
+        let mut i = 0;
+        while i < b.len() {
+            let boundary = i == 0 || !b[i - 1].is_ascii_alphanumeric();
+            let ulid = b.get(i..i + 26).filter(|w| {
+                w[0] == b'0'
+                    && w.iter().all(|c| CROCKFORD.contains(c))
+                    && b.get(i + 26).is_none_or(|c| !c.is_ascii_alphanumeric())
+            });
+            if let (true, Some(id)) = (boundary, ulid) {
+                let id = std::str::from_utf8(id).unwrap();
+                if self.fixed.iter().any(|fixed| fixed == id) {
+                    out.push_str(id);
+                } else {
+                    let n = self.seen.iter().position(|seen| seen == id);
+                    let n = n.unwrap_or_else(|| {
+                        self.seen.push(id.to_string());
+                        self.seen.len() - 1
+                    });
+                    out.push_str(&format!("<ID{n}>"));
+                }
+                i += 26;
+                continue;
+            }
+            let digits = |at: usize, n: usize| {
+                b.get(at..at + n)
+                    .is_some_and(|w| w.iter().all(u8::is_ascii_digit))
+            };
+            if digits(i, 4)
+                && b.get(i + 4) == Some(&b'-')
+                && digits(i + 5, 2)
+                && b.get(i + 10) == Some(&b'T')
+                && digits(i + 11, 2)
+                && b.get(i + 13) == Some(&b':')
+            {
+                let mut j = i + 19;
+                while j < b.len() && (b[j].is_ascii_digit() || b"+-:.Z".contains(&b[j])) {
+                    j += 1;
+                }
+                out.push_str("<TS>");
+                i = j;
+                continue;
+            }
+            let ch = text[i..].chars().next().unwrap();
+            out.push(ch);
+            i += ch.len_utf8();
+        }
+        out
     }
 }
 
@@ -1064,6 +1202,341 @@ fn with_the_daemon_off_a_command_asks_for_no_lease() {
     assert_eq!(live["state"], "ready", "{live}");
 }
 
+/// The hot commands typed as usual go to the daemon, which prints what each
+/// prints with no daemon: the same bytes as with `AXIL_DAEMON=off`, ids and
+/// times aside, and on one pipe in the same order. None of them leases the
+/// database.
+#[test]
+fn the_hot_commands_go_to_the_daemon_and_print_as_without_one() {
+    let fx = fixture();
+    let cp = r#"{"goal":"g","state":"s","next_steps":["n"]}"#;
+    let mut cases: Vec<(Vec<&str>, Option<&[u8]>)> = vec![
+        (vec!["boot"], None),
+        (vec!["boot", "--boot-format", "narrative"], None),
+        (vec!["boot", "--files", "src/auth.rs"], None),
+        (vec!["recall-for-file", "src/auth.rs"], None),
+        (vec!["store", "decisions", r#"{"summary":"sent"}"#], None),
+        (
+            vec!["store", "context", "-"],
+            Some(br#"{"summary":"piped"}"#),
+        ),
+        (vec!["store", "decisions", "{nope"], None),
+    ];
+    if built_with(cfg!(feature = "embed"), "recall") {
+        cases.push((vec!["recall", "auth timeout"], None));
+        cases.push((
+            vec!["recall", "login tokens", "--recall-format", "context-block"],
+            None,
+        ));
+    }
+    if built_with(cfg!(feature = "indexer"), "code-search") {
+        cases.push((vec!["code-search", "validate token"], None));
+    }
+    if built_with(cfg!(feature = "fts"), "fts") {
+        cases.push((vec!["fts", "tokens"], None));
+    }
+    if built_with(cfg!(feature = "timeseries"), "since") {
+        cases.push((vec!["since", "1h"], None));
+    }
+    if built_with(cfg!(feature = "checkpoint"), "checkpoint") {
+        cases.push((vec!["checkpoint", cp], None));
+        // Not the same checkpoint again: a recall ranks two records with
+        // the same text and score in no set order.
+        let piped = br#"{"goal":"g2","state":"s2","next_steps":["m"]}"#;
+        cases.push((vec!["checkpoint", "-"], Some(piped)));
+    }
+    // Both streams on one pipe: a recall prints its results, then a hint
+    // on stderr. Run first, on the fixture as both runs start it: records
+    // stored within the same second list in no set order.
+    let mut merged: Vec<Vec<&str>> = vec![vec!["boot"], vec!["store", "decisions", "{nope"]];
+    if cfg!(feature = "embed") {
+        merged.push(vec!["recall", "auth timeout"]);
+    }
+    let saved = fx._tmp.path().join("saved");
+    copy_dir(&fx.proj.join(".axil"), &saved);
+    let run_all = |env: &[(&str, &str)]| -> Vec<(String, String, Option<i32>)> {
+        // One numbering for the whole run, so an id printed by two commands
+        // is the same id in both.
+        let mut ids = Normalizer::new(&fx.ids);
+        let mut outputs = Vec::new();
+        for args in &merged {
+            let (both, code) = axil_merged(&fx.proj, args, env);
+            outputs.push((ids.apply(&both), "(merged)".to_string(), code));
+        }
+        for (args, stdin) in &cases {
+            let out = axil_env(BIN, &fx.proj, args, *stdin, env);
+            let stdout = ids.apply(&out.stdout);
+            outputs.push((stdout, ids.apply(&out.stderr), out.status.code()));
+        }
+        outputs
+    };
+
+    fx.start();
+    let sent = run_all(&[]);
+    let live = fx.live();
+    let served: u64 = live["ops"]
+        .as_object()
+        .unwrap()
+        .values()
+        .map(|op| op["served"].as_u64().unwrap())
+        .sum();
+    assert_eq!(served, (cases.len() + merged.len()) as u64, "{live}");
+    assert_eq!(live["leases_granted"], 0, "{live}");
+    let stop = fx.axil(&["daemon", "stop"]);
+    assert!(stop.status.success(), "{}", text(&stop.stderr));
+
+    std::fs::remove_dir_all(fx.proj.join(".axil")).unwrap();
+    copy_dir(&saved, &fx.proj.join(".axil"));
+    let alone = run_all(&[("AXIL_DAEMON", "off")]);
+    let names = merged.iter().chain(cases.iter().map(|(args, _)| args));
+    for (args, (sent, alone)) in names.zip(sent.iter().zip(&alone)) {
+        assert_eq!(sent, alone, "{args:?}");
+    }
+}
+
+/// A daemon on `fx`'s socket that reads each request and answers a run
+/// with `answer`, a JSON reply, or hangs up.
+fn fake_daemon(fx: &Fixture, answer: Option<&'static str>) {
+    let dir = fx.run_dir();
+    std::fs::create_dir_all(&dir).unwrap();
+    for d in [dir.parent().unwrap(), &dir] {
+        std::fs::set_permissions(d, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
+    }
+    let listener = std::os::unix::net::UnixListener::bind(dir.join("axil.sock")).unwrap();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { break };
+            let mut len = [0u8; 4];
+            if stream.read_exact(&mut len).is_err() {
+                continue;
+            }
+            let mut body = vec![0u8; u32::from_be_bytes(len) as usize];
+            if stream.read_exact(&mut body).is_err() {
+                continue;
+            }
+            let request: Value = serde_json::from_slice(&body).unwrap_or_default();
+            if let (Some(answer), "run") = (answer, request["op"].as_str().unwrap_or("")) {
+                let len = u32::try_from(answer.len()).unwrap().to_be_bytes();
+                let _ = stream
+                    .write_all(&len)
+                    .and_then(|()| stream.write_all(answer.as_bytes()));
+            }
+        }
+    });
+}
+
+/// A connection that breaks once the command went out: a write is not run
+/// again, since the daemon may have run it, and says so; a read runs here.
+#[test]
+fn a_lost_connection_fails_a_write_and_runs_a_read_here() {
+    let fx = fixture();
+    fake_daemon(&fx, None);
+
+    let store = fx.axil(&["store", "decisions", r#"{"summary":"lost on the way"}"#]);
+    assert_eq!(store.status.code(), Some(1));
+    assert_eq!(
+        text(&store.stderr),
+        "{\"error\":\"daemon connection lost; write status unknown\"}\n"
+    );
+    let boot = fx.axil(&["boot"]);
+    assert!(boot.status.success(), "{}", text(&boot.stderr));
+    assert!(
+        text(&boot.stdout).contains("512 bytes"),
+        "{}",
+        text(&boot.stdout)
+    );
+    let off = axil_env(
+        BIN,
+        &fx.proj,
+        &["list", "decisions"],
+        None,
+        &[("AXIL_DAEMON", "off")],
+    );
+    assert!(!text(&off.stdout).contains("lost on the way"));
+}
+
+/// Stdin over what a request can carry is not sent, nor read to its end
+/// first: the command runs here, on all of it, as it does with no daemon.
+/// Here stdin never ends, and the command stops reading at its own limit.
+#[test]
+fn stdin_over_what_a_request_carries_runs_the_command_here() {
+    let fx = fixture();
+    let store = |fx: &Fixture| {
+        let mut cmd = Command::new(BIN);
+        cmd.args(["store", "decisions", "-"])
+            .current_dir(&fx.proj)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        for name in ENV {
+            cmd.env_remove(name);
+        }
+        let mut child = cmd.spawn().unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        let writer = std::thread::spawn(move || {
+            let chunk = vec![b' '; 1 << 20];
+            while stdin.write_all(&chunk).is_ok() {}
+        });
+        let done = wait_for(Duration::from_secs(120), || {
+            child.try_wait().unwrap().is_some()
+        });
+        if !done {
+            let _ = child.kill();
+        }
+        let out = child.wait_with_output().unwrap();
+        assert!(done, "still reading stdin: {}", text(&out.stderr));
+        writer.join().unwrap();
+        (out.status.code(), text(&out.stderr))
+    };
+    let alone = store(&fx);
+    assert!(alone.1.contains("exceeds"), "{alone:?}");
+    fx.start();
+    assert_eq!(store(&fx), alone);
+    let ops = &fx.live()["ops"];
+    assert!(ops["store"].is_null(), "{ops}");
+}
+
+/// Output too large to send back: the daemon ran the command, so a write is
+/// not run again, and says so; a read runs here.
+#[test]
+fn output_too_large_to_send_fails_a_write_and_runs_a_read_here() {
+    let fx = fixture();
+    fake_daemon(
+        &fx,
+        Some(r#"{"reply":"not_served","reason":"too_large","detail":"over the limit"}"#),
+    );
+    let store = fx.axil(&["store", "decisions", r#"{"summary":"too large"}"#]);
+    assert_eq!(store.status.code(), Some(1));
+    assert_eq!(
+        text(&store.stderr),
+        "{\"error\":\"daemon output over the 32 MiB frame limit; write status unknown\"}\n"
+    );
+    let boot = fx.axil(&["boot"]);
+    assert!(boot.status.success(), "{}", text(&boot.stderr));
+    assert!(text(&boot.stdout).contains("512 bytes"));
+    let off = axil_env(
+        BIN,
+        &fx.proj,
+        &["list", "decisions"],
+        None,
+        &[("AXIL_DAEMON", "off")],
+    );
+    assert!(!text(&off.stdout).contains("too large"));
+}
+
+/// A client of another build, or with another environment, runs the
+/// command itself and leases the database; one for another database never
+/// reaches this one's daemon, which refuses a command for one.
+#[test]
+fn another_build_environment_or_database_is_not_sent() {
+    let fx = fixture();
+    let copy = fx.proj.join("axil-copy");
+    std::fs::copy(BIN, &copy).unwrap();
+    fx.start_with(copy.to_str().unwrap(), "60s");
+    let boot = fx.leasing(&["boot"]);
+    assert!(text(&boot.stdout).contains("512 bytes"));
+    assert_eq!(fx.served("boot"), 0, "{}", fx.live());
+    assert_eq!(fx.live()["leases_granted"], 1, "{}", fx.live());
+    // It serves only its own build again: this build is told so.
+    assert!(wait_for(Duration::from_secs(30), || fx.live()["state"] == "ready"));
+    let sent = fx.send(&["boot"], None);
+    assert!(
+        text(&sent.stderr).contains("\"reason\":\"build\""),
+        "{}",
+        text(&sent.stderr)
+    );
+    // Its executable touched, it is another build: it retires.
+    assert!(Command::new("touch").arg(&copy).status().unwrap().success());
+    assert!(wait_for(Duration::from_secs(10), || !fx.locked()));
+    assert_eq!(fx.info()["exit_reason"], "its executable changed");
+
+    fx.start();
+    let keyed = axil_env(BIN, &fx.proj, &["boot"], None, &[("AXIL_ENC_KEY", "x")]);
+    assert!(keyed.status.success(), "{}", text(&keyed.stderr));
+    assert_eq!(fx.served("boot"), 0, "{}", fx.live());
+    assert_eq!(fx.live()["leases_granted"], 1, "{}", fx.live());
+    fx.warm_again();
+    assert_eq!(fx.served("boot"), 1, "{}", fx.live());
+
+    let other = fx.proj.join("other.axil");
+    let init = fx.axil(&["init", other.to_str().unwrap()]);
+    assert!(init.status.success(), "{}", text(&init.stderr));
+    let elsewhere = fx.axil(&["--db", other.to_str().unwrap(), "boot"]);
+    assert!(elsewhere.status.success(), "{}", text(&elsewhere.stderr));
+    assert_eq!(fx.served("boot"), 1, "{}", fx.live());
+    let refused = fx.send(&["--db", other.to_str().unwrap(), "boot"], None);
+    assert_eq!(refused.status.code(), Some(125));
+    assert!(
+        text(&refused.stderr).contains("\"reason\":\"wrong_db\""),
+        "{}",
+        text(&refused.stderr)
+    );
+}
+
+/// Hook writes queued while the daemon runs: the drainer's commands that
+/// the daemon runs go to it, the others lease the database, and every job
+/// runs once, in the order queued, none of them finding the database busy.
+#[test]
+fn queued_hook_writes_run_once_in_order_beside_the_daemon() {
+    let fx = fixture();
+    fx.start();
+    let queue = fx.proj.join(".axil/hook-queue");
+    std::fs::create_dir_all(&queue).unwrap();
+    let mut stores = 0;
+    for n in 0..50 {
+        let job = match n % 5 {
+            // Not a command the daemon runs: it leases the database.
+            4 => serde_json::json!({"op": "axil", "args": ["list", "decisions"]}),
+            3 => {
+                stores += 1;
+                serde_json::json!({
+                    "op": "axil",
+                    "args": ["store", "context", "-"],
+                    "stdin": serde_json::json!({"summary": format!("queued {n}"), "seq": n}).to_string(),
+                })
+            }
+            _ => {
+                stores += 1;
+                let data = serde_json::json!({"summary": format!("queued {n}"), "seq": n});
+                serde_json::json!({"op": "axil", "args": ["store", "decisions", data.to_string()]})
+            }
+        };
+        let name = format!("20260101T000000.{n:09}Z-1-{n}.job");
+        std::fs::write(queue.join(name), job.to_string()).unwrap();
+    }
+    let drain = fx.axil(&["hook", "drain"]);
+    assert!(drain.status.success(), "{}", text(&drain.stderr));
+    let log = std::fs::read_to_string(queue.join("drain.log")).unwrap_or_default();
+    assert!(!log.contains("busy") && !log.contains("failed"), "{log}");
+    let left: Vec<_> = std::fs::read_dir(&queue)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.path()
+                .extension()
+                .is_some_and(|x| x == "job" || x == "running")
+        })
+        .collect();
+    assert!(left.is_empty(), "{left:?}");
+    assert_eq!(fx.served("store"), stores, "{}", fx.live());
+
+    // Every one once, and in order: ids rise with the time they were made.
+    let mut rows: Vec<(String, i64)> = Vec::new();
+    for table in ["decisions", "context"] {
+        let out = fx.axil(&["list", table]);
+        let list: Value = serde_json::from_slice(&out.stdout).unwrap();
+        for row in list.as_array().unwrap() {
+            if let Some(seq) = row["data"]["seq"].as_i64() {
+                rows.push((row["id"].as_str().unwrap().to_string(), seq));
+            }
+        }
+    }
+    rows.sort();
+    let seqs: Vec<i64> = rows.iter().map(|(_, seq)| *seq).collect();
+    let want: Vec<i64> = (0..50).filter(|n| n % 5 != 4).collect();
+    assert_eq!(seqs, want);
+}
+
 /// `reembed` has the database leased before it touches the vector store,
 /// even to put back the copy an interrupted run left: here one it cannot
 /// move into place.
@@ -1145,8 +1618,8 @@ fn a_store_the_daemon_lacks_is_created_under_a_lease() {
     }
 }
 
-/// While a server holds the lease, a hook's recall finds the database
-/// held and returns no context, at once.
+/// The daemon runs a hook's recall. While a server holds the lease, the
+/// hook's recall finds the database held and returns no context, at once.
 #[test]
 fn a_hook_recall_under_a_lease_returns_nothing_at_once() {
     let needs = cfg!(all(feature = "mcp", feature = "embed", feature = "fts"));
@@ -1172,11 +1645,12 @@ fn a_hook_recall_under_a_lease_returns_nothing_at_once() {
         assert!(out.status.success(), "{}", text(&out.stderr));
         (text(&out.stdout), started.elapsed())
     };
-    // With the daemon serving, the hook's recall leases it and finds the
-    // memory.
+    // With the daemon serving, it runs the hook's recall, which finds the
+    // memory and leases nothing.
     let (context, _) = hook("s-served");
     assert!(context.contains("auth timeout"), "{context}");
-    fx.warm_again();
+    assert_eq!(fx.served("recall"), 1, "{}", fx.live());
+    assert_eq!(fx.live()["leases_granted"], 0, "{}", fx.live());
 
     let mut mcp = fx.mcp();
     mcp.initialize();
@@ -1185,11 +1659,66 @@ fn a_hook_recall_under_a_lease_returns_nothing_at_once() {
     let (context, took) = hook("s-leased");
     assert_eq!(context, "");
     assert!(took < Duration::from_secs(5), "took {took:?}");
-    // The server still holds it. The recall's own lease, which ended with
-    // its process, may not be counted out yet.
-    assert!(fx.holders().contains(&pid), "{}", fx.live());
+    // The server still holds it, and its lease is the only one granted:
+    // the hook ran no child to look up in its place.
+    assert_eq!(fx.holders(), [pid], "{}", fx.live());
+    assert_eq!(fx.live()["leases_granted"], 1, "{}", fx.live());
     assert!(mcp.close().success());
     fx.warm_again();
+}
+
+/// A hook's lookup child runs the lookup itself, leasing the database: the
+/// hook asked the daemon already, and found it would not run it.
+#[test]
+fn a_hook_lookup_child_does_not_ask_the_daemon_again() {
+    let fx = fixture();
+    fx.start();
+    let until = std::time::SystemTime::now() + Duration::from_secs(30);
+    let until = until
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis()
+        .to_string();
+    let env = [("AXIL_HOOK_DEADLINE_MS", until.as_str())];
+    let boot = axil_env(BIN, &fx.proj, &["boot"], None, &env);
+    assert!(boot.status.success(), "{}", text(&boot.stderr));
+    assert!(text(&boot.stdout).contains("512 bytes"));
+    assert_eq!(fx.served("boot"), 0, "{}", fx.live());
+    assert_eq!(fx.live()["leases_granted"], 1, "{}", fx.live());
+    fx.warm_again();
+}
+
+/// `daemon start` and `status` say whether a command from the shell they
+/// run in is served, and status counts the requests refused, by reason.
+#[test]
+fn start_and_status_say_whether_this_shell_is_served() {
+    let fx = fixture();
+    let started = fx.start();
+    assert_eq!(started["this_shell"]["served"], true, "{started}");
+    let keyed = [("AXIL_ENC_KEY", "x")];
+    let start = axil_env(BIN, &fx.proj, &["daemon", "start"], None, &keyed);
+    let start: Value = serde_json::from_slice(&start.stdout).unwrap();
+    assert_eq!(start["started"], false, "{start}");
+    assert_eq!(start["this_shell"]["mismatch"], "env", "{start}");
+    let human = text(&axil_env(BIN, &fx.proj, &["daemon", "status"], None, &keyed).stdout);
+    assert!(
+        human.contains("this shell: not served, its environment differs from the daemon's"),
+        "{human}"
+    );
+
+    // A command from that shell is refused, for that reason.
+    let boot = axil_env(BIN, &fx.proj, &["boot"], None, &keyed);
+    assert!(boot.status.success(), "{}", text(&boot.stderr));
+    fx.warm_again();
+    assert_eq!(
+        fx.live()["refused_by"]["incompatible env"],
+        1,
+        "{}",
+        fx.live()
+    );
+    let human = text(&fx.axil(&["daemon", "status"]).stdout);
+    assert!(human.contains("this shell: served"), "{human}");
+    assert!(human.contains("refused: 1 (incompatible env 1)"), "{human}");
 }
 
 /// A lease held by a process that is killed ends with it: the daemon opens

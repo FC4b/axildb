@@ -28,7 +28,8 @@
 //! A daemon that can't let go within [`LEASE_WAIT`] (a request it runs
 //! takes longer) answers `lease_timeout`, and the process opens as it would
 //! with no daemon: the open waits for the lock, or fails busy. It says so in
-//! one line on stderr first, naming `axil daemon stop`.
+//! one line on stderr first, naming `axil daemon stop`. A hook's lookup
+//! child waits only for what is left of the hook's budget.
 //!
 //! A process asks once per database while its lease holds: it asks again
 //! once the daemon it was granted by is gone (another may have started
@@ -158,7 +159,9 @@ pub fn guard(path: &Path) {
         }
         asked.swap_remove(i);
     }
-    match lease(&key, LEASE_WAIT) {
+    // A hook's lookup child waits only as long as the hook has left.
+    let wait = crate::hook_brain::hook_time_left().map_or(LEASE_WAIT, |left| left.min(LEASE_WAIT));
+    match lease(&key, wait) {
         Lease::NoDaemon => {}
         Lease::Held(stream) => asked.push((key, Asked::Held(stream))),
         Lease::Refused(said) => {

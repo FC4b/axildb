@@ -54,6 +54,9 @@ thread_local! {
 
 /// Set once a write finds the process's stdout closed by its reader.
 static STDOUT_CLOSED: AtomicBool = AtomicBool::new(false);
+/// Stdin the process read ahead to send to the database's daemon, which then
+/// did not run the command: the command reads these bytes instead.
+static READ_AHEAD: Mutex<Option<Vec<u8>>> = Mutex::new(None);
 /// Set once a write finds the process's stderr closed by its reader.
 static STDERR_CLOSED: AtomicBool = AtomicBool::new(false);
 
@@ -63,6 +66,8 @@ pub struct ReqCtx {
     pub out: Vec<u8>,
     /// Bytes the command wrote to stderr.
     pub err: Vec<u8>,
+    /// The order the command wrote in (see [`Captured::order`]).
+    pub order: Vec<(bool, usize)>,
     /// Piped stdin. `None` stands for a terminal: nothing was piped.
     pub stdin: Option<Vec<u8>>,
     /// Whether the command records slow queries in the database's log.
@@ -77,6 +82,7 @@ impl Default for ReqCtx {
         Self {
             out: Vec::new(),
             err: Vec::new(),
+            order: Vec::new(),
             stdin: None,
             slow_query_log: true,
             warm: None,
@@ -91,6 +97,46 @@ impl Default for ReqCtx {
 /// when `f` panics (the panic carries on, and what `f` wrote is dropped).
 #[cfg_attr(not(test), allow(dead_code))] // the in-process host is its first non-test caller
 pub fn capture<R>(ctx: ReqCtx, f: impl FnOnce() -> R) -> (Vec<u8>, Vec<u8>, R) {
+    let (printed, result) = capture_in_order(ctx, f);
+    (printed.out, printed.err, result)
+}
+
+/// What a captured command wrote.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Captured {
+    /// Its stdout.
+    pub out: Vec<u8>,
+    /// Its stderr.
+    pub err: Vec<u8>,
+    /// The order it wrote them in: runs of so many bytes of its stderr
+    /// (`true`) or its stdout, which cover both, two runs in a row never to
+    /// the same stream. A terminal showing both streams shows them so.
+    pub order: Vec<(bool, usize)>,
+}
+
+impl Captured {
+    /// Append `bytes` to stderr (`to_err`) or stdout, after what is there.
+    #[cfg_attr(not(unix), allow(dead_code))] // the daemon's
+    pub fn push(&mut self, to_err: bool, bytes: &[u8]) {
+        if bytes.is_empty() {
+            return;
+        }
+        let buf = if to_err { &mut self.err } else { &mut self.out };
+        buf.extend_from_slice(bytes);
+        push_run(&mut self.order, to_err, bytes.len());
+    }
+}
+
+/// Count `len` more bytes to stderr (`to_err`) or stdout into `order`.
+fn push_run(order: &mut Vec<(bool, usize)>, to_err: bool, len: usize) {
+    match order.last_mut() {
+        Some((err, n)) if *err == to_err => *n += len,
+        _ => order.push((to_err, len)),
+    }
+}
+
+/// [`capture`], with the order `f` wrote its stdout and stderr in.
+pub fn capture_in_order<R>(ctx: ReqCtx, f: impl FnOnce() -> R) -> (Captured, R) {
     struct Restore(Option<ReqCtx>);
     impl Drop for Restore {
         fn drop(&mut self) {
@@ -104,7 +150,12 @@ pub fn capture<R>(ctx: ReqCtx, f: impl FnOnce() -> R) -> (Vec<u8>, Vec<u8>, R) {
     let ctx = REQ
         .with(|r| r.borrow_mut().take())
         .expect("request context removed while its capture was running");
-    (ctx.out, ctx.err, result)
+    let printed = Captured {
+        out: ctx.out,
+        err: ctx.err,
+        order: ctx.order,
+    };
+    (printed, result)
 }
 
 fn capturing() -> bool {
@@ -118,6 +169,9 @@ fn append(to_err: bool, bytes: &[u8]) -> bool {
         Some(ctx) => {
             let buf = if to_err { &mut ctx.err } else { &mut ctx.out };
             buf.extend_from_slice(bytes);
+            if !bytes.is_empty() {
+                push_run(&mut ctx.order, to_err, bytes.len());
+            }
             true
         }
         None => false,
@@ -147,14 +201,46 @@ pub fn stdout_closed() -> bool {
 /// except for a reader that has gone away: the stream is marked closed and
 /// this write and every later one to it is dropped. See the module docs.
 fn write_process(to_err: bool, args: fmt::Arguments<'_>, newline: bool) {
-    fn write_args(w: &mut impl Write, args: fmt::Arguments<'_>, newline: bool) -> io::Result<()> {
+    write_process_with(to_err, |w| {
         if newline {
             writeln!(w, "{args}")
         } else {
             write!(w, "{args}")
         }
-    }
+    });
+}
 
+/// Write `bytes` to the process's stdout or stderr as [`write_process`]
+/// writes: what a command the database's daemon ran printed, byte for byte.
+#[cfg(unix)]
+pub fn write_process_bytes(to_err: bool, bytes: &[u8]) {
+    write_process_with(to_err, |w| w.write_all(bytes).and_then(|()| w.flush()));
+}
+
+/// Write what a command the database's daemon ran printed to the process's
+/// stdout and stderr, in the order it printed it (see [`Captured::order`]).
+/// What `order` leaves out, which it should not, follows: stdout, then
+/// stderr.
+#[cfg(unix)]
+pub fn write_process_in_order(out: &[u8], err: &[u8], order: &[(bool, usize)]) {
+    let (mut out, mut err) = (out, err);
+    for &(to_err, len) in order {
+        let from = if to_err { &mut err } else { &mut out };
+        let bytes: &[u8] = from;
+        let (run, rest) = bytes.split_at(len.min(bytes.len()));
+        *from = rest;
+        if !run.is_empty() {
+            write_process_bytes(to_err, run);
+        }
+    }
+    for (to_err, rest) in [(false, out), (true, err)] {
+        if !rest.is_empty() {
+            write_process_bytes(to_err, rest);
+        }
+    }
+}
+
+fn write_process_with(to_err: bool, write: impl FnOnce(&mut dyn Write) -> io::Result<()>) {
     let (closed, label) = if to_err {
         (&STDERR_CLOSED, "stderr")
     } else {
@@ -164,9 +250,9 @@ fn write_process(to_err: bool, args: fmt::Arguments<'_>, newline: bool) {
         return;
     }
     let written = if to_err {
-        write_args(&mut io::stderr().lock(), args, newline)
+        write(&mut io::stderr().lock())
     } else {
-        write_args(&mut io::stdout().lock(), args, newline)
+        write(&mut io::stdout().lock())
     };
     match written {
         Ok(()) => {}
@@ -299,20 +385,71 @@ fn take_request_stdin(limit: u64) -> Option<Vec<u8>> {
 /// `io::stdin().take(limit).read_to_string(..)`, with the same errors
 /// (invalid UTF-8 is `InvalidData`) when the bytes come from a request.
 pub fn read_stdin(limit: u64) -> io::Result<String> {
+    read_stdin_or(limit, io::stdin)
+}
+
+/// [`read_stdin`], with `process` giving the process's stdin. Stdin read
+/// ahead is read first, then the rest of the process's.
+fn read_stdin_or<R: Read>(limit: u64, process: impl FnOnce() -> R) -> io::Result<String> {
     let mut buf = String::new();
     match take_request_stdin(limit) {
         Some(bytes) => bytes.as_slice().read_to_string(&mut buf)?,
-        None => io::stdin().take(limit).read_to_string(&mut buf)?,
+        None => match take_read_ahead(limit) {
+            Some(bytes) => {
+                let left = limit.saturating_sub(bytes.len() as u64);
+                bytes
+                    .as_slice()
+                    .chain(process().take(left))
+                    .read_to_string(&mut buf)?
+            }
+            None => process().take(limit).read_to_string(&mut buf)?,
+        },
     };
     Ok(buf)
 }
 
 /// Stdin as a buffered reader, for input consumed as a stream.
 pub fn stdin_reader() -> Box<dyn io::BufRead> {
-    match take_request_stdin(u64::MAX) {
-        Some(bytes) => Box::new(io::Cursor::new(bytes)),
-        None => Box::new(io::stdin().lock()),
+    stdin_reader_or(|| io::stdin().lock())
+}
+
+/// [`stdin_reader`], with `process` giving the process's stdin.
+fn stdin_reader_or<R: io::BufRead + 'static>(process: impl FnOnce() -> R) -> Box<dyn io::BufRead> {
+    if let Some(bytes) = take_request_stdin(u64::MAX) {
+        return Box::new(io::Cursor::new(bytes));
     }
+    match take_read_ahead(u64::MAX) {
+        Some(bytes) => Box::new(io::Cursor::new(bytes).chain(process())),
+        None => Box::new(process()),
+    }
+}
+
+/// Read the process's stdin to its end, to send to the database's daemon,
+/// but no more than `cap` bytes and one: more than `cap` shows as more.
+/// Should the daemon not run the command, [`put_back_stdin`] hands the bytes
+/// to the command.
+#[cfg(unix)]
+pub fn read_stdin_ahead(cap: usize) -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    io::stdin()
+        .take(u64::try_from(cap).unwrap_or(u64::MAX).saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+/// Give back stdin [`read_stdin_ahead`] read: the command reads these bytes,
+/// and then the rest of stdin, as if nothing had been read ahead.
+#[cfg(unix)]
+pub fn put_back_stdin(bytes: Vec<u8>) {
+    *READ_AHEAD.lock().unwrap_or_else(PoisonError::into_inner) = Some(bytes);
+}
+
+/// Take up to `limit` bytes of the stdin read ahead, or `None` when none was.
+fn take_read_ahead(limit: u64) -> Option<Vec<u8>> {
+    let mut ahead = READ_AHEAD.lock().unwrap_or_else(PoisonError::into_inner);
+    let data = ahead.as_mut()?;
+    let n = usize::try_from(limit).unwrap_or(usize::MAX).min(data.len());
+    Some(data.drain(..n).collect())
 }
 
 /// Whether stdin is a terminal, i.e. nothing was piped in. A request
@@ -621,6 +758,30 @@ pub(crate) mod tests {
         assert_eq!(n, 7);
     }
 
+    /// The order the streams were written in is kept, a run per stream
+    /// switch, and covers every byte.
+    #[test]
+    fn capture_keeps_the_order_the_streams_were_written_in() {
+        let (printed, ()) = capture_in_order(ReqCtx::default(), || {
+            outln!("one");
+            outp!("two ");
+            errln!("warning");
+            errp!("");
+            outln!("three");
+            errp!("x");
+        });
+        assert_eq!(printed.out, b"one\ntwo three\n");
+        assert_eq!(printed.err, b"warning\nx");
+        assert_eq!(
+            printed.order,
+            [(false, 8), (true, 8), (false, 6), (true, 1)]
+        );
+        let mut more = printed;
+        more.push(true, b"y\n");
+        more.push(false, b"");
+        assert_eq!(more.order.last(), Some(&(true, 3)));
+    }
+
     #[test]
     fn capture_restores_the_outer_request() {
         let (out, _, inner) = capture(ReqCtx::default(), || {
@@ -713,6 +874,33 @@ pub(crate) mod tests {
                 .collect::<Vec<_>>()
         });
         assert_eq!(lines, ["a", "b"]);
+    }
+
+    /// Stdin read ahead for the database's daemon and given back is what
+    /// the command reads, by either reader, and then the rest of the
+    /// process's stdin, which was not read ahead.
+    #[cfg(unix)]
+    #[test]
+    fn stdin_given_back_is_read_before_the_process_stdin() {
+        let process = |rest: &'static str| move || io::Cursor::new(rest.as_bytes());
+        put_back_stdin(b"abc".to_vec());
+        assert_eq!(read_stdin_or(2, process("")).unwrap(), "ab");
+        let mut rest = String::new();
+        stdin_reader_or(process(""))
+            .read_to_string(&mut rest)
+            .unwrap();
+        assert_eq!(rest, "c");
+        assert_eq!(read_stdin_or(u64::MAX, process("")).unwrap(), "");
+
+        put_back_stdin(b"abc".to_vec());
+        assert_eq!(read_stdin_or(5, process("def")).unwrap(), "abcde");
+        put_back_stdin(b"abc".to_vec());
+        let mut all = String::new();
+        stdin_reader_or(process("def"))
+            .read_to_string(&mut all)
+            .unwrap();
+        assert_eq!(all, "abcdef");
+        *READ_AHEAD.lock().unwrap() = None;
     }
 
     #[test]

@@ -1,13 +1,13 @@
 //! `axil daemon {start, stop, status, logs}`: running a database's daemon by
-//! hand. Nothing forwards commands to it on its own yet; `daemon send` sends
-//! one command line, to try it. Every other command leases the database from
-//! it (see [`super::lease`]).
+//! hand. The hot commands and the hooks' lookups are sent to it once it runs
+//! (see [`super::client`]), and `daemon send` sends one command line, to try
+//! it. Every other command leases the database from it (see
+//! [`super::lease`]).
 //!
 //! `AXIL_DAEMON` is the kill switch: `off` keeps `daemon start` from
 //! starting one. Unset, it is `on`: a daemon runs only when started by hand.
 
 use std::fs::{self, OpenOptions};
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -196,6 +196,7 @@ fn start(db: &Path, idle_timeout: Duration, wait: Duration, out: &Output) -> Res
                     "state": hello.state,
                     "build_id": hello.build_id,
                     "same_build": hello.build_id == own,
+                    "this_shell": this_shell(&run),
                     "socket": run.socket(),
                 }));
                 return Ok(EXIT_OK);
@@ -371,6 +372,43 @@ fn is_daemon_of(pid: u32, key: &Path) -> bool {
     command.contains(&format!("--db {} daemon run", key.display()))
 }
 
+/// Whether the daemon on `run` would serve a command from this shell, as
+/// far as the handshake goes: `{"served":true,"mismatch":null}`, or what
+/// does not match (`features`, `env`, …). `null` when it can't be asked,
+/// as a daemon of another build may not know how.
+fn this_shell(run: &RunDir) -> Value {
+    let (Ok(identity), Ok(cwd)) = (Identity::current(), std::env::current_dir()) else {
+        return Value::Null;
+    };
+    let header = identity.header(vec!["axil".to_string()], &cwd, false);
+    match proto::call::<Value>(run.socket(), &Op::Check(header), Duration::from_secs(2)) {
+        Ok(answer) if answer["op"] == "check" => json!({
+            "served": answer["mismatch"].is_null(),
+            "mismatch": answer["mismatch"],
+        }),
+        _ => Value::Null,
+    }
+}
+
+/// The status line for [`this_shell`]'s answer.
+fn this_shell_line(answer: &Value) -> Option<String> {
+    let differs = match answer["mismatch"].as_str() {
+        None if answer["served"] == true => return Some("this shell: served".to_string()),
+        None => return None,
+        Some("env") => format!(
+            "its environment differs from the daemon's in one of {}",
+            proto::FP_ENV.join(", ")
+        ),
+        Some("build") => "it runs another build".to_string(),
+        Some("features") => "its build has other features".to_string(),
+        Some("proto") => "it speaks another protocol version".to_string(),
+        Some(other) => format!("its {other} differs from the daemon's"),
+    };
+    Some(format!(
+        "this shell: not served, {differs}; its commands run in their own process"
+    ))
+}
+
 /// The status report: the record the daemon left, the lock and socket
 /// probed now, and the live figures when it answers.
 fn report(key: &Path, run: &RunDir) -> Value {
@@ -406,6 +444,7 @@ fn report(key: &Path, run: &RunDir) -> Value {
         },
         "this_build": own,
         "same_build": same_build,
+        "this_shell": if live.is_some() { this_shell(run) } else { Value::Null },
         "blocked": read_json_file::<Value>(&run.blocked()),
         "last": last,
         "live": live,
@@ -490,10 +529,21 @@ fn describe(report: &Value) -> Vec<String> {
         live["build_id"].as_str().unwrap_or("?"),
         live["version"].as_str().unwrap_or("?")
     ));
+    if let Some(line) = this_shell_line(&report["this_shell"]) {
+        lines.push(line);
+    }
     lines.push(format!(
         "idle: {}s, stops after {}s more",
         live["idle_secs"], live["idle_left_secs"]
     ));
+    if let Some(by) = live["refused_by"].as_object().filter(|by| !by.is_empty()) {
+        let reasons: Vec<String> = by.iter().map(|(why, n)| format!("{why} {n}")).collect();
+        lines.push(format!(
+            "refused: {} ({})",
+            live["refused"],
+            reasons.join(", ")
+        ));
+    }
     if let Some(holders) = live["lease_holders"].as_array().filter(|h| !h.is_empty()) {
         let pids: Vec<String> = holders
             .iter()
@@ -524,7 +574,13 @@ fn describe(report: &Value) -> Vec<String> {
         .into_iter()
         .filter(|e| live["engines"][e] == true)
         .collect();
-    if live["engines"].is_null() {
+    if live["held_elsewhere"] == true {
+        lines.push(
+            "engines: the database is closed: another process has it open without a lease, \
+             and commands run in their own process until it lets go"
+                .to_string(),
+        );
+    } else if live["engines"].is_null() {
         // Not open: leased, or between a close and the open after it.
         lines.push("engines: the database is closed".to_string());
     } else {
@@ -571,29 +627,31 @@ fn logs(db: &Path, lines: usize) -> Result<i32> {
     Ok(EXIT_OK)
 }
 
-/// Whether the command line `argv` reads stdin, as the command would:
-/// one with a `-` argument (`store <table> -`, `checkpoint -`), or a
-/// `checkpoint` given no JSON. Another leaves stdin be.
-fn reads_stdin(argv: &[String]) -> bool {
-    if argv.iter().any(|a| a == "-") {
-        return true;
+/// Whether `command` reads stdin when it is piped: `store <table> -`, and
+/// `checkpoint` given `-` or no JSON. Another hot command leaves stdin be.
+pub fn reads_stdin(command: &crate::Command) -> bool {
+    match command {
+        crate::Command::Store { json_data, .. } => json_data == "-",
+        #[cfg(feature = "checkpoint")]
+        crate::Command::Checkpoint { arg, .. } => matches!(arg.as_deref(), None | Some("-")),
+        _ => false,
     }
-    #[cfg(feature = "checkpoint")]
-    {
-        use clap::Parser;
-        if let Ok(cli) = crate::Cli::try_parse_from(argv) {
-            return matches!(cli.command, crate::Command::Checkpoint { arg: None, .. });
-        }
-    }
-    false
 }
 
 fn send(db: &Path, args: Vec<String>) -> Result<i32> {
     let (_, run) = run_dir(db)?;
     let identity = Identity::current()?;
     let argv: Vec<String> = std::iter::once("axil".to_string()).chain(args).collect();
-    let stdin = if reads_stdin(&argv) && !cli_io::stdin_is_terminal() {
-        Some(cli_io::read_stdin(u64::MAX)?.into_bytes())
+    let reads = {
+        use clap::Parser;
+        crate::Cli::try_parse_from(&argv).is_ok_and(|cli| reads_stdin(&cli.command))
+    };
+    let stdin = if reads && !cli_io::stdin_is_terminal() {
+        let bytes = cli_io::read_stdin_ahead(proto::MAX_FRAME)?;
+        if bytes.len() > proto::MAX_FRAME {
+            anyhow::bail!("stdin is over the 32 MiB a request can carry");
+        }
+        Some(bytes)
     } else {
         None
     };
@@ -613,11 +671,9 @@ fn send(db: &Path, args: Vec<String>) -> Result<i32> {
         }
     };
     match outcome.reply {
-        RunReply::Served { exit } => {
-            let mut stdout = cli_io::stdout();
-            stdout.write_all(&outcome.stdout)?;
-            stdout.flush()?;
-            errp!("{}", String::from_utf8_lossy(&outcome.stderr));
+        RunReply::Served { exit, .. } => {
+            let order = outcome.reply.order();
+            cli_io::write_process_in_order(&outcome.stdout, &outcome.stderr, &order);
             Ok(exit)
         }
         other => {

@@ -6,11 +6,11 @@ open, with the embedding model and the graph loaded, and runs the hot commands
 `checkpoint`) sent to it over a local socket, so a command neither opens the
 database nor loads a model on each call. Unix only.
 
-> **Started by hand only, and nothing forwards to it yet.** The CLI and the
-> hooks still run every command in their own process, and each one first
-> leases the database from the daemon ([below](#leasing-the-database)), so
-> the daemon is cold again after every command: start one to try it, and stop
-> it when you are done.
+> **Started by hand only.** Once one runs, the hot commands you type and the
+> hooks' lookups go to it ([below](#how-commands-reach-it)). Every other
+> command, and the hooks' queued writes other than `store`, still run in their
+> own process and lease the database from the daemon
+> ([below](#leasing-the-database)), which opens it again afterwards.
 
 ## Commands
 
@@ -23,17 +23,68 @@ axil daemon stop [--wait 15]                        # stop it and wait until it 
 
 `start` does nothing when a daemon already serves the database, and waits for
 one that is still starting, or for one still shutting down to go. It prints
-the daemon's pid and build id as JSON. `stop` waits for the daemon to exit and
+the daemon's pid and build id as JSON, and whether a command typed in the
+shell it ran in is served (`"this_shell"`): one of another build or
+environment is not. `stop` waits for the daemon to exit and
 says whether it closed the database (`"clean"`); one that couldn't (see below)
 leaves the next open to repair it. A daemon that holds the lock but answers
 nothing is sent SIGTERM, once `stop` has checked that the process is this
 database's daemon. `status` works whether or not a daemon runs: it reads what
 the last one recorded and probes the lock and the socket. While one runs it
-adds the idle time left, the requests in flight, each command's p50/p95
-latency over its last 256 requests, the reloads and why, the processes
-holding a lease, and the state of the engines and the graph.
+adds whether a command from this shell is served (`this shell: not served,
+its environment differs from the daemon's in one of …`), the idle time left,
+the requests in flight, the requests refused and why (`refused: 4 (incompatible
+env 3, leased 1)`), each command's p50/p95 latency over its last 256
+requests, the reloads and why, the processes holding a lease, and the state
+of the engines and the graph.
 
 `AXIL_DAEMON=off` keeps `start` from starting one.
+
+## How commands reach it
+
+A hot command typed with a daemon running goes to it: `axil` sends the
+command line, its working directory and, for a command that reads it, its
+stdin (`store <table> -`, `checkpoint -`, `checkpoint` with input piped), and
+prints what the daemon's run printed, to stdout and stderr in the order it
+printed it, exiting with its code. A command given
+more than 32 MiB of stdin runs in its own process instead. Nothing reaches
+the daemon with `AXIL_DAEMON=off`, or when no database is found from the
+working directory or `--db`. When the daemon doesn't run the command (no
+daemon, another build, a command or store it lacks), the command runs in the
+process as it would with no daemon, and its open leases the database. A
+daemon still opening the database, opening it again after a lease or a
+change, or with every request slot taken is waited for, up to 10 s.
+
+If the connection breaks after the command was sent, a write is not run
+again, since the daemon may have run it:
+`{"error":"daemon connection lost; write status unknown"}` is printed and the
+command exits 1. A read runs in the process instead. The same goes for a
+command whose output is over the 32 MiB a reply can carry, which the daemon
+ran: a write prints
+`{"error":"daemon output over the 32 MiB frame limit; write status unknown"}`
+and exits 1, and a read runs in the process.
+
+A hook's lookup (the prompt's recall, the session's boot, a file's memories,
+a search) goes to the daemon first, with the slow-query log off and a
+deadline: 2.1 s for a recall, 2 s for the rest. A boot asks again while the
+daemon is still opening the database, as at the start of a session, for up
+to 8 s in all. The hook uses what a run that exited 0 printed. It injects
+nothing when the run failed, the database is leased or opening, the daemon
+is shutting down or the deadline passed. With no daemon, a command it
+doesn't run, or a daemon of another build, the hook runs the lookup in a
+child process as before, which leases the database; the child does not ask
+the daemon to run it again.
+
+Each hook has a budget inside the timeout `axil install` gives its
+event: 2.5 s for a prompt, 4 s for a post-tool or session-end hook, 9 s for
+a session start or pre-tool hook, 14 s for a stop. No deadline above runs
+past it, a lookup's child waits for a lease only as long as the budget has
+left, and a child still running when it runs out is killed, so the hook
+prints what it has instead of being killed by the harness.
+
+The hooks' queued writes are still run by `hook drain`, a process of its own
+that runs each queued command as a child: a `store` goes to the daemon, and
+the rest lease the database.
 
 ## Leasing the database
 
@@ -58,7 +109,18 @@ holders (`leased to: pid 4242 for 30s`).
 
 While a lease is held, the process holding it has the database open, as
 without a daemon: a hook's recall finds it held and returns no context at
-once, and another command waits for it as it would for any process.
+once, and another command waits for it as it would for any process. Once the
+last lease ended, a command sent is told the database is opening, and waits
+for the daemon as at its start.
+
+A process that opens the database without a lease (a build from before
+leases, or one run with `AXIL_DAEMON=off`) may take it between a lease's end
+and the daemon's open, or a backup renamed over the database before the
+daemon reopens it. The daemon then waits for that process for as long as it
+holds the database, and a command sent meanwhile runs in its own process at
+once, as beside a lease holder: it finds the database busy, as it would
+without a daemon. `daemon status` says so (`another process has it open
+without a lease`).
 
 A daemon that can't let go within 10 s, because a request it runs takes
 longer, says so (`lease_timeout`) and serves on; the process prints one line
@@ -104,11 +166,14 @@ size and modification time), with the same compiled features and the same
 values of the environment variables that change what a command prints or
 reads: `AXIL_ENC_KEY`, `AXIL_ENC_KEY_FILE` (and the key file's size and
 modification time), `AXIL_LLM_API_KEY`, `AXIL_VERBOSE`, `AXIL_EMBED_SESSIONS`,
-`HOME`, `USERPROFILE`, `XDG_CONFIG_HOME`, `APPDATA`, `ORT_DYLIB_PATH`,
-`CARGO_HOME`, `GOPATH` and `GOMODCACHE`. The daemon clears `AXIL_VERBOSE` and
+`HOME`, `USERPROFILE`, `APPDATA` and `ORT_DYLIB_PATH`. Variables only commands
+the daemon doesn't run read (`CARGO_HOME`, `GOPATH`, `GOMODCACHE` for `deps`,
+`XDG_CONFIG_HOME` for `workspace`) don't count. The daemon clears `AXIL_VERBOSE` and
 `AXIL_EMBED_SESSIONS` from its own environment, so a client with either set
 runs the command itself. Anything else, or a command the daemon doesn't run,
-is handed back to the client unrun.
+is handed back to the client unrun, and the client runs it and leases the
+database. A command typed into a development build beside an installed
+build's daemon so runs on the code it was typed into.
 
 Vector search ranks as the one-shot command does: up to the same store size it
 scans every vector instead of building the approximate graph a long-lived
