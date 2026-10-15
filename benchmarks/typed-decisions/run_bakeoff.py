@@ -102,14 +102,43 @@ def auroc(scores, labels):
     return wins / (len(pos) * len(neg))
 
 
-def auroc_ci95(scores, labels, n=2000, seed=0):
-    """Percentile bootstrap interval for AUROC, resampling pairs. With about a
-    hundred test pairs one AUROC moves by several points between resamples, so
-    a comparison between arms reads the intervals, not the point values."""
+def clusters_of(rows):
+    """Group rows that are not independent: the same issue or record (the part
+    of `source` before '->') or the same text in any field. A PR title scored
+    once as one issue's fix and once as another's other_fix lands in one group."""
+    parent = list(range(len(rows)))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    first = {}
+    for i, r in enumerate(rows):
+        keys = [("source", r["source"].split("->")[0])]
+        keys += [(f, " ".join(r[f].lower().split())) for f in ("error", "later", "old", "new") if f in r]
+        for k in keys:
+            if k in first:
+                parent[find(i)] = find(first[k])
+            else:
+                first[k] = i
+    return [find(i) for i in range(len(rows))]
+
+
+def auroc_ci95(scores, labels, clusters, n=2000, seed=0):
+    """Percentile bootstrap interval for AUROC that resamples clusters of
+    dependent rows (clusters_of), not single rows. With about a hundred test
+    pairs one AUROC moves by several points between resamples, so arms are
+    compared on intervals, not point values."""
+    groups = {}
+    for i, c in enumerate(clusters):
+        groups.setdefault(c, []).append(i)
+    keys = list(groups)
     rng = random.Random(seed)
     vals = []
     for _ in range(n):
-        pick = [rng.randrange(len(scores)) for _ in scores]
+        pick = [i for _ in keys for i in groups[keys[rng.randrange(len(keys))]]]
         a = auroc([scores[i] for i in pick], [labels[i] for i in pick])
         if a is not None:
             vals.append(a)
@@ -209,13 +238,15 @@ def evaluate(scores, rows, argmax_hits):
         hit[1] += 1
 
     te_argmax = [argmax_hits[i] for i in test]
+    te_clusters = clusters_of([rows[i] for i in test])
     by_source = {}
     for i in test:
         by_source.setdefault(rows[i]["source"].split(":")[0], []).append(i)
     return {
         "n_train": len(train), "n_test": len(test),
         "auroc_test": auroc(te_s, te_y),
-        "auroc_test_ci95": auroc_ci95(te_s, te_y),
+        "auroc_test_ci95_cluster": auroc_ci95(te_s, te_y, te_clusters),
+        "n_test_clusters": len(set(te_clusters)),
         "auroc_all": auroc(scores, y),
         "threshold_from_train": thr,
         "at_threshold_test": rates(te_s, te_y, thr),
@@ -238,7 +269,12 @@ def main():
     args = ap.parse_args()
     for spec in args.local:
         name, _, path = spec.partition("=")
-        CANDIDATES[name] = dict(repo=str(Path(path).resolve()), onnx="model.onnx", labels=NLI3)
+        if not name or not path or name in CANDIDATES:
+            ap.error(f"--local {spec!r}: need NAME=DIR with a new NAME")
+        if not Path(path).is_dir():
+            ap.error(f"--local {spec!r}: {path} is not a directory")
+        # Kept as given (relative), so no home directory lands in the report.
+        CANDIDATES[name] = dict(repo=path, onnx="model.onnx", labels=NLI3)
 
     sets = {
         "U1": load_set("u1_lme.jsonl") + load_set("u1_repo.jsonl"),
@@ -276,6 +312,8 @@ def main():
                     argmax_hits = [max(clf.probs(r["later"], U2_TEMPLATE.format(r["error"])).items(),
                                        key=lambda kv: kv[1])[0] == target for r in rows]
                 res = evaluate(scores, rows, argmax_hits)
+                # Per-row scores, for paired comparisons between arms.
+                res["scores"] = {r["id"]: round(s, 6) for r, s in zip(rows, scores)}
                 res["latency_ms_p50"] = round(statistics.median(lat), 2)
                 res["latency_ms_p95"] = round(sorted(lat)[int(0.95 * (len(lat) - 1))], 2)
                 entry[decision + ("+sym" if sym else "")] = res

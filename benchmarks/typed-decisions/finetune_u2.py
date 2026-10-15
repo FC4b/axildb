@@ -8,14 +8,19 @@ put its remaining mass on contradiction or neutral, whichever the model prefers.
 So the 3-way head and its label order stay as they are, and run_bakeoff.py
 scores the tuned model with no special case (`--local`).
 
-Model selection (best epoch checkpoint) uses the dev repos of the harvested
-pairs. The U2 test sets in sets/ are never read here.
+Model selection (the best evaluated checkpoint, the untuned model included)
+uses the dev repos of the harvested pairs. The U2 test sets in sets/ are never
+read here. `--drop-repos` leaves repos out of training and dev, for ablations.
+
+On a GPU the run is not bit-reproducible across machines or driver versions
+(some CUDA kernels are nondeterministic); compare seeds, not single runs.
 
 Usage: python finetune_u2.py --out data/u2_finetune/run1 [--epochs 3] [--threads 16]
 Requires requirements-finetune.txt.
 """
 
 import argparse
+import hashlib
 import json
 import math
 import platform
@@ -33,15 +38,23 @@ from run_bakeoff import U2_TEMPLATE, auroc
 
 HERE = Path(__file__).resolve().parent
 PAIRS = HERE / "data" / "u2_train" / "pairs.jsonl"
+HARVEST_META = HERE / "data" / "u2_train" / "harvest-meta.json"
 
 BASE = "cross-encoder/nli-deberta-v3-xsmall"
 BASE_REVISION = "a150876415327c80daeff35ca6f68f5ed8cf5c24"
-MAX_LEN = 128  # titles: the longest harvested pair is well under this
+MAX_LEN = 128  # titles: the longest harvested pair is well under this (counted below)
+MAX_ONNX_PROB_DIFF = 1e-4
 
 
-def load_pairs():
+def load_pairs(drop_repos):
     rows = [json.loads(line) for line in PAIRS.read_text().splitlines() if line.strip()]
+    rows = [r for r in rows if r["repo"].lower() not in drop_repos]
     return [r for r in rows if r["split"] == "train"], [r for r in rows if r["split"] == "dev"]
+
+
+def count_truncated(tok, rows):
+    enc = tok([r["later"] for r in rows], [U2_TEMPLATE.format(r["error"]) for r in rows], truncation=False)
+    return sum(1 for ids in enc["input_ids"] if len(ids) > MAX_LEN)
 
 
 def encode(tok, rows):
@@ -99,6 +112,8 @@ def export_onnx(model, tok, out_dir, check_rows, ent):
             got = np.exp(got - got.max())
             got = got / got.sum()
             worst = max(worst, float(np.abs(got - want).max()))
+    if worst > MAX_ONNX_PROB_DIFF:
+        raise SystemExit(f"ONNX export differs from torch by {worst:.2e} (> {MAX_ONNX_PROB_DIFF})")
     return worst
 
 
@@ -113,7 +128,9 @@ def main():
     ap.add_argument("--threads", type=int, default=16)
     ap.add_argument("--seed", type=int, default=13)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    ap.add_argument("--drop-repos", default="", help="comma-separated owner/name list left out of train and dev")
     args = ap.parse_args()
+    drop_repos = {r.strip().lower() for r in args.drop_repos.split(",") if r.strip()}
 
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -122,8 +139,9 @@ def main():
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    train, dev = load_pairs()
+    train, dev = load_pairs(drop_repos)
     tok = AutoTokenizer.from_pretrained(BASE, revision=BASE_REVISION)
+    truncated = {"train": count_truncated(tok, train), "dev": count_truncated(tok, dev)}
     model = AutoModelForSequenceClassification.from_pretrained(BASE, revision=BASE_REVISION).to(args.device)
     id2label = {int(k): v.lower() for k, v in model.config.id2label.items()}
     ent = next(i for i, l in id2label.items() if l == "entailment")
@@ -141,7 +159,10 @@ def main():
         opt, lambda s: (s + 1) / max(1, warm) if s < warm else max(0.0, (total - s) / max(1, total - warm)))
     eval_every = max(1, steps_per_epoch // args.evals_per_epoch)
 
-    history, best = [], (base_auc, 0, None)
+    # The untuned weights are a candidate too: if no evaluation beats them,
+    # they are what gets exported, and the meta says so.
+    initial = {k: v.detach().clone() for k, v in model.state_dict().items()}
+    history, best = [], (base_auc, 0, initial)
     step, t0 = 0, time.time()
     for epoch in range(args.epochs):
         order = list(range(len(train)))
@@ -168,15 +189,16 @@ def main():
                 if auc > best[0]:
                     best = (auc, step, {k: v.detach().clone() for k, v in model.state_dict().items()})
 
-    if best[2] is not None:
-        model.load_state_dict(best[2])
+    model.load_state_dict(best[2])
     worst = export_onnx(model, tok, out_dir, dev[:50], ent)
     meta = {
         "base": BASE, "base_revision": BASE_REVISION, "objective": "bce on P(entailment)",
-        "u2_template": U2_TEMPLATE, "max_len": MAX_LEN, "args": vars(args),
+        "u2_template": U2_TEMPLATE, "max_len": MAX_LEN, "truncated_pairs": truncated, "args": vars(args),
+        "pairs_sha256": hashlib.sha256(PAIRS.read_bytes()).hexdigest(),
+        "harvest_meta": json.loads(HARVEST_META.read_text()) if HARVEST_META.exists() else None,
         "n_train": len(train), "n_train_pos": sum(r["label"] for r in train),
         "n_dev": len(dev), "dev_repos": sorted({r["repo"] for r in dev}),
-        "dev_auroc_before": base_auc, "dev_auroc_best": best[0], "best_step": best[1],
+        "dev_auroc_before": base_auc, "exported_dev_auroc": best[0], "exported_step": best[1],
         "history": history, "onnx_max_abs_prob_diff_vs_torch": worst,
         "train_seconds": round(time.time() - t0), "torch": torch.__version__, "device": args.device,
         "gpu": torch.cuda.get_device_name(0) if args.device.startswith("cuda") else None,
