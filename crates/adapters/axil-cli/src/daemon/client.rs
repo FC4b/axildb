@@ -177,10 +177,9 @@ fn ask(
     let wait = deadline.map_or(CLI_ANSWER_WAIT, |d| d + ANSWER_SLACK);
     // A socket nobody listens on, or one not to be trusted: the command
     // runs here, and its open says what is wrong when anything is.
-    let Ok(stream) = proto::connect(run.socket(), wait) else {
+    let Ok(mut stream) = proto::connect(run.socket(), wait) else {
         return Ask::Done(Forwarded::NoDaemon);
     };
-    let mut stream = stream;
     let sent = proto::write_json(&mut stream, &proto::Op::Run(header.clone()))
         .and_then(|()| stdin.map_or(Ok(()), |bytes| proto::write_frame(&mut stream, bytes)));
     if sent.is_err() {
@@ -306,8 +305,9 @@ pub fn forward_lookup(db: &Path, args: &[&str]) -> Option<Option<String>> {
         Forwarded::Served {
             exit: 0, stdout, ..
         } => Some(Some(String::from_utf8_lossy(&stdout).into_owned())),
-        // Another build's daemon: the child runs the lookup on this
-        // build's code, leasing the database as any command of it does.
+        // A daemon of another build or environment: the child runs the
+        // lookup as this hook would, leasing the database as any command
+        // does.
         Forwarded::NoDaemon | Forwarded::NotServed(_) | Forwarded::Incompatible(_) => None,
         Forwarded::Served { .. }
         | Forwarded::Leased
