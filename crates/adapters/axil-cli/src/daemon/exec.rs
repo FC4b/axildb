@@ -328,6 +328,12 @@ impl WarmState {
         self.slot_read().clone()
     }
 
+    /// Tests only: make the next command run on the handle panic.
+    #[cfg(test)]
+    pub fn panic_on_next(&self) {
+        self.panic_next.store(true, Ordering::Release);
+    }
+
     /// Debug builds only: the writer lock, held as a write holds it.
     #[cfg(debug_assertions)]
     pub fn debug_writer(&self) -> std::sync::MutexGuard<'_, ()> {

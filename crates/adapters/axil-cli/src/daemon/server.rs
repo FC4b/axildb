@@ -379,7 +379,7 @@ pub(super) enum Queued {
     /// Not now: the database is opening, opening again or leased.
     Wait,
     /// Not at all: the daemon is stopping with the database closed, or a
-    /// request panicked.
+    /// request panicked before this one could run.
     Stopped,
     /// It did not run: its job's claim said no as it was to start (see
     /// [`crate::hook_brain::JobClaim`]).
@@ -1899,14 +1899,17 @@ impl Server {
         }
         if state.poisoned() {
             self.request_stop(StopReason::Panicked);
-            return Queued::Stopped;
         }
         match result {
+            // Run, the step that panicked too (its answer says so): never
+            // run again, in a process of its own or otherwise.
             Ok(response) => {
                 self.touch();
                 self.stats.served(op, started.elapsed());
                 Queued::Ran(response)
             }
+            // Not run, the handle poisoned by another request's panic.
+            Err(_) if state.poisoned() => Queued::Stopped,
             Err(NotServed::Unavailable | NotServed::Expired | NotServed::Leased) => Queued::Wait,
             Err(why) => {
                 self.stats.not_served(op);
@@ -2597,6 +2600,40 @@ mod tests {
         }
         assert_eq!(server.phase.get(), Phase::Ready);
         stop(server);
+    }
+
+    /// A queued step that panics has run: its answer is the panic's, and
+    /// it is not handed back to be run again in a process of its own. The
+    /// steps after it are not run on the poisoned handle.
+    #[test]
+    fn a_queued_step_that_panics_is_not_run_again() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = build_fixture(tmp.path());
+        let db = proj.join(".axil/memory.axil");
+        let server = start(&db);
+        quiet(&server);
+        let cwd = proj.canonicalize().unwrap();
+        let store = parity::argv(&[
+            "--db",
+            db.to_str().unwrap(),
+            "store",
+            "decisions",
+            r#"{"summary":"a step that panics"}"#,
+        ]);
+        server.state.get().unwrap().panic_on_next();
+        match server.run_queued(&store, &cwd, b"", &[], &|| true) {
+            Queued::Ran(response) => {
+                assert_eq!(response.exit, crate::EXIT_ERROR);
+                let stderr = String::from_utf8_lossy(&response.stderr);
+                assert!(stderr.contains("the command panicked"), "{stderr}");
+            }
+            _ => panic!("the step that ran was not answered as run"),
+        }
+        assert!(matches!(
+            server.run_queued(&store, &cwd, b"", &[], &|| true),
+            Queued::Stopped
+        ));
+        assert_eq!(server.shutdown(&StopReason::Panicked), Finish::Abandoned);
     }
 
     /// A `deps refresh` that changes the database's dependencies leaves the
