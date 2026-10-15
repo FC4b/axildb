@@ -31,8 +31,8 @@ use super::exec::{self, NotServed};
 use super::paths::{fnv1a64, trusted_socket, uid};
 
 /// The protocol version a run header must carry. 2 added the `leased` run
-/// reply.
-pub const DAEMON_PROTO: u32 = 2;
+/// reply, 3 the order a served command printed in.
+pub const DAEMON_PROTO: u32 = 3;
 
 /// The largest frame either side sends or accepts: 32 MiB.
 pub const MAX_FRAME: usize = 32 * 1024 * 1024;
@@ -267,6 +267,10 @@ pub enum RunReply {
     Served {
         /// Its exit code.
         exit: i32,
+        /// The order it printed in: runs of so many bytes of one stream,
+        /// `[["out",12],["err",40],["out",3]]`, which the client prints in.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        order: Vec<(Stream, u64)>,
     },
     /// The daemon did not run it and wrote nothing; the client runs it.
     /// Except `too_large`: the daemon ran it, and what it printed is over
@@ -304,7 +308,45 @@ pub enum RunReply {
     },
 }
 
+/// One of a command's two output streams.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Stream {
+    Out,
+    Err,
+}
+
 impl RunReply {
+    /// The reply for a command that ran, from what [`exec`] made of it.
+    pub fn served(response: &exec::Response) -> RunReply {
+        RunReply::Served {
+            exit: response.exit,
+            order: response
+                .order
+                .iter()
+                .map(|&(to_err, len)| {
+                    let stream = if to_err { Stream::Err } else { Stream::Out };
+                    (stream, u64::try_from(len).unwrap_or(u64::MAX))
+                })
+                .collect(),
+        }
+    }
+
+    /// The order of a served reply as [`crate::cli_io::Captured::order`]
+    /// keeps it; empty for any other reply.
+    pub fn order(&self) -> Vec<(bool, usize)> {
+        match self {
+            RunReply::Served { order, .. } => order
+                .iter()
+                .map(|&(stream, len)| {
+                    let len = usize::try_from(len).unwrap_or(usize::MAX);
+                    (stream == Stream::Err, len)
+                })
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
     /// The reply for a request [`exec::execute_captured`] did not serve.
     pub fn not_served(reason: NotServed) -> RunReply {
         let code = match reason {
@@ -770,7 +812,7 @@ mod tests {
             serde_json::from_str::<RunReply>(r#"{"reply":"overloaded","in_flight":16}"#).unwrap(),
             RunReply::Overloaded
         );
-        assert_eq!(DAEMON_PROTO, 2);
+        assert_eq!(DAEMON_PROTO, 3);
     }
 
     #[test]
@@ -799,8 +841,21 @@ mod tests {
         assert_eq!(json["op"], "run");
         assert_eq!(json["argv"], serde_json::json!(["axil", "boot"]));
         assert_eq!(serde_json::from_value::<Op>(json).unwrap(), Op::Run(header));
-        let served = serde_json::to_string(&RunReply::Served { exit: 0 }).unwrap();
-        assert_eq!(served, r#"{"reply":"served","exit":0}"#);
+        let served = RunReply::Served {
+            exit: 0,
+            order: Vec::new(),
+        };
+        let json = r#"{"reply":"served","exit":0}"#;
+        assert_eq!(serde_json::to_string(&served).unwrap(), json);
+        assert_eq!(serde_json::from_str::<RunReply>(json).unwrap(), served);
+        let printed = RunReply::Served {
+            exit: 1,
+            order: vec![(Stream::Out, 12), (Stream::Err, 40), (Stream::Out, 3)],
+        };
+        let json = r#"{"reply":"served","exit":1,"order":[["out",12],["err",40],["out",3]]}"#;
+        assert_eq!(serde_json::to_string(&printed).unwrap(), json);
+        assert_eq!(serde_json::from_str::<RunReply>(json).unwrap(), printed);
+        assert_eq!(printed.order(), [(false, 12), (true, 40), (false, 3)]);
     }
 
     #[test]

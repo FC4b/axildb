@@ -68,11 +68,13 @@ const RETRY_EVERY: Duration = Duration::from_millis(50);
 /// What a command line sent to the database's daemon came to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Forwarded {
-    /// The daemon ran it: what it printed, and its exit code.
+    /// The daemon ran it: what it printed, in what order
+    /// ([`cli_io::Captured::order`]), and its exit code.
     Served {
         exit: i32,
         stdout: Vec<u8>,
         stderr: Vec<u8>,
+        order: Vec<(bool, usize)>,
     },
     /// No daemon answers for the database.
     NoDaemon,
@@ -223,7 +225,7 @@ fn ask(
         return Ask::Done(Forwarded::Lost { sent: true });
     };
     Ask::Done(match reply {
-        RunReply::Served { exit } => {
+        RunReply::Served { exit, .. } => {
             match (
                 proto::read_frame(&mut stream),
                 proto::read_frame(&mut stream),
@@ -232,6 +234,7 @@ fn ask(
                     exit,
                     stdout,
                     stderr,
+                    order: reply.order(),
                 },
                 _ => Forwarded::Lost { sent: true },
             }
@@ -296,10 +299,9 @@ pub fn forward_cli(cli: &Cli) -> Option<i32> {
             exit,
             stdout,
             stderr,
+            order,
         } => {
-            // A command prints its warnings before its results, mostly.
-            cli_io::write_process_bytes(true, &stderr);
-            cli_io::write_process_bytes(false, &stdout);
+            cli_io::write_process_in_order(&stdout, &stderr, &order);
             Some(exit)
         }
         // The daemon may have run it: running it again could write twice.
@@ -478,7 +480,13 @@ mod tests {
             vec![
                 Then::Reply(RunReply::Starting, Vec::new()),
                 Then::Reply(RunReply::Overloaded, Vec::new()),
-                Then::Reply(RunReply::Served { exit: 3 }, b"out".to_vec()),
+                Then::Reply(
+                    RunReply::Served {
+                        exit: 3,
+                        order: vec![(proto::Stream::Out, 3)],
+                    },
+                    b"out".to_vec(),
+                ),
             ],
         );
         let got = forward(&db, argv(&["axil", "boot"]), &cwd, None, &cli_opts());
@@ -487,7 +495,8 @@ mod tests {
             Forwarded::Served {
                 exit: 3,
                 stdout: b"out".to_vec(),
-                stderr: Vec::new()
+                stderr: Vec::new(),
+                order: vec![(false, 3)],
             }
         );
         assert_eq!(asked.lock().unwrap().len(), 3);
@@ -552,8 +561,20 @@ mod tests {
             reason: "build".into(),
         };
         let cases = [
-            (RunReply::Served { exit: 0 }, Some(Some("ctx".to_string()))),
-            (RunReply::Served { exit: 1 }, Some(None)),
+            (
+                RunReply::Served {
+                    exit: 0,
+                    order: Vec::new(),
+                },
+                Some(Some("ctx".to_string())),
+            ),
+            (
+                RunReply::Served {
+                    exit: 1,
+                    order: Vec::new(),
+                },
+                Some(None),
+            ),
             (RunReply::Leased, Some(None)),
             (RunReply::Starting, Some(None)),
             (RunReply::Stopping, Some(None)),

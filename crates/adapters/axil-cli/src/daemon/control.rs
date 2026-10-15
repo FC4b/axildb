@@ -8,7 +8,6 @@
 //! starting one. Unset, it is `on`: a daemon runs only when started by hand.
 
 use std::fs::{self, OpenOptions};
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -622,11 +621,9 @@ fn send(db: &Path, args: Vec<String>) -> Result<i32> {
         }
     };
     match outcome.reply {
-        RunReply::Served { exit } => {
-            let mut stdout = cli_io::stdout();
-            stdout.write_all(&outcome.stdout)?;
-            stdout.flush()?;
-            errp!("{}", String::from_utf8_lossy(&outcome.stderr));
+        RunReply::Served { exit, .. } => {
+            let order = outcome.reply.order();
+            cli_io::write_process_in_order(&outcome.stdout, &outcome.stderr, &order);
             Ok(exit)
         }
         other => {

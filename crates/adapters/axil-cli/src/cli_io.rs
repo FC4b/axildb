@@ -66,6 +66,8 @@ pub struct ReqCtx {
     pub out: Vec<u8>,
     /// Bytes the command wrote to stderr.
     pub err: Vec<u8>,
+    /// The order the command wrote in (see [`Captured::order`]).
+    pub order: Vec<(bool, usize)>,
     /// Piped stdin. `None` stands for a terminal: nothing was piped.
     pub stdin: Option<Vec<u8>>,
     /// Whether the command records slow queries in the database's log.
@@ -80,6 +82,7 @@ impl Default for ReqCtx {
         Self {
             out: Vec::new(),
             err: Vec::new(),
+            order: Vec::new(),
             stdin: None,
             slow_query_log: true,
             warm: None,
@@ -94,6 +97,45 @@ impl Default for ReqCtx {
 /// when `f` panics (the panic carries on, and what `f` wrote is dropped).
 #[cfg_attr(not(test), allow(dead_code))] // the in-process host is its first non-test caller
 pub fn capture<R>(ctx: ReqCtx, f: impl FnOnce() -> R) -> (Vec<u8>, Vec<u8>, R) {
+    let (printed, result) = capture_in_order(ctx, f);
+    (printed.out, printed.err, result)
+}
+
+/// What a captured command wrote.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Captured {
+    /// Its stdout.
+    pub out: Vec<u8>,
+    /// Its stderr.
+    pub err: Vec<u8>,
+    /// The order it wrote them in: runs of so many bytes of its stderr
+    /// (`true`) or its stdout, which cover both, two runs in a row never to
+    /// the same stream. A terminal showing both streams shows them so.
+    pub order: Vec<(bool, usize)>,
+}
+
+impl Captured {
+    /// Append `bytes` to stderr (`to_err`) or stdout, after what is there.
+    pub fn push(&mut self, to_err: bool, bytes: &[u8]) {
+        if bytes.is_empty() {
+            return;
+        }
+        let buf = if to_err { &mut self.err } else { &mut self.out };
+        buf.extend_from_slice(bytes);
+        push_run(&mut self.order, to_err, bytes.len());
+    }
+}
+
+/// Count `len` more bytes to stderr (`to_err`) or stdout into `order`.
+fn push_run(order: &mut Vec<(bool, usize)>, to_err: bool, len: usize) {
+    match order.last_mut() {
+        Some((err, n)) if *err == to_err => *n += len,
+        _ => order.push((to_err, len)),
+    }
+}
+
+/// [`capture`], with the order `f` wrote its stdout and stderr in.
+pub fn capture_in_order<R>(ctx: ReqCtx, f: impl FnOnce() -> R) -> (Captured, R) {
     struct Restore(Option<ReqCtx>);
     impl Drop for Restore {
         fn drop(&mut self) {
@@ -107,7 +149,12 @@ pub fn capture<R>(ctx: ReqCtx, f: impl FnOnce() -> R) -> (Vec<u8>, Vec<u8>, R) {
     let ctx = REQ
         .with(|r| r.borrow_mut().take())
         .expect("request context removed while its capture was running");
-    (ctx.out, ctx.err, result)
+    let printed = Captured {
+        out: ctx.out,
+        err: ctx.err,
+        order: ctx.order,
+    };
+    (printed, result)
 }
 
 fn capturing() -> bool {
@@ -121,6 +168,9 @@ fn append(to_err: bool, bytes: &[u8]) -> bool {
         Some(ctx) => {
             let buf = if to_err { &mut ctx.err } else { &mut ctx.out };
             buf.extend_from_slice(bytes);
+            if !bytes.is_empty() {
+                push_run(&mut ctx.order, to_err, bytes.len());
+            }
             true
         }
         None => false,
@@ -164,6 +214,29 @@ fn write_process(to_err: bool, args: fmt::Arguments<'_>, newline: bool) {
 #[cfg(unix)]
 pub fn write_process_bytes(to_err: bool, bytes: &[u8]) {
     write_process_with(to_err, |w| w.write_all(bytes).and_then(|()| w.flush()));
+}
+
+/// Write what a command the database's daemon ran printed to the process's
+/// stdout and stderr, in the order it printed it (see [`Captured::order`]).
+/// What `order` leaves out, which it should not, follows: stdout, then
+/// stderr.
+#[cfg(unix)]
+pub fn write_process_in_order(out: &[u8], err: &[u8], order: &[(bool, usize)]) {
+    let (mut out, mut err) = (out, err);
+    for &(to_err, len) in order {
+        let from = if to_err { &mut err } else { &mut out };
+        let bytes: &[u8] = from;
+        let (run, rest) = bytes.split_at(len.min(bytes.len()));
+        *from = rest;
+        if !run.is_empty() {
+            write_process_bytes(to_err, run);
+        }
+    }
+    for (to_err, rest) in [(false, out), (true, err)] {
+        if !rest.is_empty() {
+            write_process_bytes(to_err, rest);
+        }
+    }
 }
 
 fn write_process_with(to_err: bool, write: impl FnOnce(&mut dyn Write) -> io::Result<()>) {
@@ -682,6 +755,30 @@ pub(crate) mod tests {
         assert_eq!(out, b"a 1\nb\n");
         assert_eq!(err, b"c  xctx: outer\n");
         assert_eq!(n, 7);
+    }
+
+    /// The order the streams were written in is kept, a run per stream
+    /// switch, and covers every byte.
+    #[test]
+    fn capture_keeps_the_order_the_streams_were_written_in() {
+        let (printed, ()) = capture_in_order(ReqCtx::default(), || {
+            outln!("one");
+            outp!("two ");
+            errln!("warning");
+            errp!("");
+            outln!("three");
+            errp!("x");
+        });
+        assert_eq!(printed.out, b"one\ntwo three\n");
+        assert_eq!(printed.err, b"warning\nx");
+        assert_eq!(
+            printed.order,
+            [(false, 8), (true, 8), (false, 6), (true, 1)]
+        );
+        let mut more = printed;
+        more.push(true, b"y\n");
+        more.push(false, b"");
+        assert_eq!(more.order.last(), Some(&(true, 3)));
     }
 
     #[test]

@@ -108,6 +108,19 @@ pub struct Response {
     pub stdout: Vec<u8>,
     /// Bytes for stderr.
     pub stderr: Vec<u8>,
+    /// The order they were printed in ([`cli_io::Captured::order`]).
+    pub order: Vec<(bool, usize)>,
+}
+
+impl Response {
+    fn of(exit: i32, printed: cli_io::Captured) -> Response {
+        Response {
+            exit,
+            stdout: printed.out,
+            stderr: printed.err,
+            order: printed.order,
+        }
+    }
 }
 
 /// Why the host did not run a request. It printed and wrote nothing, so the
@@ -482,7 +495,7 @@ pub fn execute_gated(
             // handle as it was.
             Ok(request) => request
                 .join()
-                .unwrap_or_else(|payload| Ok(panicked(Vec::new(), Vec::new(), &*payload))),
+                .unwrap_or_else(|payload| Ok(panicked(cli_io::Captured::default(), &*payload))),
             Err(_) => Err(NotServed::Unavailable),
         }
     })
@@ -523,7 +536,7 @@ fn execute(
         warm: Some(warm),
         ..ReqCtx::default()
     };
-    let (stdout, stderr, result) = cli_io::capture(ctx, || {
+    let (printed, result) = cli_io::capture_in_order(ctx, || {
         panic::catch_unwind(AssertUnwindSafe(|| {
             #[cfg(test)]
             if state.panic_next.swap(false, Ordering::AcqRel) {
@@ -534,10 +547,10 @@ fn execute(
         }))
     });
     match result {
-        Ok(result) => finish(result, stdout, stderr),
+        Ok(result) => finish(result, printed),
         Err(payload) => {
             state.poison(held);
-            Ok(panicked(stdout, stderr, &*payload))
+            Ok(panicked(printed, &*payload))
         }
     }
 }
@@ -547,42 +560,30 @@ fn execute(
 /// the handle lacked what the command needs (the command wrote nothing).
 fn finish(
     result: anyhow::Result<i32>,
-    stdout: Vec<u8>,
-    mut stderr: Vec<u8>,
+    mut printed: cli_io::Captured,
 ) -> Result<Response, NotServed> {
     match result {
-        Ok(exit) => Ok(Response {
-            exit,
-            stdout,
-            stderr,
-        }),
+        Ok(exit) => Ok(Response::of(exit, printed)),
         Err(e) => {
             if let Some(WarmLacks(need)) = e.downcast_ref::<WarmLacks>() {
                 return Err(NotServed::Lacks(*need));
             }
-            stderr.extend_from_slice(crate::format_cli_error(&e).as_bytes());
-            stderr.push(b'\n');
-            Ok(Response {
-                exit: crate::EXIT_ERROR,
-                stdout,
-                stderr,
-            })
+            let line = format!("{}\n", crate::format_cli_error(&e));
+            printed.push(true, line.as_bytes());
+            Ok(Response::of(crate::EXIT_ERROR, printed))
         }
     }
 }
 
-fn panicked(stdout: Vec<u8>, mut stderr: Vec<u8>, payload: &(dyn Any + Send)) -> Response {
+fn panicked(mut printed: cli_io::Captured, payload: &(dyn Any + Send)) -> Response {
     let message = payload
         .downcast_ref::<&str>()
         .map(|s| s.to_string())
         .or_else(|| payload.downcast_ref::<String>().cloned())
         .unwrap_or_else(|| "a non-string payload".to_string());
-    stderr.extend_from_slice(format!("axil: the command panicked: {message}\n").as_bytes());
-    Response {
-        exit: crate::EXIT_ERROR,
-        stdout,
-        stderr,
-    }
+    let line = format!("axil: the command panicked: {message}\n");
+    printed.push(true, line.as_bytes());
+    Response::of(crate::EXIT_ERROR, printed)
 }
 
 /// Whether a host runs `command` in-process at all, and what its open
@@ -749,17 +750,9 @@ fn printed(e: clap::Error, req: &Request, parser: &CliParser) -> Result<Parsed, 
     if unknown || parser.env_differs(req, |_| true) {
         return Err(NotServed::Parse);
     }
-    let text = e.render().to_string().into_bytes();
-    let (stdout, stderr) = if e.use_stderr() {
-        (Vec::new(), text)
-    } else {
-        (text, Vec::new())
-    };
-    Ok(Parsed::Printed(Response {
-        exit: e.exit_code(),
-        stdout,
-        stderr,
-    }))
+    let mut printed = cli_io::Captured::default();
+    printed.push(e.use_stderr(), e.render().to_string().as_bytes());
+    Ok(Parsed::Printed(Response::of(e.exit_code(), printed)))
 }
 
 #[cfg(test)]
@@ -1219,24 +1212,27 @@ mod tests {
     /// one-shot binary prints it.
     #[test]
     fn a_command_error_prints_and_a_refusal_does_not() {
+        let printed = |to_err: bool, bytes: &[u8]| {
+            let mut printed = cli_io::Captured::default();
+            printed.push(to_err, bytes);
+            printed
+        };
         let refused = finish(
             Err(WarmLacks(Need::FullText).into()),
-            b"half".to_vec(),
-            Vec::new(),
+            printed(false, b"half"),
         );
         assert_eq!(refused, Err(NotServed::Lacks(Need::FullText)));
-        let failed = finish(
-            Err(anyhow::anyhow!("boom").context("ctx")),
-            Vec::new(),
-            b"warning\n".to_vec(),
-        );
-        let stderr = b"warning\n{\"error\":\"ctx: boom\"}\n".to_vec();
+        let mut before = printed(true, b"warning\n");
+        before.push(false, b"out\n");
+        let failed = finish(Err(anyhow::anyhow!("boom").context("ctx")), before);
+        let error = b"{\"error\":\"ctx: boom\"}\n";
         assert_eq!(
             failed,
             Ok(Response {
                 exit: 1,
-                stdout: Vec::new(),
-                stderr
+                stdout: b"out\n".to_vec(),
+                stderr: [b"warning\n".as_slice(), error].concat(),
+                order: vec![(true, 8), (false, 4), (true, error.len())],
             })
         );
     }

@@ -1339,12 +1339,7 @@ impl Server {
                 // whose own command leases the database, keeps no daemon up.
                 self.touch();
                 self.stats.served(op, took);
-                (
-                    RunReply::Served {
-                        exit: response.exit,
-                    },
-                    Some(response),
-                )
+                (RunReply::served(&response), Some(response))
             }
             Err(not_served) => {
                 self.stats.not_served(op);
@@ -1991,7 +1986,7 @@ mod tests {
 
     fn served(outcome: RunOutcome) -> Run {
         match outcome.reply {
-            RunReply::Served { exit } => (outcome.stdout, outcome.stderr, exit),
+            RunReply::Served { exit, .. } => (outcome.stdout, outcome.stderr, exit),
             other => panic!("not served: {other:?}"),
         }
     }
@@ -2105,6 +2100,7 @@ mod tests {
                         exit,
                         stdout,
                         stderr,
+                        ..
                     } => (stdout, stderr, exit),
                     other => panic!("{}: not served: {other:?}", c.name),
                 }
@@ -2497,7 +2493,7 @@ mod tests {
 
         assert!(matches!(
             reply(header.clone()),
-            RunReply::Served { exit: 0 }
+            RunReply::Served { exit: 0, .. }
         ));
         let mut other = header.clone();
         other.build_id = "0000000000000000".into();

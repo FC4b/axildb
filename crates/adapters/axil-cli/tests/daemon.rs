@@ -142,6 +142,28 @@ fn axil_env(
     child.wait_with_output().unwrap()
 }
 
+/// [`axil_env`], with stdout and stderr on one pipe, as a terminal shows
+/// them: what is on it, and the exit code.
+fn axil_merged(dir: &Path, args: &[&str], env: &[(&str, &str)]) -> (Vec<u8>, Option<i32>) {
+    let (mut reader, writer) = std::io::pipe().unwrap();
+    let mut cmd = Command::new(BIN);
+    cmd.args(args)
+        .current_dir(dir)
+        .stdin(Stdio::null())
+        .stdout(writer.try_clone().unwrap())
+        .stderr(writer);
+    for name in ENV {
+        cmd.env_remove(name);
+    }
+    cmd.envs(env.iter().copied());
+    let mut child = cmd.spawn().unwrap();
+    // The pipe ends when the child's ends close, not this process's too.
+    drop(cmd);
+    let mut merged = Vec::new();
+    reader.read_to_end(&mut merged).unwrap();
+    (merged, child.wait().unwrap().code())
+}
+
 impl Fixture {
     fn axil(&self, args: &[&str]) -> Output {
         axil_in(BIN, &self.proj, args, None)
@@ -1154,7 +1176,8 @@ fn with_the_daemon_off_a_command_asks_for_no_lease() {
 
 /// The hot commands typed as usual go to the daemon, which prints what each
 /// prints with no daemon: the same bytes as with `AXIL_DAEMON=off`, ids and
-/// times aside. None of them leases the database.
+/// times aside, and on one pipe in the same order. None of them leases the
+/// database.
 #[test]
 fn the_hot_commands_go_to_the_daemon_and_print_as_without_one() {
     let fx = fixture();
@@ -1191,19 +1214,31 @@ fn the_hot_commands_go_to_the_daemon_and_print_as_without_one() {
         cases.push((vec!["checkpoint", cp], None));
         cases.push((vec!["checkpoint", "-"], Some(cp.as_bytes())));
     }
+    // Both streams on one pipe: a recall prints its results, then a hint
+    // on stderr.
+    let mut merged: Vec<Vec<&str>> = vec![vec!["boot"], vec!["store", "decisions", "{nope"]];
+    if cfg!(feature = "embed") {
+        merged.push(vec!["recall", "auth timeout"]);
+    }
     let saved = fx._tmp.path().join("saved");
     copy_dir(&fx.proj.join(".axil"), &saved);
     let run_all = |env: &[(&str, &str)]| -> Vec<(String, String, Option<i32>)> {
-        cases
-            .iter()
-            .map(|(args, stdin)| {
-                let out = axil_env(BIN, &fx.proj, args, *stdin, env);
-                (
-                    normalize(&out.stdout),
-                    normalize(&out.stderr),
-                    out.status.code(),
-                )
-            })
+        let apart = cases.iter().map(|(args, stdin)| {
+            let out = axil_env(BIN, &fx.proj, args, *stdin, env);
+            (
+                normalize(&out.stdout),
+                normalize(&out.stderr),
+                out.status.code(),
+            )
+        });
+        let together = merged.iter().map(|args| {
+            let (both, code) = axil_merged(&fx.proj, args, env);
+            (normalize(&both), "(merged)".to_string(), code)
+        });
+        apart
+            .collect::<Vec<_>>()
+            .into_iter()
+            .chain(together)
             .collect()
     };
 
@@ -1216,7 +1251,7 @@ fn the_hot_commands_go_to_the_daemon_and_print_as_without_one() {
         .values()
         .map(|op| op["served"].as_u64().unwrap())
         .sum();
-    assert_eq!(served, cases.len() as u64, "{live}");
+    assert_eq!(served, (cases.len() + merged.len()) as u64, "{live}");
     assert_eq!(live["leases_granted"], 0, "{live}");
     let stop = fx.axil(&["daemon", "stop"]);
     assert!(stop.status.success(), "{}", text(&stop.stderr));
@@ -1224,7 +1259,8 @@ fn the_hot_commands_go_to_the_daemon_and_print_as_without_one() {
     std::fs::remove_dir_all(fx.proj.join(".axil")).unwrap();
     copy_dir(&saved, &fx.proj.join(".axil"));
     let alone = run_all(&[("AXIL_DAEMON", "off")]);
-    for ((args, _), (sent, alone)) in cases.iter().zip(sent.iter().zip(&alone)) {
+    let names = cases.iter().map(|(args, _)| args).chain(&merged);
+    for (args, (sent, alone)) in names.zip(sent.iter().zip(&alone)) {
         assert_eq!(sent, alone, "{args:?}");
     }
 }
