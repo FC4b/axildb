@@ -67,8 +67,9 @@ use crate::hook_brain::{
 /// How often the thread looks at the queue without being poked.
 const POLL: Duration = Duration::from_secs(2);
 
-/// How often an idle thread touches `drain.lock`, so a drainer that judges
-/// it by age finds it fresh (it gives up on one after 30 minutes).
+/// How often the thread touches `drain.lock` while it waits, so a drainer
+/// that judges it by age finds it fresh (it gives up on one after 30
+/// minutes).
 const TOUCH_EVERY: Duration = Duration::from_secs(60);
 
 /// How long the thread waits, once it let go of the queue at a job queued
@@ -157,27 +158,25 @@ fn run(server: &Arc<Server>) {
         cwd,
         exe: exe.clone(),
         yielded: None,
+        lock: dir.join("drain.lock"),
+        touched: Instant::now(),
     };
     let mut lock: Option<DrainLock> = None;
-    let mut touched = Instant::now();
     // The job last handed over that no drainer took: run here next time.
     let mut not_taken: Option<PathBuf> = None;
     while !server.stopping() {
         let Some(held) = lock.as_ref() else {
             lock = take(&dir, server);
             if lock.is_some() {
-                touched = Instant::now();
+                runner.touched = Instant::now();
             } else {
                 server.wait_for_wake(POLL);
             }
             continue;
         };
+        runner.keep_lock_fresh();
         let Some(job) = next_job(&dir) else {
             runner.end_yield();
-            if touched.elapsed() >= TOUCH_EVERY {
-                held.touch();
-                touched = Instant::now();
-            }
             server.wait_for_wake(POLL);
             continue;
         };
@@ -197,7 +196,7 @@ fn run(server: &Arc<Server>) {
                 &format!("daemon: leaving job {name} and the ones after it to the drainer of the hook that queued it"),
             );
             lock = None;
-            match hand_over(&dir, server) {
+            match hand_over(&dir, &job, server) {
                 None => {}
                 Some(back) => {
                     drain_log(
@@ -213,7 +212,7 @@ fn run(server: &Arc<Server>) {
             continue;
         }
         held.touch();
-        touched = Instant::now();
+        runner.touched = Instant::now();
         let ran = run_job_file(&mut runner, &exe, &db, &dir, &job);
         server.queue().ran(!ran);
     }
@@ -234,14 +233,17 @@ fn take(dir: &Path, server: &Server) -> Option<DrainLock> {
     Some(lock)
 }
 
-/// Leave the queue, let go of a moment ago, to another drainer: `None` once
-/// one holds it, the lock back when none took it within [`HANDOVER_GRACE`].
-/// It is let go of for most of each tenth of a second, and taken back
-/// between, to find out.
-fn hand_over(dir: &Path, server: &Server) -> Option<DrainLock> {
+/// Leave the queue, let go of a moment ago at `job`, to another drainer:
+/// `None` once one holds it or has claimed `job`, the lock back when none
+/// did within [`HANDOVER_GRACE`]. It is let go of for most of each tenth of
+/// a second, and taken back between, to find out.
+fn hand_over(dir: &Path, job: &Path, server: &Server) -> Option<DrainLock> {
     let deadline = Instant::now() + HANDOVER_GRACE;
     loop {
         thread::sleep(Duration::from_millis(100));
+        if !job.exists() {
+            return None;
+        }
         let lock = DrainLock::acquire(dir)?;
         if Instant::now() >= deadline || server.stopping() {
             return Some(lock);
@@ -266,6 +268,10 @@ struct WarmRunner<'a> {
     /// The lease the daemon holds for the queue's own steps, while it has
     /// let go of the database for them.
     yielded: Option<u64>,
+    /// `drain.lock`, which the thread holds while it runs a job.
+    lock: PathBuf,
+    /// When `drain.lock` was last touched.
+    touched: Instant,
 }
 
 impl WarmRunner<'_> {
@@ -276,6 +282,20 @@ impl WarmRunner<'_> {
         let mut argv = vec!["axil".to_string(), "--db".to_string(), db.to_string()];
         argv.extend(args.iter().map(|a| a.to_string()));
         Some(argv)
+    }
+
+    /// Touch `drain.lock` when [`TOUCH_EVERY`] has passed since it last
+    /// was, however long the queue waits, so a drainer that judges it by
+    /// age never finds it stale. Only its time changes: the holder's tag
+    /// and pid stay.
+    fn keep_lock_fresh(&mut self) {
+        if self.touched.elapsed() < TOUCH_EVERY {
+            return;
+        }
+        self.touched = Instant::now();
+        if let Ok(file) = std::fs::File::options().append(true).open(&self.lock) {
+            let _ = file.set_modified(std::time::SystemTime::now());
+        }
     }
 
     /// Wait for the writes clients sent, which go first between steps.
@@ -365,6 +385,7 @@ impl JobRunner for WarmRunner<'_> {
                     return self.own_process(args, stdin, &why.to_string());
                 }
                 Queued::Wait if !self.server.stopping() => {
+                    self.keep_lock_fresh();
                     self.server.wait_for_wake(POLL);
                 }
                 Queued::Wait | Queued::Stopped => {
