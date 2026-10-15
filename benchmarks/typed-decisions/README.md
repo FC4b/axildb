@@ -191,6 +191,31 @@ the load average next to every latency. It writes
 the classifier step would load, `typed-decisions-u3-heads-<date>.json`
 (weights, bias, decision rule and parity fixtures).
 
+```bash
+# U2 fine-tune: harvest training pairs from repos held out of the test sets,
+# fine-tune nli-deberta-v3-xsmall, then score the tuned ONNX like any other arm.
+# Needs `gh` and requirements-finetune.txt (a CUDA GPU if present; CPU works).
+python harvest_u2_train.py          # data/u2_train/pairs.jsonl + harvest-meta.json
+python finetune_u2.py --out data/u2_finetune/v2-s13 --seed 13       # likewise --seed 29, --seed 47
+python finetune_u2.py --out data/u2_finetune/v2-s13-nosib --seed 13 \
+  --drop-repos astral-sh/ruff,tokio-rs/axum,tokio-rs/tracing,rust-lang/regex,hyperium/hyper,seanmonstar/reqwest,pypa/pip,python-poetry/poetry
+python run_bakeoff.py --only nli-deberta-v3-xsmall v2-s13 v2-s29 v2-s47 v2-s13-nosib \
+  --local v2-s13=data/u2_finetune/v2-s13 --local v2-s29=data/u2_finetune/v2-s29 \
+  --local v2-s47=data/u2_finetune/v2-s47 --local v2-s13-nosib=data/u2_finetune/v2-s13-nosib
+python run_laya.py --subfolder typed-decisions      # Laya needs transformers >= 4.48; use its own venv
+python analyze_u2_finetune.py out/bakeoff-<date>.json out/bakeoff-laya-<...>.json \
+  --ref nli-deberta-v3-xsmall --seeds v2-s          # and again with --ref the Laya arm
+```
+
+`harvest_u2_train.py` builds pairs the way `build_u2_github.py` does, from 62
+repos that share no repo with the test sets; the docstring lists where the
+construction differs and why. Nothing in `sets/` is trained on: the checkpoint
+is chosen on the harvested dev repos, and the sets' train split still only
+fits each arm's threshold and calibration. The tuned weights stay in `data/`
+(gitignored); publishing them is a separate decision. The committed result is
+`benchmarks/results/typed-decisions-u2-finetune-<date>.json`, with every run's
+training data hash, the per-row test scores and both paired comparisons.
+
 Raw outputs go to `out/`, which is gitignored. The committed summary is `benchmarks/results/typed-decisions-bakeoff-<date>.json`.
 
 ## Metrics
@@ -200,6 +225,12 @@ Raw outputs go to `out/`, which is gitignored. The committed summary is `benchma
 - **ECE** before and after Platt scaling fit on train.
 - **Per-kind accuracy:** shows which kinds of negative fool a model.
 - **CPU latency:** p50/p95 per pair, batch 1, model already loaded, Python-side. Load time is reported separately.
+- **AUROC interval:** a 95% cluster bootstrap. Test rows that share an issue or record, or any text, are resampled together: one PR title can be one issue's fix and another issue's other_fix, so single rows are not independent.
+
+For the U2 fine-tune (`analyze_u2_finetune.py`), on top of the above:
+- **Paired AUROC difference** against a reference arm, with an interval from the same cluster resamples for both arms. Two arms' separate intervals overlapping says little; the paired interval is the comparison.
+- **Fixed against topic negatives** (a fix for a different bug) and **fixed against status negatives** (the same bug, not fixed: still broken, planned, not shipped, a workaround, a mention), reported separately. Axil's candidate search already filters by topic, so status negatives are the ones a deployed judge meets.
+- **Mean and standard deviation over seeds** of one recipe; no seed is picked on test.
 
 For U5:
 - **Mention-level micro precision / recall / F1** on test, over normalized surface forms (`adjudicate_u5.norm`), one form per text. Span = the form matches; span + type = the type matches too. Reported per type and per stratum. Precision plays the false-positive role: a wrong entity becomes a graph node that links unrelated notes.

@@ -1,0 +1,2506 @@
+{
+  "benchmark": "typed-decisions-u2-finetune",
+  "date": "2026-10-15",
+  "question": "Does fine-tuning nli-deberta-v3-xsmall on GitHub issue->PR pairs from held-out repos lift U2 (error resolved?) above the best prior arm?",
+  "code_commit": "9643002895c76100015a4b6fe3cb83048e503116",
+  "machine": {
+    "platform": "x86_64 Linux-6.18.40.1-microsoft-standard-WSL2-x86_64-with-glibc2.39",
+    "cpu": "AMD Ryzen 7 5800X (8C/16T), WSL2 20 GB",
+    "training_gpu": "NVIDIA GeForce RTX 3080 10 GB",
+    "onnxruntime_scoring": "1.20.1",
+    "laya_env": "torch 2.5.1+cpu, transformers 4.48.3, laya 0.3.20"
+  },
+  "machine_load_note": "Scoring and training ran beside a CPU-bound LongMemEval benchmark (1-minute load 13-19 on 16 threads). Latencies below are recorded but not comparable to other runs.",
+  "base_model": {
+    "repo": "cross-encoder/nli-deberta-v3-xsmall",
+    "revision": "a150876415327c80daeff35ca6f68f5ed8cf5c24"
+  },
+  "u2_template": "This problem has been fixed: {}",
+  "training_data": {
+    "args": {
+      "max_pages": 12,
+      "allow_partial": false
+    },
+    "query_sha256_12": "f38206cd4847",
+    "positives_per_repo": 150,
+    "dev_share_percent_of_repos": 10,
+    "pairs": 11822,
+    "positives": 5579,
+    "by_split_kind": {
+      "dev/downstream_workaround": 97,
+      "dev/fixed": 1308,
+      "dev/mentioned_not_fix": 133,
+      "dev/other_fix": 1251,
+      "train/downstream_workaround": 489,
+      "train/fixed": 4271,
+      "train/mentioned_not_fix": 274,
+      "train/other_fix": 3999
+    },
+    "dropped": {
+      "xref_from_test_repo": 10,
+      "shares_text_with_sets": 0,
+      "conflicting_label_pairs_dropped": 18
+    },
+    "failed_repos": [],
+    "pairs_sha256": "174abaa2f34a90d4e2a3f2d460d88fc5ce90e2920f4cd0784bf4c8395097c070"
+  },
+  "training_repos": [
+    "PyO3/pyo3",
+    "alacritty/alacritty",
+    "apache/arrow-rs",
+    "apache/datafusion",
+    "astral-sh/ruff",
+    "bevyengine/bevy",
+    "biomejs/biome",
+    "bytecodealliance/wasmtime",
+    "caddyserver/caddy",
+    "clap-rs/clap",
+    "cli/cli",
+    "denoland/deno",
+    "diesel-rs/diesel",
+    "encode/httpx",
+    "gfx-rs/wgpu",
+    "gohugoio/hugo",
+    "helix-editor/helix",
+    "huggingface/tokenizers",
+    "hyperium/hyper",
+    "junegunn/fzf",
+    "launchbadge/sqlx",
+    "matplotlib/matplotlib",
+    "meilisearch/meilisearch",
+    "microsoft/TypeScript",
+    "nushell/nushell",
+    "oven-sh/bun",
+    "pallets/click",
+    "pallets/flask",
+    "pandas-dev/pandas",
+    "pola-rs/polars",
+    "prettier/prettier",
+    "prometheus/prometheus",
+    "psf/black",
+    "pydantic/pydantic",
+    "pypa/pip",
+    "pytest-dev/pytest",
+    "python-poetry/poetry",
+    "python/mypy",
+    "qdrant/qdrant",
+    "rayon-rs/rayon",
+    "rust-lang/cargo",
+    "rust-lang/regex",
+    "rust-lang/rust-analyzer",
+    "rust-lang/rust-clippy",
+    "rust-lang/rustfmt",
+    "rust-lang/rustup",
+    "rustls/rustls",
+    "scrapy/scrapy",
+    "seanmonstar/reqwest",
+    "serde-rs/serde",
+    "sharkdp/bat",
+    "sharkdp/fd",
+    "spf13/cobra",
+    "starship/starship",
+    "sveltejs/svelte",
+    "tauri-apps/tauri",
+    "tokio-rs/axum",
+    "tokio-rs/tracing",
+    "vitejs/vite",
+    "vuejs/core",
+    "withastro/astro",
+    "zellij-org/zellij"
+  ],
+  "ablation_dropped_repos": "astral-sh/ruff,tokio-rs/axum,tokio-rs/tracing,rust-lang/regex,hyperium/hyper,seanmonstar/reqwest,pypa/pip,python-poetry/poetry",
+  "runs": {
+    "v2-s13": {
+      "args": {
+        "out": "data/u2_finetune/v2-s13",
+        "epochs": 3,
+        "batch": 16,
+        "lr": 2e-05,
+        "warmup": 0.1,
+        "evals_per_epoch": 2,
+        "threads": 2,
+        "seed": 13,
+        "device": "cuda",
+        "drop_repos": ""
+      },
+      "n_train": 9033,
+      "n_train_pos": 4271,
+      "n_dev": 2789,
+      "dev_auroc_before": 0.5078723979788844,
+      "exported_dev_auroc": 0.7991919048002527,
+      "exported_step": 1692,
+      "train_seconds": 750,
+      "device": "cuda",
+      "gpu": "NVIDIA GeForce RTX 3080",
+      "torch": "2.5.1+cu124",
+      "truncated_pairs": {
+        "train": 0,
+        "dev": 0
+      },
+      "onnx_max_abs_prob_diff_vs_torch": 1.2516975402832031e-06,
+      "pairs_sha256": "174abaa2f34a90d4e2a3f2d460d88fc5ce90e2920f4cd0784bf4c8395097c070",
+      "history": [
+        {
+          "step": 282,
+          "epoch": 0.5,
+          "loss": 0.6609,
+          "dev_auroc": 0.7403,
+          "elapsed_s": 154
+        },
+        {
+          "step": 564,
+          "epoch": 1.0,
+          "loss": 0.3811,
+          "dev_auroc": 0.7689,
+          "elapsed_s": 270
+        },
+        {
+          "step": 846,
+          "epoch": 1.5,
+          "loss": 0.3859,
+          "dev_auroc": 0.7847,
+          "elapsed_s": 378
+        },
+        {
+          "step": 1128,
+          "epoch": 2.0,
+          "loss": 0.4709,
+          "dev_auroc": 0.7936,
+          "elapsed_s": 482
+        },
+        {
+          "step": 1410,
+          "epoch": 2.5,
+          "loss": 0.4547,
+          "dev_auroc": 0.7984,
+          "elapsed_s": 588
+        },
+        {
+          "step": 1692,
+          "epoch": 2.99,
+          "loss": 0.502,
+          "dev_auroc": 0.7992,
+          "elapsed_s": 687
+        },
+        {
+          "step": 1695,
+          "epoch": 3.0,
+          "loss": 0.5902,
+          "dev_auroc": 0.7992,
+          "elapsed_s": 694
+        }
+      ],
+      "model_onnx_sha256": "9ace298de226109d1df9ccca6204aeea0efbe01f38377751253f4106fe59b922"
+    },
+    "v2-s29": {
+      "args": {
+        "out": "data/u2_finetune/v2-s29",
+        "epochs": 3,
+        "batch": 16,
+        "lr": 2e-05,
+        "warmup": 0.1,
+        "evals_per_epoch": 2,
+        "threads": 2,
+        "seed": 29,
+        "device": "cuda",
+        "drop_repos": ""
+      },
+      "n_train": 9033,
+      "n_train_pos": 4271,
+      "n_dev": 2789,
+      "dev_auroc_before": 0.5078723979788844,
+      "exported_dev_auroc": 0.8028689599349146,
+      "exported_step": 1692,
+      "train_seconds": 684,
+      "device": "cuda",
+      "gpu": "NVIDIA GeForce RTX 3080",
+      "torch": "2.5.1+cu124",
+      "truncated_pairs": {
+        "train": 0,
+        "dev": 0
+      },
+      "onnx_max_abs_prob_diff_vs_torch": 1.6689300537109375e-06,
+      "pairs_sha256": "174abaa2f34a90d4e2a3f2d460d88fc5ce90e2920f4cd0784bf4c8395097c070",
+      "history": [
+        {
+          "step": 282,
+          "epoch": 0.5,
+          "loss": 0.4793,
+          "dev_auroc": 0.7458,
+          "elapsed_s": 109
+        },
+        {
+          "step": 564,
+          "epoch": 1.0,
+          "loss": 0.8945,
+          "dev_auroc": 0.7712,
+          "elapsed_s": 208
+        },
+        {
+          "step": 846,
+          "epoch": 1.5,
+          "loss": 0.7466,
+          "dev_auroc": 0.794,
+          "elapsed_s": 307
+        },
+        {
+          "step": 1128,
+          "epoch": 2.0,
+          "loss": 0.3924,
+          "dev_auroc": 0.7993,
+          "elapsed_s": 409
+        },
+        {
+          "step": 1410,
+          "epoch": 2.5,
+          "loss": 0.3722,
+          "dev_auroc": 0.8,
+          "elapsed_s": 510
+        },
+        {
+          "step": 1692,
+          "epoch": 2.99,
+          "loss": 0.2924,
+          "dev_auroc": 0.8029,
+          "elapsed_s": 609
+        },
+        {
+          "step": 1695,
+          "epoch": 3.0,
+          "loss": 0.5459,
+          "dev_auroc": 0.8029,
+          "elapsed_s": 616
+        }
+      ],
+      "model_onnx_sha256": "01592317f9f0d0f25733dd98f91068dfd1e849d50d6b1e0978d8daeb2bbb28f3"
+    },
+    "v2-s47": {
+      "args": {
+        "out": "data/u2_finetune/v2-s47",
+        "epochs": 3,
+        "batch": 16,
+        "lr": 2e-05,
+        "warmup": 0.1,
+        "evals_per_epoch": 2,
+        "threads": 2,
+        "seed": 47,
+        "device": "cuda",
+        "drop_repos": ""
+      },
+      "n_train": 9033,
+      "n_train_pos": 4271,
+      "n_dev": 2789,
+      "dev_auroc_before": 0.5078723979788844,
+      "exported_dev_auroc": 0.8000911649497096,
+      "exported_step": 1692,
+      "train_seconds": 380,
+      "device": "cuda",
+      "gpu": "NVIDIA GeForce RTX 3080",
+      "torch": "2.5.1+cu124",
+      "truncated_pairs": {
+        "train": 0,
+        "dev": 0
+      },
+      "onnx_max_abs_prob_diff_vs_torch": 1.7583370208740234e-06,
+      "pairs_sha256": "174abaa2f34a90d4e2a3f2d460d88fc5ce90e2920f4cd0784bf4c8395097c070",
+      "history": [
+        {
+          "step": 282,
+          "epoch": 0.5,
+          "loss": 0.7176,
+          "dev_auroc": 0.7465,
+          "elapsed_s": 104
+        },
+        {
+          "step": 564,
+          "epoch": 1.0,
+          "loss": 0.5415,
+          "dev_auroc": 0.7696,
+          "elapsed_s": 155
+        },
+        {
+          "step": 846,
+          "epoch": 1.5,
+          "loss": 0.4818,
+          "dev_auroc": 0.7876,
+          "elapsed_s": 206
+        },
+        {
+          "step": 1128,
+          "epoch": 2.0,
+          "loss": 0.5667,
+          "dev_auroc": 0.7945,
+          "elapsed_s": 261
+        },
+        {
+          "step": 1410,
+          "epoch": 2.5,
+          "loss": 0.3614,
+          "dev_auroc": 0.7992,
+          "elapsed_s": 309
+        },
+        {
+          "step": 1692,
+          "epoch": 2.99,
+          "loss": 0.3988,
+          "dev_auroc": 0.8001,
+          "elapsed_s": 353
+        },
+        {
+          "step": 1695,
+          "epoch": 3.0,
+          "loss": 0.2379,
+          "dev_auroc": 0.8001,
+          "elapsed_s": 356
+        }
+      ],
+      "model_onnx_sha256": "f78e209bdf5cbb7d2195c4f80cc9303a5d5bc154efa1c8d96e625df6e9b0f99f"
+    },
+    "v2-s13-nosib": {
+      "args": {
+        "out": "data/u2_finetune/v2-s13-nosib",
+        "epochs": 3,
+        "batch": 16,
+        "lr": 2e-05,
+        "warmup": 0.1,
+        "evals_per_epoch": 2,
+        "threads": 2,
+        "seed": 13,
+        "device": "cuda",
+        "drop_repos": "astral-sh/ruff,tokio-rs/axum,tokio-rs/tracing,rust-lang/regex,hyperium/hyper,seanmonstar/reqwest,pypa/pip,python-poetry/poetry"
+      },
+      "n_train": 7958,
+      "n_train_pos": 3767,
+      "n_dev": 2789,
+      "dev_auroc_before": 0.5078723979788844,
+      "exported_dev_auroc": 0.7941959003648663,
+      "exported_step": 1494,
+      "train_seconds": 253,
+      "device": "cuda",
+      "gpu": "NVIDIA GeForce RTX 3080",
+      "torch": "2.5.1+cu124",
+      "truncated_pairs": {
+        "train": 0,
+        "dev": 0
+      },
+      "onnx_max_abs_prob_diff_vs_torch": 1.9073486328125e-06,
+      "pairs_sha256": "174abaa2f34a90d4e2a3f2d460d88fc5ce90e2920f4cd0784bf4c8395097c070",
+      "history": [
+        {
+          "step": 249,
+          "epoch": 0.5,
+          "loss": 0.498,
+          "dev_auroc": 0.7379,
+          "elapsed_s": 45
+        },
+        {
+          "step": 498,
+          "epoch": 1.0,
+          "loss": 0.4575,
+          "dev_auroc": 0.7677,
+          "elapsed_s": 83
+        },
+        {
+          "step": 747,
+          "epoch": 1.5,
+          "loss": 0.6671,
+          "dev_auroc": 0.786,
+          "elapsed_s": 124
+        },
+        {
+          "step": 996,
+          "epoch": 2.0,
+          "loss": 0.7111,
+          "dev_auroc": 0.7901,
+          "elapsed_s": 165
+        },
+        {
+          "step": 1245,
+          "epoch": 2.5,
+          "loss": 0.7154,
+          "dev_auroc": 0.7917,
+          "elapsed_s": 190
+        },
+        {
+          "step": 1494,
+          "epoch": 3.0,
+          "loss": 0.2192,
+          "dev_auroc": 0.7942,
+          "elapsed_s": 232
+        }
+      ],
+      "model_onnx_sha256": "5ffe13b9f1978bf3ac6f79c8b510596d2f1e4a5c5dfc8b84b1e372f8634916d9"
+    }
+  },
+  "bakeoff": {
+    "nli-deberta-v3-xsmall": {
+      "repo": "cross-encoder/nli-deberta-v3-xsmall",
+      "onnx": "onnx/model.onnx",
+      "load_ms": 3357.8,
+      "size_mb": 284.2,
+      "U1": {
+        "n_train": 102,
+        "n_test": 147,
+        "auroc_test": 0.7450822962665596,
+        "auroc_test_ci95_cluster": [
+          0.6455595380326563,
+          0.84
+        ],
+        "n_test_clusters": 120,
+        "auroc_all": 0.7271769662921348,
+        "threshold_from_train": 0.8495689224944903,
+        "at_threshold_test": {
+          "tpr": 0.39622641509433965,
+          "fpr": 0.0851063829787234,
+          "precision": 0.7241379310344828
+        },
+        "at_argmax_test": {
+          "tpr": 0.5283018867924528,
+          "fpr": 0.0851063829787234,
+          "precision": 0.7777777777777778
+        },
+        "ece_test_raw": 0.20861611591134843,
+        "ece_test_platt": 0.10020917221506433,
+        "accuracy_by_kind_test": {
+          "both_hold": "40/42",
+          "contradiction": "3/4",
+          "negation_other_subject": "2/3",
+          "refinement": "3/4",
+          "restatement": "1/2",
+          "reversal": "3/3",
+          "same_topic": "40/43",
+          "update": "15/46"
+        },
+        "auroc_test_by_source": {
+          "axil-dogfood": 0.819047619047619,
+          "longmemeval_oracle": 0.7085526315789473
+        },
+        "latency_ms_p50": 101.35,
+        "latency_ms_p95": 177.08
+      },
+      "U1+sym": {
+        "n_train": 102,
+        "n_test": 147,
+        "auroc_test": 0.7460859092733841,
+        "auroc_test_ci95_cluster": [
+          0.6567226890756303,
+          0.837299771167048
+        ],
+        "n_test_clusters": 120,
+        "auroc_all": 0.7155898876404494,
+        "threshold_from_train": 0.9485306536422816,
+        "at_threshold_test": {
+          "tpr": 0.3584905660377358,
+          "fpr": 0.09574468085106383,
+          "precision": 0.6785714285714286
+        },
+        "at_argmax_test": {
+          "tpr": 0.5283018867924528,
+          "fpr": 0.0851063829787234,
+          "precision": 0.7777777777777778
+        },
+        "ece_test_raw": 0.1977903366853977,
+        "ece_test_platt": 0.1181934174248236,
+        "accuracy_by_kind_test": {
+          "both_hold": "40/42",
+          "contradiction": "4/4",
+          "negation_other_subject": "2/3",
+          "refinement": "3/4",
+          "restatement": "1/2",
+          "reversal": "3/3",
+          "same_topic": "39/43",
+          "update": "12/46"
+        },
+        "auroc_test_by_source": {
+          "axil-dogfood": 0.8238095238095238,
+          "longmemeval_oracle": 0.7200657894736842
+        },
+        "latency_ms_p50": 200.75,
+        "latency_ms_p95": 357.76
+      },
+      "U2": {
+        "n_train": 90,
+        "n_test": 111,
+        "auroc_test": 0.6179337231968811,
+        "auroc_test_ci95_cluster": [
+          0.5236666666666666,
+          0.7094043887147335
+        ],
+        "n_test_clusters": 56,
+        "auroc_all": 0.5665334665334665,
+        "threshold_from_train": 0.09841849386996802,
+        "at_threshold_test": {
+          "tpr": 0.14814814814814814,
+          "fpr": 0.03508771929824561,
+          "precision": 0.8
+        },
+        "at_argmax_test": {
+          "tpr": 0.07407407407407407,
+          "fpr": 0.03508771929824561,
+          "precision": 0.6666666666666666
+        },
+        "ece_test_raw": 0.4503722929357163,
+        "ece_test_platt": 0.13206331802649898,
+        "accuracy_by_kind_test": {
+          "downstream_workaround": "5/6",
+          "fixed": "8/53",
+          "fixed_implicit": "0/1",
+          "lexical_trap": "1/1",
+          "mentioned_not_fix": "5/5",
+          "merged_not_shipped": "1/1",
+          "other_fix": "35/36",
+          "other_fix_same_area": "1/1",
+          "planned": "1/1",
+          "still_broken": "1/1",
+          "unrelated_same_area": "5/5"
+        },
+        "auroc_test_by_source": {
+          "axil-dogfood": 0.44,
+          "github": 0.6144159791576205
+        },
+        "latency_ms_p50": 44.85,
+        "latency_ms_p95": 78.49
+      }
+    },
+    "v2-s13": {
+      "repo": "data/u2_finetune/v2-s13",
+      "onnx": "model.onnx",
+      "load_ms": 3517.6,
+      "size_mb": 284.2,
+      "U1": {
+        "n_train": 102,
+        "n_test": 147,
+        "auroc_test": 0.6830590124448013,
+        "auroc_test_ci95_cluster": [
+          0.5838709677419355,
+          0.7769679300291545
+        ],
+        "n_test_clusters": 120,
+        "auroc_all": 0.6543539325842697,
+        "threshold_from_train": 0.8108220824024777,
+        "at_threshold_test": {
+          "tpr": 0.16981132075471697,
+          "fpr": 0.0425531914893617,
+          "precision": 0.6923076923076923
+        },
+        "at_argmax_test": {
+          "tpr": 0.3584905660377358,
+          "fpr": 0.11702127659574468,
+          "precision": 0.6333333333333333
+        },
+        "ece_test_raw": 0.2385718102017716,
+        "ece_test_platt": 0.10673760992948679,
+        "accuracy_by_kind_test": {
+          "both_hold": "41/42",
+          "contradiction": "2/4",
+          "negation_other_subject": "2/3",
+          "refinement": "4/4",
+          "restatement": "1/2",
+          "reversal": "2/3",
+          "same_topic": "42/43",
+          "update": "5/46"
+        },
+        "auroc_test_by_source": {
+          "axil-dogfood": 0.5904761904761905,
+          "longmemeval_oracle": 0.6542763157894737
+        },
+        "latency_ms_p50": 98.74,
+        "latency_ms_p95": 189.31
+      },
+      "U1+sym": {
+        "n_train": 102,
+        "n_test": 147,
+        "auroc_test": 0.6716178241670012,
+        "auroc_test_ci95_cluster": [
+          0.5689990281827016,
+          0.7688453159041394
+        ],
+        "n_test_clusters": 120,
+        "auroc_all": 0.6372191011235955,
+        "threshold_from_train": 0.8910892721819502,
+        "at_threshold_test": {
+          "tpr": 0.20754716981132076,
+          "fpr": 0.031914893617021274,
+          "precision": 0.7857142857142857
+        },
+        "at_argmax_test": {
+          "tpr": 0.3584905660377358,
+          "fpr": 0.11702127659574468,
+          "precision": 0.6333333333333333
+        },
+        "ece_test_raw": 0.22333136810090265,
+        "ece_test_platt": 0.08430402797439261,
+        "accuracy_by_kind_test": {
+          "both_hold": "41/42",
+          "contradiction": "2/4",
+          "negation_other_subject": "2/3",
+          "refinement": "4/4",
+          "restatement": "2/2",
+          "reversal": "2/3",
+          "same_topic": "42/43",
+          "update": "7/46"
+        },
+        "auroc_test_by_source": {
+          "axil-dogfood": 0.6904761904761905,
+          "longmemeval_oracle": 0.6351973684210527
+        },
+        "latency_ms_p50": 208.66,
+        "latency_ms_p95": 348.19
+      },
+      "U2": {
+        "n_train": 90,
+        "n_test": 111,
+        "auroc_test": 0.8066926575698505,
+        "auroc_test_ci95_cluster": [
+          0.7192982456140351,
+          0.8862745098039215
+        ],
+        "n_test_clusters": 56,
+        "auroc_all": 0.7825174825174825,
+        "threshold_from_train": 0.6027377500745694,
+        "at_threshold_test": {
+          "tpr": 0.5740740740740741,
+          "fpr": 0.12280701754385964,
+          "precision": 0.8157894736842105
+        },
+        "at_argmax_test": {
+          "tpr": 0.7407407407407407,
+          "fpr": 0.3157894736842105,
+          "precision": 0.6896551724137931
+        },
+        "ece_test_raw": 0.08222898684419068,
+        "ece_test_platt": 0.13978858529325291,
+        "accuracy_by_kind_test": {
+          "downstream_workaround": "6/6",
+          "fixed": "31/53",
+          "fixed_implicit": "0/1",
+          "lexical_trap": "1/1",
+          "mentioned_not_fix": "5/5",
+          "merged_not_shipped": "1/1",
+          "other_fix": "30/36",
+          "other_fix_same_area": "1/1",
+          "planned": "1/1",
+          "still_broken": "0/1",
+          "unrelated_same_area": "5/5"
+        },
+        "auroc_test_by_source": {
+          "axil-dogfood": 0.64,
+          "github": 0.8219713417281806
+        },
+        "latency_ms_p50": 42.19,
+        "latency_ms_p95": 74.84
+      }
+    },
+    "v2-s29": {
+      "repo": "data/u2_finetune/v2-s29",
+      "onnx": "model.onnx",
+      "load_ms": 2572.2,
+      "size_mb": 284.2,
+      "U1": {
+        "n_train": 102,
+        "n_test": 147,
+        "auroc_test": 0.6894821356884785,
+        "auroc_test_ci95_cluster": [
+          0.594636524822695,
+          0.7835164835164835
+        ],
+        "n_test_clusters": 120,
+        "auroc_all": 0.6651685393258427,
+        "threshold_from_train": 0.7714956804083896,
+        "at_threshold_test": {
+          "tpr": 0.20754716981132076,
+          "fpr": 0.06382978723404255,
+          "precision": 0.6470588235294118
+        },
+        "at_argmax_test": {
+          "tpr": 0.37735849056603776,
+          "fpr": 0.1276595744680851,
+          "precision": 0.625
+        },
+        "ece_test_raw": 0.21593249142123597,
+        "ece_test_platt": 0.09803613030795903,
+        "accuracy_by_kind_test": {
+          "both_hold": "41/42",
+          "contradiction": "2/4",
+          "negation_other_subject": "2/3",
+          "refinement": "2/4",
+          "restatement": "1/2",
+          "reversal": "2/3",
+          "same_topic": "42/43",
+          "update": "7/46"
+        },
+        "auroc_test_by_source": {
+          "axil-dogfood": 0.5428571428571428,
+          "longmemeval_oracle": 0.6733552631578947
+        },
+        "latency_ms_p50": 93.43,
+        "latency_ms_p95": 159.1
+      },
+      "U1+sym": {
+        "n_train": 102,
+        "n_test": 147,
+        "auroc_test": 0.6774387796065837,
+        "auroc_test_ci95_cluster": [
+          0.5821894303363074,
+          0.7721611721611722
+        ],
+        "n_test_clusters": 120,
+        "auroc_all": 0.6457162921348315,
+        "threshold_from_train": 0.9058485948656234,
+        "at_threshold_test": {
+          "tpr": 0.1509433962264151,
+          "fpr": 0.02127659574468085,
+          "precision": 0.8
+        },
+        "at_argmax_test": {
+          "tpr": 0.37735849056603776,
+          "fpr": 0.1276595744680851,
+          "precision": 0.625
+        },
+        "ece_test_raw": 0.2171676299474211,
+        "ece_test_platt": 0.07586172385540269,
+        "accuracy_by_kind_test": {
+          "both_hold": "41/42",
+          "contradiction": "1/4",
+          "negation_other_subject": "2/3",
+          "refinement": "4/4",
+          "restatement": "2/2",
+          "reversal": "1/3",
+          "same_topic": "43/43",
+          "update": "6/46"
+        },
+        "auroc_test_by_source": {
+          "axil-dogfood": 0.6095238095238096,
+          "longmemeval_oracle": 0.6598684210526315
+        },
+        "latency_ms_p50": 181.93,
+        "latency_ms_p95": 358.39
+      },
+      "U2": {
+        "n_train": 90,
+        "n_test": 111,
+        "auroc_test": 0.799545159194282,
+        "auroc_test_ci95_cluster": [
+          0.6992892290869327,
+          0.8878424657534246
+        ],
+        "n_test_clusters": 56,
+        "auroc_all": 0.7682317682317682,
+        "threshold_from_train": 0.6880650338052782,
+        "at_threshold_test": {
+          "tpr": 0.4444444444444444,
+          "fpr": 0.07017543859649122,
+          "precision": 0.8571428571428571
+        },
+        "at_argmax_test": {
+          "tpr": 0.7037037037037037,
+          "fpr": 0.3157894736842105,
+          "precision": 0.6785714285714286
+        },
+        "ece_test_raw": 0.11825091187805724,
+        "ece_test_platt": 0.15719072762182656,
+        "accuracy_by_kind_test": {
+          "downstream_workaround": "6/6",
+          "fixed": "24/53",
+          "fixed_implicit": "0/1",
+          "lexical_trap": "1/1",
+          "mentioned_not_fix": "5/5",
+          "merged_not_shipped": "1/1",
+          "other_fix": "33/36",
+          "other_fix_same_area": "1/1",
+          "planned": "1/1",
+          "still_broken": "0/1",
+          "unrelated_same_area": "5/5"
+        },
+        "auroc_test_by_source": {
+          "axil-dogfood": 0.62,
+          "github": 0.822405557967868
+        },
+        "latency_ms_p50": 44.29,
+        "latency_ms_p95": 65.19
+      }
+    },
+    "v2-s47": {
+      "repo": "data/u2_finetune/v2-s47",
+      "onnx": "model.onnx",
+      "load_ms": 2557.3,
+      "size_mb": 284.2,
+      "U1": {
+        "n_train": 102,
+        "n_test": 147,
+        "auroc_test": 0.688478522681654,
+        "auroc_test_ci95_cluster": [
+          0.5914208074534162,
+          0.785
+        ],
+        "n_test_clusters": 120,
+        "auroc_all": 0.6629915730337078,
+        "threshold_from_train": 0.8008284889537917,
+        "at_threshold_test": {
+          "tpr": 0.18867924528301888,
+          "fpr": 0.07446808510638298,
+          "precision": 0.5882352941176471
+        },
+        "at_argmax_test": {
+          "tpr": 0.4716981132075472,
+          "fpr": 0.14893617021276595,
+          "precision": 0.6410256410256411
+        },
+        "ece_test_raw": 0.1828067925995959,
+        "ece_test_platt": 0.08114576798012595,
+        "accuracy_by_kind_test": {
+          "both_hold": "41/42",
+          "contradiction": "2/4",
+          "negation_other_subject": "2/3",
+          "refinement": "2/4",
+          "restatement": "1/2",
+          "reversal": "1/3",
+          "same_topic": "41/43",
+          "update": "7/46"
+        },
+        "auroc_test_by_source": {
+          "axil-dogfood": 0.5571428571428572,
+          "longmemeval_oracle": 0.6638157894736842
+        },
+        "latency_ms_p50": 100.95,
+        "latency_ms_p95": 193.63
+      },
+      "U1+sym": {
+        "n_train": 102,
+        "n_test": 147,
+        "auroc_test": 0.6639903653151344,
+        "auroc_test_ci95_cluster": [
+          0.5646591970121382,
+          0.7608879492600423
+        ],
+        "n_test_clusters": 120,
+        "auroc_all": 0.6406601123595506,
+        "threshold_from_train": 0.8965030638396186,
+        "at_threshold_test": {
+          "tpr": 0.16981132075471697,
+          "fpr": 0.031914893617021274,
+          "precision": 0.75
+        },
+        "at_argmax_test": {
+          "tpr": 0.4716981132075472,
+          "fpr": 0.14893617021276595,
+          "precision": 0.6410256410256411
+        },
+        "ece_test_raw": 0.20430130476267405,
+        "ece_test_platt": 0.066946847567665,
+        "accuracy_by_kind_test": {
+          "both_hold": "41/42",
+          "contradiction": "1/4",
+          "negation_other_subject": "2/3",
+          "refinement": "4/4",
+          "restatement": "2/2",
+          "reversal": "0/3",
+          "same_topic": "42/43",
+          "update": "8/46"
+        },
+        "auroc_test_by_source": {
+          "axil-dogfood": 0.6333333333333333,
+          "longmemeval_oracle": 0.6342105263157894
+        },
+        "latency_ms_p50": 203.92,
+        "latency_ms_p95": 330.18
+      },
+      "U2": {
+        "n_train": 90,
+        "n_test": 111,
+        "auroc_test": 0.8122157244964262,
+        "auroc_test_ci95_cluster": [
+          0.7205663189269746,
+          0.8932215743440233
+        ],
+        "n_test_clusters": 56,
+        "auroc_all": 0.788011988011988,
+        "threshold_from_train": 0.5526384048415995,
+        "at_threshold_test": {
+          "tpr": 0.5925925925925926,
+          "fpr": 0.08771929824561403,
+          "precision": 0.8648648648648649
+        },
+        "at_argmax_test": {
+          "tpr": 0.7222222222222222,
+          "fpr": 0.3157894736842105,
+          "precision": 0.6842105263157895
+        },
+        "ece_test_raw": 0.14488115669574775,
+        "ece_test_platt": 0.16044390872205783,
+        "accuracy_by_kind_test": {
+          "downstream_workaround": "6/6",
+          "fixed": "31/53",
+          "fixed_implicit": "1/1",
+          "lexical_trap": "1/1",
+          "mentioned_not_fix": "5/5",
+          "merged_not_shipped": "1/1",
+          "other_fix": "32/36",
+          "other_fix_same_area": "1/1",
+          "planned": "1/1",
+          "still_broken": "0/1",
+          "unrelated_same_area": "5/5"
+        },
+        "auroc_test_by_source": {
+          "axil-dogfood": 0.66,
+          "github": 0.8319583152409901
+        },
+        "latency_ms_p50": 42.39,
+        "latency_ms_p95": 72.89
+      }
+    },
+    "v2-s13-nosib": {
+      "repo": "data/u2_finetune/v2-s13-nosib",
+      "onnx": "model.onnx",
+      "load_ms": 2398.9,
+      "size_mb": 284.2,
+      "U1": {
+        "n_train": 102,
+        "n_test": 147,
+        "auroc_test": 0.6756322761942994,
+        "auroc_test_ci95_cluster": [
+          0.5788701393983859,
+          0.775238886580806
+        ],
+        "n_test_clusters": 120,
+        "auroc_all": 0.6448033707865168,
+        "threshold_from_train": 0.8547366297366342,
+        "at_threshold_test": {
+          "tpr": 0.1509433962264151,
+          "fpr": 0.05319148936170213,
+          "precision": 0.6153846153846154
+        },
+        "at_argmax_test": {
+          "tpr": 0.4528301886792453,
+          "fpr": 0.14893617021276595,
+          "precision": 0.631578947368421
+        },
+        "ece_test_raw": 0.20177520075582378,
+        "ece_test_platt": 0.09453200074434165,
+        "accuracy_by_kind_test": {
+          "both_hold": "41/42",
+          "contradiction": "1/4",
+          "negation_other_subject": "2/3",
+          "refinement": "3/4",
+          "restatement": "2/2",
+          "reversal": "2/3",
+          "same_topic": "41/43",
+          "update": "5/46"
+        },
+        "auroc_test_by_source": {
+          "axil-dogfood": 0.5476190476190477,
+          "longmemeval_oracle": 0.6440789473684211
+        },
+        "latency_ms_p50": 92.27,
+        "latency_ms_p95": 165.31
+      },
+      "U1+sym": {
+        "n_train": 102,
+        "n_test": 147,
+        "auroc_test": 0.6597751906864713,
+        "auroc_test_ci95_cluster": [
+          0.5592903828197946,
+          0.7595833333333334
+        ],
+        "n_test_clusters": 120,
+        "auroc_all": 0.6299157303370787,
+        "threshold_from_train": 0.9182825328495181,
+        "at_threshold_test": {
+          "tpr": 0.24528301886792453,
+          "fpr": 0.031914893617021274,
+          "precision": 0.8125
+        },
+        "at_argmax_test": {
+          "tpr": 0.4528301886792453,
+          "fpr": 0.14893617021276595,
+          "precision": 0.631578947368421
+        },
+        "ece_test_raw": 0.23533440821185855,
+        "ece_test_platt": 0.08092538876077815,
+        "accuracy_by_kind_test": {
+          "both_hold": "41/42",
+          "contradiction": "3/4",
+          "negation_other_subject": "2/3",
+          "refinement": "3/4",
+          "restatement": "2/2",
+          "reversal": "2/3",
+          "same_topic": "43/43",
+          "update": "8/46"
+        },
+        "auroc_test_by_source": {
+          "axil-dogfood": 0.6857142857142857,
+          "longmemeval_oracle": 0.6210526315789474
+        },
+        "latency_ms_p50": 200.01,
+        "latency_ms_p95": 360.26
+      },
+      "U2": {
+        "n_train": 90,
+        "n_test": 111,
+        "auroc_test": 0.8076673164392463,
+        "auroc_test_ci95_cluster": [
+          0.7204415954415955,
+          0.8871908863573215
+        ],
+        "n_test_clusters": 56,
+        "auroc_all": 0.7864135864135864,
+        "threshold_from_train": 0.5699554821385043,
+        "at_threshold_test": {
+          "tpr": 0.5370370370370371,
+          "fpr": 0.10526315789473684,
+          "precision": 0.8285714285714286
+        },
+        "at_argmax_test": {
+          "tpr": 0.7407407407407407,
+          "fpr": 0.2631578947368421,
+          "precision": 0.7272727272727273
+        },
+        "ece_test_raw": 0.08128203078488118,
+        "ece_test_platt": 0.12773063625950443,
+        "accuracy_by_kind_test": {
+          "downstream_workaround": "6/6",
+          "fixed": "29/53",
+          "fixed_implicit": "0/1",
+          "lexical_trap": "1/1",
+          "mentioned_not_fix": "5/5",
+          "merged_not_shipped": "1/1",
+          "other_fix": "31/36",
+          "other_fix_same_area": "1/1",
+          "planned": "1/1",
+          "still_broken": "0/1",
+          "unrelated_same_area": "5/5"
+        },
+        "auroc_test_by_source": {
+          "axil-dogfood": 0.64,
+          "github": 0.8323925314806774
+        },
+        "latency_ms_p50": 33.52,
+        "latency_ms_p95": 55.57
+      }
+    },
+    "convaiinnovations/laya/typed-decisions": {
+      "model": "convaiinnovations/laya/typed-decisions",
+      "load_ms": 8002.8,
+      "device": "cpu",
+      "threads": 2,
+      "U1": {
+        "n_train": 102,
+        "n_test": 147,
+        "auroc_test": 0.6897832195905259,
+        "auroc_test_ci95_cluster": [
+          0.592266775777414,
+          0.7831867057673509
+        ],
+        "n_test_clusters": 120,
+        "auroc_all": 0.6741221910112359,
+        "threshold_from_train": 0.2612,
+        "at_threshold_test": {
+          "tpr": 0.32075471698113206,
+          "fpr": 0.0851063829787234,
+          "precision": 0.68
+        },
+        "at_argmax_test": {
+          "tpr": 0.1509433962264151,
+          "fpr": 0.0,
+          "precision": 1.0
+        },
+        "ece_test_raw": 0.1447,
+        "ece_test_platt": 0.053350086767992445,
+        "accuracy_by_kind_test": {
+          "both_hold": "38/42",
+          "contradiction": "3/4",
+          "negation_other_subject": "3/3",
+          "refinement": "3/4",
+          "restatement": "1/2",
+          "reversal": "2/3",
+          "same_topic": "41/43",
+          "update": "12/46"
+        },
+        "auroc_test_by_source": {
+          "axil-dogfood": 0.9333333333333333,
+          "longmemeval_oracle": 0.6129934210526315
+        },
+        "latency_ms_p50": 2329.97,
+        "latency_ms_p95": 3145.92,
+        "question": "Does the NEW statement replace, update, or contradict the OLD statement, so that the OLD statement is no longer current?"
+      },
+      "U2": {
+        "n_train": 90,
+        "n_test": 111,
+        "auroc_test": 0.7002923976608187,
+        "auroc_test_ci95_cluster": [
+          0.5795214637579169,
+          0.799863387978142
+        ],
+        "n_test_clusters": 56,
+        "auroc_all": 0.7038461538461539,
+        "threshold_from_train": 0.5399,
+        "at_threshold_test": {
+          "tpr": 0.12962962962962962,
+          "fpr": 0.05263157894736842,
+          "precision": 0.7
+        },
+        "at_argmax_test": {
+          "tpr": 0.25925925925925924,
+          "fpr": 0.07017543859649122,
+          "precision": 0.7777777777777778
+        },
+        "ece_test_raw": 0.13719459459459457,
+        "ece_test_platt": 0.14269719674937087,
+        "accuracy_by_kind_test": {
+          "downstream_workaround": "6/6",
+          "fixed": "6/53",
+          "fixed_implicit": "1/1",
+          "lexical_trap": "0/1",
+          "mentioned_not_fix": "5/5",
+          "merged_not_shipped": "1/1",
+          "other_fix": "35/36",
+          "other_fix_same_area": "1/1",
+          "planned": "1/1",
+          "still_broken": "1/1",
+          "unrelated_same_area": "4/5"
+        },
+        "auroc_test_by_source": {
+          "axil-dogfood": 0.76,
+          "github": 0.7071211463308728
+        },
+        "latency_ms_p50": 1386.66,
+        "latency_ms_p95": 1743.53,
+        "question": "Does the LATER note show that the ERROR has actually been fixed?"
+      }
+    }
+  },
+  "u2_test_paired_vs_base": {
+    "set": "U2 test split (sets/u2_repo.jsonl + sets/u2_github.jsonl)",
+    "n_test": 111,
+    "n_test_pos": 54,
+    "n_clusters": 56,
+    "bootstrap": "2000 cluster resamples, shared by every arm (paired)",
+    "reference_arm": "nli-deberta-v3-xsmall",
+    "arms": {
+      "convaiinnovations/laya/typed-decisions": {
+        "auroc": 0.7003,
+        "auroc_ci95_cluster": [
+          0.5795,
+          0.7999
+        ],
+        "diff_vs_ref": 0.0825,
+        "diff_vs_ref_ci95": [
+          -0.0315,
+          0.1826
+        ],
+        "auroc_fixed_vs_topic_negatives": {
+          "auroc": 0.7132,
+          "n": 96
+        },
+        "auroc_fixed_vs_status_negatives": {
+          "auroc": 0.6642,
+          "n": 69
+        },
+        "auroc_by_repo": {
+          "BurntSushi/ripgrep": {
+            "auroc": 0.5667,
+            "n": 16
+          },
+          "astral-sh/uv": {
+            "auroc": 0.6713,
+            "n": 24
+          },
+          "axil-dogfood": {
+            "auroc": 0.76,
+            "n": 15
+          },
+          "cberner/redb": {
+            "auroc": 0.7321,
+            "n": 15
+          },
+          "pykeio/ort": {
+            "auroc": null,
+            "n": 1
+          },
+          "quickwit-oss/tantivy": {
+            "auroc": 0.75,
+            "n": 21
+          },
+          "tokio-rs/tokio": {
+            "auroc": 0.8636,
+            "n": 19
+          }
+        }
+      },
+      "nli-deberta-v3-xsmall": {
+        "auroc": 0.6178,
+        "auroc_ci95_cluster": [
+          0.5232,
+          0.7092
+        ],
+        "diff_vs_ref": null,
+        "diff_vs_ref_ci95": null,
+        "auroc_fixed_vs_topic_negatives": {
+          "auroc": 0.6186,
+          "n": 96
+        },
+        "auroc_fixed_vs_status_negatives": {
+          "auroc": 0.6154,
+          "n": 69
+        },
+        "auroc_by_repo": {
+          "BurntSushi/ripgrep": {
+            "auroc": 0.5333,
+            "n": 16
+          },
+          "astral-sh/uv": {
+            "auroc": 0.5804,
+            "n": 24
+          },
+          "axil-dogfood": {
+            "auroc": 0.44,
+            "n": 15
+          },
+          "cberner/redb": {
+            "auroc": 0.5357,
+            "n": 15
+          },
+          "pykeio/ort": {
+            "auroc": null,
+            "n": 1
+          },
+          "quickwit-oss/tantivy": {
+            "auroc": 0.6944,
+            "n": 21
+          },
+          "tokio-rs/tokio": {
+            "auroc": 0.5568,
+            "n": 19
+          }
+        }
+      },
+      "v2-s13": {
+        "auroc": 0.8067,
+        "auroc_ci95_cluster": [
+          0.7193,
+          0.8863
+        ],
+        "diff_vs_ref": 0.1889,
+        "diff_vs_ref_ci95": [
+          0.0652,
+          0.308
+        ],
+        "auroc_fixed_vs_topic_negatives": {
+          "auroc": 0.8122,
+          "n": 96
+        },
+        "auroc_fixed_vs_status_negatives": {
+          "auroc": 0.7914,
+          "n": 69
+        },
+        "auroc_by_repo": {
+          "BurntSushi/ripgrep": {
+            "auroc": 0.7833,
+            "n": 16
+          },
+          "astral-sh/uv": {
+            "auroc": 0.8112,
+            "n": 24
+          },
+          "axil-dogfood": {
+            "auroc": 0.64,
+            "n": 15
+          },
+          "cberner/redb": {
+            "auroc": 0.7143,
+            "n": 15
+          },
+          "pykeio/ort": {
+            "auroc": null,
+            "n": 1
+          },
+          "quickwit-oss/tantivy": {
+            "auroc": 0.8889,
+            "n": 21
+          },
+          "tokio-rs/tokio": {
+            "auroc": 0.8523,
+            "n": 19
+          }
+        }
+      },
+      "v2-s13-nosib": {
+        "auroc": 0.8077,
+        "auroc_ci95_cluster": [
+          0.7204,
+          0.8872
+        ],
+        "diff_vs_ref": 0.1899,
+        "diff_vs_ref_ci95": [
+          0.0629,
+          0.3081
+        ],
+        "auroc_fixed_vs_topic_negatives": {
+          "auroc": 0.8108,
+          "n": 96
+        },
+        "auroc_fixed_vs_status_negatives": {
+          "auroc": 0.7988,
+          "n": 69
+        },
+        "auroc_by_repo": {
+          "BurntSushi/ripgrep": {
+            "auroc": 0.7667,
+            "n": 16
+          },
+          "astral-sh/uv": {
+            "auroc": 0.8252,
+            "n": 24
+          },
+          "axil-dogfood": {
+            "auroc": 0.64,
+            "n": 15
+          },
+          "cberner/redb": {
+            "auroc": 0.7143,
+            "n": 15
+          },
+          "pykeio/ort": {
+            "auroc": null,
+            "n": 1
+          },
+          "quickwit-oss/tantivy": {
+            "auroc": 0.8889,
+            "n": 21
+          },
+          "tokio-rs/tokio": {
+            "auroc": 0.8864,
+            "n": 19
+          }
+        }
+      },
+      "v2-s29": {
+        "auroc": 0.7995,
+        "auroc_ci95_cluster": [
+          0.6993,
+          0.8878
+        ],
+        "diff_vs_ref": 0.1818,
+        "diff_vs_ref_ci95": [
+          0.0451,
+          0.3095
+        ],
+        "auroc_fixed_vs_topic_negatives": {
+          "auroc": 0.806,
+          "n": 96
+        },
+        "auroc_fixed_vs_status_negatives": {
+          "auroc": 0.7815,
+          "n": 69
+        },
+        "auroc_by_repo": {
+          "BurntSushi/ripgrep": {
+            "auroc": 0.8,
+            "n": 16
+          },
+          "astral-sh/uv": {
+            "auroc": 0.8252,
+            "n": 24
+          },
+          "axil-dogfood": {
+            "auroc": 0.62,
+            "n": 15
+          },
+          "cberner/redb": {
+            "auroc": 0.6607,
+            "n": 15
+          },
+          "pykeio/ort": {
+            "auroc": null,
+            "n": 1
+          },
+          "quickwit-oss/tantivy": {
+            "auroc": 0.8889,
+            "n": 21
+          },
+          "tokio-rs/tokio": {
+            "auroc": 0.8295,
+            "n": 19
+          }
+        }
+      },
+      "v2-s47": {
+        "auroc": 0.8122,
+        "auroc_ci95_cluster": [
+          0.7206,
+          0.8932
+        ],
+        "diff_vs_ref": 0.1944,
+        "diff_vs_ref_ci95": [
+          0.0692,
+          0.3136
+        ],
+        "auroc_fixed_vs_topic_negatives": {
+          "auroc": 0.828,
+          "n": 96
+        },
+        "auroc_fixed_vs_status_negatives": {
+          "auroc": 0.7679,
+          "n": 69
+        },
+        "auroc_by_repo": {
+          "BurntSushi/ripgrep": {
+            "auroc": 0.7833,
+            "n": 16
+          },
+          "astral-sh/uv": {
+            "auroc": 0.8112,
+            "n": 24
+          },
+          "axil-dogfood": {
+            "auroc": 0.66,
+            "n": 15
+          },
+          "cberner/redb": {
+            "auroc": 0.7679,
+            "n": 15
+          },
+          "pykeio/ort": {
+            "auroc": null,
+            "n": 1
+          },
+          "quickwit-oss/tantivy": {
+            "auroc": 0.8611,
+            "n": 21
+          },
+          "tokio-rs/tokio": {
+            "auroc": 0.8636,
+            "n": 19
+          }
+        }
+      }
+    },
+    "seed_summary": {
+      "v2-s": {
+        "arms": 3,
+        "auroc_mean": 0.8061,
+        "auroc_sd": 0.0064
+      }
+    }
+  },
+  "u2_test_paired_vs_laya": {
+    "set": "U2 test split (sets/u2_repo.jsonl + sets/u2_github.jsonl)",
+    "n_test": 111,
+    "n_test_pos": 54,
+    "n_clusters": 56,
+    "bootstrap": "2000 cluster resamples, shared by every arm (paired)",
+    "reference_arm": "convaiinnovations/laya/typed-decisions",
+    "arms": {
+      "convaiinnovations/laya/typed-decisions": {
+        "auroc": 0.7003,
+        "auroc_ci95_cluster": [
+          0.5795,
+          0.7999
+        ],
+        "diff_vs_ref": null,
+        "diff_vs_ref_ci95": null,
+        "auroc_fixed_vs_topic_negatives": {
+          "auroc": 0.7132,
+          "n": 96
+        },
+        "auroc_fixed_vs_status_negatives": {
+          "auroc": 0.6642,
+          "n": 69
+        },
+        "auroc_by_repo": {
+          "BurntSushi/ripgrep": {
+            "auroc": 0.5667,
+            "n": 16
+          },
+          "astral-sh/uv": {
+            "auroc": 0.6713,
+            "n": 24
+          },
+          "axil-dogfood": {
+            "auroc": 0.76,
+            "n": 15
+          },
+          "cberner/redb": {
+            "auroc": 0.7321,
+            "n": 15
+          },
+          "pykeio/ort": {
+            "auroc": null,
+            "n": 1
+          },
+          "quickwit-oss/tantivy": {
+            "auroc": 0.75,
+            "n": 21
+          },
+          "tokio-rs/tokio": {
+            "auroc": 0.8636,
+            "n": 19
+          }
+        }
+      },
+      "nli-deberta-v3-xsmall": {
+        "auroc": 0.6178,
+        "auroc_ci95_cluster": [
+          0.5232,
+          0.7092
+        ],
+        "diff_vs_ref": -0.0825,
+        "diff_vs_ref_ci95": [
+          -0.1826,
+          0.0315
+        ],
+        "auroc_fixed_vs_topic_negatives": {
+          "auroc": 0.6186,
+          "n": 96
+        },
+        "auroc_fixed_vs_status_negatives": {
+          "auroc": 0.6154,
+          "n": 69
+        },
+        "auroc_by_repo": {
+          "BurntSushi/ripgrep": {
+            "auroc": 0.5333,
+            "n": 16
+          },
+          "astral-sh/uv": {
+            "auroc": 0.5804,
+            "n": 24
+          },
+          "axil-dogfood": {
+            "auroc": 0.44,
+            "n": 15
+          },
+          "cberner/redb": {
+            "auroc": 0.5357,
+            "n": 15
+          },
+          "pykeio/ort": {
+            "auroc": null,
+            "n": 1
+          },
+          "quickwit-oss/tantivy": {
+            "auroc": 0.6944,
+            "n": 21
+          },
+          "tokio-rs/tokio": {
+            "auroc": 0.5568,
+            "n": 19
+          }
+        }
+      },
+      "v2-s13": {
+        "auroc": 0.8067,
+        "auroc_ci95_cluster": [
+          0.7193,
+          0.8863
+        ],
+        "diff_vs_ref": 0.1064,
+        "diff_vs_ref_ci95": [
+          -0.0032,
+          0.2258
+        ],
+        "auroc_fixed_vs_topic_negatives": {
+          "auroc": 0.8122,
+          "n": 96
+        },
+        "auroc_fixed_vs_status_negatives": {
+          "auroc": 0.7914,
+          "n": 69
+        },
+        "auroc_by_repo": {
+          "BurntSushi/ripgrep": {
+            "auroc": 0.7833,
+            "n": 16
+          },
+          "astral-sh/uv": {
+            "auroc": 0.8112,
+            "n": 24
+          },
+          "axil-dogfood": {
+            "auroc": 0.64,
+            "n": 15
+          },
+          "cberner/redb": {
+            "auroc": 0.7143,
+            "n": 15
+          },
+          "pykeio/ort": {
+            "auroc": null,
+            "n": 1
+          },
+          "quickwit-oss/tantivy": {
+            "auroc": 0.8889,
+            "n": 21
+          },
+          "tokio-rs/tokio": {
+            "auroc": 0.8523,
+            "n": 19
+          }
+        }
+      },
+      "v2-s13-nosib": {
+        "auroc": 0.8077,
+        "auroc_ci95_cluster": [
+          0.7204,
+          0.8872
+        ],
+        "diff_vs_ref": 0.1074,
+        "diff_vs_ref_ci95": [
+          -0.0041,
+          0.2252
+        ],
+        "auroc_fixed_vs_topic_negatives": {
+          "auroc": 0.8108,
+          "n": 96
+        },
+        "auroc_fixed_vs_status_negatives": {
+          "auroc": 0.7988,
+          "n": 69
+        },
+        "auroc_by_repo": {
+          "BurntSushi/ripgrep": {
+            "auroc": 0.7667,
+            "n": 16
+          },
+          "astral-sh/uv": {
+            "auroc": 0.8252,
+            "n": 24
+          },
+          "axil-dogfood": {
+            "auroc": 0.64,
+            "n": 15
+          },
+          "cberner/redb": {
+            "auroc": 0.7143,
+            "n": 15
+          },
+          "pykeio/ort": {
+            "auroc": null,
+            "n": 1
+          },
+          "quickwit-oss/tantivy": {
+            "auroc": 0.8889,
+            "n": 21
+          },
+          "tokio-rs/tokio": {
+            "auroc": 0.8864,
+            "n": 19
+          }
+        }
+      },
+      "v2-s29": {
+        "auroc": 0.7995,
+        "auroc_ci95_cluster": [
+          0.6993,
+          0.8878
+        ],
+        "diff_vs_ref": 0.0993,
+        "diff_vs_ref_ci95": [
+          -0.0213,
+          0.2259
+        ],
+        "auroc_fixed_vs_topic_negatives": {
+          "auroc": 0.806,
+          "n": 96
+        },
+        "auroc_fixed_vs_status_negatives": {
+          "auroc": 0.7815,
+          "n": 69
+        },
+        "auroc_by_repo": {
+          "BurntSushi/ripgrep": {
+            "auroc": 0.8,
+            "n": 16
+          },
+          "astral-sh/uv": {
+            "auroc": 0.8252,
+            "n": 24
+          },
+          "axil-dogfood": {
+            "auroc": 0.62,
+            "n": 15
+          },
+          "cberner/redb": {
+            "auroc": 0.6607,
+            "n": 15
+          },
+          "pykeio/ort": {
+            "auroc": null,
+            "n": 1
+          },
+          "quickwit-oss/tantivy": {
+            "auroc": 0.8889,
+            "n": 21
+          },
+          "tokio-rs/tokio": {
+            "auroc": 0.8295,
+            "n": 19
+          }
+        }
+      },
+      "v2-s47": {
+        "auroc": 0.8122,
+        "auroc_ci95_cluster": [
+          0.7206,
+          0.8932
+        ],
+        "diff_vs_ref": 0.1119,
+        "diff_vs_ref_ci95": [
+          0.0071,
+          0.2262
+        ],
+        "auroc_fixed_vs_topic_negatives": {
+          "auroc": 0.828,
+          "n": 96
+        },
+        "auroc_fixed_vs_status_negatives": {
+          "auroc": 0.7679,
+          "n": 69
+        },
+        "auroc_by_repo": {
+          "BurntSushi/ripgrep": {
+            "auroc": 0.7833,
+            "n": 16
+          },
+          "astral-sh/uv": {
+            "auroc": 0.8112,
+            "n": 24
+          },
+          "axil-dogfood": {
+            "auroc": 0.66,
+            "n": 15
+          },
+          "cberner/redb": {
+            "auroc": 0.7679,
+            "n": 15
+          },
+          "pykeio/ort": {
+            "auroc": null,
+            "n": 1
+          },
+          "quickwit-oss/tantivy": {
+            "auroc": 0.8611,
+            "n": 21
+          },
+          "tokio-rs/tokio": {
+            "auroc": 0.8636,
+            "n": 19
+          }
+        }
+      }
+    },
+    "seed_summary": {
+      "v2-s": {
+        "arms": 3,
+        "auroc_mean": 0.8061,
+        "auroc_sd": 0.0064
+      }
+    }
+  },
+  "u2_test_scores": {
+    "nli-deberta-v3-xsmall": {
+      "e1-03": 7.2e-05,
+      "e1-04": 0.000824,
+      "e1-06": 0.000165,
+      "e1-09": 0.001332,
+      "e1-10": 0.019081,
+      "e0-01": 0.000679,
+      "e0-02": 0.000172,
+      "e0-04": 0.000258,
+      "e0-06": 0.000916,
+      "e0-07": 0.000861,
+      "e0-10": 0.00012,
+      "e0-11": 0.025882,
+      "e0-12": 0.000291,
+      "e0-13": 0.002586,
+      "e0-14": 0.001403,
+      "gh-ort-609-downstream_workaround": 0.000923,
+      "gh-redb-1072-fixed": 0.001361,
+      "gh-redb-1072-other_fix": 0.003431,
+      "gh-redb-1331-fixed": 0.002789,
+      "gh-redb-1331-other_fix": 0.001101,
+      "gh-redb-364-fixed": 0.011135,
+      "gh-redb-405-fixed": 0.000223,
+      "gh-redb-450-other_fix": 0.018552,
+      "gh-redb-471-fixed": 0.014465,
+      "gh-redb-594-fixed": 0.006707,
+      "gh-redb-594-other_fix": 0.01302,
+      "gh-redb-629-other_fix": 0.052706,
+      "gh-redb-715-fixed": 0.972091,
+      "gh-redb-715-other_fix": 0.0025,
+      "gh-redb-798-fixed": 0.027527,
+      "gh-redb-798-other_fix": 0.002585,
+      "gh-ripgrep-2574-fixed": 0.071263,
+      "gh-ripgrep-2574-other_fix": 0.074646,
+      "gh-ripgrep-2767-fixed": 0.015823,
+      "gh-ripgrep-2884-other_fix": 0.027782,
+      "gh-ripgrep-2956-fixed": 0.000679,
+      "gh-ripgrep-3076-fixed": 0.027718,
+      "gh-ripgrep-3135-fixed": 0.129548,
+      "gh-ripgrep-3155-fixed": 0.013536,
+      "gh-ripgrep-3173-other_fix": 0.055629,
+      "gh-ripgrep-3180-fixed": 0.110317,
+      "gh-ripgrep-3184-fixed": 0.944454,
+      "gh-ripgrep-3184-mentioned_not_fix": 0.004421,
+      "gh-ripgrep-3419-downstream_workaround": 0.004907,
+      "gh-ripgrep-3419-fixed": 0.000782,
+      "gh-ripgrep-3419-other_fix": 0.023129,
+      "gh-ripgrep-3453-fixed": 0.007448,
+      "gh-tantivy-1291-fixed": 0.012729,
+      "gh-tantivy-1291-other_fix": 0.057692,
+      "gh-tantivy-1303-fixed": 0.009904,
+      "gh-tantivy-1303-other_fix": 0.001085,
+      "gh-tantivy-1366-other_fix": 0.662921,
+      "gh-tantivy-1757-fixed": 0.000462,
+      "gh-tantivy-1859-fixed": 0.087664,
+      "gh-tantivy-1863-fixed": 0.004525,
+      "gh-tantivy-1863-other_fix": 0.003933,
+      "gh-tantivy-1967-fixed": 0.012994,
+      "gh-tantivy-2112-other_fix": 0.004774,
+      "gh-tantivy-2180-fixed": 0.0009,
+      "gh-tantivy-2225-other_fix": 0.001957,
+      "gh-tantivy-2251-fixed": 0.922305,
+      "gh-tantivy-2494-fixed": 0.922939,
+      "gh-tantivy-2607-fixed": 0.003602,
+      "gh-tantivy-2607-mentioned_not_fix": 0.00096,
+      "gh-tantivy-2607-other_fix": 0.000794,
+      "gh-tantivy-2788-fixed": 0.329899,
+      "gh-tantivy-3086-fixed": 0.007751,
+      "gh-tantivy-3086-other_fix": 0.000852,
+      "gh-tokio-6820-other_fix": 0.000593,
+      "gh-tokio-6837-fixed": 0.188372,
+      "gh-tokio-7019-other_fix": 0.000632,
+      "gh-tokio-7036-fixed": 0.011033,
+      "gh-tokio-7133-fixed": 0.00027,
+      "gh-tokio-7133-other_fix": 0.000918,
+      "gh-tokio-7368-fixed": 0.000369,
+      "gh-tokio-7563-other_fix": 0.000398,
+      "gh-tokio-7691-fixed": 0.000683,
+      "gh-tokio-7691-mentioned_not_fix": 0.006133,
+      "gh-tokio-7751-downstream_workaround": 0.87645,
+      "gh-tokio-7751-fixed": 0.011527,
+      "gh-tokio-7751-other_fix": 0.000607,
+      "gh-tokio-7979-other_fix": 0.006311,
+      "gh-tokio-8061-downstream_workaround": 0.001306,
+      "gh-tokio-8061-fixed": 0.089658,
+      "gh-tokio-8423-other_fix": 0.000498,
+      "gh-tokio-8433-fixed": 0.000289,
+      "gh-tokio-8433-other_fix": 0.000123,
+      "gh-uv-18809-fixed": 0.000615,
+      "gh-uv-18809-other_fix": 0.000322,
+      "gh-uv-18916-fixed": 0.074633,
+      "gh-uv-18939-other_fix": 0.000564,
+      "gh-uv-19080-downstream_workaround": 0.016709,
+      "gh-uv-19080-fixed": 0.001663,
+      "gh-uv-19080-other_fix": 0.000967,
+      "gh-uv-19258-downstream_workaround": 0.000192,
+      "gh-uv-19258-other_fix": 0.001704,
+      "gh-uv-19326-fixed": 0.001598,
+      "gh-uv-19326-other_fix": 0.001072,
+      "gh-uv-19534-fixed": 0.000968,
+      "gh-uv-19672-fixed": 0.00132,
+      "gh-uv-19811-fixed": 0.003169,
+      "gh-uv-19811-other_fix": 0.005103,
+      "gh-uv-19832-fixed": 0.00665,
+      "gh-uv-19832-other_fix": 0.000711,
+      "gh-uv-19972-mentioned_not_fix": 0.000981,
+      "gh-uv-19972-other_fix": 0.002128,
+      "gh-uv-20128-fixed": 0.00091,
+      "gh-uv-20912-fixed": 0.002235,
+      "gh-uv-20912-mentioned_not_fix": 0.002898,
+      "gh-uv-20949-fixed": 0.001443,
+      "gh-uv-21846-other_fix": 0.014206
+    },
+    "v2-s13": {
+      "e1-03": 0.788026,
+      "e1-04": 0.766866,
+      "e1-06": 0.085404,
+      "e1-09": 0.565096,
+      "e1-10": 0.108383,
+      "e0-01": 0.927584,
+      "e0-02": 0.33542,
+      "e0-04": 0.245452,
+      "e0-06": 0.149418,
+      "e0-07": 0.176231,
+      "e0-10": 0.052474,
+      "e0-11": 0.045518,
+      "e0-12": 0.394997,
+      "e0-13": 0.326868,
+      "e0-14": 0.08656,
+      "gh-ort-609-downstream_workaround": 0.175742,
+      "gh-redb-1072-fixed": 0.530333,
+      "gh-redb-1072-other_fix": 0.613779,
+      "gh-redb-1331-fixed": 0.47331,
+      "gh-redb-1331-other_fix": 0.240135,
+      "gh-redb-364-fixed": 0.043373,
+      "gh-redb-405-fixed": 0.699358,
+      "gh-redb-450-other_fix": 0.007196,
+      "gh-redb-471-fixed": 0.232943,
+      "gh-redb-594-fixed": 0.920715,
+      "gh-redb-594-other_fix": 0.01742,
+      "gh-redb-629-other_fix": 0.677646,
+      "gh-redb-715-fixed": 0.990317,
+      "gh-redb-715-other_fix": 0.02452,
+      "gh-redb-798-fixed": 0.424511,
+      "gh-redb-798-other_fix": 0.476396,
+      "gh-ripgrep-2574-fixed": 0.8787,
+      "gh-ripgrep-2574-other_fix": 0.699517,
+      "gh-ripgrep-2767-fixed": 0.950477,
+      "gh-ripgrep-2884-other_fix": 0.205179,
+      "gh-ripgrep-2956-fixed": 0.921655,
+      "gh-ripgrep-3076-fixed": 0.569265,
+      "gh-ripgrep-3135-fixed": 0.812734,
+      "gh-ripgrep-3155-fixed": 0.609775,
+      "gh-ripgrep-3173-other_fix": 0.075885,
+      "gh-ripgrep-3180-fixed": 0.205189,
+      "gh-ripgrep-3184-fixed": 0.892064,
+      "gh-ripgrep-3184-mentioned_not_fix": 0.16577,
+      "gh-ripgrep-3419-downstream_workaround": 0.166203,
+      "gh-ripgrep-3419-fixed": 0.076814,
+      "gh-ripgrep-3419-other_fix": 0.711476,
+      "gh-ripgrep-3453-fixed": 0.63553,
+      "gh-tantivy-1291-fixed": 0.809762,
+      "gh-tantivy-1291-other_fix": 0.055796,
+      "gh-tantivy-1303-fixed": 0.930023,
+      "gh-tantivy-1303-other_fix": 0.296837,
+      "gh-tantivy-1366-other_fix": 0.163735,
+      "gh-tantivy-1757-fixed": 0.857071,
+      "gh-tantivy-1859-fixed": 0.976979,
+      "gh-tantivy-1863-fixed": 0.907808,
+      "gh-tantivy-1863-other_fix": 0.550585,
+      "gh-tantivy-1967-fixed": 0.387405,
+      "gh-tantivy-2112-other_fix": 0.026472,
+      "gh-tantivy-2180-fixed": 0.150166,
+      "gh-tantivy-2225-other_fix": 0.809035,
+      "gh-tantivy-2251-fixed": 0.812984,
+      "gh-tantivy-2494-fixed": 0.880067,
+      "gh-tantivy-2607-fixed": 0.373324,
+      "gh-tantivy-2607-mentioned_not_fix": 0.460863,
+      "gh-tantivy-2607-other_fix": 0.241509,
+      "gh-tantivy-2788-fixed": 0.977558,
+      "gh-tantivy-3086-fixed": 0.95576,
+      "gh-tantivy-3086-other_fix": 0.03769,
+      "gh-tokio-6820-other_fix": 0.140907,
+      "gh-tokio-6837-fixed": 0.648735,
+      "gh-tokio-7019-other_fix": 0.113281,
+      "gh-tokio-7036-fixed": 0.0508,
+      "gh-tokio-7133-fixed": 0.741947,
+      "gh-tokio-7133-other_fix": 0.131998,
+      "gh-tokio-7368-fixed": 0.327629,
+      "gh-tokio-7563-other_fix": 0.270753,
+      "gh-tokio-7691-fixed": 0.584198,
+      "gh-tokio-7691-mentioned_not_fix": 0.502058,
+      "gh-tokio-7751-downstream_workaround": 0.027076,
+      "gh-tokio-7751-fixed": 0.914799,
+      "gh-tokio-7751-other_fix": 0.051133,
+      "gh-tokio-7979-other_fix": 0.207571,
+      "gh-tokio-8061-downstream_workaround": 0.413573,
+      "gh-tokio-8061-fixed": 0.645804,
+      "gh-tokio-8423-other_fix": 0.077045,
+      "gh-tokio-8433-fixed": 0.395339,
+      "gh-tokio-8433-other_fix": 0.011463,
+      "gh-uv-18809-fixed": 0.634119,
+      "gh-uv-18809-other_fix": 0.31837,
+      "gh-uv-18916-fixed": 0.984781,
+      "gh-uv-18939-other_fix": 0.158798,
+      "gh-uv-19080-downstream_workaround": 0.027721,
+      "gh-uv-19080-fixed": 0.186297,
+      "gh-uv-19080-other_fix": 0.499606,
+      "gh-uv-19258-downstream_workaround": 0.42611,
+      "gh-uv-19258-other_fix": 0.464122,
+      "gh-uv-19326-fixed": 0.094979,
+      "gh-uv-19326-other_fix": 0.182361,
+      "gh-uv-19534-fixed": 0.952429,
+      "gh-uv-19672-fixed": 0.569789,
+      "gh-uv-19811-fixed": 0.921185,
+      "gh-uv-19811-other_fix": 0.523136,
+      "gh-uv-19832-fixed": 0.484387,
+      "gh-uv-19832-other_fix": 0.027518,
+      "gh-uv-19972-mentioned_not_fix": 0.084905,
+      "gh-uv-19972-other_fix": 0.092141,
+      "gh-uv-20128-fixed": 0.991276,
+      "gh-uv-20912-fixed": 0.278621,
+      "gh-uv-20912-mentioned_not_fix": 0.423241,
+      "gh-uv-20949-fixed": 0.645681,
+      "gh-uv-21846-other_fix": 0.619305
+    },
+    "v2-s29": {
+      "e1-03": 0.763238,
+      "e1-04": 0.885163,
+      "e1-06": 0.083403,
+      "e1-09": 0.635997,
+      "e1-10": 0.070601,
+      "e0-01": 0.965267,
+      "e0-02": 0.352346,
+      "e0-04": 0.367799,
+      "e0-06": 0.201788,
+      "e0-07": 0.111824,
+      "e0-10": 0.107059,
+      "e0-11": 0.015798,
+      "e0-12": 0.482826,
+      "e0-13": 0.42563,
+      "e0-14": 0.051277,
+      "gh-ort-609-downstream_workaround": 0.136946,
+      "gh-redb-1072-fixed": 0.458243,
+      "gh-redb-1072-other_fix": 0.671073,
+      "gh-redb-1331-fixed": 0.455639,
+      "gh-redb-1331-other_fix": 0.131574,
+      "gh-redb-364-fixed": 0.023092,
+      "gh-redb-405-fixed": 0.562377,
+      "gh-redb-450-other_fix": 0.002899,
+      "gh-redb-471-fixed": 0.166552,
+      "gh-redb-594-fixed": 0.951348,
+      "gh-redb-594-other_fix": 0.008737,
+      "gh-redb-629-other_fix": 0.680685,
+      "gh-redb-715-fixed": 0.989076,
+      "gh-redb-715-other_fix": 0.034274,
+      "gh-redb-798-fixed": 0.321668,
+      "gh-redb-798-other_fix": 0.522926,
+      "gh-ripgrep-2574-fixed": 0.858166,
+      "gh-ripgrep-2574-other_fix": 0.309079,
+      "gh-ripgrep-2767-fixed": 0.956014,
+      "gh-ripgrep-2884-other_fix": 0.076762,
+      "gh-ripgrep-2956-fixed": 0.902909,
+      "gh-ripgrep-3076-fixed": 0.648375,
+      "gh-ripgrep-3135-fixed": 0.631404,
+      "gh-ripgrep-3155-fixed": 0.608274,
+      "gh-ripgrep-3173-other_fix": 0.084428,
+      "gh-ripgrep-3180-fixed": 0.179531,
+      "gh-ripgrep-3184-fixed": 0.903359,
+      "gh-ripgrep-3184-mentioned_not_fix": 0.166358,
+      "gh-ripgrep-3419-downstream_workaround": 0.39719,
+      "gh-ripgrep-3419-fixed": 0.08259,
+      "gh-ripgrep-3419-other_fix": 0.772838,
+      "gh-ripgrep-3453-fixed": 0.661973,
+      "gh-tantivy-1291-fixed": 0.909866,
+      "gh-tantivy-1291-other_fix": 0.006895,
+      "gh-tantivy-1303-fixed": 0.927559,
+      "gh-tantivy-1303-other_fix": 0.504675,
+      "gh-tantivy-1366-other_fix": 0.026343,
+      "gh-tantivy-1757-fixed": 0.881325,
+      "gh-tantivy-1859-fixed": 0.977288,
+      "gh-tantivy-1863-fixed": 0.913015,
+      "gh-tantivy-1863-other_fix": 0.720116,
+      "gh-tantivy-1967-fixed": 0.252683,
+      "gh-tantivy-2112-other_fix": 0.02135,
+      "gh-tantivy-2180-fixed": 0.17672,
+      "gh-tantivy-2225-other_fix": 0.747351,
+      "gh-tantivy-2251-fixed": 0.800207,
+      "gh-tantivy-2494-fixed": 0.865239,
+      "gh-tantivy-2607-fixed": 0.424564,
+      "gh-tantivy-2607-mentioned_not_fix": 0.36008,
+      "gh-tantivy-2607-other_fix": 0.210418,
+      "gh-tantivy-2788-fixed": 0.972876,
+      "gh-tantivy-3086-fixed": 0.95379,
+      "gh-tantivy-3086-other_fix": 0.076349,
+      "gh-tokio-6820-other_fix": 0.090544,
+      "gh-tokio-6837-fixed": 0.813065,
+      "gh-tokio-7019-other_fix": 0.048047,
+      "gh-tokio-7036-fixed": 0.031815,
+      "gh-tokio-7133-fixed": 0.614535,
+      "gh-tokio-7133-other_fix": 0.093739,
+      "gh-tokio-7368-fixed": 0.336875,
+      "gh-tokio-7563-other_fix": 0.145922,
+      "gh-tokio-7691-fixed": 0.467511,
+      "gh-tokio-7691-mentioned_not_fix": 0.424712,
+      "gh-tokio-7751-downstream_workaround": 0.0262,
+      "gh-tokio-7751-fixed": 0.903264,
+      "gh-tokio-7751-other_fix": 0.040166,
+      "gh-tokio-7979-other_fix": 0.273855,
+      "gh-tokio-8061-downstream_workaround": 0.478809,
+      "gh-tokio-8061-fixed": 0.833261,
+      "gh-tokio-8423-other_fix": 0.053608,
+      "gh-tokio-8433-fixed": 0.255535,
+      "gh-tokio-8433-other_fix": 0.010539,
+      "gh-uv-18809-fixed": 0.681929,
+      "gh-uv-18809-other_fix": 0.213015,
+      "gh-uv-18916-fixed": 0.985994,
+      "gh-uv-18939-other_fix": 0.253838,
+      "gh-uv-19080-downstream_workaround": 0.018043,
+      "gh-uv-19080-fixed": 0.282457,
+      "gh-uv-19080-other_fix": 0.388385,
+      "gh-uv-19258-downstream_workaround": 0.209181,
+      "gh-uv-19258-other_fix": 0.401489,
+      "gh-uv-19326-fixed": 0.098078,
+      "gh-uv-19326-other_fix": 0.121855,
+      "gh-uv-19534-fixed": 0.909591,
+      "gh-uv-19672-fixed": 0.426457,
+      "gh-uv-19811-fixed": 0.839968,
+      "gh-uv-19811-other_fix": 0.404684,
+      "gh-uv-19832-fixed": 0.515215,
+      "gh-uv-19832-other_fix": 0.017532,
+      "gh-uv-19972-mentioned_not_fix": 0.03119,
+      "gh-uv-19972-other_fix": 0.201249,
+      "gh-uv-20128-fixed": 0.991526,
+      "gh-uv-20912-fixed": 0.218889,
+      "gh-uv-20912-mentioned_not_fix": 0.455759,
+      "gh-uv-20949-fixed": 0.539543,
+      "gh-uv-21846-other_fix": 0.633257
+    },
+    "v2-s47": {
+      "e1-03": 0.817408,
+      "e1-04": 0.881685,
+      "e1-06": 0.044784,
+      "e1-09": 0.600411,
+      "e1-10": 0.220566,
+      "e0-01": 0.934471,
+      "e0-02": 0.452794,
+      "e0-04": 0.252016,
+      "e0-06": 0.165311,
+      "e0-07": 0.126647,
+      "e0-10": 0.113033,
+      "e0-11": 0.014529,
+      "e0-12": 0.535909,
+      "e0-13": 0.400332,
+      "e0-14": 0.050712,
+      "gh-ort-609-downstream_workaround": 0.280405,
+      "gh-redb-1072-fixed": 0.527692,
+      "gh-redb-1072-other_fix": 0.525094,
+      "gh-redb-1331-fixed": 0.55162,
+      "gh-redb-1331-other_fix": 0.232352,
+      "gh-redb-364-fixed": 0.077424,
+      "gh-redb-405-fixed": 0.580676,
+      "gh-redb-450-other_fix": 0.002999,
+      "gh-redb-471-fixed": 0.309643,
+      "gh-redb-594-fixed": 0.892317,
+      "gh-redb-594-other_fix": 0.007544,
+      "gh-redb-629-other_fix": 0.775513,
+      "gh-redb-715-fixed": 0.990308,
+      "gh-redb-715-other_fix": 0.029644,
+      "gh-redb-798-fixed": 0.356229,
+      "gh-redb-798-other_fix": 0.434254,
+      "gh-ripgrep-2574-fixed": 0.813114,
+      "gh-ripgrep-2574-other_fix": 0.308723,
+      "gh-ripgrep-2767-fixed": 0.964189,
+      "gh-ripgrep-2884-other_fix": 0.169588,
+      "gh-ripgrep-2956-fixed": 0.875313,
+      "gh-ripgrep-3076-fixed": 0.414188,
+      "gh-ripgrep-3135-fixed": 0.69018,
+      "gh-ripgrep-3155-fixed": 0.579965,
+      "gh-ripgrep-3173-other_fix": 0.098305,
+      "gh-ripgrep-3180-fixed": 0.25034,
+      "gh-ripgrep-3184-fixed": 0.864238,
+      "gh-ripgrep-3184-mentioned_not_fix": 0.235623,
+      "gh-ripgrep-3419-downstream_workaround": 0.36197,
+      "gh-ripgrep-3419-fixed": 0.07722,
+      "gh-ripgrep-3419-other_fix": 0.796805,
+      "gh-ripgrep-3453-fixed": 0.539159,
+      "gh-tantivy-1291-fixed": 0.945556,
+      "gh-tantivy-1291-other_fix": 0.01489,
+      "gh-tantivy-1303-fixed": 0.878781,
+      "gh-tantivy-1303-other_fix": 0.436208,
+      "gh-tantivy-1366-other_fix": 0.103335,
+      "gh-tantivy-1757-fixed": 0.926443,
+      "gh-tantivy-1859-fixed": 0.981199,
+      "gh-tantivy-1863-fixed": 0.905891,
+      "gh-tantivy-1863-other_fix": 0.758913,
+      "gh-tantivy-1967-fixed": 0.400691,
+      "gh-tantivy-2112-other_fix": 0.024778,
+      "gh-tantivy-2180-fixed": 0.210698,
+      "gh-tantivy-2225-other_fix": 0.726255,
+      "gh-tantivy-2251-fixed": 0.669338,
+      "gh-tantivy-2494-fixed": 0.90323,
+      "gh-tantivy-2607-fixed": 0.346409,
+      "gh-tantivy-2607-mentioned_not_fix": 0.423885,
+      "gh-tantivy-2607-other_fix": 0.250911,
+      "gh-tantivy-2788-fixed": 0.975695,
+      "gh-tantivy-3086-fixed": 0.959574,
+      "gh-tantivy-3086-other_fix": 0.151344,
+      "gh-tokio-6820-other_fix": 0.125714,
+      "gh-tokio-6837-fixed": 0.687559,
+      "gh-tokio-7019-other_fix": 0.118549,
+      "gh-tokio-7036-fixed": 0.101682,
+      "gh-tokio-7133-fixed": 0.786074,
+      "gh-tokio-7133-other_fix": 0.061362,
+      "gh-tokio-7368-fixed": 0.557038,
+      "gh-tokio-7563-other_fix": 0.304378,
+      "gh-tokio-7691-fixed": 0.482633,
+      "gh-tokio-7691-mentioned_not_fix": 0.499845,
+      "gh-tokio-7751-downstream_workaround": 0.130929,
+      "gh-tokio-7751-fixed": 0.922995,
+      "gh-tokio-7751-other_fix": 0.111548,
+      "gh-tokio-7979-other_fix": 0.23539,
+      "gh-tokio-8061-downstream_workaround": 0.50259,
+      "gh-tokio-8061-fixed": 0.826014,
+      "gh-tokio-8423-other_fix": 0.055997,
+      "gh-tokio-8433-fixed": 0.310504,
+      "gh-tokio-8433-other_fix": 0.022892,
+      "gh-uv-18809-fixed": 0.692702,
+      "gh-uv-18809-other_fix": 0.290993,
+      "gh-uv-18916-fixed": 0.985393,
+      "gh-uv-18939-other_fix": 0.192557,
+      "gh-uv-19080-downstream_workaround": 0.032319,
+      "gh-uv-19080-fixed": 0.205909,
+      "gh-uv-19080-other_fix": 0.454846,
+      "gh-uv-19258-downstream_workaround": 0.470121,
+      "gh-uv-19258-other_fix": 0.275484,
+      "gh-uv-19326-fixed": 0.057958,
+      "gh-uv-19326-other_fix": 0.073009,
+      "gh-uv-19534-fixed": 0.884816,
+      "gh-uv-19672-fixed": 0.515179,
+      "gh-uv-19811-fixed": 0.908242,
+      "gh-uv-19811-other_fix": 0.282891,
+      "gh-uv-19832-fixed": 0.535679,
+      "gh-uv-19832-other_fix": 0.027138,
+      "gh-uv-19972-mentioned_not_fix": 0.055034,
+      "gh-uv-19972-other_fix": 0.245564,
+      "gh-uv-20128-fixed": 0.991354,
+      "gh-uv-20912-fixed": 0.179362,
+      "gh-uv-20912-mentioned_not_fix": 0.447172,
+      "gh-uv-20949-fixed": 0.639815,
+      "gh-uv-21846-other_fix": 0.32383
+    },
+    "v2-s13-nosib": {
+      "e1-03": 0.751561,
+      "e1-04": 0.792821,
+      "e1-06": 0.047321,
+      "e1-09": 0.526372,
+      "e1-10": 0.192444,
+      "e0-01": 0.953965,
+      "e0-02": 0.404027,
+      "e0-04": 0.489623,
+      "e0-06": 0.240177,
+      "e0-07": 0.236988,
+      "e0-10": 0.151447,
+      "e0-11": 0.03022,
+      "e0-12": 0.514247,
+      "e0-13": 0.403336,
+      "e0-14": 0.034694,
+      "gh-ort-609-downstream_workaround": 0.115471,
+      "gh-redb-1072-fixed": 0.51542,
+      "gh-redb-1072-other_fix": 0.532244,
+      "gh-redb-1331-fixed": 0.523183,
+      "gh-redb-1331-other_fix": 0.363058,
+      "gh-redb-364-fixed": 0.057825,
+      "gh-redb-405-fixed": 0.53196,
+      "gh-redb-450-other_fix": 0.01106,
+      "gh-redb-471-fixed": 0.252263,
+      "gh-redb-594-fixed": 0.919744,
+      "gh-redb-594-other_fix": 0.012013,
+      "gh-redb-629-other_fix": 0.600124,
+      "gh-redb-715-fixed": 0.988414,
+      "gh-redb-715-other_fix": 0.042479,
+      "gh-redb-798-fixed": 0.457297,
+      "gh-redb-798-other_fix": 0.375382,
+      "gh-ripgrep-2574-fixed": 0.776584,
+      "gh-ripgrep-2574-other_fix": 0.579492,
+      "gh-ripgrep-2767-fixed": 0.916852,
+      "gh-ripgrep-2884-other_fix": 0.217456,
+      "gh-ripgrep-2956-fixed": 0.889007,
+      "gh-ripgrep-3076-fixed": 0.609294,
+      "gh-ripgrep-3135-fixed": 0.713348,
+      "gh-ripgrep-3155-fixed": 0.499583,
+      "gh-ripgrep-3173-other_fix": 0.093307,
+      "gh-ripgrep-3180-fixed": 0.213447,
+      "gh-ripgrep-3184-fixed": 0.852584,
+      "gh-ripgrep-3184-mentioned_not_fix": 0.171355,
+      "gh-ripgrep-3419-downstream_workaround": 0.233581,
+      "gh-ripgrep-3419-fixed": 0.100699,
+      "gh-ripgrep-3419-other_fix": 0.710424,
+      "gh-ripgrep-3453-fixed": 0.496925,
+      "gh-tantivy-1291-fixed": 0.882325,
+      "gh-tantivy-1291-other_fix": 0.019811,
+      "gh-tantivy-1303-fixed": 0.864047,
+      "gh-tantivy-1303-other_fix": 0.224869,
+      "gh-tantivy-1366-other_fix": 0.128808,
+      "gh-tantivy-1757-fixed": 0.880538,
+      "gh-tantivy-1859-fixed": 0.97645,
+      "gh-tantivy-1863-fixed": 0.885924,
+      "gh-tantivy-1863-other_fix": 0.763722,
+      "gh-tantivy-1967-fixed": 0.312676,
+      "gh-tantivy-2112-other_fix": 0.024177,
+      "gh-tantivy-2180-fixed": 0.180365,
+      "gh-tantivy-2225-other_fix": 0.702048,
+      "gh-tantivy-2251-fixed": 0.752323,
+      "gh-tantivy-2494-fixed": 0.857557,
+      "gh-tantivy-2607-fixed": 0.333543,
+      "gh-tantivy-2607-mentioned_not_fix": 0.376177,
+      "gh-tantivy-2607-other_fix": 0.283648,
+      "gh-tantivy-2788-fixed": 0.965448,
+      "gh-tantivy-3086-fixed": 0.959905,
+      "gh-tantivy-3086-other_fix": 0.038671,
+      "gh-tokio-6820-other_fix": 0.19248,
+      "gh-tokio-6837-fixed": 0.604754,
+      "gh-tokio-7019-other_fix": 0.119461,
+      "gh-tokio-7036-fixed": 0.145273,
+      "gh-tokio-7133-fixed": 0.619622,
+      "gh-tokio-7133-other_fix": 0.098421,
+      "gh-tokio-7368-fixed": 0.266399,
+      "gh-tokio-7563-other_fix": 0.276056,
+      "gh-tokio-7691-fixed": 0.499333,
+      "gh-tokio-7691-mentioned_not_fix": 0.397001,
+      "gh-tokio-7751-downstream_workaround": 0.031024,
+      "gh-tokio-7751-fixed": 0.868273,
+      "gh-tokio-7751-other_fix": 0.031047,
+      "gh-tokio-7979-other_fix": 0.31809,
+      "gh-tokio-8061-downstream_workaround": 0.465019,
+      "gh-tokio-8061-fixed": 0.695395,
+      "gh-tokio-8423-other_fix": 0.164954,
+      "gh-tokio-8433-fixed": 0.477365,
+      "gh-tokio-8433-other_fix": 0.020307,
+      "gh-uv-18809-fixed": 0.760794,
+      "gh-uv-18809-other_fix": 0.275851,
+      "gh-uv-18916-fixed": 0.980969,
+      "gh-uv-18939-other_fix": 0.198575,
+      "gh-uv-19080-downstream_workaround": 0.067547,
+      "gh-uv-19080-fixed": 0.31395,
+      "gh-uv-19080-other_fix": 0.342177,
+      "gh-uv-19258-downstream_workaround": 0.302214,
+      "gh-uv-19258-other_fix": 0.345234,
+      "gh-uv-19326-fixed": 0.070819,
+      "gh-uv-19326-other_fix": 0.111052,
+      "gh-uv-19534-fixed": 0.897567,
+      "gh-uv-19672-fixed": 0.509275,
+      "gh-uv-19811-fixed": 0.884286,
+      "gh-uv-19811-other_fix": 0.435446,
+      "gh-uv-19832-fixed": 0.422587,
+      "gh-uv-19832-other_fix": 0.016517,
+      "gh-uv-19972-mentioned_not_fix": 0.090005,
+      "gh-uv-19972-other_fix": 0.105817,
+      "gh-uv-20128-fixed": 0.990251,
+      "gh-uv-20912-fixed": 0.327284,
+      "gh-uv-20912-mentioned_not_fix": 0.477757,
+      "gh-uv-20949-fixed": 0.637533,
+      "gh-uv-21846-other_fix": 0.534583
+    },
+    "convaiinnovations/laya/typed-decisions": {
+      "e1-03": 0.5145,
+      "e1-04": 0.4494,
+      "e1-06": 0.2294,
+      "e1-09": 0.576,
+      "e1-10": 0.6113,
+      "e0-01": 0.2242,
+      "e0-02": 0.1202,
+      "e0-04": 0.1827,
+      "e0-06": 0.1889,
+      "e0-07": 0.4585,
+      "e0-10": 0.465,
+      "e0-11": 0.554,
+      "e0-12": 0.3221,
+      "e0-13": 0.151,
+      "e0-14": 0.5907,
+      "gh-ort-609-downstream_workaround": 0.4504,
+      "gh-redb-1072-fixed": 0.2727,
+      "gh-redb-1072-other_fix": 0.2661,
+      "gh-redb-1331-fixed": 0.4596,
+      "gh-redb-1331-other_fix": 0.3334,
+      "gh-redb-364-fixed": 0.2565,
+      "gh-redb-405-fixed": 0.3761,
+      "gh-redb-450-other_fix": 0.5268,
+      "gh-redb-471-fixed": 0.4192,
+      "gh-redb-594-fixed": 0.404,
+      "gh-redb-594-other_fix": 0.25,
+      "gh-redb-629-other_fix": 0.3894,
+      "gh-redb-715-fixed": 0.567,
+      "gh-redb-715-other_fix": 0.2932,
+      "gh-redb-798-fixed": 0.464,
+      "gh-redb-798-other_fix": 0.2533,
+      "gh-ripgrep-2574-fixed": 0.3533,
+      "gh-ripgrep-2574-other_fix": 0.302,
+      "gh-ripgrep-2767-fixed": 0.5204,
+      "gh-ripgrep-2884-other_fix": 0.3388,
+      "gh-ripgrep-2956-fixed": 0.4122,
+      "gh-ripgrep-3076-fixed": 0.4123,
+      "gh-ripgrep-3135-fixed": 0.3989,
+      "gh-ripgrep-3155-fixed": 0.1767,
+      "gh-ripgrep-3173-other_fix": 0.5971,
+      "gh-ripgrep-3180-fixed": 0.4531,
+      "gh-ripgrep-3184-fixed": 0.4567,
+      "gh-ripgrep-3184-mentioned_not_fix": 0.2912,
+      "gh-ripgrep-3419-downstream_workaround": 0.4444,
+      "gh-ripgrep-3419-fixed": 0.1992,
+      "gh-ripgrep-3419-other_fix": 0.3149,
+      "gh-ripgrep-3453-fixed": 0.3328,
+      "gh-tantivy-1291-fixed": 0.5244,
+      "gh-tantivy-1291-other_fix": 0.2436,
+      "gh-tantivy-1303-fixed": 0.5047,
+      "gh-tantivy-1303-other_fix": 0.3804,
+      "gh-tantivy-1366-other_fix": 0.32,
+      "gh-tantivy-1757-fixed": 0.2304,
+      "gh-tantivy-1859-fixed": 0.5524,
+      "gh-tantivy-1863-fixed": 0.4159,
+      "gh-tantivy-1863-other_fix": 0.4982,
+      "gh-tantivy-1967-fixed": 0.3506,
+      "gh-tantivy-2112-other_fix": 0.3258,
+      "gh-tantivy-2180-fixed": 0.1581,
+      "gh-tantivy-2225-other_fix": 0.4438,
+      "gh-tantivy-2251-fixed": 0.6286,
+      "gh-tantivy-2494-fixed": 0.5319,
+      "gh-tantivy-2607-fixed": 0.3191,
+      "gh-tantivy-2607-mentioned_not_fix": 0.1688,
+      "gh-tantivy-2607-other_fix": 0.2549,
+      "gh-tantivy-2788-fixed": 0.6134,
+      "gh-tantivy-3086-fixed": 0.5874,
+      "gh-tantivy-3086-other_fix": 0.3132,
+      "gh-tokio-6820-other_fix": 0.2066,
+      "gh-tokio-6837-fixed": 0.5331,
+      "gh-tokio-7019-other_fix": 0.2023,
+      "gh-tokio-7036-fixed": 0.3934,
+      "gh-tokio-7133-fixed": 0.4486,
+      "gh-tokio-7133-other_fix": 0.2337,
+      "gh-tokio-7368-fixed": 0.3413,
+      "gh-tokio-7563-other_fix": 0.245,
+      "gh-tokio-7691-fixed": 0.355,
+      "gh-tokio-7691-mentioned_not_fix": 0.2857,
+      "gh-tokio-7751-downstream_workaround": 0.3902,
+      "gh-tokio-7751-fixed": 0.3906,
+      "gh-tokio-7751-other_fix": 0.2039,
+      "gh-tokio-7979-other_fix": 0.4167,
+      "gh-tokio-8061-downstream_workaround": 0.1752,
+      "gh-tokio-8061-fixed": 0.3605,
+      "gh-tokio-8423-other_fix": 0.165,
+      "gh-tokio-8433-fixed": 0.2352,
+      "gh-tokio-8433-other_fix": 0.1655,
+      "gh-uv-18809-fixed": 0.3183,
+      "gh-uv-18809-other_fix": 0.18,
+      "gh-uv-18916-fixed": 0.3185,
+      "gh-uv-18939-other_fix": 0.2753,
+      "gh-uv-19080-downstream_workaround": 0.4732,
+      "gh-uv-19080-fixed": 0.1776,
+      "gh-uv-19080-other_fix": 0.2384,
+      "gh-uv-19258-downstream_workaround": 0.2842,
+      "gh-uv-19258-other_fix": 0.4531,
+      "gh-uv-19326-fixed": 0.42,
+      "gh-uv-19326-other_fix": 0.2392,
+      "gh-uv-19534-fixed": 0.3836,
+      "gh-uv-19672-fixed": 0.2176,
+      "gh-uv-19811-fixed": 0.5015,
+      "gh-uv-19811-other_fix": 0.1516,
+      "gh-uv-19832-fixed": 0.3773,
+      "gh-uv-19832-other_fix": 0.2729,
+      "gh-uv-19972-mentioned_not_fix": 0.1947,
+      "gh-uv-19972-other_fix": 0.3149,
+      "gh-uv-20128-fixed": 0.3792,
+      "gh-uv-20912-fixed": 0.1942,
+      "gh-uv-20912-mentioned_not_fix": 0.1922,
+      "gh-uv-20949-fixed": 0.2741,
+      "gh-uv-21846-other_fix": 0.2031
+    }
+  },
+  "reproduced_prior": {
+    "nli-deberta-v3-xsmall U2 auroc_test": [
+      0.6179337231968811,
+      0.6179337231968811
+    ],
+    "laya typed-decisions U2 auroc_test": [
+      0.7002923976608187,
+      0.7002923976608187
+    ],
+    "source": "benchmarks/results/typed-decisions-bakeoff-2026-09-27.json"
+  },
+  "verdict": {
+    "summary": "Large, stable gain over the untuned base; ahead of the best prior arm (Laya typed-decisions) by about 0.10 AUROC, but that difference is not established at 95% on this test set.",
+    "u2_auroc_three_seeds": {
+      "mean": 0.8061,
+      "sd": 0.0064
+    },
+    "vs_base": "paired AUROC gain +0.18 to +0.19 per seed; every cluster-bootstrap 95% interval excludes 0",
+    "vs_laya": "paired gain +0.10 to +0.11 per seed; 95% intervals from about -0.02 to +0.23, one of three excludes 0",
+    "sibling_repo_ablation": "dropping the test repos' sibling projects from training leaves U2 AUROC unchanged",
+    "status_negatives": "fixed vs same-bug-not-fixed negatives (n=15 negatives) rises from 0.62 (base) to 0.77-0.80",
+    "u1_side_effect": "U1 AUROC falls from 0.745 to about 0.68: the tuned model is U2-only, never a U1 judge",
+    "operating_point": "FPR at the train-fit threshold is 0.07-0.12 on test, above the 0.05 target; a 29.12b suggestion list ranks top-3 and never auto-resolves, so it relies on ranking, not on this threshold",
+    "limits": "111 test rows in 56 dependent clusters; 77% of test negatives are fixes for another bug; the Axil subset has 15 test rows. Not for README/docs/CLI (see the typed-decisions README numbers policy)."
+  }
+}

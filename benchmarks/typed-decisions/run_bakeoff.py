@@ -16,8 +16,9 @@ Scores:
       the max over both directions (two forward passes).
   U2  P(entailment | premise=LATER, hypothesis=U2_TEMPLATE.format(error)).
 
-Usage: python run_bakeoff.py [--threads 4] [--only NAME ...]
-Writes out/bakeoff-<utc-date>.json (gitignored) and prints a summary table.
+Usage: python run_bakeoff.py [--threads 4] [--only NAME ...] [--local NAME=DIR ...]
+Writes out/bakeoff-<utc-date>.json (gitignored), with every row's score, and
+prints a summary table.
 """
 
 import argparse
