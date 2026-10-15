@@ -115,8 +115,11 @@ doesn't answer in time, the job is marked for the hook's own `hook drain`:
 the daemon lets go of the queue at that job, even while it is not serving (a
 lease, a reload), and takes it back once that drainer is done. With
 `AXIL_DAEMON=off`, that drainer's write finds the database busy while the
-daemon holds it, as any command run with the daemon off does, and runs once
-the database is free. When no drainer takes the job within 5 s, the daemon
+daemon holds it, as any command run with the daemon off does: `hook drain`
+waits up to 120 s for it, as for any other process holding the writer lock,
+then gives the step up and logs it in `drain.log`. So with a daemon running,
+leave `AXIL_DAEMON` unset for the hooks, or stop the daemon before turning
+it off. When no drainer takes the job within 5 s, the daemon
 runs it itself. A job it can't read (one a newer build queued) is moved to
 `interrupted/` and logged, never deleted.
 
