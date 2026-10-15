@@ -155,16 +155,21 @@ pub struct RecallResult {
 }
 
 impl RecallResult {
-    /// Recall's result order: highest score first, equal scores by record id.
+    /// Recall's result order: highest score first, equal scores newest
+    /// record first (record ids are ULIDs, so the higher id is the newer
+    /// record).
     ///
     /// The order candidates are gathered in (hash-map iteration, the FTS
     /// index's segment layout) differs between processes, so ties settled by
-    /// it came back in a different order on every run.
+    /// it came back in a different order on every run. Newest first, not
+    /// oldest: the recency term only ever lifts the newer of two records, so
+    /// when two scores differ by nothing but a rounding step that depends on
+    /// the clock, a tie and that step put the two in the same order.
     pub fn rank_order(a: &Self, b: &Self) -> std::cmp::Ordering {
         b.score
             .partial_cmp(&a.score)
             .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.record.id.cmp(&b.record.id))
+            .then_with(|| b.record.id.cmp(&a.record.id))
     }
 }
 

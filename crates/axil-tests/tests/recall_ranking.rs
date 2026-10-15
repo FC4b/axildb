@@ -348,7 +348,10 @@ fn equal_scores_come_back_in_record_id_order() {
         let record = db.get(&id).unwrap().unwrap();
         db.update(&id, record.data).unwrap();
     }
+    // Full-text search breaks ties by id, oldest first; recall newest first,
+    // the way its recency term leans.
     expected.sort();
+    let newest_first: Vec<String> = expected.iter().rev().cloned().collect();
 
     // Recall gathers candidates in hash maps, whose order changes with every
     // map, so twenty runs would show any tie left to that order. Without the
@@ -360,7 +363,7 @@ fn equal_scores_come_back_in_record_id_order() {
         ..cli_config()
     };
     for _ in 0..20 {
-        assert_eq!(ids(&db, query, 12, no_qtc()), expected, "recall");
+        assert_eq!(ids(&db, query, 12, no_qtc()), newest_first, "recall");
         let fts: Vec<String> = db
             .search_text(query, 12)
             .unwrap()
@@ -380,7 +383,7 @@ fn equal_scores_come_back_in_record_id_order() {
     for _ in 0..20 {
         assert_eq!(
             ids(&db, query, 12, no_qtc()),
-            expected,
+            newest_first,
             "recall over full-text search only"
         );
     }
