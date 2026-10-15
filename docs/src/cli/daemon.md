@@ -23,15 +23,20 @@ axil daemon stop [--wait 15]                        # stop it and wait until it 
 
 `start` does nothing when a daemon already serves the database, and waits for
 one that is still starting, or for one still shutting down to go. It prints
-the daemon's pid and build id as JSON. `stop` waits for the daemon to exit and
+the daemon's pid and build id as JSON, and whether a command typed in the
+shell it ran in is served (`"this_shell"`): one of another build or
+environment is not. `stop` waits for the daemon to exit and
 says whether it closed the database (`"clean"`); one that couldn't (see below)
 leaves the next open to repair it. A daemon that holds the lock but answers
 nothing is sent SIGTERM, once `stop` has checked that the process is this
 database's daemon. `status` works whether or not a daemon runs: it reads what
 the last one recorded and probes the lock and the socket. While one runs it
-adds the idle time left, the requests in flight, each command's p50/p95
-latency over its last 256 requests, the reloads and why, the processes
-holding a lease, and the state of the engines and the graph.
+adds whether a command from this shell is served (`this shell: not served,
+its environment differs from the daemon's in one of …`), the idle time left,
+the requests in flight, the requests refused and why (`refused: 4 (incompatible
+env 3, leased 1)`), each command's p50/p95 latency over its last 256
+requests, the reloads and why, the processes holding a lease, and the state
+of the engines and the graph.
 
 `AXIL_DAEMON=off` keeps `start` from starting one.
 

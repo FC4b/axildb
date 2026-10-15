@@ -937,6 +937,10 @@ impl Server {
             Op::Hello => write_json(&mut stream, &self.hello()),
             Op::Shutdown { reason } => self.acknowledge_shutdown(&mut stream, reason),
             Op::Status => write_json(&mut stream, &self.status()),
+            Op::Check(header) => {
+                let mismatch = self.identity.mismatch(&header);
+                write_json(&mut stream, &json!({"op": "check", "mismatch": mismatch}))
+            }
             Op::Lease { db, wait_ms, pid } => self.handle_lease(&mut stream, &db, wait_ms, pid),
             Op::Run(header) => {
                 self.handle_run(&mut stream, header);
@@ -1253,7 +1257,14 @@ impl Server {
         stdin: Option<Vec<u8>>,
     ) -> (RunReply, Option<exec::Response>) {
         let refused = |reply: RunReply| {
-            self.stats.refused.fetch_add(1, Ordering::AcqRel);
+            let reason = match &reply {
+                RunReply::Incompatible { reason } => format!("incompatible {reason}"),
+                other => serde_json::to_value(other)
+                    .ok()
+                    .and_then(|v| v["reply"].as_str().map(str::to_string))
+                    .unwrap_or_default(),
+            };
+            self.stats.refused(reason);
             (reply, None)
         };
         // Counted in before the phase is read: a shutdown that set the
@@ -1716,6 +1727,7 @@ impl Server {
             "reloads": self.stats.reloads.load(Ordering::Acquire),
             "last_reload": self.stats.last_reload(),
             "refused": self.stats.refused.load(Ordering::Acquire),
+            "refused_by": self.stats.refused_by(),
             "ops": self.stats.ops(),
             "engines": engines,
             "graph": graph,

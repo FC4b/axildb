@@ -1684,6 +1684,39 @@ fn a_hook_lookup_child_does_not_ask_the_daemon_again() {
     fx.warm_again();
 }
 
+/// `daemon start` and `status` say whether a command from the shell they
+/// run in is served, and status counts the requests refused, by reason.
+#[test]
+fn start_and_status_say_whether_this_shell_is_served() {
+    let fx = fixture();
+    let started = fx.start();
+    assert_eq!(started["this_shell"]["served"], true, "{started}");
+    let keyed = [("AXIL_ENC_KEY", "x")];
+    let start = axil_env(BIN, &fx.proj, &["daemon", "start"], None, &keyed);
+    let start: Value = serde_json::from_slice(&start.stdout).unwrap();
+    assert_eq!(start["started"], false, "{start}");
+    assert_eq!(start["this_shell"]["mismatch"], "env", "{start}");
+    let human = text(&axil_env(BIN, &fx.proj, &["daemon", "status"], None, &keyed).stdout);
+    assert!(
+        human.contains("this shell: not served, its environment differs from the daemon's"),
+        "{human}"
+    );
+
+    // A command from that shell is refused, for that reason.
+    let boot = axil_env(BIN, &fx.proj, &["boot"], None, &keyed);
+    assert!(boot.status.success(), "{}", text(&boot.stderr));
+    fx.warm_again();
+    assert_eq!(
+        fx.live()["refused_by"]["incompatible env"],
+        1,
+        "{}",
+        fx.live()
+    );
+    let human = text(&fx.axil(&["daemon", "status"]).stdout);
+    assert!(human.contains("this shell: served"), "{human}");
+    assert!(human.contains("refused: 1 (incompatible env 1)"), "{human}");
+}
+
 /// A lease held by a process that is killed ends with it: the daemon opens
 /// the database again and serves.
 #[test]

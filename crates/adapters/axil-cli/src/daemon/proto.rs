@@ -125,6 +125,12 @@ pub enum Op {
     Run(RunHeader),
     /// What `daemon status` reports while the daemon runs.
     Status,
+    /// Whether a run with this header would get past the handshake,
+    /// without running anything: answered by
+    /// `{"op":"check","mismatch":null}`, or by what does not match
+    /// (`proto`, `build`, `features` or `env`). `daemon start` and `status`
+    /// ask it for the shell they run in.
+    Check(RunHeader),
     /// Debug builds only: report the graph as failed to load, so a test can
     /// watch the daemon reload. Answered by `{"op":"debug_fail_graph","ok":true}`.
     #[cfg(debug_assertions)]
@@ -1124,9 +1130,18 @@ mod tests {
         ),
         ("USER", "the scheduled maintenance's log directory"),
         ("SystemRoot", "Windows only, where there is no daemon"),
-        ("CARGO_HOME", "`deps`, reading a crate's docs from its source"),
-        ("GOPATH", "`deps`, reading a Go module's docs from its source"),
-        ("GOMODCACHE", "`deps`, reading a Go module's docs from its source"),
+        (
+            "CARGO_HOME",
+            "`deps`, reading a crate's docs from its source",
+        ),
+        (
+            "GOPATH",
+            "`deps`, reading a Go module's docs from its source",
+        ),
+        (
+            "GOMODCACHE",
+            "`deps`, reading a Go module's docs from its source",
+        ),
         ("XDG_CONFIG_HOME", "`workspace`, finding its registry"),
     ];
 

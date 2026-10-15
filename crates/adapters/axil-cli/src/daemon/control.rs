@@ -196,6 +196,7 @@ fn start(db: &Path, idle_timeout: Duration, wait: Duration, out: &Output) -> Res
                     "state": hello.state,
                     "build_id": hello.build_id,
                     "same_build": hello.build_id == own,
+                    "this_shell": this_shell(&run),
                     "socket": run.socket(),
                 }));
                 return Ok(EXIT_OK);
@@ -371,6 +372,43 @@ fn is_daemon_of(pid: u32, key: &Path) -> bool {
     command.contains(&format!("--db {} daemon run", key.display()))
 }
 
+/// Whether the daemon on `run` would serve a command from this shell, as
+/// far as the handshake goes: `{"served":true,"mismatch":null}`, or what
+/// does not match (`features`, `env`, …). `null` when it can't be asked,
+/// as a daemon of another build may not know how.
+fn this_shell(run: &RunDir) -> Value {
+    let (Ok(identity), Ok(cwd)) = (Identity::current(), std::env::current_dir()) else {
+        return Value::Null;
+    };
+    let header = identity.header(vec!["axil".to_string()], &cwd, false);
+    match proto::call::<Value>(run.socket(), &Op::Check(header), Duration::from_secs(2)) {
+        Ok(answer) if answer["op"] == "check" => json!({
+            "served": answer["mismatch"].is_null(),
+            "mismatch": answer["mismatch"],
+        }),
+        _ => Value::Null,
+    }
+}
+
+/// The status line for [`this_shell`]'s answer.
+fn this_shell_line(answer: &Value) -> Option<String> {
+    let differs = match answer["mismatch"].as_str() {
+        None if answer["served"] == true => return Some("this shell: served".to_string()),
+        None => return None,
+        Some("env") => format!(
+            "its environment differs from the daemon's in one of {}",
+            proto::FP_ENV.join(", ")
+        ),
+        Some("build") => "it runs another build".to_string(),
+        Some("features") => "its build has other features".to_string(),
+        Some("proto") => "it speaks another protocol version".to_string(),
+        Some(other) => format!("its {other} differs from the daemon's"),
+    };
+    Some(format!(
+        "this shell: not served, {differs}; its commands run in their own process"
+    ))
+}
+
 /// The status report: the record the daemon left, the lock and socket
 /// probed now, and the live figures when it answers.
 fn report(key: &Path, run: &RunDir) -> Value {
@@ -406,6 +444,7 @@ fn report(key: &Path, run: &RunDir) -> Value {
         },
         "this_build": own,
         "same_build": same_build,
+        "this_shell": if live.is_some() { this_shell(run) } else { Value::Null },
         "blocked": read_json_file::<Value>(&run.blocked()),
         "last": last,
         "live": live,
@@ -490,10 +529,21 @@ fn describe(report: &Value) -> Vec<String> {
         live["build_id"].as_str().unwrap_or("?"),
         live["version"].as_str().unwrap_or("?")
     ));
+    if let Some(line) = this_shell_line(&report["this_shell"]) {
+        lines.push(line);
+    }
     lines.push(format!(
         "idle: {}s, stops after {}s more",
         live["idle_secs"], live["idle_left_secs"]
     ));
+    if let Some(by) = live["refused_by"].as_object().filter(|by| !by.is_empty()) {
+        let reasons: Vec<String> = by.iter().map(|(why, n)| format!("{why} {n}")).collect();
+        lines.push(format!(
+            "refused: {} ({})",
+            live["refused"],
+            reasons.join(", ")
+        ));
+    }
     if let Some(holders) = live["lease_holders"].as_array().filter(|h| !h.is_empty()) {
         let pids: Vec<String> = holders
             .iter()
