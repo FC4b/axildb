@@ -2967,8 +2967,9 @@ mod tests {
     }
 
     /// While a lease is held a request is told so; once the last ended, it
-    /// is told the database is opening, as at the start, so a client waits
-    /// for the daemon rather than lease the database again.
+    /// is told the database is opening, as at the start (`unavailable`
+    /// once the open has begun), so a client waits for the daemon rather
+    /// than lease the database again.
     #[test]
     fn after_the_last_lease_a_request_is_told_the_database_is_opening() {
         let tmp = tempfile::tempdir().unwrap();
@@ -2988,7 +2989,11 @@ mod tests {
             thread::sleep(Duration::from_millis(1));
         }
         let outcome = send(&server, &["boot"], &proj, None);
-        assert_ne!(outcome.reply, RunReply::Leased);
+        assert!(
+            outcome.reply == RunReply::Starting || unavailable(&outcome),
+            "{:?}",
+            outcome.reply
+        );
         wait_for_phase(&server, Phase::Ready);
         let (_, _, exit) = served(send(&server, &["boot"], &proj, None));
         assert_eq!(exit, 0);
