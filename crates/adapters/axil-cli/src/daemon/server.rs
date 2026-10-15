@@ -144,6 +144,9 @@ const GRAPH_RELOADS: u32 = 1;
 /// The reload reason for a graph that failed to load.
 const GRAPH_FAILED: &str = "the graph failed to load";
 
+/// Why the handle is stale from a lease until the database is opened again.
+const LEASED: &str = "the database was leased";
+
 /// How a daemon runs.
 #[derive(Debug, Clone)]
 pub struct Options {
@@ -1051,6 +1054,14 @@ impl Server {
         let left = deadline.saturating_duration_since(Instant::now());
         match state.release(left) {
             Ok(()) => {
+                // What the holder does to the files is its own business: until
+                // the database is opened again, a request finds the handle
+                // stale and is not served, rather than take the holder's
+                // writes for someone else's overwrite.
+                self.fresh
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .stale = Some(LEASED.to_string());
                 // A shutdown that began meanwhile finds the database closed.
                 if self.phase.advance(Phase::Leasing, Phase::Leased) {
                     self.write_info();
@@ -2530,6 +2541,36 @@ mod tests {
         let (reply, _) = ask(&server, &proj.join("other.axil"), 10_000);
         assert_eq!(reply, LeaseReply::refused("wrong_db"));
         assert_eq!(server.phase.get(), Phase::Ready);
+        stop(server);
+    }
+
+    /// A request that comes while the database opens again after a lease
+    /// (the holder still has it open here, so the reopen waits) is not
+    /// served, and the holder's writes are not taken for an overwrite.
+    #[test]
+    fn a_request_during_the_reopen_after_a_lease_is_not_served() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = build_fixture(tmp.path());
+        let db = proj.join(".axil/memory.axil");
+        let server = start(&db);
+        quiet(&server);
+        let (reply, held) = ask(&server, &server.key, 10_000);
+        assert_eq!(reply, LeaseReply::granted());
+        let holder = axil_core::Axil::open(&db).build().unwrap();
+        holder
+            .insert("decisions", json!({"summary": "written under the lease"}))
+            .unwrap();
+        drop(held);
+        wait_for_phase(&server, Phase::Reloading);
+        let outcome = send(&server, &["boot"], &proj, None);
+        assert!(unavailable(&outcome), "{:?}", outcome.reply);
+        assert!(!server.state.get().unwrap().poisoned());
+        assert_eq!(server.stop_reason(), None);
+        drop(holder);
+        wait_for_phase(&server, Phase::Ready);
+        let (out, _, exit) = served(send(&server, &["boot"], &proj, None));
+        assert_eq!(exit, 0);
+        assert!(String::from_utf8_lossy(&out).contains("written under the lease"));
         stop(server);
     }
 
