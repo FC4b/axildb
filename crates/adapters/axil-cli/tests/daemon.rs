@@ -1700,7 +1700,9 @@ fn a_sessions_hooks_need_no_lease() {
     );
     let live = fx.live();
     let queue = &live["queue"];
-    assert_eq!(queue["failed"], 0, "{live}");
+    // A build without `deps` has no command for the manifest's job.
+    let failed = u64::from(!cfg!(feature = "deps"));
+    assert_eq!(queue["failed"], failed, "{live}");
     assert_eq!(live["leases_granted"], queue["yields"], "{live}");
     if every_queued_step_is_served(&fx) {
         assert_eq!(live["leases_granted"], 0, "{live}");
