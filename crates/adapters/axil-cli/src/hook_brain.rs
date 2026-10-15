@@ -925,6 +925,7 @@ fn first_patch_path(patch: &str) -> Option<String> {
 pub(crate) const HOOK_DEADLINE_ENV: &str = "AXIL_HOOK_DEADLINE_MS";
 
 /// In a hook's lookup child: how long until the hook must be done.
+#[cfg_attr(not(unix), allow(dead_code))] // read where a daemon may run
 pub(crate) fn hook_time_left() -> Option<Duration> {
     let until: u64 = std::env::var(HOOK_DEADLINE_ENV).ok()?.parse().ok()?;
     Some(Duration::from_millis(until.saturating_sub(epoch_ms())))

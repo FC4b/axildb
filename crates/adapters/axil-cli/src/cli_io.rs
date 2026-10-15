@@ -116,6 +116,7 @@ pub struct Captured {
 
 impl Captured {
     /// Append `bytes` to stderr (`to_err`) or stdout, after what is there.
+    #[cfg_attr(not(unix), allow(dead_code))] // the daemon's
     pub fn push(&mut self, to_err: bool, bytes: &[u8]) {
         if bytes.is_empty() {
             return;
