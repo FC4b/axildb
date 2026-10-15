@@ -141,6 +141,12 @@ struct Args {
     #[arg(long, default_value = "benchmarks/longmemeval/data")]
     data_dir: PathBuf,
 
+    /// Evaluate only the questions a JSON array of question ids in this file
+    /// lists, in dataset order; `--limit` then applies to them. Every listed
+    /// id must be in the dataset.
+    #[arg(long)]
+    question_ids: Option<PathBuf>,
+
     /// Print per-question details.
     #[arg(long)]
     verbose: bool,
@@ -480,7 +486,25 @@ fn main() {
     // reads, which is markedly slower than `from_slice` on the 265 MB file.
     eprintln!("[1/3] Loading dataset...");
     let bytes = std::fs::read(&data_file).expect("cannot read dataset file");
-    let questions: Vec<Question> = serde_json::from_slice(&bytes).expect("invalid JSON");
+    let mut questions: Vec<Question> = serde_json::from_slice(&bytes).expect("invalid JSON");
+    if let Some(path) = &args.question_ids {
+        let text = std::fs::read_to_string(path).expect("cannot read --question-ids file");
+        let ids: Vec<String> =
+            serde_json::from_str(&text).expect("--question-ids: expected a JSON array of ids");
+        let wanted: std::collections::HashSet<&str> = ids.iter().map(String::as_str).collect();
+        let present: std::collections::HashSet<&str> =
+            questions.iter().map(|q| q.question_id.as_str()).collect();
+        let mut missing: Vec<&str> = wanted.difference(&present).copied().collect();
+        if !missing.is_empty() {
+            missing.sort_unstable();
+            eprintln!(
+                "--question-ids: not in {}: {missing:?}",
+                data_file.display()
+            );
+            std::process::exit(2);
+        }
+        questions.retain(|q| wanted.contains(q.question_id.as_str()));
+    }
     let total = if args.limit > 0 { questions.len().min(args.limit) } else { questions.len() };
     eprintln!("       {} questions loaded, evaluating {}", questions.len(), total);
 
