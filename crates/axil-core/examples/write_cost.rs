@@ -104,7 +104,12 @@ fn measure(size: usize, samples: usize, migration: bool) -> Value {
     db.insert_batch("ctl", (0..CONTROL_ROWS).map(row).collect())
         .expect("fill control");
     let fill_s = fill.elapsed().as_secs_f64();
-    let id_list_bytes: usize = db.list("big").expect("list").iter().map(|r| r.id.as_str().len() + 3).sum();
+    let id_list_bytes: usize = db
+        .list("big")
+        .expect("list")
+        .iter()
+        .map(|r| r.id.as_str().len() + 3)
+        .sum();
 
     for i in 0..WARMUP {
         db.insert("big", row(size + i)).expect("warm big");
@@ -114,8 +119,12 @@ fn measure(size: usize, samples: usize, migration: bool) -> Value {
     let (mut ins_big, mut ins_ctl) = (Vec::new(), Vec::new());
     let (mut big_ids, mut ctl_ids) = (Vec::new(), Vec::new());
     for i in 0..samples {
-        ins_big.push(time_us(|| big_ids.push(db.insert("big", row(i)).expect("insert big").id)));
-        ins_ctl.push(time_us(|| ctl_ids.push(db.insert("ctl", row(i)).expect("insert ctl").id)));
+        ins_big.push(time_us(|| {
+            big_ids.push(db.insert("big", row(i)).expect("insert big").id)
+        }));
+        ins_ctl.push(time_us(|| {
+            ctl_ids.push(db.insert("ctl", row(i)).expect("insert ctl").id)
+        }));
     }
     let (mut upd_big, mut upd_ctl) = (Vec::new(), Vec::new());
     for (b, c) in big_ids.iter().zip(&ctl_ids) {
@@ -168,13 +177,22 @@ fn main() {
                     .map(|s| s.trim().parse().expect("size"))
                     .collect()
             }
-            "--samples" => samples = it.next().expect("--samples needs a value").parse().expect("samples"),
+            "--samples" => {
+                samples = it
+                    .next()
+                    .expect("--samples needs a value")
+                    .parse()
+                    .expect("samples")
+            }
             "--migration" => migration = true,
             other => panic!("unknown argument {other}"),
         }
     }
 
-    let results: Vec<Value> = sizes.iter().map(|&s| measure(s, samples, migration)).collect();
+    let results: Vec<Value> = sizes
+        .iter()
+        .map(|&s| measure(s, samples, migration))
+        .collect();
     let out = json!({
         "benchmark": "write-cost-vs-table-size",
         "samples_per_kind": samples,
