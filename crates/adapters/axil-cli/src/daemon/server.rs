@@ -1862,6 +1862,7 @@ mod tests {
     use crate::cli_io::tests::parity::{
         self, build_fixture, check_parity_with, matrix, one_shot_at, Case, Run,
     };
+    use crate::daemon::client;
     use crate::daemon::lease::{self, Lease};
     use crate::daemon::proto::RunOutcome;
 
@@ -1973,6 +1974,50 @@ mod tests {
         );
         let (_, boot) = results.iter().find(|(n, _)| *n == "boot json").unwrap();
         assert!(boot.2 == 0 && boot.0.starts_with(b"{"));
+    }
+
+    /// The same matrix sent as the CLI sends it ([`client::forward`]): the
+    /// client's own command line, environment and stdin, and no deadline.
+    #[test]
+    fn forwarded_output_matches_one_shot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fixture = build_fixture(&tmp.path().join("fixture"));
+        let proj = tmp.path().join("work/proj");
+        let db_path = proj.join(".axil/memory.axil");
+        let db = db_path.to_str().unwrap();
+        let auth_rs = proj.join("src/auth.rs");
+        let auth_rs = auth_rs.to_str().unwrap();
+        let refused = |c: &Case| c.cold_only || c.name == "clap unknown flag";
+        let cases: Vec<Case> = matrix(db, auth_rs)
+            .into_iter()
+            .filter(|c| !refused(c))
+            .collect();
+        let cwd = || proj.canonicalize().unwrap();
+        let opts = client::Opts {
+            slow_query_log: true,
+            deadline: None,
+            starting_wait: Duration::from_secs(10),
+        };
+        check_parity_with(
+            &fixture,
+            &proj,
+            &cases,
+            |c, args| {
+                let server = start(&db_path);
+                let stdin = Some(c.stdin.unwrap_or_default().to_vec());
+                let forwarded = client::forward(&db_path, parity::argv(args), &cwd(), stdin, &opts);
+                stop(server);
+                match forwarded {
+                    client::Forwarded::Served {
+                        exit,
+                        stdout,
+                        stderr,
+                    } => (stdout, stderr, exit),
+                    other => panic!("{}: not served: {other:?}", c.name),
+                }
+            },
+            |c, args| one_shot_at(args, c.stdin, &cwd(), None),
+        );
     }
 
     /// Sixteen recalls at once, with stores running beside them: every one

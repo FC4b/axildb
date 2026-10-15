@@ -309,3 +309,195 @@ pub fn forward_lookup(db: &Path, args: &[&str]) -> Option<Option<String>> {
         | Forwarded::Lost { .. } => Some(None),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::net::UnixListener;
+    use std::path::PathBuf;
+    use std::sync::{Arc, Mutex};
+
+    /// A database file of its own, with its run directory.
+    fn new_db() -> (tempfile::TempDir, PathBuf, RunDir) {
+        let tmp = tempfile::Builder::new().prefix("c").tempdir().unwrap();
+        let db = tmp.path().canonicalize().unwrap().join("memory.axil");
+        std::fs::write(&db, b"").unwrap();
+        let run = RunDir::of(&db);
+        run.create().unwrap();
+        (tmp, db, run)
+    }
+
+    /// What a daemon does with one connection.
+    #[derive(Clone)]
+    enum Then {
+        /// Answer with this reply, and frames when it is `Served`.
+        Reply(RunReply, Vec<u8>),
+        /// Read the request, then close without a word.
+        Hang,
+    }
+
+    /// A daemon on `run`'s socket answering its connections in turn, the
+    /// last answer over and over, and keeping each request it read.
+    fn daemon(run: &RunDir, answers: Vec<Then>) -> Arc<Mutex<Vec<RunHeader>>> {
+        let listener = UnixListener::bind(run.socket()).unwrap();
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let seen = asked.clone();
+        thread::spawn(move || {
+            for (n, stream) in listener.incoming().enumerate() {
+                let Ok(mut stream) = stream else { break };
+                let Ok(proto::Op::Run(header)) = proto::read_json::<proto::Op>(&mut stream) else {
+                    continue;
+                };
+                if header.has_stdin {
+                    let _ = proto::read_frame(&mut stream);
+                }
+                seen.lock().unwrap().push(header);
+                match answers[n.min(answers.len() - 1)].clone() {
+                    Then::Reply(reply, out) => {
+                        let served = matches!(reply, RunReply::Served { .. });
+                        proto::write_json(&mut stream, &reply).unwrap();
+                        if served {
+                            proto::write_frame(&mut stream, &out).unwrap();
+                            proto::write_frame(&mut stream, b"").unwrap();
+                        }
+                    }
+                    Then::Hang => drop(stream),
+                }
+            }
+        });
+        asked
+    }
+
+    fn argv(args: &[&str]) -> Vec<String> {
+        args.iter().map(|a| a.to_string()).collect()
+    }
+
+    fn cli_opts() -> Opts {
+        Opts {
+            slow_query_log: true,
+            deadline: None,
+            starting_wait: Duration::from_secs(5),
+        }
+    }
+
+    /// No socket, or one nobody listens on: no daemon, found at once.
+    #[test]
+    fn with_no_daemon_nothing_is_sent() {
+        let (_tmp, db, run) = new_db();
+        let cwd = std::env::current_dir().unwrap();
+        let started = Instant::now();
+        let send = || forward(&db, argv(&["axil", "boot"]), &cwd, None, &cli_opts());
+        assert_eq!(send(), Forwarded::NoDaemon);
+        assert!(!may_have_daemon(&db));
+        drop(UnixListener::bind(run.socket()).unwrap());
+        assert!(may_have_daemon(&db));
+        assert_eq!(send(), Forwarded::NoDaemon);
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    /// A daemon still opening the database is asked again until it serves,
+    /// within the wait; past it the client gives up.
+    #[test]
+    fn a_starting_daemon_is_asked_again_within_the_wait() {
+        let (_tmp, db, run) = new_db();
+        let cwd = std::env::current_dir().unwrap();
+        let asked = daemon(
+            &run,
+            vec![
+                Then::Reply(RunReply::Starting, Vec::new()),
+                Then::Reply(RunReply::Overloaded, Vec::new()),
+                Then::Reply(RunReply::Served { exit: 3 }, b"out".to_vec()),
+            ],
+        );
+        let got = forward(&db, argv(&["axil", "boot"]), &cwd, None, &cli_opts());
+        assert_eq!(
+            got,
+            Forwarded::Served {
+                exit: 3,
+                stdout: b"out".to_vec(),
+                stderr: Vec::new()
+            }
+        );
+        assert_eq!(asked.lock().unwrap().len(), 3);
+
+        let (_tmp, db, run) = new_db();
+        let _asked = daemon(&run, vec![Then::Reply(RunReply::Starting, Vec::new())]);
+        let opts = Opts {
+            starting_wait: Duration::from_millis(200),
+            ..cli_opts()
+        };
+        let started = Instant::now();
+        let got = forward(&db, argv(&["axil", "boot"]), &cwd, None, &opts);
+        assert_eq!(got, Forwarded::StartingTimeout);
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    /// The request carries what the client was given: its command line,
+    /// stdin, the slow-query switch and a deadline.
+    #[test]
+    fn the_request_carries_the_clients_command() {
+        let (_tmp, db, run) = new_db();
+        let cwd = std::env::current_dir().unwrap();
+        let asked = daemon(&run, vec![Then::Reply(RunReply::Leased, Vec::new())]);
+        let opts = Opts {
+            slow_query_log: false,
+            deadline: Some(Duration::from_secs(2)),
+            starting_wait: Duration::ZERO,
+        };
+        let argv = argv(&["axil", "store", "decisions", "-"]);
+        let got = forward(&db, argv.clone(), &cwd, Some(b"{}".to_vec()), &opts);
+        assert_eq!(got, Forwarded::Leased);
+        let header = asked.lock().unwrap().pop().unwrap();
+        assert_eq!(header.argv, argv);
+        assert_eq!(header.cwd, cwd.to_string_lossy());
+        assert!(header.has_stdin && !header.slow_query_log);
+        let deadline = header.deadline_ms.unwrap();
+        assert!(deadline > epoch_ms() && deadline <= epoch_ms() + 2000);
+    }
+
+    /// A connection that breaks once the request is out leaves it unknown
+    /// whether the daemon ran it.
+    #[test]
+    fn a_connection_lost_after_the_request_went_out_is_lost() {
+        let (_tmp, db, run) = new_db();
+        let cwd = std::env::current_dir().unwrap();
+        let _asked = daemon(&run, vec![Then::Hang]);
+        let got = forward(&db, argv(&["axil", "boot"]), &cwd, None, &cli_opts());
+        assert_eq!(got, Forwarded::Lost { sent: true });
+    }
+
+    /// What a hook's lookup gets for each answer: the output of a run that
+    /// exited 0, no context when the daemon ran it otherwise or is not free
+    /// to, and its own child when the daemon does not run the command.
+    #[test]
+    fn a_lookup_answers_or_leaves_it_to_the_child() {
+        let not_served = RunReply::NotServed {
+            reason: "command".into(),
+            detail: String::new(),
+        };
+        let incompatible = RunReply::Incompatible {
+            reason: "build".into(),
+        };
+        let cases = [
+            (RunReply::Served { exit: 0 }, Some(Some("ctx".to_string()))),
+            (RunReply::Served { exit: 1 }, Some(None)),
+            (RunReply::Leased, Some(None)),
+            (RunReply::Starting, Some(None)),
+            (RunReply::Stopping, Some(None)),
+            (RunReply::Expired, Some(None)),
+            (not_served, None),
+            (incompatible, None),
+        ];
+        for (reply, want) in cases {
+            let (_tmp, db, run) = new_db();
+            let asked = daemon(&run, vec![Then::Reply(reply.clone(), b"ctx".to_vec())]);
+            let got = forward_lookup(&db, &["recall", "auth"]);
+            assert_eq!(got, want, "{reply:?}");
+            let header = asked.lock().unwrap().pop().unwrap();
+            assert!(!header.slow_query_log);
+            assert_eq!(header.argv[..3], ["axil", "--db", db.to_str().unwrap()]);
+        }
+        let (_tmp, db, _run) = new_db();
+        assert_eq!(forward_lookup(&db, &["boot"]), None);
+    }
+}
