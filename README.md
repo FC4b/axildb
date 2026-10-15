@@ -312,10 +312,7 @@ cargo install axildb --no-default-features \
 ```toml
 [database]
 path = "./.axil/memory.axil"
-
-[index]
 embedding_model = "bge-small-en-v1.5"    # local ONNX, auto-downloaded
-embedding_dimensions = 384
 
 [fts]
 default_limit = 10

@@ -16,10 +16,7 @@ project-root config for that database only.
 ```toml
 [database]
 path = "./memory.axil"
-
-[index]
 embedding_model = "bge-small-en-v1.5"
-embedding_dimensions = 384
 
 [runtime]
 max_results = 50
@@ -47,13 +44,7 @@ model = "gpt-4o-mini"
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `database.path` | string | `./memory.axil` | Default database path |
-
-### Index
-
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `index.embedding_model` | string | `bge-small-en-v1.5` | ONNX embedding model |
-| `index.embedding_dimensions` | int | `384` | Vector dimensions |
+| `database.embedding_model` | string | `bge-small-en-v1.5` | ONNX embedding model; the vector dimensions follow from it |
 
 ### Runtime
 
@@ -152,8 +143,8 @@ key) prints a warning and turns review off until it is fixed.
 axil config show
 
 # Set a value
-axil config set index.embedding_model bge-base-en-v1.5
+axil config set database.embedding_model bge-base-en-v1.5
 
 # Get a value
-axil config get index.embedding_model
+axil config get database.embedding_model
 ```

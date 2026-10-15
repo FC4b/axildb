@@ -144,7 +144,7 @@ This is what Axil itself does. It's the single biggest scale win.
 `axil.toml`:
 
 ```toml
-[index]
+[database]
 embedding_model = "bge-small-en-v1.5-int8"
 ```
 

@@ -34,8 +34,8 @@ pub enum EmbeddingModel {
     ///
     /// ModernBERT backbone, Apache-2.0, MTEB 64.38 (vs bge-small 62.17).
     /// 16× longer context than bge-small without truncation. [CLS] pooling.
-    /// Registered as an additional option in — bge-small
-    /// remains the default; switch via `axil.toml` `model = "gte-modernbert-base"`.
+    /// Registered as an additional option; bge-small remains the default.
+    /// Switch via `axil.toml` `[database] embedding_model = "gte-modernbert-base"`.
     GteModernbertBase,
     /// ibm-granite/granite-embedding-small-english-r2: 384 dimensions, ~188 MB
     /// ONNX, 8192-token context.

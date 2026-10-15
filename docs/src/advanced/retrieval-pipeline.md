@@ -81,10 +81,11 @@ boosting. Phase 4 added fuzzy matching, snippets, and field scoping.
 20k vectors (100k in a one-shot CLI call, which would otherwise rebuild the
 graph on every search), and the HNSW graph above that.
 The query is either a pre-embedded `&[f32]` or text that the configured
-embedder converts. Default embedder is BGE-small-en-v1.5 (int8); BGE-base,
-nomic, and gte-modernbert are also registered. Query text is embedded on the
-embedder's query side (`TextEmbedder::embed_query`) and stored text on its
-passage side, so a model trained with separate prompts for each can use them.
+embedder converts. Default embedder is BGE-small-en-v1.5; its int8 export,
+BGE-base, nomic, and gte-modernbert are also registered. Query text is
+embedded on the embedder's query side (`TextEmbedder::embed_query`) and
+stored text on its passage side, so a model trained with separate prompts
+for each can use them.
 
 **Cascade skip rule**: vector search is skipped when FTS already returned
 a high-confidence top hit (score > 0.95). This is the most common reason
@@ -373,7 +374,7 @@ hit-rate 0% → 20%, ~45% context-token reduction, p95 19ms → 15ms.
 | `RecallConfig.weights` | `RecallConfig::default()` | see table above | Domain has unusual signal mix (e.g. logs need higher recency, code needs higher keyword) |
 | `recency_half_life_hours` | `RecallConfig` | 168 (1 week) | Longer for archival corpora, shorter for incident channels |
 | `qtc` | `RecallConfig` | `None` | Long documents where answers sit beyond the embedding window |
-| Embedding model | `axil.toml` `[index] embedding_model` | `bge-small-en-v1.5-int8` | `bge-base` for quality, `int8` for speed |
+| Embedding model | `axil.toml` `[database] embedding_model` | `bge-small-en-v1.5` | `bge-base` for quality, `int8` for speed |
 | Cross-encoder rerank | `with_reranker(...)` | unattached | Not measured on this path; for the CLI's cross-encoder results see Step 4b |
 | Fetch multiplier | `min_fetch = (limit + offset) * 4` | × 4 | Increase if top-K is very small and you want richer fusion input |
 
