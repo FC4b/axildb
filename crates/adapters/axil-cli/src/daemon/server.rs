@@ -3167,7 +3167,13 @@ mod tests {
             .write(true)
             .open(run.lock())
             .unwrap();
-        held.try_lock().unwrap();
+        // A process another test starts keeps a copy of every handle open
+        // here, the lock just let go of included, until it execs.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while let Err(e) = held.try_lock() {
+            assert!(Instant::now() < deadline, "{e}");
+            thread::sleep(Duration::from_millis(10));
+        }
         let started = Instant::now();
         assert!(elect_within(&run, quiet, Duration::from_secs(30))
             .unwrap()
