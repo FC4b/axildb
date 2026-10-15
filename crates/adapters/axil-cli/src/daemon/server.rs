@@ -1171,8 +1171,6 @@ impl Server {
                 }
                 self.set_fresh(before);
                 self.fail_graph.store(false, Ordering::Release);
-                // Idle from now, not from before the lease.
-                self.touch();
                 log("opened the database again");
                 // On disk before a client can see it, as at the first open,
                 // unless a shutdown began.
@@ -1253,7 +1251,6 @@ impl Server {
             Phase::Leasing | Phase::Leased => return refused(RunReply::Leased),
             Phase::Ready | Phase::Reloading => {}
         }
-        self.touch();
         if expired(header.deadline_ms) {
             return refused(RunReply::Expired);
         }
@@ -1280,7 +1277,6 @@ impl Server {
             exec::execute_gated(header.to_request(stdin), state, &gate)
         };
         let took = started.elapsed();
-        self.touch();
         if state.poisoned() {
             self.request_stop(StopReason::Panicked);
         }
@@ -1296,6 +1292,9 @@ impl Server {
                 (reply, None)
             }
             Ok(response) => {
+                // Only a command run is use: a client that is refused, or
+                // whose own command leases the database, keeps no daemon up.
+                self.touch();
                 self.stats.served(op, took);
                 (
                     RunReply::Served {
@@ -2523,6 +2522,52 @@ mod tests {
         assert_eq!(info.state, "stopped");
         assert_eq!(info.exit_reason.as_deref(), Some("idle"));
         assert_eq!(info.closed_cleanly, Some(true));
+    }
+
+    /// Only a command it runs keeps a daemon from idling out: neither the
+    /// requests it refuses nor the leases of the clients it refuses, and
+    /// the reopen after each.
+    #[test]
+    fn a_daemon_no_client_can_use_still_idles_out() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = build_fixture(tmp.path());
+        let db = proj.join(".axil/memory.axil");
+        let server = start_with(&db, options(Duration::from_secs(2)));
+        let cwd = proj.canonicalize().unwrap();
+        let done = AtomicBool::new(false);
+        let started = Instant::now();
+        thread::scope(|s| {
+            s.spawn(|| {
+                while !done.load(Ordering::Acquire) {
+                    let mut header =
+                        Identity::current()
+                            .unwrap()
+                            .header(parity::argv(&["boot"]), &cwd, false);
+                    header.build_id = "another build".into();
+                    let _ = proto::run(server.run.socket(), &header, None, Duration::from_secs(5));
+                    if let Ok(mut stream) =
+                        proto::connect(server.run.socket(), Duration::from_secs(5))
+                    {
+                        let op = Op::Lease {
+                            db: db.display().to_string(),
+                            wait_ms: 5_000,
+                            pid: std::process::id(),
+                        };
+                        let _ = write_json(&mut stream, &op)
+                            .and_then(|()| read_json::<LeaseReply>(&mut stream));
+                    }
+                    thread::sleep(Duration::from_millis(300));
+                }
+            });
+            assert_eq!(server.serve(), StopReason::Idle);
+            done.store(true, Ordering::Release);
+        });
+        assert!(
+            started.elapsed() < Duration::from_secs(8),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(server.shutdown(&StopReason::Idle), Finish::Exit(0));
     }
 
     /// A machine that slept through the idle timeout: the monotonic clock
