@@ -1946,7 +1946,8 @@ enum Command {
     /// Download an embedding model.
     #[cfg(feature = "vector")]
     ModelDownload {
-        /// Model name: bge-small, bge-small-int8, bge-base, nomic, or bge-m3.
+        /// Model name: bge-small, bge-small-int8, bge-base, nomic, bge-m3,
+        /// gte-modernbert-base, or granite-small (granite-embedding-small-english-r2).
         #[arg(default_value = "bge-small")]
         model: String,
     },
@@ -1970,7 +1971,7 @@ enum Command {
     #[cfg(feature = "embed")]
     Reembed {
         /// Model name: bge-small, bge-small-int8, bge-base, nomic, bge-m3,
-        /// or a registered custom model.
+        /// gte-modernbert-base, granite-small, or a registered custom model.
         #[arg(long, default_value = "bge-small")]
         model: String,
         /// Record field to embed (must be a string field present on all records).
@@ -8214,6 +8215,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
                     EmbeddingModel::Nomic,
                     EmbeddingModel::BgeM3,
                     EmbeddingModel::GteModernbertBase,
+                    EmbeddingModel::GraniteSmallR2,
                 ];
                 for model in &models_to_check {
                     // A model with no directory was never installed.
@@ -11836,7 +11838,15 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
             } else {
                 // Benchmark all available built-in models
                 let mut available = Vec::new();
-                for name in ["bge-small", "bge-small-int8", "bge-base", "nomic", "bge-m3"] {
+                for name in [
+                    "bge-small",
+                    "bge-small-int8",
+                    "bge-base",
+                    "nomic",
+                    "bge-m3",
+                    "gte-modernbert-base",
+                    "granite-small",
+                ] {
                     if let Ok(model) = name.parse::<EmbeddingModel>() {
                         if axil_vector::download::is_model_available(&model) {
                             available.push(name.to_string());
