@@ -1,0 +1,76 @@
+{
+  "provenance": {
+    "measured": "2026-10-15",
+    "build": "benchmarks/longmemeval at integrate/recall-core ae9655b (review/recall-core merged onto dev 346d03e), release, default features (no rerank), built --locked against benchmarks/longmemeval/model-ab/Cargo.lock.pinned from branch feat/model-ab (sha256 2da16fc49957042c908f999af4572e90be2ec2b87ae0bd1f86656ed662bca6e0); harness binary sha256 ef6b61a90b3726ed44c4fd1b5ace5fba1d69b3af457830152055eb4643e3db72",
+    "sample": "the first 20 questions of LongMemEval-S (longmemeval_s_cleaned.json), all single-session-user",
+    "env": "AXIL_DAEMON=off; load averages 7-13 during the runs, timings not representative",
+    "command": "scripts/longmemeval-gate.sh --questions 20 (the default strategy, 2% tolerance)",
+    "gate_baseline": "benchmarks/longmemeval/baselines/s-recall-qtc-k5-n20.json",
+    "gate_verdict": "PASS: avg_recall 0.900 -> 0.950, ndcg_at_10 0.857 -> 0.967; the baseline misses 5d3d2817 and 726462e0, this run 5d3d2817 only",
+    "note": "benchmarks/longmemeval/baseline.jsonl is the 500-question recall-qtc run; the gate compares it only with a 500-question run. On these 20 questions it misses 5d3d2817 and 726462e0."
+  },
+  "benchmark": "LongMemEval",
+  "variant": "s",
+  "strategy": "recall-qtc",
+  "model": "bge-small",
+  "rerank": "off",
+  "top_k": 5,
+  "total_questions": 20,
+  "overall": {
+    "hit_rate": 0.95,
+    "avg_recall": 0.95,
+    "avg_precision": 0.19000000000000006,
+    "recall_all": 0.95,
+    "ndcg_at_10": 0.9666666666666668,
+    "turn_recall_compact": 0.0,
+    "turn_recall_full": 0.95,
+    "tokens_compact": 250.0,
+    "tokens_full": 15835.1875,
+    "evidence_per_1k_tokens_compact": 0.0,
+    "evidence_per_1k_tokens_full": 0.05999297450693274,
+    "turn_recall_snippet": 0.05,
+    "tokens_snippet": 245.5,
+    "turn_recall_piece": 0.375,
+    "tokens_piece": 584.3375
+  },
+  "by_category": {
+    "single-session-user": {
+      "total": 20,
+      "hits": 19,
+      "hit_rate": 0.95,
+      "avg_recall": 0.95,
+      "avg_precision": 0.19000000000000006,
+      "recall_all": 0.95,
+      "ndcg_at_10": 0.9666666666666668,
+      "turn_recall_compact": 0.0,
+      "turn_recall_full": 0.95,
+      "tokens_compact": 250.0,
+      "tokens_full": 15835.1875,
+      "evidence_per_1k_tokens_compact": 0.0,
+      "evidence_per_1k_tokens_full": 0.05999297450693274,
+      "turn_recall_snippet": 0.05,
+      "tokens_snippet": 245.5,
+      "turn_recall_piece": 0.375,
+      "tokens_piece": 584.3375
+    }
+  },
+  "misses": [
+    {
+      "question_id": "5d3d2817",
+      "question_type": "single-session-user",
+      "question_date": "2023/05/30 (Tue) 20:08",
+      "recall": 0.0,
+      "precision": 0.0,
+      "retrieved_sessions": [
+        "session_37",
+        "session_41",
+        "session_44",
+        "session_28",
+        "session_29"
+      ],
+      "answer_sessions": [
+        "session_26"
+      ]
+    }
+  ]
+}
