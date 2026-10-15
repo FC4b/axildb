@@ -149,7 +149,8 @@ struct Args {
     #[arg(long, default_value = "0")]
     jobs: usize,
 
-    /// Embedding model: bge-small (default), bge-base, or nomic.
+    /// Embedding model: bge-small (default), bge-base, nomic,
+    /// gte-modernbert-base or granite-small.
     #[arg(long, default_value = "bge-small")]
     model: String,
 
@@ -492,8 +493,13 @@ fn main() {
         "bge-small" => EmbeddingModel::BgeSmall,
         "bge-base" => EmbeddingModel::BgeBase,
         "nomic" => EmbeddingModel::Nomic,
+        "gte-modernbert-base" => EmbeddingModel::GteModernbertBase,
+        "granite-small" => EmbeddingModel::GraniteSmallR2,
         other => {
-            eprintln!("unknown --model {other:?}: expected bge-small, bge-base or nomic");
+            eprintln!(
+                "unknown --model {other:?}: expected bge-small, bge-base, nomic, \
+                 gte-modernbert-base or granite-small"
+            );
             std::process::exit(2);
         }
     };
