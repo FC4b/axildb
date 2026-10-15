@@ -1735,6 +1735,8 @@ pub(crate) mod tests {
                     &["--db", db, "session-heal", "--session", "s1"],
                 )
                 .volatile(),
+                case("maintain", &["--db", db, "maintain", "--if-stale"]),
+                case("maintain --dry-run", &["--db", db, "maintain", "--dry-run"]),
                 case("clap usage error", &["store"]),
                 case("clap unknown flag", &["boot", "--bogus"]),
                 case("--help", &["--help"]),

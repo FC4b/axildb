@@ -818,6 +818,7 @@ fn the_hot_commands_print_nothing_into_the_log() {
         (vec!["worker", "run"], None, !cfg!(feature = "decide")),
         (vec!["beliefs", "--generate"], None, true),
         (vec!["session-heal", "--session", "s1"], None, true),
+        (vec!["maintain", "--if-stale"], None, true),
         (vec!["checkpoint", cp], None, cfg!(feature = "checkpoint")),
         (
             vec!["checkpoint", "-"],
@@ -1762,6 +1763,39 @@ fn a_hook_the_daemon_does_not_serve_drains_its_own_write() {
     failed_command(&[]);
     assert!(fx.drained(1), "{}", fx.live());
     assert_eq!(fx.live()["queue"]["handed_over"], 1, "{}", fx.live());
+}
+
+/// A session start's `maintain --in-background`: the detached child it
+/// starts runs on the daemon's handle, so the daemon never lets go of the
+/// database for it.
+#[test]
+fn background_maintenance_runs_in_the_daemon() {
+    let fx = fixture();
+    fx.start();
+    let out = fx.axil(&["maintain", "--if-stale", "--in-background"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let spawned: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(spawned["spawned"], true, "{spawned}");
+    let lock = fx.proj.join(".axil/maintain.lock");
+    assert!(
+        wait_for(Duration::from_secs(60), || !lock.exists()),
+        "{}",
+        fx.live()
+    );
+    let live = fx.live();
+    assert_eq!(live["leases_granted"], 0, "{live}");
+    let log = std::fs::read_to_string(fx.proj.join(".axil/maintain.log")).unwrap_or_default();
+    assert!(log.trim().is_empty(), "{log}");
+    let runs = fx.axil(&["list", "_maintenance_runs"]);
+    let runs: Value = serde_json::from_slice(&runs.stdout).unwrap();
+    let mut tasks: Vec<&str> = runs
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|r| r["data"]["task"].as_str())
+        .collect();
+    tasks.sort_unstable();
+    assert_eq!(tasks, ["health_report", "snapshot"], "{runs}");
 }
 
 /// `reembed` has the database leased before it touches the vector store,

@@ -7269,6 +7269,12 @@ fn hot_needs(command: &Command) -> Option<Vec<cli_io::Need>> {
             problems_file,
             ..
         } if problems_file.as_deref().is_none_or(Path::is_absolute) => Some(Vec::new()),
+        // In the background it spawns a child, which the daemon must not;
+        // that child, run in the foreground, is served.
+        Command::Maintain {
+            in_background: false,
+            ..
+        } => Some(Vec::new()),
         _ => None,
     }
 }
@@ -8974,7 +8980,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
             // downsample purges (deletes) records past the retention window,
             // so auto-firing it from the hook would silently destroy memory.
             // Keep downsampling explicit via `axil heal`.
-            let db = open_with_all_detected(&db_path)?;
+            let db = cli_io::hot_db(&db_path, &needs, || open_with_all_detected(&db_path))?;
             let now_secs = chrono::Utc::now().timestamp();
             let runs = db.list("_maintenance_runs").unwrap_or_default();
             let last_run = |task: &str| -> Option<i64> {
