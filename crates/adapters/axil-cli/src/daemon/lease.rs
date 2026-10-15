@@ -27,14 +27,19 @@
 //!
 //! A daemon that can't let go within [`LEASE_WAIT`] (a request it runs
 //! takes longer) answers `lease_timeout`, and the process opens as it would
-//! with no daemon: the open waits for the lock, or fails busy.
+//! with no daemon: the open waits for the lock, or fails busy. It says so in
+//! one line on stderr first, naming `axil daemon stop`.
 //!
-//! A process asks once per database. `AXIL_DAEMON=off` turns the guard off.
+//! A process asks once per database while its lease holds: it asks again
+//! once the daemon it was granted by is gone (another may have started
+//! since), [`REFUSED_FOR`] after a refusal, and at every open while no
+//! daemon runs. `AXIL_DAEMON=off` turns the guard off.
 //! In the daemon itself, the guard only checks, in a debug build, that no
 //! command it runs opens the database it serves: those run on its open
 //! handle, and its own opens skip the guard.
 
 use std::io;
+use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock, PoisonError};
@@ -54,12 +59,62 @@ pub const LEASE_WAIT: Duration = Duration::from_secs(10);
 /// How much longer than its wait a process waits for the daemon's answer.
 const ANSWER_SLACK: Duration = Duration::from_secs(5);
 
+/// How long a refused lease stands before an open asks again: long enough
+/// that a process opening the database many times waits for the daemon
+/// once, not at each open.
+const REFUSED_FOR: Duration = Duration::from_secs(30);
+
 /// The database this process serves, once it is a daemon.
 static SERVING: OnceLock<PathBuf> = OnceLock::new();
 
-/// The databases this process has asked for, each with the lease it was
-/// granted, if any. A lease is held here until the process exits.
-static ASKED: Mutex<Vec<(PathBuf, Option<UnixStream>)>> = Mutex::new(Vec::new());
+/// The databases this process has asked for, and what it was answered. A
+/// lease is held here until the process exits.
+static ASKED: Mutex<Vec<(PathBuf, Asked)>> = Mutex::new(Vec::new());
+
+/// What a database was asked for came to, while it stands.
+#[derive(Debug)]
+enum Asked {
+    /// Granted, over this connection.
+    Held(UnixStream),
+    /// Refused at this time.
+    Refused(Instant),
+}
+
+impl Asked {
+    /// Whether it still stands: a lease while the daemon that granted it
+    /// runs, a refusal for [`REFUSED_FOR`].
+    fn stands(&self) -> bool {
+        match self {
+            Asked::Held(stream) => connected(stream),
+            Asked::Refused(at) => at.elapsed() < REFUSED_FOR,
+        }
+    }
+}
+
+/// Whether the daemon is still at the other end of a lease. It never
+/// writes on one, so a read that does not block finds nothing to read
+/// while it runs, and the end of the stream once it has exited.
+fn connected(stream: &UnixStream) -> bool {
+    let mut byte = 0u8;
+    // SAFETY: a one-byte read into a live buffer on an open descriptor;
+    // MSG_PEEK leaves the byte unread and MSG_DONTWAIT keeps it from blocking.
+    let n = unsafe {
+        libc::recv(
+            stream.as_raw_fd(),
+            std::ptr::addr_of_mut!(byte).cast(),
+            1,
+            libc::MSG_PEEK | libc::MSG_DONTWAIT,
+        )
+    };
+    match n {
+        0 => false,
+        1.. => true,
+        _ => matches!(
+            io::Error::last_os_error().kind(),
+            io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+        ),
+    }
+}
 
 /// Make [`guard`] this process's open guard.
 pub fn install() {
@@ -78,8 +133,8 @@ pub fn hold(db: &Path) {
     axil_core::open_guard(db);
 }
 
-/// The open guard: lease the database at `path` from its daemon, once per
-/// process (see the module docs).
+/// The open guard: lease the database at `path` from its daemon, once
+/// while the lease holds (see the module docs).
 pub fn guard(path: &Path) {
     let Ok(key) = cli_io::db_key(path) else {
         return;
@@ -97,13 +152,21 @@ pub fn guard(path: &Path) {
         return;
     }
     let mut asked = ASKED.lock().unwrap_or_else(PoisonError::into_inner);
-    if asked.iter().any(|(k, _)| *k == key) {
-        return;
+    if let Some(i) = asked.iter().position(|(k, _)| *k == key) {
+        if asked[i].1.stands() {
+            return;
+        }
+        asked.swap_remove(i);
     }
     match lease(&key, LEASE_WAIT) {
         Lease::NoDaemon => {}
-        Lease::Held(stream) => asked.push((key, Some(stream))),
-        Lease::Refused => asked.push((key, None)),
+        Lease::Held(stream) => asked.push((key, Asked::Held(stream))),
+        Lease::Refused(said) => {
+            if !said.is_empty() {
+                errln!("{said}");
+            }
+            asked.push((key, Asked::Refused(Instant::now())));
+        }
     }
 }
 
@@ -118,8 +181,18 @@ pub enum Lease {
     /// connection is open.
     Held(UnixStream),
     /// The daemon did not let go in time, or its socket is not to be
-    /// trusted. Not asked again.
-    Refused,
+    /// trusted: the line to say so, empty once said. Not asked again for
+    /// [`REFUSED_FOR`].
+    Refused(String),
+}
+
+/// A refusal from the daemon of `key`, which still has it open, for `why`.
+fn refused(key: &Path, why: &str) -> Lease {
+    Lease::Refused(format!(
+        "axil: warning: the daemon has {} open and did not let go of it ({why}); \
+         `axil daemon stop` frees it",
+        key.display()
+    ))
 }
 
 /// Ask the daemon of the database `key`, when one runs, to let go of it,
@@ -130,18 +203,17 @@ pub fn lease(key: &Path, wait: Duration) -> Lease {
         // A daemon shutting down removes its socket first, and closes the
         // database after the requests it runs: wait for it to be done.
         if server::said_stopping(&run) && server::lock_held(&run) && !gone(&run, wait) {
-            return Lease::Refused;
+            return refused(key, "it is still shutting down");
         }
         return Lease::NoDaemon;
     }
     let mut stream = match proto::connect(run.socket(), wait + ANSWER_SLACK) {
         Ok(stream) => stream,
         Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
-            errln!(
+            return Lease::Refused(format!(
                 "axil: warning: not asking the daemon on {} to let go of the database: {e}",
                 run.socket().display()
-            );
-            return Lease::Refused;
+            ));
         }
         // Nothing listens on the socket: the daemon that bound it is gone.
         Err(_) => return Lease::NoDaemon,
@@ -153,11 +225,12 @@ pub fn lease(key: &Path, wait: Duration) -> Lease {
     };
     let answer =
         proto::write_json(&mut stream, &op).and_then(|()| proto::read_json::<Value>(&mut stream));
-    let Ok(answer) = answer else {
-        return Lease::Refused;
+    let answer = match answer {
+        Ok(answer) => answer,
+        Err(e) => return refused(key, &format!("it did not answer: {e}")),
     };
     if answer["op"] != "lease" {
-        return retire(&run, wait);
+        return retire(key, &run, wait);
     }
     match serde_json::from_value::<LeaseReply>(answer) {
         Ok(reply) if reply.granted => {
@@ -171,26 +244,36 @@ pub fn lease(key: &Path, wait: Duration) -> Lease {
             if gone(&run, wait) {
                 Lease::NoDaemon
             } else {
-                Lease::Refused
+                refused(key, "it is still shutting down")
             }
         }
-        _ => Lease::Refused,
+        Ok(reply) => match reply.reason.as_deref() {
+            Some("lease_timeout") => {
+                refused(key, &format!("it was still busy after {}s", wait.as_secs()))
+            }
+            Some(reason) => refused(key, reason),
+            None => refused(key, "it gave no reason"),
+        },
+        Err(e) => refused(key, &format!("its answer was not understood: {e}")),
     }
 }
 
-/// Ask a daemon that does not know `lease` to shut down, and wait up to
-/// `wait` for it to be gone.
-fn retire(run: &RunDir, wait: Duration) -> Lease {
+/// Ask the daemon of `key`, one that does not know `lease`, to shut down,
+/// and wait up to `wait` for it to be gone.
+fn retire(key: &Path, run: &RunDir, wait: Duration) -> Lease {
     let op = Op::Shutdown {
         reason: "a process needs the database, and this daemon does not answer lease".into(),
     };
-    if proto::call::<Ack>(run.socket(), &op, Duration::from_secs(5)).is_err() {
-        return Lease::Refused;
+    if let Err(e) = proto::call::<Ack>(run.socket(), &op, Duration::from_secs(5)) {
+        return refused(
+            key,
+            &format!("it predates leases, and did not answer a shutdown: {e}"),
+        );
     }
     if gone(run, wait) {
         Lease::NoDaemon
     } else {
-        Lease::Refused
+        refused(key, "it predates leases, and is still shutting down")
     }
 }
 
@@ -210,7 +293,6 @@ fn gone(run: &RunDir, wait: Duration) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::fd::AsRawFd;
 
     /// No socket, or a socket nobody listens on: no daemon, and nothing is
     /// waited for.
@@ -289,6 +371,113 @@ mod tests {
         assert!(matches!(daemon.join().unwrap(), Op::Shutdown { .. }));
     }
 
+    /// A database file of its own, for a guard's cache of no other test.
+    fn new_key() -> (tempfile::TempDir, PathBuf) {
+        let tmp = tempfile::Builder::new().prefix("l").tempdir().unwrap();
+        let key = tmp.path().canonicalize().unwrap().join("memory.axil");
+        std::fs::write(&key, b"").unwrap();
+        (tmp, key)
+    }
+
+    /// A daemon for `key` that gives every lease asked of it `reply` and
+    /// keeps the connection.
+    struct Answering {
+        asks: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        held: std::sync::Arc<Mutex<Vec<UnixStream>>>,
+    }
+
+    impl Answering {
+        fn new(key: &Path, reply: LeaseReply) -> Self {
+            let run = RunDir::of(key);
+            run.create().unwrap();
+            let listener = std::os::unix::net::UnixListener::bind(run.socket()).unwrap();
+            let me = Answering {
+                asks: Default::default(),
+                held: Default::default(),
+            };
+            let (asks, held) = (me.asks.clone(), me.held.clone());
+            std::thread::spawn(move || {
+                for stream in listener.incoming() {
+                    let Ok(mut stream) = stream else { break };
+                    if proto::read_json::<Op>(&mut stream).is_err() {
+                        continue;
+                    }
+                    asks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    proto::write_json(&mut stream, &reply).unwrap();
+                    held.lock().unwrap().push(stream);
+                }
+            });
+            me
+        }
+
+        fn asks(&self) -> usize {
+            self.asks.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    fn kept(key: &Path) -> bool {
+        let asked = ASKED.lock().unwrap_or_else(PoisonError::into_inner);
+        asked.iter().any(|(k, _)| k == key)
+    }
+
+    /// With no daemon nothing is kept, so the next open asks again: one may
+    /// have started. A lease is asked for once while it holds, and again
+    /// once the daemon that granted it is gone.
+    #[test]
+    fn a_lease_is_asked_for_once_while_it_holds() {
+        let (_tmp, key) = new_key();
+        guard(&key);
+        assert!(!kept(&key));
+
+        let daemon = Answering::new(&key, LeaseReply::granted());
+        guard(&key);
+        guard(&key);
+        assert_eq!(daemon.asks(), 1);
+        assert!(kept(&key));
+
+        // As when the daemon exits, and another starts.
+        daemon.held.lock().unwrap().clear();
+        guard(&key);
+        assert_eq!(daemon.asks(), 2);
+        guard(&key);
+        assert_eq!(daemon.asks(), 2);
+    }
+
+    /// A refusal is not asked again at each open, only once it is old.
+    #[test]
+    fn a_refused_lease_is_asked_again_once_it_is_old() {
+        let (_tmp, key) = new_key();
+        let daemon = Answering::new(&key, LeaseReply::refused("lease_timeout"));
+        guard(&key);
+        guard(&key);
+        assert_eq!(daemon.asks(), 1);
+        {
+            let mut asked = ASKED.lock().unwrap();
+            let (_, at) = asked.iter_mut().find(|(k, _)| *k == key).unwrap();
+            *at = Asked::Refused(Instant::now() - REFUSED_FOR);
+        }
+        guard(&key);
+        assert_eq!(daemon.asks(), 2);
+    }
+
+    /// A refusal says what the daemon holds and how to free it.
+    #[test]
+    fn a_refused_lease_says_how_to_free_the_database() {
+        let (_tmp, key) = new_key();
+        let _daemon = Answering::new(&key, LeaseReply::refused("lease_timeout"));
+        let Lease::Refused(said) = lease(&key, Duration::from_secs(10)) else {
+            panic!("not refused");
+        };
+        assert_eq!(
+            said,
+            format!(
+                "axil: warning: the daemon has {} open and did not let go of it (it was \
+                 still busy after 10s); `axil daemon stop` frees it",
+                key.display()
+            )
+        );
+    }
+
     /// A socket in a directory others can enter is not asked anything.
     #[test]
     fn an_untrusted_socket_is_not_asked() {
@@ -304,6 +493,6 @@ mod tests {
         run.create().unwrap();
         let _listener = std::os::unix::net::UnixListener::bind(run.socket()).unwrap();
         std::fs::set_permissions(run.dir(), std::fs::Permissions::from_mode(0o755)).unwrap();
-        assert!(matches!(lease(&key, LEASE_WAIT), Lease::Refused));
+        assert!(matches!(lease(&key, LEASE_WAIT), Lease::Refused(_)));
     }
 }
