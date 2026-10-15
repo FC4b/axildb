@@ -527,9 +527,13 @@ fn a_dropped_engine_and_a_failed_graph_reload_the_daemon() {
     assert!(fx.send(&["since", "1h"], None).status.success());
     assert_eq!(reloads(), 0);
 
-    // `compact --drop-engine` removes the store without opening the database.
-    let dropped = fx.axil(&["compact", "--drop-engine", "ts"]);
-    assert!(dropped.status.success(), "{}", text(&dropped.stderr));
+    // A store removed by something that never asks the daemon first.
+    let ts = fx.proj.join(".axil/memory.axil.ts");
+    if ts.is_dir() {
+        std::fs::remove_dir_all(&ts).unwrap();
+    } else {
+        std::fs::remove_file(&ts).unwrap();
+    }
     std::thread::sleep(Duration::from_millis(300));
     let since = fx.send_settled(&["since", "1h"]);
     assert_eq!(since.status.code(), Some(125), "{}", text(&since.stderr));
@@ -539,6 +543,16 @@ fn a_dropped_engine_and_a_failed_graph_reload_the_daemon() {
         .as_str()
         .unwrap()
         .contains(".ts was removed"));
+
+    // `compact --drop-engine` removes one with the database leased, and
+    // the daemon opens it again without it rather than reload.
+    fx.leasing(&["compact", "--drop-engine", "fts"]);
+    fx.warm_again();
+    let fts = fx.send(&["fts", "tokens"], None);
+    assert_eq!(fts.status.code(), Some(125), "{}", text(&fts.stderr));
+    assert!(text(&fts.stderr).contains("\"reason\":\"lacks\""));
+    assert_eq!(fx.live()["leases_granted"], 1);
+    assert_eq!(reloads(), 1);
 
     let ack = raw_call(&socket, r#"{"op":"debug_fail_graph"}"#);
     assert_eq!(ack["ok"], true);
@@ -967,6 +981,28 @@ fn the_commands_it_does_not_serve_lease_the_database() {
         text(&found.stdout)
     );
     assert_eq!(fx.live()["reloads"], 0, "{}", fx.live());
+}
+
+/// `reembed` has the database leased before it touches the vector store,
+/// even to put back the copy an interrupted run left: here one it cannot
+/// move into place.
+#[test]
+fn reembed_leases_before_it_moves_the_vector_store() {
+    let fx = fixture();
+    if !fx.vectors {
+        return;
+    }
+    fx.start();
+    std::fs::create_dir_all(fx.proj.join(".axil/memory.axil.reembed-bak/x")).unwrap();
+    let out = fx.axil(&["reembed", "--field", "summary"]);
+    assert!(!out.status.success());
+    assert!(
+        text(&out.stderr).contains("failed to restore"),
+        "{}",
+        text(&out.stderr)
+    );
+    assert_eq!(fx.live()["leases_granted"], 1, "{}", fx.live());
+    fx.warm_again();
 }
 
 /// A command for a store the daemon's handle lacks is not served; the

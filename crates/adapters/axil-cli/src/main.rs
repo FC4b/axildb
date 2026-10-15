@@ -8745,7 +8745,10 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
             if let Some(engine) = drop_engine {
                 // Never open the DB here — the Engine being dropped may be
                 // orphaned or version-incompatible, which is exactly why it's
-                // being removed. This is a pure file operation on the companion.
+                // being removed. This is a pure file operation on the companion,
+                // made once a daemon that has the database open has let go.
+                #[cfg(unix)]
+                daemon::lease::hold(&db_path);
                 let report = axil_core::drop_engine_companion(&db_path, &engine)
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
                 out.print(&serde_json::to_value(&report).unwrap());
@@ -11527,6 +11530,9 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
             table,
         } => {
             let db_path = require_db(&db_opt)?;
+            // The vector store is moved about below before anything opens it.
+            #[cfg(unix)]
+            daemon::lease::hold(&db_path);
 
             let embedding_model = parse_model(&model)?;
             let new_dims = embedding_model.dimensions();

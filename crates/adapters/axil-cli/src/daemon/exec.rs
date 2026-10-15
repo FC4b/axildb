@@ -355,6 +355,14 @@ impl WarmState {
                 return Err(ReopenError::InUse);
             }
         }
+        // Opening creates a database that is not there: one removed from
+        // under the handle is not brought back empty.
+        if !self.path.is_file() {
+            return Err(ReopenError::Open(anyhow::anyhow!(
+                "{} no longer exists",
+                self.path.display()
+            )));
+        }
         let warm = open_warm(&self.path).map_err(ReopenError::Open)?;
         *self.slot_write() = Some(warm);
         Ok(())
@@ -1326,6 +1334,22 @@ mod tests {
         });
         assert!(first.upgrade().is_none(), "the old handle is still open");
         assert_eq!(execute_captured(boot(), &state).unwrap().exit, 0);
+    }
+
+    /// A reopen of a database removed from under the open handle fails
+    /// rather than create an empty one in its place.
+    #[test]
+    fn a_reopen_never_creates_a_removed_database() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = build_fixture(tmp.path());
+        let db = proj.join(".axil/memory.axil");
+        let state = WarmState::open(&db).unwrap();
+        std::fs::remove_file(&db).unwrap();
+        assert!(matches!(
+            state.reopen(Duration::from_secs(5)),
+            Err(ReopenError::Open(_))
+        ));
+        assert!(!db.exists());
     }
 
     /// The host relies on catching a request's panic, so no build may abort
