@@ -327,6 +327,38 @@ fn write_unknown(why: &'static str) -> Option<i32> {
     Some(crate::EXIT_ERROR)
 }
 
+/// How long a hook waits for the daemon's answer about the queue.
+const QUEUE_ASK_WAIT: Duration = Duration::from_millis(500);
+
+/// Whether the daemon of the database at `db` runs the writes this process
+/// queues: `Some(true)` when it would serve this process's commands (see
+/// [`Identity::mismatch`]), `Some(false)` when a daemon answers that would
+/// not, `None` when none answers or `AXIL_DAEMON` is `off`. A daemon drains
+/// the queue only for a process it serves; it leaves the jobs of another to
+/// that process's own drainer.
+pub fn queue_served(db: &Path) -> Option<bool> {
+    if control::mode() == Mode::Off || !may_have_daemon(db) {
+        return None;
+    }
+    let run = RunDir::of(&cli_io::db_key(db).ok()?);
+    let cwd = std::env::current_dir().ok()?;
+    let header = identity()?.header(vec!["axil".to_string()], &cwd, false);
+    let answer: serde_json::Value =
+        proto::call(run.socket(), &proto::Op::Check(header), QUEUE_ASK_WAIT).ok()?;
+    (answer["op"] == "check").then(|| answer["mismatch"].is_null())
+}
+
+/// Tell the daemon of the database at `db` that a job was queued. True when
+/// it said it drains the queue.
+pub fn poke(db: &Path) -> bool {
+    let Ok(key) = cli_io::db_key(db) else {
+        return false;
+    };
+    let answer: Result<serde_json::Value, _> =
+        proto::call(RunDir::of(&key).socket(), &proto::Op::Poke, QUEUE_ASK_WAIT);
+    answer.is_ok_and(|a| a["op"] == "poke" && a["ok"] == true)
+}
+
 /// A hook's lookup `args` (`recall …`, `boot …`), on the database at `db`:
 /// `Some` with what the daemon's run answered (`Some(stdout)` when it ran
 /// and exited 0, `None` for no context), `None` when the hook is to run the

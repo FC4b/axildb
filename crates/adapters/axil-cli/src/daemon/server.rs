@@ -942,6 +942,13 @@ impl Server {
                 write_json(&mut stream, &json!({"op": "check", "mismatch": mismatch}))
             }
             Op::Lease { db, wait_ms, pid } => self.handle_lease(&mut stream, &db, wait_ms, pid),
+            Op::Poke => {
+                let ack = Ack {
+                    op: "poke".into(),
+                    ok: false,
+                };
+                write_json(&mut stream, &ack)
+            }
             Op::Run(header) => {
                 self.handle_run(&mut stream, header);
                 Ok(())

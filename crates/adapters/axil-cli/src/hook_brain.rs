@@ -1339,14 +1339,24 @@ impl HookCtx {
 
     // ── Write queue ───────────────────────────────────────────────────
 
-    /// Queue a database write and make sure a drainer is running. False
-    /// when there is no database or the job file can't be written.
+    /// Queue a database write and make sure something drains the queue: the
+    /// database's daemon, poked, when it serves this process; else a drainer
+    /// started here. False when there is no database or the job file can't
+    /// be written.
     fn enqueue(&self, job: &Job) -> bool {
         let Some(db) = self.db.as_ref() else {
             return false;
         };
-        if !write_job(db, job) {
+        #[cfg(unix)]
+        let served = crate::daemon::client::queue_served(db);
+        #[cfg(not(unix))]
+        let served: Option<bool> = None;
+        if !write_job(db, job, served == Some(false)) {
             return false;
+        }
+        #[cfg(unix)]
+        if served == Some(true) && crate::daemon::client::poke(db) {
+            return true;
         }
         spawn_drainer(&self.exe, db, &self.project_dir);
         true
@@ -2250,7 +2260,13 @@ const DRAIN_LOCK_STALE_SECS: u64 = 30 * 60;
 /// Bound on `drain.log`; past it the log starts over.
 const DRAIN_LOG_MAX_BYTES: u64 = 1_048_576;
 
-/// A database write a hook asked for, run later by `axil hook drain`.
+/// A database write a hook asked for, run later by the database's daemon or
+/// by `axil hook drain`.
+///
+/// Its file may also say `"own_drainer": true`: the hook that queued it is
+/// one the database's daemon does not serve (another build, or another
+/// environment), so the daemon leaves the job to a drainer of the hook's
+/// own. Drainers from before the daemon ignore the field.
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "op", rename_all = "snake_case")]
 enum Job {
@@ -2291,12 +2307,21 @@ fn queue_dir(db: &Path) -> PathBuf {
 
 /// Write `job` to the queue atomically (temp file, then rename), so the
 /// drainer never reads half a job. Names sort by creation time, which is the
-/// order jobs run in.
-fn write_job(db: &Path, job: &Job) -> bool {
+/// order jobs run in. `own_drainer` marks it for a drainer of this
+/// process's own (see [`Job`]).
+fn write_job(db: &Path, job: &Job, own_drainer: bool) -> bool {
     use std::sync::atomic::{AtomicU32, Ordering};
     static SEQ: AtomicU32 = AtomicU32::new(0);
     let dir = queue_dir(db);
-    let Ok(body) = serde_json::to_vec(job) else {
+    let body = if own_drainer {
+        serde_json::to_value(job).and_then(|mut body| {
+            body["own_drainer"] = Value::Bool(true);
+            serde_json::to_vec(&body)
+        })
+    } else {
+        serde_json::to_vec(job)
+    };
+    let Ok(body) = body else {
         return false;
     };
     if std::fs::create_dir_all(&dir).is_err() {
@@ -2323,15 +2348,34 @@ fn spawn_drainer(exe: &Path, db: &Path, cwd: &Path) {
     spawn_detached(exe, &args, cwd, &queue_dir(db).join("drain.log"));
 }
 
+/// How long a drainer waits for a daemon that does not serve its process
+/// to hand it the queue.
+const HANDOVER_WAIT: Duration = Duration::from_secs(60);
+
 /// `axil hook drain`: run the queued hook writes in order, one drainer at a
-/// time. Every enqueue starts one detached; a drainer that finds the lock
-/// held exits at once, since the running one will reach the new job.
+/// time. A hook starts one detached when the database's daemon does not
+/// drain the queue for it. One that finds the lock held exits at once,
+/// since the running one will reach the new job; except that a daemon that
+/// does not serve this process leaves this process's jobs to it, so it
+/// waits for the daemon to let go of the queue.
 pub(crate) fn drain(db: &Path) -> Result<i32> {
     let exe = std::env::current_exe()?;
     let dir = queue_dir(db);
+    #[cfg(unix)]
+    let handed_over = match crate::daemon::client::queue_served(db) {
+        Some(true) if crate::daemon::client::poke(db) => return Ok(0),
+        Some(false) => Some(Instant::now() + HANDOVER_WAIT),
+        _ => None,
+    };
+    #[cfg(not(unix))]
+    let handed_over: Option<Instant> = None;
     let mut runner = SubprocessRunner::new(&exe, db);
     loop {
-        let Some(lock) = DrainLock::acquire(&dir) else {
+        let lock = DrainLock::acquire(&dir).or_else(|| {
+            let until = handed_over?;
+            wait_for_handover(&dir, until)
+        });
+        let Some(lock) = lock else {
             return Ok(0);
         };
         set_aside_interrupted(&dir);
@@ -2346,6 +2390,42 @@ pub(crate) fn drain(db: &Path) -> Result<i32> {
             return Ok(0);
         }
     }
+}
+
+/// The queue, once a daemon that does not serve this process lets go of it
+/// to run the jobs left for this process's drainer: `None` once none is
+/// left, or at `until`.
+fn wait_for_handover(dir: &Path, until: Instant) -> Option<DrainLock> {
+    loop {
+        if !queue_files(dir, "job").iter().any(|j| for_own_drainer(j)) {
+            return None;
+        }
+        if Instant::now() >= until {
+            drain_log(
+                dir,
+                "the daemon did not hand over the queue; leaving the jobs to it",
+            );
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        if let Some(lock) = DrainLock::acquire(dir) {
+            return Some(lock);
+        }
+    }
+}
+
+/// Whether the queued job at `path` is for a drainer of its hook's own
+/// (see [`Job`]).
+fn for_own_drainer(path: &Path) -> bool {
+    #[derive(Deserialize)]
+    struct Flag {
+        #[serde(default)]
+        own_drainer: bool,
+    }
+    std::fs::read(path)
+        .ok()
+        .and_then(|body| serde_json::from_slice::<Flag>(&body).ok())
+        .is_some_and(|flag| flag.own_drainer)
 }
 
 /// `hook-queue/drain.lock`, held by an OS file lock on the open handle.
@@ -5510,5 +5590,61 @@ mod tests {
         assert!(queue.join("interrupted/1-a.running").is_file());
         assert_eq!(next_job(&queue), Some(queue.join("2-b.job")));
         assert!(queue_files(&queue, "running").is_empty());
+    }
+
+    /// A job queued by a hook the database's daemon does not serve says so
+    /// in its file, and still reads as the job it is for a drainer that
+    /// ignores the mark.
+    #[test]
+    fn a_job_for_its_hooks_own_drainer_is_marked() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("memory.axil");
+        let queue = queue_dir(&db);
+        let job = Job::axil(&["store", "decisions", "{}"], None);
+        assert!(write_job(&db, &job, true));
+        assert!(write_job(&db, &job, false));
+        let files = queue_files(&queue, "job");
+        assert_eq!(files.len(), 2);
+        assert_eq!(files.iter().filter(|f| for_own_drainer(f)).count(), 1);
+        for file in &files {
+            let read: Job = serde_json::from_slice(&std::fs::read(file).unwrap()).unwrap();
+            assert_eq!(read, job);
+        }
+    }
+
+    /// A drainer whose jobs the daemon leaves to it waits for the queue to
+    /// be let go of, and gives up once none of those jobs is left, or at
+    /// its deadline.
+    #[test]
+    fn a_drainer_waits_for_the_queue_to_be_handed_over() {
+        let _serial = drain_lock_serial();
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("memory.axil");
+        let queue = queue_dir(&db);
+        let job = Job::axil(&["store", "decisions", "{}"], None);
+        assert!(write_job(&db, &job, false));
+        let held = DrainLock::acquire(&queue).expect("free lock");
+        let later = Instant::now() + Duration::from_secs(10);
+        assert!(
+            wait_for_handover(&queue, later).is_none(),
+            "none of its jobs queued: nothing to wait for"
+        );
+
+        assert!(write_job(&db, &job, true));
+        let started = Instant::now();
+        let deadline = started + Duration::from_millis(300);
+        assert!(wait_for_handover(&queue, deadline).is_none());
+        assert!(started.elapsed() >= Duration::from_millis(300));
+        let log = std::fs::read_to_string(queue.join("drain.log")).unwrap();
+        assert!(log.contains("did not hand over the queue"), "{log}");
+
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            drop(held);
+        });
+        let later = Instant::now() + Duration::from_secs(10);
+        let taken = wait_for_handover(&queue, later);
+        release.join().unwrap();
+        assert!(taken.is_some(), "the queue let go of is taken");
     }
 }

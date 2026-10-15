@@ -129,8 +129,14 @@ pub enum Op {
     /// without running anything: answered by
     /// `{"op":"check","mismatch":null}`, or by what does not match
     /// (`proto`, `build`, `features` or `env`). `daemon start` and `status`
-    /// ask it for the shell they run in.
+    /// ask it for the shell they run in, and a hook before it queues a
+    /// write.
     Check(RunHeader),
+    /// A job was queued: the daemon's drain thread looks at the queue now
+    /// rather than at its next poll. Answered by `{"op":"poke","ok":true}`
+    /// when the daemon drains the queue, `"ok":false` when it is shutting
+    /// down.
+    Poke,
     /// Debug builds only: report the graph as failed to load, so a test can
     /// watch the daemon reload. Answered by `{"op":"debug_fail_graph","ok":true}`.
     #[cfg(debug_assertions)]
