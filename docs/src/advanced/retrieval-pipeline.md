@@ -82,10 +82,16 @@ boosting. Phase 4 added fuzzy matching, snippets, and field scoping.
 graph on every search), and the HNSW graph above that.
 The query is either a pre-embedded `&[f32]` or text that the configured
 embedder converts. Default embedder is BGE-small-en-v1.5; its int8 export,
-BGE-base, nomic, and gte-modernbert are also registered. Query text is
-embedded on the embedder's query side (`TextEmbedder::embed_query`) and
-stored text on its passage side, so a model trained with separate prompts
-for each can use them.
+BGE-base, nomic, and gte-modernbert are also registered, and granite-small
+as an experiment. Granite is 384-d like the default, so a switch between them
+is not detected and needs every vector rebuilt, and the 0.65 and 0.92
+similarity thresholds were tuned on bge-small while granite's same-table
+cosines run higher (median 0.80 against 0.66,
+`benchmarks/results/embedding-model-ab-2026-10-15.json`); see
+[Embedding models](../getting-started/installation.md#granite-small-is-experimental).
+Query text is embedded on the embedder's query side
+(`TextEmbedder::embed_query`) and stored text on its passage side, so a
+model trained with separate prompts for each can use them.
 
 **Cascade skip rule**: vector search is skipped when FTS already returned
 a high-confidence top hit (score > 0.95). This is the most common reason

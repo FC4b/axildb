@@ -46,6 +46,16 @@ model = "gpt-4o-mini"
 | `database.path` | string | `./memory.axil` | Default database path |
 | `database.embedding_model` | string | `bge-small-en-v1.5` | ONNX embedding model; the vector dimensions follow from it |
 
+The registered models are listed under
+[Embedding models](installation.md#embedding-models). `granite-small`
+(`granite-embedding-small-english-r2`) is experimental, and the default stays
+`bge-small-en-v1.5`. Granite is 384-d like bge-small, so a switch between the
+two is not detected: rebuild every vector after switching. The 0.65
+conflict-candidate floor and the 0.92 `healing.supersede_similarity_threshold`
+were tuned on bge-small, and granite's same-table cosines run higher (median
+0.80 against 0.66 on Axil's own project memory,
+`benchmarks/results/embedding-model-ab-2026-10-15.json`).
+
 ### Runtime
 
 | Key | Type | Default | Description |

@@ -1947,7 +1947,8 @@ enum Command {
     #[cfg(feature = "vector")]
     ModelDownload {
         /// Model name: bge-small, bge-small-int8, bge-base, nomic, bge-m3,
-        /// gte-modernbert-base, or granite-small (granite-embedding-small-english-r2).
+        /// gte-modernbert-base, or granite-small (granite-embedding-small-english-r2,
+        /// experimental).
         #[arg(default_value = "bge-small")]
         model: String,
     },
@@ -1971,7 +1972,8 @@ enum Command {
     #[cfg(feature = "embed")]
     Reembed {
         /// Model name: bge-small, bge-small-int8, bge-base, nomic, bge-m3,
-        /// gte-modernbert-base, granite-small, or a registered custom model.
+        /// gte-modernbert-base, granite-small (experimental), or a registered
+        /// custom model.
         #[arg(long, default_value = "bge-small")]
         model: String,
         /// Record field to embed (must be a string field present on all records).

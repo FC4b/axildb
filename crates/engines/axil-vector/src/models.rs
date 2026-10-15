@@ -44,6 +44,12 @@ pub enum EmbeddingModel {
     /// query or document prompt. Same width as bge-small, so a store embedded
     /// with one opens under the other without a dimension error: switching
     /// between them needs a re-embed all the same.
+    ///
+    /// Experimental; bge-small remains the default. The supersede (0.92) and
+    /// conflict-candidate (0.65) cosine thresholds were tuned on bge-small, and
+    /// granite's same-table cosines run higher: median 0.80 against 0.66 on
+    /// Axil's own project memory
+    /// (`benchmarks/results/embedding-model-ab-2026-10-15.json`).
     GraniteSmallR2,
     /// User-provided ONNX model.
     Custom {

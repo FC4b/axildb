@@ -195,6 +195,37 @@ Available models:
 | `bge-small-en-v1.5` | 384 | 128 MB | Good (default) |
 | `bge-base-en-v1.5` | 768 | 416 MB | Better |
 | `nomic-embed-text-v1.5` | 768 | 523 MB | Best |
+| `granite-embedding-small-english-r2` (`granite-small`) | 384 | 188 MB | Experimental, see below |
+
+The model is set with `[database] embedding_model` in `axil.toml`
+(see [Configuration](configuration.md)).
+
+### granite-small is experimental
+
+`granite-embedding-small-english-r2` is registered so it can be measured
+against the default, not as a recommendation. The default stays
+`bge-small-en-v1.5`. Before switching to granite, know two things:
+
+- **A switch between granite and bge-small is not detected.** Both write
+  384-dimension vectors, so a store embedded with one opens under the other
+  with no error, and recall then compares vectors from two different models.
+  After switching in either direction, rebuild every vector: move the
+  `.axil.vec` file to another directory, then run `axil init` and
+  `axil heal --reindex` (see
+  [A damaged vector store](../cli/diagnostics.md#a-damaged-vector-store)).
+  That route leaves code-index and dependency-doc rows without vectors;
+  [`axil heal --embed-internal`](../cli/diagnostics.md#heal) embeds them.
+- **The similarity thresholds were tuned on bge-small.** The 0.92
+  auto-supersede threshold (`[healing] supersede_similarity_threshold`) and
+  the 0.65 floor for possible-conflict candidates are absolute cosines set with
+  bge-small. granite places records much closer together: across the 8,035
+  same-table memory pairs of Axil's own project memory, the median cosine is
+  0.80 under granite against 0.66 under bge-small, every pair clears 0.65, and
+  1.8x as many pairs clear 0.92
+  (`benchmarks/results/embedding-model-ab-2026-10-15.json`,
+  `same_table_memory_pair_cosines`). Under granite the 0.65 floor stops
+  filtering conflict candidates, and the 0.92 threshold treats more pairs as
+  near-duplicates; neither has been re-tuned for it.
 
 ## Windows + ONNX
 
