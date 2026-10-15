@@ -40,7 +40,8 @@ holding a lease, and the state of the engines and the graph.
 A hot command typed with a daemon running goes to it: `axil` sends the
 command line, its working directory and, for a command that reads it, its
 stdin (`store <table> -`, `checkpoint -`, `checkpoint` with input piped), and
-prints what the daemon's run printed, exiting with its code. Nothing reaches
+prints what the daemon's run printed, exiting with its code. A command given
+more than 32 MiB of stdin runs in its own process instead. Nothing reaches
 the daemon with `AXIL_DAEMON=off`, or when no database is found from the
 working directory or `--db`. When the daemon doesn't run the command (no
 daemon, another build, a command or store it lacks), the command runs in the

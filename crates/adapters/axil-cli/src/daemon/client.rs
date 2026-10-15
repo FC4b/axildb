@@ -273,8 +273,15 @@ pub fn forward_cli(cli: &Cli) -> Option<i32> {
     let argv: Vec<String> = std::env::args_os()
         .map(|arg| arg.into_string().ok())
         .collect::<Option<_>>()?;
-    let stdin = if control::reads_stdin(&argv) && !cli_io::stdin_is_terminal() {
-        Some(cli_io::read_stdin_ahead().ok()?)
+    let stdin = if control::reads_stdin(&cli.command) && !cli_io::stdin_is_terminal() {
+        let bytes = cli_io::read_stdin_ahead(proto::MAX_FRAME).ok()?;
+        if bytes.len() > proto::MAX_FRAME {
+            // More than a request carries: the command runs here, on all of
+            // it.
+            cli_io::put_back_stdin(bytes);
+            return None;
+        }
+        Some(bytes)
     } else {
         None
     };
@@ -572,6 +579,38 @@ mod tests {
         }
         let (_tmp, db, _run) = new_db();
         assert_eq!(forward_lookup(&db, &["boot"], far()), None);
+    }
+
+    /// Stdin is read ahead only for a command that reads it: `store` given
+    /// `-`, and `checkpoint` given `-` or no JSON; not for a `-` another
+    /// argument happens to be.
+    #[test]
+    fn stdin_is_read_ahead_only_for_a_command_that_reads_it() {
+        use clap::Parser;
+        // Parsed on a stack as large as the CLI's own.
+        let reads = |args: &[&str]| {
+            let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+            thread::Builder::new()
+                .stack_size(32 * 1024 * 1024)
+                .spawn(move || {
+                    let cli = crate::Cli::try_parse_from(args).unwrap();
+                    control::reads_stdin(&cli.command)
+                })
+                .unwrap()
+                .join()
+                .unwrap()
+        };
+        assert!(reads(&["axil", "store", "decisions", "-"]));
+        assert!(!reads(&["axil", "store", "decisions", "{}"]));
+        assert!(!reads(&["axil", "get", "-"]));
+        assert!(!reads(&["axil", "list", "-"]));
+        assert!(!reads(&["axil", "boot"]));
+        if cfg!(feature = "checkpoint") {
+            assert!(reads(&["axil", "checkpoint"]));
+            assert!(reads(&["axil", "checkpoint", "-"]));
+            assert!(!reads(&["axil", "checkpoint", "{}"]));
+            assert!(!reads(&["axil", "checkpoint", "show"]));
+        }
     }
 
     /// A deadline far enough off not to matter.

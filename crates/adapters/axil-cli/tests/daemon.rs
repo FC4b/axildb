@@ -1290,6 +1290,47 @@ fn a_lost_connection_fails_a_write_and_runs_a_read_here() {
     assert!(!text(&off.stdout).contains("lost on the way"));
 }
 
+/// Stdin over what a request can carry is not sent, nor read to its end
+/// first: the command runs here, on all of it, as it does with no daemon.
+/// Here stdin never ends, and the command stops reading at its own limit.
+#[test]
+fn stdin_over_what_a_request_carries_runs_the_command_here() {
+    let fx = fixture();
+    let store = |fx: &Fixture| {
+        let mut cmd = Command::new(BIN);
+        cmd.args(["store", "decisions", "-"])
+            .current_dir(&fx.proj)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        for name in ENV {
+            cmd.env_remove(name);
+        }
+        let mut child = cmd.spawn().unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        let writer = std::thread::spawn(move || {
+            let chunk = vec![b' '; 1 << 20];
+            while stdin.write_all(&chunk).is_ok() {}
+        });
+        let done = wait_for(Duration::from_secs(120), || {
+            child.try_wait().unwrap().is_some()
+        });
+        if !done {
+            let _ = child.kill();
+        }
+        let out = child.wait_with_output().unwrap();
+        assert!(done, "still reading stdin: {}", text(&out.stderr));
+        writer.join().unwrap();
+        (out.status.code(), text(&out.stderr))
+    };
+    let alone = store(&fx);
+    assert!(alone.1.contains("exceeds"), "{alone:?}");
+    fx.start();
+    assert_eq!(store(&fx), alone);
+    let ops = &fx.live()["ops"];
+    assert!(ops["store"].is_null(), "{ops}");
+}
+
 /// Output too large to send back: the daemon ran the command, so a write is
 /// not run again, and says so; a read runs here.
 #[test]

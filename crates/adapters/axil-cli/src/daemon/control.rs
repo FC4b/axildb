@@ -578,29 +578,31 @@ fn logs(db: &Path, lines: usize) -> Result<i32> {
     Ok(EXIT_OK)
 }
 
-/// Whether the command line `argv` reads stdin, as the command would:
-/// one with a `-` argument (`store <table> -`, `checkpoint -`), or a
-/// `checkpoint` given no JSON. Another leaves stdin be.
-pub fn reads_stdin(argv: &[String]) -> bool {
-    if argv.iter().any(|a| a == "-") {
-        return true;
+/// Whether `command` reads stdin when it is piped: `store <table> -`, and
+/// `checkpoint` given `-` or no JSON. Another hot command leaves stdin be.
+pub fn reads_stdin(command: &crate::Command) -> bool {
+    match command {
+        crate::Command::Store { json_data, .. } => json_data == "-",
+        #[cfg(feature = "checkpoint")]
+        crate::Command::Checkpoint { arg, .. } => matches!(arg.as_deref(), None | Some("-")),
+        _ => false,
     }
-    #[cfg(feature = "checkpoint")]
-    {
-        use clap::Parser;
-        if let Ok(cli) = crate::Cli::try_parse_from(argv) {
-            return matches!(cli.command, crate::Command::Checkpoint { arg: None, .. });
-        }
-    }
-    false
 }
 
 fn send(db: &Path, args: Vec<String>) -> Result<i32> {
     let (_, run) = run_dir(db)?;
     let identity = Identity::current()?;
     let argv: Vec<String> = std::iter::once("axil".to_string()).chain(args).collect();
-    let stdin = if reads_stdin(&argv) && !cli_io::stdin_is_terminal() {
-        Some(cli_io::read_stdin(u64::MAX)?.into_bytes())
+    let reads = {
+        use clap::Parser;
+        crate::Cli::try_parse_from(&argv).is_ok_and(|cli| reads_stdin(&cli.command))
+    };
+    let stdin = if reads && !cli_io::stdin_is_terminal() {
+        let bytes = cli_io::read_stdin_ahead(proto::MAX_FRAME)?;
+        if bytes.len() > proto::MAX_FRAME {
+            anyhow::bail!("stdin is over the 32 MiB a request can carry");
+        }
+        Some(bytes)
     } else {
         None
     };

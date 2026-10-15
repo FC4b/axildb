@@ -311,34 +311,60 @@ fn take_request_stdin(limit: u64) -> Option<Vec<u8>> {
 /// `io::stdin().take(limit).read_to_string(..)`, with the same errors
 /// (invalid UTF-8 is `InvalidData`) when the bytes come from a request.
 pub fn read_stdin(limit: u64) -> io::Result<String> {
+    read_stdin_or(limit, io::stdin)
+}
+
+/// [`read_stdin`], with `process` giving the process's stdin. Stdin read
+/// ahead is read first, then the rest of the process's.
+fn read_stdin_or<R: Read>(limit: u64, process: impl FnOnce() -> R) -> io::Result<String> {
     let mut buf = String::new();
-    match take_request_stdin(limit).or_else(|| take_read_ahead(limit)) {
+    match take_request_stdin(limit) {
         Some(bytes) => bytes.as_slice().read_to_string(&mut buf)?,
-        None => io::stdin().take(limit).read_to_string(&mut buf)?,
+        None => match take_read_ahead(limit) {
+            Some(bytes) => {
+                let left = limit.saturating_sub(bytes.len() as u64);
+                bytes
+                    .as_slice()
+                    .chain(process().take(left))
+                    .read_to_string(&mut buf)?
+            }
+            None => process().take(limit).read_to_string(&mut buf)?,
+        },
     };
     Ok(buf)
 }
 
 /// Stdin as a buffered reader, for input consumed as a stream.
 pub fn stdin_reader() -> Box<dyn io::BufRead> {
-    match take_request_stdin(u64::MAX).or_else(|| take_read_ahead(u64::MAX)) {
-        Some(bytes) => Box::new(io::Cursor::new(bytes)),
-        None => Box::new(io::stdin().lock()),
+    stdin_reader_or(|| io::stdin().lock())
+}
+
+/// [`stdin_reader`], with `process` giving the process's stdin.
+fn stdin_reader_or<R: io::BufRead + 'static>(process: impl FnOnce() -> R) -> Box<dyn io::BufRead> {
+    if let Some(bytes) = take_request_stdin(u64::MAX) {
+        return Box::new(io::Cursor::new(bytes));
+    }
+    match take_read_ahead(u64::MAX) {
+        Some(bytes) => Box::new(io::Cursor::new(bytes).chain(process())),
+        None => Box::new(process()),
     }
 }
 
-/// Read the process's stdin to its end, to send to the database's daemon.
+/// Read the process's stdin to its end, to send to the database's daemon,
+/// but no more than `cap` bytes and one: more than `cap` shows as more.
 /// Should the daemon not run the command, [`put_back_stdin`] hands the bytes
 /// to the command.
 #[cfg(unix)]
-pub fn read_stdin_ahead() -> io::Result<Vec<u8>> {
+pub fn read_stdin_ahead(cap: usize) -> io::Result<Vec<u8>> {
     let mut bytes = Vec::new();
-    io::stdin().read_to_end(&mut bytes)?;
+    io::stdin()
+        .take(u64::try_from(cap).unwrap_or(u64::MAX).saturating_add(1))
+        .read_to_end(&mut bytes)?;
     Ok(bytes)
 }
 
 /// Give back stdin [`read_stdin_ahead`] read: the command reads these bytes,
-/// and then the end of stdin, as if nothing had been read ahead.
+/// and then the rest of stdin, as if nothing had been read ahead.
 #[cfg(unix)]
 pub fn put_back_stdin(bytes: Vec<u8>) {
     *READ_AHEAD.lock().unwrap_or_else(PoisonError::into_inner) = Some(bytes);
@@ -753,16 +779,29 @@ pub(crate) mod tests {
     }
 
     /// Stdin read ahead for the database's daemon and given back is what
-    /// the command reads, by either reader, and then its end.
+    /// the command reads, by either reader, and then the rest of the
+    /// process's stdin, which was not read ahead.
     #[cfg(unix)]
     #[test]
     fn stdin_given_back_is_read_before_the_process_stdin() {
+        let process = |rest: &'static str| move || io::Cursor::new(rest.as_bytes());
         put_back_stdin(b"abc".to_vec());
-        assert_eq!(read_stdin(2).unwrap(), "ab");
+        assert_eq!(read_stdin_or(2, process("")).unwrap(), "ab");
         let mut rest = String::new();
-        stdin_reader().read_to_string(&mut rest).unwrap();
+        stdin_reader_or(process(""))
+            .read_to_string(&mut rest)
+            .unwrap();
         assert_eq!(rest, "c");
-        assert_eq!(read_stdin(u64::MAX).unwrap(), "");
+        assert_eq!(read_stdin_or(u64::MAX, process("")).unwrap(), "");
+
+        put_back_stdin(b"abc".to_vec());
+        assert_eq!(read_stdin_or(5, process("def")).unwrap(), "abcde");
+        put_back_stdin(b"abc".to_vec());
+        let mut all = String::new();
+        stdin_reader_or(process("def"))
+            .read_to_string(&mut all)
+            .unwrap();
+        assert_eq!(all, "abcdef");
         *READ_AHEAD.lock().unwrap() = None;
     }
 
