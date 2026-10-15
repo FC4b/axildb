@@ -173,8 +173,11 @@ algorithmic patterns. `recency_decay` is a true half-life exponential
 (0.5 at the configured half-life). `keyword_overlap` uses overlapping
 1600-char windows with 400-char stride so long records aren't penalized
 for keyword sparsity. `graph_proximity` counts only when the query names an
-entity (a backticked or quoted name, a path, a CamelCase or snake_case
-identifier) that the candidate is linked to. It then scores the candidate's links to the ten
+entity that the candidate is linked to: one entity extraction finds in the
+query (a backticked name, a path or file name, a command or flag, a
+CamelCase, snake_case or ALL_CAPS identifier). Quoted phrases are not
+entities, and the product and dependency names insert also finds are not
+looked for in the query. It then scores the candidate's links to the ten
 candidates closest to the query by vector, `links / sqrt(degree × 10)`, so a
 hub linked to everything does not outscore a record whose few links all land
 on those seeds.
