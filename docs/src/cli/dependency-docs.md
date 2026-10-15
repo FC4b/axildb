@@ -174,7 +174,7 @@ captured (`migrations`) and how many doc diffs it recorded
 
 | Table | Holds |
 |-------|-------|
-| `_dep_manifests` | One row per detected manifest; content hashes for drift detection. |
+| `_dep_manifests` | One row per detected manifest, keyed by its resolved absolute path; content hashes for drift detection. A row stored under an older relative path still counts and is replaced on the next sync. |
 | `_deps` | One row per resolved dependency — name, version, ecosystem, chunk count. |
 | `_dep_docs` | One row per doc chunk — embedded and full-text indexed. |
 

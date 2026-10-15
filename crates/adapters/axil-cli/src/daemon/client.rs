@@ -44,7 +44,11 @@ use crate::Cli;
 /// or has every request slot taken, before it runs the command itself.
 const CLI_STARTING_WAIT: Duration = Duration::from_secs(10);
 
-/// How long the CLI waits for the answer to a command the daemon runs.
+/// How long the daemon may take to start a command the CLI sent, waiting
+/// for the writer lock behind other writes, say; past it the daemon answers
+/// that it expired, and has not run it. A read is given up on then too, and
+/// runs in the CLI's own process; a write, which may have started, is
+/// waited for however long it runs.
 const CLI_ANSWER_WAIT: Duration = Duration::from_secs(300);
 
 /// How long a hook's lookup may take: what the hook waits for the child
@@ -112,6 +116,14 @@ pub struct Opts {
     /// When the answer must be in by, all tries included: no try's
     /// deadline runs past it.
     pub until: Option<Instant>,
+    /// With no `deadline`: how long the daemon may take to start the
+    /// command ([`CLI_ANSWER_WAIT`] for the CLI), past which it answers
+    /// `expired` without running it. A read's answer is given up on then.
+    pub start_wait: Duration,
+    /// The command writes. With no `deadline`, its answer is then waited
+    /// for however long it runs, once the daemon has it: a client that gave
+    /// up could not tell whether it ran.
+    pub writes: bool,
 }
 
 /// This process's identity, worked out once.
@@ -172,7 +184,7 @@ pub fn forward(
                 Some(opts.deadline.map_or(left, |d| d.min(left)))
             }
         };
-        match ask(&run, &mut header, stdin.as_deref(), deadline) {
+        match ask(&run, &mut header, stdin.as_deref(), deadline, opts) {
             Ask::Again(reply) if Instant::now() + RETRY_EVERY < retry_until => {
                 last = Some(reply);
                 thread::sleep(RETRY_EVERY);
@@ -202,15 +214,19 @@ enum Ask {
     Done(Forwarded),
 }
 
-/// One try: connect, send, read the answer.
+/// One try: connect, send, read the answer. With no `deadline`, the
+/// daemon is given [`Opts::start_wait`] to start the command, and a write's
+/// answer is waited for without a limit (see [`Opts::writes`]).
 fn ask(
     run: &RunDir,
     header: &mut RunHeader,
     stdin: Option<&[u8]>,
     deadline: Option<Duration>,
+    opts: &Opts,
 ) -> Ask {
-    header.deadline_ms = deadline.map(|d| epoch_ms() + u64::try_from(d.as_millis()).unwrap_or(0));
-    let wait = deadline.map_or(CLI_ANSWER_WAIT, |d| d + ANSWER_SLACK);
+    let start_by = deadline.unwrap_or(opts.start_wait);
+    header.deadline_ms = Some(epoch_ms() + u64::try_from(start_by.as_millis()).unwrap_or(0));
+    let wait = start_by + ANSWER_SLACK;
     // A socket nobody listens on, or one not to be trusted: the command
     // runs here, and its open says what is wrong when anything is.
     let Ok(mut stream) = proto::connect(run.socket(), wait) else {
@@ -220,6 +236,11 @@ fn ask(
         .and_then(|()| stdin.map_or(Ok(()), |bytes| proto::write_frame(&mut stream, bytes)));
     if sent.is_err() {
         return Ask::Done(Forwarded::Lost { sent: false });
+    }
+    // The daemon answers `expired` for a write it has not started by then,
+    // and otherwise once the write is done, however long that takes.
+    if deadline.is_none() && opts.writes && stream.set_read_timeout(None).is_err() {
+        return Ask::Done(Forwarded::Lost { sent: true });
     }
     let Ok(reply) = proto::read_json::<RunReply>(&mut stream) else {
         return Ask::Done(Forwarded::Lost { sent: true });
@@ -293,6 +314,8 @@ pub fn forward_cli(cli: &Cli) -> Option<i32> {
         deadline: None,
         starting_wait: CLI_STARTING_WAIT,
         until: None,
+        start_wait: CLI_ANSWER_WAIT,
+        writes: exec::writes(&cli.command),
     };
     match forward(&db, argv, &cwd, stdin.clone(), &opts) {
         Forwarded::Served {
@@ -327,6 +350,38 @@ fn write_unknown(why: &'static str) -> Option<i32> {
     Some(crate::EXIT_ERROR)
 }
 
+/// How long a hook waits for the daemon's answer about the queue.
+const QUEUE_ASK_WAIT: Duration = Duration::from_millis(500);
+
+/// Whether the daemon of the database at `db` runs the writes this process
+/// queues: `Some(true)` when it would serve this process's commands (see
+/// [`Identity::mismatch`]), `Some(false)` when a daemon answers that would
+/// not, `None` when none answers or `AXIL_DAEMON` is `off`. A daemon drains
+/// the queue only for a process it serves; it leaves the jobs of another to
+/// that process's own drainer.
+pub fn queue_served(db: &Path) -> Option<bool> {
+    if control::mode() == Mode::Off || !may_have_daemon(db) {
+        return None;
+    }
+    let run = RunDir::of(&cli_io::db_key(db).ok()?);
+    let cwd = std::env::current_dir().ok()?;
+    let header = identity()?.header(vec!["axil".to_string()], &cwd, false);
+    let answer: serde_json::Value =
+        proto::call(run.socket(), &proto::Op::Check(header), QUEUE_ASK_WAIT).ok()?;
+    (answer["op"] == "check").then(|| answer["mismatch"].is_null())
+}
+
+/// Tell the daemon of the database at `db` that a job was queued. True when
+/// it said it drains the queue.
+pub fn poke(db: &Path) -> bool {
+    let Ok(key) = cli_io::db_key(db) else {
+        return false;
+    };
+    let answer: Result<serde_json::Value, _> =
+        proto::call(RunDir::of(&key).socket(), &proto::Op::Poke, QUEUE_ASK_WAIT);
+    answer.is_ok_and(|a| a["op"] == "poke" && a["ok"] == true)
+}
+
 /// A hook's lookup `args` (`recall …`, `boot …`), on the database at `db`:
 /// `Some` with what the daemon's run answered (`Some(stdout)` when it ran
 /// and exited 0, `None` for no context), `None` when the hook is to run the
@@ -358,6 +413,8 @@ pub fn forward_lookup(db: &Path, args: &[&str], until: Instant) -> Option<Option
         deadline: Some(deadline),
         starting_wait,
         until: Some(until),
+        start_wait: CLI_ANSWER_WAIT,
+        writes: false,
     };
     match forward(db, argv, &cwd, None, &opts) {
         Forwarded::Served {
@@ -401,6 +458,8 @@ mod tests {
         Hang,
         /// Read the request, and say nothing for a long while.
         Stall,
+        /// Read the request, and answer this after so long.
+        Late(Duration, RunReply, Vec<u8>),
     }
 
     /// A daemon on `run`'s socket answering its connections in turn, the
@@ -419,14 +478,21 @@ mod tests {
                     let _ = proto::read_frame(&mut stream);
                 }
                 seen.lock().unwrap().push(header);
+                let answer = |mut stream: std::os::unix::net::UnixStream, reply, out: Vec<u8>| {
+                    let served = matches!(reply, RunReply::Served { .. });
+                    let _ = proto::write_json(&mut stream, &reply);
+                    if served {
+                        let _ = proto::write_frame(&mut stream, &out);
+                        let _ = proto::write_frame(&mut stream, b"");
+                    }
+                };
                 match answers[n.min(answers.len() - 1)].clone() {
-                    Then::Reply(reply, out) => {
-                        let served = matches!(reply, RunReply::Served { .. });
-                        proto::write_json(&mut stream, &reply).unwrap();
-                        if served {
-                            proto::write_frame(&mut stream, &out).unwrap();
-                            proto::write_frame(&mut stream, b"").unwrap();
-                        }
+                    Then::Reply(reply, out) => answer(stream, reply, out),
+                    Then::Late(after, reply, out) => {
+                        thread::spawn(move || {
+                            thread::sleep(after);
+                            answer(stream, reply, out);
+                        });
                     }
                     Then::Hang => drop(stream),
                     Then::Stall => {
@@ -451,6 +517,8 @@ mod tests {
             deadline: None,
             starting_wait: Duration::from_secs(5),
             until: None,
+            start_wait: CLI_ANSWER_WAIT,
+            writes: false,
         }
     }
 
@@ -525,6 +593,8 @@ mod tests {
             deadline: Some(Duration::from_secs(2)),
             starting_wait: Duration::ZERO,
             until: None,
+            start_wait: CLI_ANSWER_WAIT,
+            writes: true,
         };
         let argv = argv(&["axil", "store", "decisions", "-"]);
         let got = forward(&db, argv.clone(), &cwd, Some(b"{}".to_vec()), &opts);
@@ -535,6 +605,46 @@ mod tests {
         assert!(header.has_stdin && !header.slow_query_log);
         let deadline = header.deadline_ms.unwrap();
         assert!(deadline > epoch_ms() && deadline <= epoch_ms() + 2000);
+    }
+
+    /// With no deadline of its own, a request may start within the start
+    /// wait, past which the daemon answers `expired` instead of running
+    /// it. A write is then waited for however long it runs: the client
+    /// can't tell one that started from one that didn't. A read is given
+    /// up on, and runs in the client's own process.
+    #[test]
+    fn a_write_is_waited_for_past_the_start_wait() {
+        let served = RunReply::Served {
+            exit: 0,
+            order: vec![(proto::Stream::Out, 4)],
+        };
+        let cwd = std::env::current_dir().unwrap();
+        let opts = |writes| Opts {
+            start_wait: Duration::from_millis(300),
+            writes,
+            ..cli_opts()
+        };
+        let late = Then::Late(Duration::from_millis(1500), served, b"done".to_vec());
+
+        let (_tmp, db, run) = new_db();
+        let asked = daemon(&run, vec![late.clone()]);
+        let store = argv(&["axil", "store", "decisions", "{}"]);
+        let sent = epoch_ms();
+        let got = forward(&db, store, &cwd, None, &opts(true));
+        assert!(
+            matches!(&got, Forwarded::Served { stdout, .. } if stdout == b"done"),
+            "{got:?}"
+        );
+        let start_by = asked.lock().unwrap().pop().unwrap().deadline_ms.unwrap();
+        assert!(
+            start_by >= sent + 300 && start_by <= epoch_ms(),
+            "{start_by}"
+        );
+
+        let (_tmp, db, run) = new_db();
+        let _asked = daemon(&run, vec![late]);
+        let got = forward(&db, argv(&["axil", "boot"]), &cwd, None, &opts(false));
+        assert_eq!(got, Forwarded::Lost { sent: true });
     }
 
     /// A connection that breaks once the request is out leaves it unknown

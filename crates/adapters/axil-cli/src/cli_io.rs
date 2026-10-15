@@ -1513,6 +1513,17 @@ pub(crate) mod tests {
                     i = j;
                     continue;
                 }
+                // How long the command took.
+                const DURATION: &[u8] = b"\"duration_ms\":";
+                if b[i..].starts_with(DURATION) {
+                    let mut j = i + DURATION.len();
+                    while j < b.len() && (b[j].is_ascii_digit() || b[j] == b'.') {
+                        j += 1;
+                    }
+                    out.push_str("\"duration_ms\":<MS>");
+                    i = j;
+                    continue;
+                }
                 let ch = text[i..].chars().next().unwrap();
                 out.push(ch);
                 i += ch.len_utf8();
@@ -1633,6 +1644,8 @@ pub(crate) mod tests {
         /// errors and help text around them. `db` is the work copy's
         /// database and `auth_rs` a file in its project.
         pub(crate) fn matrix(db: &str, auth_rs: &str) -> Vec<Case> {
+            let proj = Path::new(auth_rs).parent().unwrap().parent().unwrap();
+            let proj = proj.to_str().unwrap();
             let cp = r#"{"goal":"parity","state":"fixture built","next_steps":["diff"],"references":[{"kind":"file","ref":"src/auth.rs"}]}"#;
 
             let mut cases = vec![
@@ -1675,6 +1688,57 @@ pub(crate) mod tests {
                     "store stdin empty (Err)",
                     &["--db", db, "store", "context", "-"],
                 ),
+                case(
+                    "auto-capture dry run",
+                    &[
+                        "--db",
+                        db,
+                        "auto-capture",
+                        "Decided to cap login tokens at 512 bytes because of the DoS",
+                        "--dry-run",
+                    ],
+                ),
+                case(
+                    "auto-capture stdin",
+                    &[
+                        "--db",
+                        db,
+                        "auto-capture",
+                        "-",
+                        "--min-confidence",
+                        "0.0",
+                        "--source",
+                        "bash",
+                    ],
+                )
+                .stdin(
+                    b"error[E0425]: cannot find value `timeout_ms` in this scope\n\
+                      Decided to pass the timeout through the session config.",
+                )
+                .volatile(),
+                case(
+                    "extract-entities",
+                    &[
+                        "--db",
+                        db,
+                        "extract-entities",
+                        "validate_token in src/auth.rs uses PlanCache",
+                    ],
+                ),
+                case(
+                    "extract-entities stdin",
+                    &["--db", db, "extract-entities", "-"],
+                )
+                .stdin(b"Fixed the auth timeout in validate_token (src/auth.rs)"),
+                case("worker run", &["--db", db, "worker", "run"]).volatile(),
+                case("beliefs --generate", &["--db", db, "beliefs", "--generate"]).volatile(),
+                case(
+                    "session-heal",
+                    &["--db", db, "session-heal", "--session", "s1"],
+                )
+                .volatile(),
+                case("maintain", &["--db", db, "maintain", "--if-stale"]),
+                case("maintain --dry-run", &["--db", db, "maintain", "--dry-run"]),
                 case("clap usage error", &["store"]),
                 case("clap unknown flag", &["boot", "--bogus"]),
                 case("--help", &["--help"]),
@@ -1716,6 +1780,14 @@ pub(crate) mod tests {
                     &["--db", db, "--format", "table", "recall", "auth timeout"],
                 ));
             }
+            // The fixture has no vector store: the command fails as its
+            // one-shot open does, before it reads the id.
+            if cfg!(all(feature = "embed", feature = "graph")) {
+                cases.push(case(
+                    "auto-link without a vector store",
+                    &["--db", db, "auto-link", "01ZZZZZZZZZZZZZZZZZZZZZZZZ"],
+                ));
+            }
             if cfg!(feature = "indexer") {
                 cases.push(case(
                     "code-search",
@@ -1739,6 +1811,12 @@ pub(crate) mod tests {
             }
             if cfg!(feature = "timeseries") {
                 cases.push(case("since 1h", &["--db", db, "since", "1h"]));
+            }
+            if cfg!(feature = "deps") {
+                cases.push(case(
+                    "deps refresh",
+                    &["--db", db, "deps", "refresh", "--if-stale", "--path", proj],
+                ));
             }
             if cfg!(feature = "checkpoint") {
                 cases.push(case("checkpoint arg", &["--db", db, "checkpoint", cp]).volatile());

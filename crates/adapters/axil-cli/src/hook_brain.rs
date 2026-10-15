@@ -34,7 +34,8 @@
 //!   session end      — queue the session close, clean up
 //!
 //! Hooks never write to the database themselves. Each write becomes a job
-//! file in `<db dir>/hook-queue/` (the intent log) and one detached
+//! file in the database's queue, `<db dir>/hook-queue/` for `memory.axil`
+//! (the intent log; see [`queue_dir`]), and one detached
 //! `axil hook drain` runs them, so a harness timeout can never kill a write
 //! mid-commit. Lookups run with the slow-query log off for the same reason.
 //!
@@ -1339,14 +1340,28 @@ impl HookCtx {
 
     // ── Write queue ───────────────────────────────────────────────────
 
-    /// Queue a database write and make sure a drainer is running. False
-    /// when there is no database or the job file can't be written.
+    /// Queue a database write and make sure something drains the queue: the
+    /// database's daemon, poked, when it serves this process; else a drainer
+    /// started here. False when there is no database or the job file can't
+    /// be written.
     fn enqueue(&self, job: &Job) -> bool {
         let Some(db) = self.db.as_ref() else {
             return false;
         };
-        if !write_job(db, job) {
+        #[cfg(unix)]
+        let served = crate::daemon::client::queue_served(db);
+        #[cfg(not(unix))]
+        let served: Option<bool> = None;
+        // Marked for this process's own drainer unless the daemon said it
+        // serves this process: one that would not, one not asked
+        // (`AXIL_DAEMON=off`) and one that did not answer in time all leave
+        // the job to it.
+        if !write_job(db, job, served != Some(true)) {
             return false;
+        }
+        #[cfg(unix)]
+        if served == Some(true) && crate::daemon::client::poke(db) {
+            return true;
         }
         spawn_drainer(&self.exe, db, &self.project_dir);
         true
@@ -1962,10 +1977,14 @@ impl HookCtx {
         // re-ingest the docs of whatever changed (a no-op when nothing did).
         // Checked before the skip below, which drops lockfiles.
         if is_dependency_manifest(file_path) {
-            self.enqueue(&Job::axil(
-                &["deps", "refresh", "--if-stale", "--quiet"],
-                None,
-            ));
+            // The project named, not the drainer's working directory, which
+            // is the daemon's when the daemon runs the job.
+            let mut args = vec!["deps", "refresh", "--if-stale", "--quiet"];
+            let dir = Some(&self.project_dir).filter(|dir| dir.is_absolute());
+            if let Some(dir) = dir.and_then(|dir| dir.to_str()) {
+                args.extend(["--path", dir]);
+            }
+            self.enqueue(&Job::axil(&args, None).in_deps_env());
         }
         if is_skipped_path(file_path) {
             return Ok(());
@@ -2239,8 +2258,31 @@ fn claude_registers_session_end(project_dir: &Path) -> bool {
 // ── Write queue and drainer ──────────────────────────────────────────
 
 /// How long the drainer waits, in total, for another process to release the
-/// writer lock before giving a job up.
+/// writer lock before giving a job's step up.
 const BUSY_WAIT_MAX: Duration = Duration::from_secs(120);
+
+/// How many times drainers give a job up, the database busy past
+/// [`BUSY_WAIT_MAX`] each time, before the job is set aside instead of
+/// queued again. One give-up is expected: a hook run with `AXIL_DAEMON=off`
+/// leaves its write to its own drainer, which can't open the database the
+/// daemon holds, and the daemon then runs the job. Three mean the database
+/// stayed held, at least 6 minutes in all, through drainers that each found
+/// it busy: whatever holds it is not letting go, and the jobs behind this
+/// one wait for it, so a person should look.
+const BUSY_GIVE_UPS_MAX: u32 = 3;
+
+/// [`BUSY_WAIT_MAX`]; in a debug build, `AXIL_DEBUG_BUSY_WAIT_MS` when set,
+/// so a test can watch a drainer give a step up without waiting minutes.
+fn busy_wait_max() -> Duration {
+    #[cfg(debug_assertions)]
+    if let Some(ms) = std::env::var("AXIL_DEBUG_BUSY_WAIT_MS")
+        .ok()
+        .and_then(|ms| ms.parse().ok())
+    {
+        return Duration::from_millis(ms);
+    }
+    BUSY_WAIT_MAX
+}
 
 /// A drain lock held without an OS lock (an older axil's, or any drainer's
 /// on a filesystem that refuses OS locks) and untouched this long belonged
@@ -2250,7 +2292,8 @@ const DRAIN_LOCK_STALE_SECS: u64 = 30 * 60;
 /// Bound on `drain.log`; past it the log starts over.
 const DRAIN_LOG_MAX_BYTES: u64 = 1_048_576;
 
-/// A database write a hook asked for, run later by `axil hook drain`.
+/// A database write a hook asked for, run later by the database's daemon or
+/// by `axil hook drain`. Its file says more beside it (see [`JobMeta`]).
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "op", rename_all = "snake_case")]
 enum Job {
@@ -2259,6 +2302,13 @@ enum Job {
         args: Vec<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         stdin: Option<String>,
+        /// For a command that reads the [`crate::DEPS_ENV`] variables
+        /// (`deps refresh`): the hook's values of those it had set, so the
+        /// command reads the dependency sources the hook's own run would
+        /// have. `None` (any other job, or one queued before these were
+        /// recorded) runs with the drainer's.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        env: Option<Vec<(String, String)>>,
     },
     /// A session's close: the `_sessions` row and its links, then worker,
     /// beliefs and session-heal.
@@ -2278,25 +2328,224 @@ impl Job {
         Self::Axil {
             args: args.iter().map(|a| a.to_string()).collect(),
             stdin: stdin.map(str::to_string),
+            env: None,
         }
+    }
+
+    /// The same job, with this process's [`crate::DEPS_ENV`] values
+    /// recorded for its command. A value that is not text records none, and
+    /// the job runs with the drainer's.
+    fn in_deps_env(mut self) -> Self {
+        if let Self::Axil { env, .. } = &mut self {
+            *env = crate::DEPS_ENV
+                .iter()
+                .filter_map(|name| Some((name, std::env::var_os(name)?)))
+                .map(|(name, value)| Some((name.to_string(), value.into_string().ok()?)))
+                .collect();
+        }
+        self
     }
 }
 
-/// Hook jobs wait next to the database they change: `<db dir>/hook-queue/`.
-fn queue_dir(db: &Path) -> PathBuf {
-    db.parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join("hook-queue")
+/// What a job file says beside its [`Job`], in fields of its own. A drainer
+/// that doesn't know a field ignores it.
+#[derive(Debug, Default, Serialize, Deserialize, PartialEq)]
+struct JobMeta {
+    /// The file name of the database the job was queued for, such as
+    /// `memory.axil`: a drainer of another database's never runs it. A job
+    /// an older build queued names none (see [`not_this_databases`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    db_file: Option<String>,
+    /// The hook that queued the job was not told the database's daemon
+    /// serves it (the daemon is another build or environment's, was not
+    /// asked with `AXIL_DAEMON=off`, did not answer in time, or there is
+    /// none), so a daemon leaves the job to a drainer of the hook's own.
+    /// Cleared when the job is queued again (see [`requeue_busy`]).
+    /// Drainers from before the daemon ignore it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    own_drainer: bool,
+    /// The job's write steps that ran, each named by its command, whether
+    /// or not it succeeded, before a later step gave up waiting for the
+    /// database: the next drainer starts at the first step not among them,
+    /// and never runs one of them again.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    done: Vec<String>,
+    /// A session close's `_sessions` row, once its store ran: the id the
+    /// steps after it link.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    session_row: Option<String>,
+    /// How many times a drainer gave the job up, the database busy.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    busy_give_ups: u32,
+    /// The step that gave up waiting for the database in this run, if one
+    /// did. Not saved.
+    #[serde(skip)]
+    busy_at: Option<String>,
+}
+
+impl JobMeta {
+    /// Whether the job's step `command` ran in an earlier run of the job.
+    fn did(&self, command: &str) -> bool {
+        self.done.iter().any(|d| d == command)
+    }
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
+}
+
+/// A job file's content: `job`, with `meta`'s fields beside its own.
+fn job_body(job: &Job, meta: &JobMeta) -> serde_json::Result<Vec<u8>> {
+    let mut body = serde_json::to_value(job)?;
+    if let (Some(fields), Value::Object(meta)) = (body.as_object_mut(), serde_json::to_value(meta)?)
+    {
+        fields.extend(meta);
+    }
+    serde_json::to_vec(&body)
+}
+
+/// Give `cmd` the [`crate::DEPS_ENV`] values a job recorded (see
+/// [`Job::Axil`]), unsetting those it had unset; `None` leaves `cmd`'s.
+pub(crate) fn set_deps_env(cmd: &mut Command, env: Option<&[(String, String)]>) {
+    let Some(env) = env else { return };
+    for name in crate::DEPS_ENV {
+        match env.iter().find(|(n, _)| n == name) {
+            Some((_, value)) => cmd.env(name, value),
+            None => cmd.env_remove(name),
+        };
+    }
+}
+
+/// Hook jobs wait next to the database they change, in a queue of its own:
+/// `<db dir>/hook-queue/` for `memory.axil`, `<db dir>/hook-queue.<file>/`
+/// for any other database file, so databases sharing a directory (a
+/// branch, an `AXIL_DB` sibling) never wait behind each other's jobs. Each
+/// job also names its database file, and runs on no other (see
+/// [`not_this_databases`]). `memory.axil` keeps the queue's old name, which
+/// every database in the directory used before: the jobs an earlier build
+/// left there name no database.
+pub(crate) fn queue_dir(db: &Path) -> PathBuf {
+    let dir = db.parent().unwrap_or_else(|| Path::new("."));
+    match db.file_name() {
+        None => dir.join("hook-queue"),
+        Some(name) if name == "memory.axil" => dir.join("hook-queue"),
+        Some(name) => dir.join(format!("hook-queue.{}", name.to_string_lossy())),
+    }
+}
+
+/// The name a job gives the database at `db` (see [`JobMeta::db_file`]).
+fn db_file_name(db: &Path) -> Option<String> {
+    db.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+}
+
+/// Why the job `meta` describes, in `dir`, the queue of the database `db`,
+/// must not run on that database: `None` when it may.
+///
+/// A job runs only on the database file it names. One an older build
+/// queued names none. In `hook-queue/` it may be any database's in the
+/// directory, since before each database file had a queue of its own they
+/// all queued there: it runs on `memory.axil` only while no other database
+/// sits beside it ([`other_databases`]). In any other queue it was queued by
+/// a build that gave each database its own, so it is that database's.
+fn not_this_databases(db: &Path, dir: &Path, meta: &JobMeta) -> Option<String> {
+    let own = db_file_name(db).unwrap_or_default();
+    match &meta.db_file {
+        Some(file) if *file == own => None,
+        Some(file) => Some(format!("it was queued for {file}, not {own}")),
+        None if dir.file_name().is_some_and(|name| name == "hook-queue") => {
+            let others = other_databases(db);
+            (!others.is_empty()).then(|| {
+                format!(
+                    "an older axil queued it without naming its database, which may be any of {own}, {}",
+                    others.join(", ")
+                )
+            })
+        }
+        None => None,
+    }
+}
+
+/// The first bytes of every file redb writes.
+const REDB_MAGIC: [u8; 9] = [b'r', b'e', b'd', b'b', 0x1A, 0x0A, 0xA9, 0x0D, 0x0A];
+
+/// The databases beside the one at `db` in its directory, by file name: a
+/// branch of it (`<db>.branch.<name>`), and any other database, named
+/// `*.axil` or, since `AXIL_DB` may name any file, written by redb. The
+/// files Axil derives from a database's path (its engine companions
+/// `.vec`, `.graph`, `.fts` and `.ts`, a branch's, a branch being made) are
+/// not databases of their own; another database's companions only ever
+/// sit beside that database.
+fn other_databases(db: &Path) -> Vec<String> {
+    let Some(own) = db_file_name(db) else {
+        return Vec::new();
+    };
+    let dir = match db.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir,
+        _ => Path::new("."),
+    };
+    let branch = format!("{own}.branch.");
+    let is_redb = |path: &Path| {
+        let mut head = [0u8; REDB_MAGIC.len()];
+        std::fs::File::open(path)
+            .and_then(|mut file| std::io::Read::read_exact(&mut file, &mut head))
+            .is_ok_and(|()| head == REDB_MAGIC)
+    };
+    let mut others: Vec<String> = std::fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter(|entry| entry.path().is_file())
+                .map(|entry| {
+                    (
+                        entry.file_name().to_string_lossy().into_owned(),
+                        entry.path(),
+                    )
+                })
+                .filter(|(name, path)| {
+                    if *name == own {
+                        false
+                    } else if axil_core::is_database_file_name(&own, name) {
+                        name.strip_prefix(&branch)
+                            .is_some_and(|rest| !rest.is_empty() && !rest.contains('.'))
+                    } else {
+                        name.ends_with(".axil") || is_redb(path)
+                    }
+                })
+                .map(|(name, _)| name)
+                .collect()
+        })
+        .unwrap_or_default();
+    others.sort();
+    others
+}
+
+/// The project the database at `db` belongs to: the directory holding its
+/// `.axil/`, else the database's own directory. A drainer the daemon starts
+/// runs there, as one a hook in the project starts does.
+#[cfg_attr(not(unix), allow(dead_code))] // the daemon's
+pub(crate) fn project_dir_of(db: &Path) -> PathBuf {
+    let dir = db.parent().unwrap_or_else(|| Path::new("."));
+    match (dir.file_name(), dir.parent()) {
+        (Some(name), Some(parent)) if name == ".axil" => parent.to_path_buf(),
+        _ => dir.to_path_buf(),
+    }
 }
 
 /// Write `job` to the queue atomically (temp file, then rename), so the
 /// drainer never reads half a job. Names sort by creation time, which is the
-/// order jobs run in.
-fn write_job(db: &Path, job: &Job) -> bool {
+/// order jobs run in. `own_drainer` marks it for a drainer of this
+/// process's own (see [`JobMeta::own_drainer`]).
+fn write_job(db: &Path, job: &Job, own_drainer: bool) -> bool {
     use std::sync::atomic::{AtomicU32, Ordering};
     static SEQ: AtomicU32 = AtomicU32::new(0);
     let dir = queue_dir(db);
-    let Ok(body) = serde_json::to_vec(job) else {
+    let meta = JobMeta {
+        db_file: db_file_name(db),
+        own_drainer,
+        ..JobMeta::default()
+    };
+    let Ok(body) = job_body(job, &meta) else {
         return false;
     };
     if std::fs::create_dir_all(&dir).is_err() {
@@ -2313,7 +2562,7 @@ fn write_job(db: &Path, job: &Job) -> bool {
         && std::fs::rename(&tmp, dir.join(format!("{name}.job"))).is_ok()
 }
 
-fn spawn_drainer(exe: &Path, db: &Path, cwd: &Path) {
+pub(crate) fn spawn_drainer(exe: &Path, db: &Path, cwd: &Path) {
     let args = [
         "--db".to_string(),
         db.to_string_lossy().into_owned(),
@@ -2323,20 +2572,53 @@ fn spawn_drainer(exe: &Path, db: &Path, cwd: &Path) {
     spawn_detached(exe, &args, cwd, &queue_dir(db).join("drain.log"));
 }
 
+/// How long a drainer waits for a daemon that does not serve its process
+/// to hand it the queue.
+const HANDOVER_WAIT: Duration = Duration::from_secs(60);
+
 /// `axil hook drain`: run the queued hook writes in order, one drainer at a
-/// time. Every enqueue starts one detached; a drainer that finds the lock
-/// held exits at once, since the running one will reach the new job.
+/// time. A hook starts one detached when the database's daemon does not
+/// drain the queue for it. One that finds the lock held exits at once,
+/// since the running one will reach the new job; except that a daemon that
+/// does not serve this process leaves this process's jobs to it, so it
+/// waits for the daemon to let go of the queue.
 pub(crate) fn drain(db: &Path) -> Result<i32> {
     let exe = std::env::current_exe()?;
     let dir = queue_dir(db);
+    #[cfg(unix)]
+    let handed_over = match crate::daemon::client::queue_served(db) {
+        Some(true) if crate::daemon::client::poke(db) => return Ok(0),
+        Some(true) => None,
+        // A daemon that does not serve this process, or was not asked (or
+        // did not answer), and may be draining: it lets go of the queue at
+        // this process's jobs.
+        Some(false) => Some(Instant::now() + HANDOVER_WAIT),
+        None if crate::daemon::client::may_have_daemon(db) => Some(Instant::now() + HANDOVER_WAIT),
+        None => None,
+    };
+    #[cfg(not(unix))]
+    let handed_over: Option<Instant> = None;
+    let mut runner = SubprocessRunner::new(&exe, db);
     loop {
-        let Some(lock) = DrainLock::acquire(&dir) else {
+        let lock = DrainLock::acquire(&dir).or_else(|| {
+            let until = handed_over?;
+            wait_for_handover(&dir, until)
+        });
+        let Some(lock) = lock else {
             return Ok(0);
         };
         set_aside_interrupted(&dir);
         while let Some(job) = next_job(&dir) {
             lock.touch();
-            run_job_file(&exe, db, &dir, &job);
+            let claim = JobClaim::new(&job);
+            let _ = run_job_file(&mut runner, &exe, db, &dir, &claim);
+            // The database stayed busy: the job is queued again, and every
+            // job after it would find the database as busy. Whichever
+            // drainer next finds it free runs them: the daemon, once this
+            // one lets go of the queue, or a later hook's.
+            if claim.state() == Claim::Busy {
+                return Ok(0);
+            }
         }
         drop(lock);
         // A job queued after the last scan but before the lock dropped saw a
@@ -2347,7 +2629,38 @@ pub(crate) fn drain(db: &Path) -> Result<i32> {
     }
 }
 
-/// `hook-queue/drain.lock`, held by an OS file lock on the open handle.
+/// The queue, once a daemon that does not serve this process lets go of it
+/// to run the jobs left for this process's drainer: `None` once none is
+/// left, or at `until`.
+fn wait_for_handover(dir: &Path, until: Instant) -> Option<DrainLock> {
+    loop {
+        if !queue_files(dir, "job").iter().any(|j| for_own_drainer(j)) {
+            return None;
+        }
+        if Instant::now() >= until {
+            drain_log(
+                dir,
+                "the daemon did not hand over the queue; leaving the jobs to it",
+            );
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        if let Some(lock) = DrainLock::acquire(dir) {
+            return Some(lock);
+        }
+    }
+}
+
+/// Whether the queued job at `path` is for a drainer of its hook's own
+/// (see [`JobMeta::own_drainer`]).
+pub(crate) fn for_own_drainer(path: &Path) -> bool {
+    std::fs::read(path)
+        .ok()
+        .and_then(|body| serde_json::from_slice::<JobMeta>(&body).ok())
+        .is_some_and(|meta| meta.own_drainer)
+}
+
+/// The queue's `drain.lock`, held by an OS file lock on the open handle.
 ///
 /// The OS drops that lock when the holder exits by any means, SIGKILL
 /// included, so a dead drainer's lock is free at once, and a live one is
@@ -2375,7 +2688,7 @@ pub(crate) fn drain(db: &Path) -> Result<i32> {
 /// from one thread while another takes or drops this lock, the lock can
 /// outlive the drop by that moment, and a drainer that checks then sees it
 /// held.
-struct DrainLock {
+pub(crate) struct DrainLock {
     path: PathBuf,
     /// The OS-locked handle, or `None` when the lock is held by the file's
     /// existence alone. On Windows it is closed before the file is removed.
@@ -2388,7 +2701,7 @@ struct DrainLock {
 const DRAIN_LOCK_TAG: &str = "flock";
 
 impl DrainLock {
-    fn acquire(dir: &Path) -> Option<Self> {
+    pub(crate) fn acquire(dir: &Path) -> Option<Self> {
         Self::acquire_with(dir, std::fs::File::try_lock)
     }
 
@@ -2474,7 +2787,7 @@ impl DrainLock {
     /// Rewrite the tag and pid, which also refreshes the mtime an older axil
     /// reads as liveness. Without an OS lock it writes the bare pid, the
     /// form every drainer reads as a lock judged by age.
-    fn touch(&self) {
+    pub(crate) fn touch(&self) {
         use std::io::{Seek as _, Write as _};
         let Some(mut file) = self.file.as_ref() else {
             let _ = std::fs::write(&self.path, std::process::id().to_string());
@@ -2615,7 +2928,7 @@ fn queue_files(dir: &Path, ext: &str) -> Vec<PathBuf> {
     files
 }
 
-fn next_job(dir: &Path) -> Option<PathBuf> {
+pub(crate) fn next_job(dir: &Path) -> Option<PathBuf> {
     queue_files(dir, "job").into_iter().next()
 }
 
@@ -2623,24 +2936,28 @@ fn next_job(dir: &Path) -> Option<PathBuf> {
 /// mid-job, so some of its writes may have landed. It is never retried
 /// (that could write twice): it moves to `interrupted/` for a person to
 /// look at.
-fn set_aside_interrupted(dir: &Path) {
+pub(crate) fn set_aside_interrupted(dir: &Path) {
     for path in queue_files(dir, "running") {
-        let dest = dir.join("interrupted");
-        let _ = std::fs::create_dir_all(&dest);
-        if let Some(name) = path.file_name() {
-            let _ = std::fs::rename(&path, dest.join(name));
+        if let Some(name) = set_aside(dir, &path) {
             drain_log(
                 dir,
-                &format!(
-                    "set aside interrupted job {}, not retried",
-                    name.to_string_lossy()
-                ),
+                &format!("set aside interrupted job {name}, not retried"),
             );
         }
     }
 }
 
-fn drain_log(dir: &Path, line: &str) {
+/// Move the queued file at `path` into the queue's `interrupted/`, where no
+/// drainer runs it; its name, when it went.
+fn set_aside(dir: &Path, path: &Path) -> Option<String> {
+    let dest = dir.join("interrupted");
+    let _ = std::fs::create_dir_all(&dest);
+    let name = path.file_name()?;
+    std::fs::rename(path, dest.join(name)).ok()?;
+    Some(name.to_string_lossy().into_owned())
+}
+
+pub(crate) fn drain_log(dir: &Path, line: &str) {
     let path = dir.join("drain.log");
     if std::fs::metadata(&path).is_ok_and(|m| m.len() > DRAIN_LOG_MAX_BYTES) {
         let _ = std::fs::remove_file(&path);
@@ -2648,31 +2965,347 @@ fn drain_log(dir: &Path, line: &str) {
     append_line(&path, &format!("{} {line}", now_iso()));
 }
 
-/// Claim a job (rename to `.running`, the in-flight mark), run it, and
-/// remove it. A failed job is logged and dropped, not retried.
-fn run_job_file(exe: &Path, db: &Path, dir: &Path, job_path: &Path) {
-    let running = job_path.with_extension("running");
-    if std::fs::rename(job_path, &running).is_err() {
-        return;
+/// Where a queued job's run stands: whether a write of it has started.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Claim {
+    /// None has: the file is still `.job`.
+    Waiting,
+    /// One has: the file is `.running`, the in-flight mark.
+    Claimed,
+    /// One was kept from starting, its drainer stopping: the job is left
+    /// queued, whole, for the next drainer.
+    Withheld,
+    /// The file was gone when a write was to start: another drainer has
+    /// it.
+    Lost,
+    /// One gave up waiting for the database, which another process held
+    /// past [`BUSY_WAIT_MAX`]: none starts after it, and the job goes back
+    /// to the queue at that step (see [`requeue_busy`]).
+    Busy,
+}
+
+/// A queued job, claimed lazily: renamed from `.job` to `.running` only as
+/// its first write starts. A drainer stopping (a daemon shutting down)
+/// while the job still waits, for the writer lock or for the database,
+/// leaves it queued whole, rather than marked in flight and so set aside
+/// as interrupted, never run. Once a write has started, the job is in
+/// flight: its drainer runs the rest, and one killed then leaves it
+/// `.running`, never run again. The one way back to the queue is a write
+/// that gives up waiting for the database ([`Claim::Busy`]): its drainer
+/// queues the job again, recording the steps that ran.
+pub(crate) struct JobClaim {
+    job: PathBuf,
+    state: std::sync::Mutex<Claim>,
+}
+
+impl JobClaim {
+    pub(crate) fn new(job: &Path) -> Self {
+        Self {
+            job: job.to_path_buf(),
+            state: std::sync::Mutex::new(Claim::Waiting),
+        }
     }
-    let name = running
+
+    /// For a write about to start: whether it may, the job claimed if this
+    /// is its first. With `may_claim` false (the drainer is stopping), a
+    /// job none of whose writes has started is withheld instead, and none
+    /// of its writes starts.
+    pub(crate) fn start(&self, may_claim: bool) -> bool {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if *state == Claim::Waiting {
+            *state = if !may_claim {
+                Claim::Withheld
+            } else if std::fs::rename(&self.job, self.job.with_extension("running")).is_ok() {
+                Claim::Claimed
+            } else {
+                Claim::Lost
+            };
+        }
+        *state == Claim::Claimed
+    }
+
+    /// Keep any write of the job from starting from now on, unless one
+    /// has: whether one has.
+    #[cfg_attr(not(unix), allow(dead_code))] // the daemon's
+    pub(crate) fn withhold(&self) -> bool {
+        self.start(false) || self.state() == Claim::Busy
+    }
+
+    /// For a write that gave up waiting for the database: no write of the
+    /// job starts from now on, and the job goes back to the queue.
+    pub(crate) fn give_up_busy(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if *state == Claim::Claimed {
+            *state = Claim::Busy;
+        }
+    }
+
+    pub(crate) fn state(&self) -> Claim {
+        *self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+/// Why a write of a job its drainer withheld did not run.
+pub(crate) const WITHHELD: &str = "its drainer stopped before it started";
+
+/// Run the queued job `claim` is for, from the first step an earlier run
+/// did not (see [`JobMeta::done`]), claiming it as its first write starts
+/// (see [`JobClaim`]), and remove it. A failed job is logged and dropped,
+/// not retried. One that is not for `db` (see [`not_this_databases`]) is
+/// set aside in `interrupted/`, logged, and not run. One whose step gave
+/// up waiting for the database goes back to the queue instead
+/// ([`requeue_busy`]). Returns whether it ran and succeeded, or `None` when
+/// it did not run, or not in full: withheld, left queued for the next
+/// drainer, or taken by another.
+pub(crate) fn run_job_file(
+    runner: &mut impl JobRunner,
+    exe: &Path,
+    db: &Path,
+    dir: &Path,
+    claim: &JobClaim,
+) -> Option<bool> {
+    let name = claim
+        .job
         .file_stem()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let result = std::fs::read(&running)
-        .ok()
-        .and_then(|body| serde_json::from_slice::<Job>(&body).ok())
-        .ok_or_else(|| "unreadable job file".to_string())
-        .and_then(|job| run_job(exe, db, &job));
-    if let Err(e) = result {
+    let body = std::fs::read(&claim.job).ok()?;
+    let read = serde_json::from_slice::<Job>(&body)
+        .and_then(|job| Ok((job, serde_json::from_slice::<JobMeta>(&body)?)));
+    let Ok((job, mut meta)) = read else {
+        // Never deleted: one a newer build queued is kept for its owner to
+        // see, and the queue goes on past it.
+        set_aside(dir, &claim.job);
+        drain_log(
+            dir,
+            &format!("job {name} failed: unreadable job file (set aside, not run)"),
+        );
+        return Some(false);
+    };
+    if let Some(why) = not_this_databases(db, dir, &meta) {
+        set_aside(dir, &claim.job);
+        drain_log(dir, &format!("job {name} set aside, not run: {why}"));
+        return Some(false);
+    }
+    let result = run_job(runner, claim, exe, db, &job, &mut meta);
+    match claim.state() {
+        Claim::Lost => return None,
+        Claim::Withheld => {
+            drain_log(dir, &format!("job {name} left queued: {WITHHELD}"));
+            return None;
+        }
+        Claim::Busy => {
+            requeue_busy(dir, claim, &name, &job, meta);
+            return None;
+        }
+        // Run (or failed) in full; or none of its writes started, each
+        // failing before it could, and it is done all the same.
+        Claim::Claimed => {
+            let _ = std::fs::remove_file(claim.job.with_extension("running"));
+        }
+        Claim::Waiting => {
+            let _ = std::fs::remove_file(&claim.job);
+        }
+    }
+    if let Err(e) = &result {
         drain_log(dir, &format!("job {name} failed: {e}"));
     }
-    let _ = std::fs::remove_file(&running);
+    Some(result.is_ok())
 }
 
-fn run_job(exe: &Path, db: &Path, job: &Job) -> std::result::Result<(), String> {
+/// Put the job `claim` is for, `.running` with a step that gave up waiting
+/// for the database, back in the queue as `.job` under its own name, so it
+/// keeps its place. `meta` records the steps that ran and one more give-up,
+/// and no longer marks the job for its hook's own drainer: whichever
+/// drainer next finds the database free runs the rest, the database's
+/// daemon included. At the [`BUSY_GIVE_UPS_MAX`]th give-up the job is set
+/// aside in `interrupted/` instead, still `.job`, so moving it back
+/// resumes it. It is never deleted: one whose record can't be written stays
+/// `.running`, and the next drainer sets it aside.
+fn requeue_busy(dir: &Path, claim: &JobClaim, name: &str, job: &Job, mut meta: JobMeta) {
+    let running = claim.job.with_extension("running");
+    let step = meta.busy_at.take().unwrap_or_default();
+    meta.busy_give_ups += 1;
+    meta.own_drainer = false;
+    let tmp = claim.job.with_extension("tmp");
+    let recorded = job_body(job, &meta).is_ok_and(|body| {
+        std::fs::write(&tmp, body).is_ok() && std::fs::rename(&tmp, &running).is_ok()
+    });
+    if !recorded {
+        let _ = std::fs::remove_file(&tmp);
+        drain_log(
+            dir,
+            &format!(
+                "job {name}: the database was busy at `axil {step}`, and the job's progress could not be recorded (left running, to be set aside)"
+            ),
+        );
+        return;
+    }
+    let busy = meta.busy_give_ups;
+    if busy >= BUSY_GIVE_UPS_MAX {
+        let dest = dir.join("interrupted");
+        let _ = std::fs::create_dir_all(&dest);
+        if std::fs::rename(&running, dest.join(format!("{name}.job"))).is_ok() {
+            drain_log(
+                dir,
+                &format!(
+                    "job {name} set aside, not run again: the database was busy at `axil {step}` for {busy} drainers in turn (steps done: {})",
+                    if meta.done.is_empty() {
+                        "none".to_string()
+                    } else {
+                        meta.done.join(", ")
+                    }
+                ),
+            );
+        }
+    } else if std::fs::rename(&running, &claim.job).is_ok() {
+        drain_log(
+            dir,
+            &format!(
+                "job {name} queued again: the database was busy at `axil {step}` past {:?} ({busy} of {BUSY_GIVE_UPS_MAX} give-ups); it resumes there once a drainer finds the database free",
+                busy_wait_max()
+            ),
+        );
+    }
+}
+
+/// What runs the steps of a queued job, each one axil command line: a
+/// child process per step for `hook drain`, the open database in the
+/// database's daemon.
+pub(crate) trait JobRunner {
+    /// Run `axil --db <db> <args>` on the queue's database, with `stdin`
+    /// piped in (`None`: an empty stdin) and the [`crate::DEPS_ENV`] values
+    /// `env` (see [`Job::Axil`]), and return what it printed on stdout when
+    /// it exited 0, or why it failed. The step is a write of the job
+    /// `claim` is for: it asks [`JobClaim::start`] as it starts, and does
+    /// not run when refused. One that gives up waiting for the database,
+    /// another process holding it, says so with [`JobClaim::give_up_busy`].
+    fn write(
+        &mut self,
+        args: &[String],
+        stdin: Option<&str>,
+        env: Option<&[(String, String)]>,
+        claim: &JobClaim,
+    ) -> std::result::Result<String, String>;
+
+    /// Run `axil <args>`, a command that opens no database, with `stdin`
+    /// piped in, and return what it printed on stdout when it exited 0.
+    fn read(&mut self, args: &[&str], stdin: &[u8]) -> Option<String>;
+}
+
+/// The runner `hook drain` uses: each step a child process of `exe`,
+/// waiting while another process holds the writer lock.
+pub(crate) struct SubprocessRunner<'a> {
+    exe: &'a Path,
+    db: &'a Path,
+    /// Set on every child.
+    env: Vec<(&'static str, &'static str)>,
+    /// Where each child runs; this process's working directory when `None`.
+    cwd: Option<&'a Path>,
+    /// How long a step waits for another process to let go of the
+    /// database before it gives up.
+    busy_wait: Duration,
+}
+
+impl<'a> SubprocessRunner<'a> {
+    pub(crate) fn new(exe: &'a Path, db: &'a Path) -> Self {
+        Self {
+            exe,
+            db,
+            env: Vec::new(),
+            cwd: None,
+            busy_wait: busy_wait_max(),
+        }
+    }
+
+    /// The same, a step giving up after `wait` on a busy database.
+    #[cfg(test)]
+    fn busy_wait(mut self, wait: Duration) -> Self {
+        self.busy_wait = wait;
+        self
+    }
+
+    /// The same, with `name=value` set on every child.
+    #[cfg_attr(not(unix), allow(dead_code))] // the daemon's
+    pub(crate) fn with_env(mut self, name: &'static str, value: &'static str) -> Self {
+        self.env.push((name, value));
+        self
+    }
+
+    /// The same, each child run in `cwd`.
+    #[cfg_attr(not(unix), allow(dead_code))] // the daemon's
+    pub(crate) fn in_dir(mut self, cwd: &'a Path) -> Self {
+        self.cwd = Some(cwd);
+        self
+    }
+
+    fn command(&self) -> Command {
+        let mut cmd = Command::new(self.exe);
+        cmd.envs(self.env.iter().copied());
+        if let Some(cwd) = self.cwd {
+            cmd.current_dir(cwd);
+        }
+        cmd
+    }
+}
+
+impl JobRunner for SubprocessRunner<'_> {
+    fn write(
+        &mut self,
+        args: &[String],
+        stdin: Option<&str>,
+        env: Option<&[(String, String)]>,
+        claim: &JobClaim,
+    ) -> std::result::Result<String, String> {
+        if !claim.start(true) {
+            return Err("another drainer took the job".into());
+        }
+        let command = || {
+            let mut cmd = self.command();
+            set_deps_env(&mut cmd, env);
+            cmd
+        };
+        let result = run_write(command, self.db, args, stdin, self.busy_wait);
+        result.map_err(|(why, busy)| {
+            if busy {
+                claim.give_up_busy();
+            }
+            why
+        })
+    }
+
+    fn read(&mut self, args: &[&str], stdin: &[u8]) -> Option<String> {
+        run_capture_stdin(self.command().args(args), stdin)
+    }
+}
+
+/// Run `job`'s steps, those an earlier run of it ran left out (see
+/// [`JobMeta::done`]), recording in `meta` each that runs. Once a step
+/// gives up waiting for the database, none after it runs.
+fn run_job(
+    runner: &mut impl JobRunner,
+    claim: &JobClaim,
+    exe: &Path,
+    db: &Path,
+    job: &Job,
+    meta: &mut JobMeta,
+) -> std::result::Result<(), String> {
     match job {
-        Job::Axil { args, stdin } => run_write(exe, db, args, stdin.as_deref()).map(drop),
+        Job::Axil { args, stdin, env } => {
+            match run_step(runner, claim, meta, args, stdin.as_deref(), env.as_deref()) {
+                Some(result) => result.map(drop),
+                None => Ok(()),
+            }
+        }
         Job::CloseSession {
             session,
             project_dir,
@@ -2682,61 +3315,100 @@ fn run_job(exe: &Path, db: &Path, job: &Job) -> std::result::Result<(), String> 
             ended_at,
         } => {
             if !files.is_empty() {
-                let entities: Value = Some(content.as_str())
-                    .filter(|c| !c.is_empty())
-                    .and_then(|c| {
-                        run_capture_stdin(
-                            Command::new(exe).args(["extract-entities", "-"]),
-                            c.as_bytes(),
-                        )
-                    })
-                    .and_then(|out| serde_json::from_str(out.trim()).ok())
-                    .unwrap_or_else(|| json!([]));
-                let entity_count = entities.as_array().map_or(0, Vec::len);
-                let record = json!({
-                    "session": session,
-                    "files_changed": files,
-                    "file_count": files.len(),
-                    "entities": entities,
-                    "entity_count": entity_count,
-                    "ended_at": ended_at,
-                });
-                let stored = run_write(
-                    exe,
-                    db,
-                    &["store".into(), "_sessions".into(), record.to_string()],
-                    None,
-                )?;
-                if let Some(id) = serde_json::from_str::<Value>(stored.trim())
-                    .ok()
-                    .and_then(|v| v.get("id").and_then(Value::as_str).map(str::to_string))
-                {
-                    let _ = run_write(exe, db, &["auto-link".into(), id], None);
+                let row = if meta.did("store") {
+                    meta.session_row.clone()
+                } else {
+                    let entities: Value = Some(content.as_str())
+                        .filter(|c| !c.is_empty())
+                        .and_then(|c| runner.read(&["extract-entities", "-"], c.as_bytes()))
+                        .and_then(|out| serde_json::from_str(out.trim()).ok())
+                        .unwrap_or_else(|| json!([]));
+                    let entity_count = entities.as_array().map_or(0, Vec::len);
+                    let record = json!({
+                        "session": session,
+                        "files_changed": files,
+                        "file_count": files.len(),
+                        "entities": entities,
+                        "entity_count": entity_count,
+                        "ended_at": ended_at,
+                    });
+                    let args = ["store".into(), "_sessions".into(), record.to_string()];
+                    let Some(stored) = run_step(runner, claim, meta, &args, None, None) else {
+                        return Ok(());
+                    };
+                    meta.session_row = serde_json::from_str::<Value>(stored?.trim())
+                        .ok()
+                        .and_then(|v| v.get("id").and_then(Value::as_str).map(str::to_string));
+                    meta.session_row.clone()
+                };
+                // A build without `auto-link` has no step to run: one in a
+                // process of its own would only fail to parse.
+                #[cfg(all(feature = "embed", feature = "graph"))]
+                if let Some(id) = row {
+                    let _ = run_step(runner, claim, meta, &["auto-link".into(), id], None, None);
                 }
+                #[cfg(not(all(feature = "embed", feature = "graph")))]
+                let _ = row;
                 // Consolidation, connections, inference, decay — then beliefs.
-                let _ = run_write(exe, db, &["worker".into(), "run".into()], None);
-                let _ = run_write(exe, db, &["beliefs".into(), "--generate".into()], None);
+                let worker = ["worker".into(), "run".into()];
+                let _ = run_step(runner, claim, meta, &worker, None, None);
+                let beliefs = ["beliefs".into(), "--generate".into()];
+                let _ = run_step(runner, claim, meta, &beliefs, None, None);
             }
-            session_heal(exe, db, session, project_dir, problems.as_deref());
+            let problems = problems.as_deref();
+            session_heal(runner, claim, meta, exe, db, session, project_dir, problems);
             Ok(())
         }
     }
 }
 
-/// Run one axil command against `db`, waiting while another process holds
-/// the writer lock. Retrying a busy open is safe: it fails before anything
-/// is written.
+/// Run the job's write step `args`, as [`JobRunner::write`] does, and
+/// record in `meta` that it ran. `None`, running nothing, for a step an
+/// earlier run of the job ran, and for every step once one gave up waiting
+/// for the database; and for that step itself, which is left for the next
+/// run of the job.
+fn run_step(
+    runner: &mut impl JobRunner,
+    claim: &JobClaim,
+    meta: &mut JobMeta,
+    args: &[String],
+    stdin: Option<&str>,
+    env: Option<&[(String, String)]>,
+) -> Option<std::result::Result<String, String>> {
+    let command = args.first().map(String::as_str).unwrap_or_default();
+    if meta.did(command) || claim.state() == Claim::Busy {
+        return None;
+    }
+    let result = runner.write(args, stdin, env, claim);
+    match claim.state() {
+        Claim::Busy => {
+            meta.busy_at = Some(command.to_string());
+            None
+        }
+        Claim::Claimed => {
+            meta.done.push(command.to_string());
+            Some(result)
+        }
+        _ => Some(result),
+    }
+}
+
+/// Run one axil command against `db`, waiting up to `busy_wait` while
+/// another process holds the writer lock. Retrying a busy open is safe: it
+/// fails before anything is written. Fails with why, and whether it gave
+/// up on the database busy.
 fn run_write(
-    exe: &Path,
+    command: impl Fn() -> Command,
     db: &Path,
     args: &[String],
     stdin: Option<&str>,
-) -> std::result::Result<String, String> {
+    busy_wait: Duration,
+) -> std::result::Result<String, (String, bool)> {
     use std::io::Write as _;
     let mut delay = Duration::from_millis(250);
     let mut waited = Duration::ZERO;
     loop {
-        let child = Command::new(exe)
+        let child = command()
             .arg("--db")
             .arg(db)
             .args(args)
@@ -2748,36 +3420,60 @@ fn run_write(
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn();
-        let mut child = child.map_err(|e| e.to_string())?;
+        let mut child = child.map_err(|e| (e.to_string(), false))?;
         if let (Some(text), Some(mut pipe)) = (stdin, child.stdin.take()) {
             let _ = pipe.write_all(text.as_bytes());
         }
-        let out = child.wait_with_output().map_err(|e| e.to_string())?;
+        let out = child
+            .wait_with_output()
+            .map_err(|e| (e.to_string(), false))?;
         if out.status.success() {
             return Ok(String::from_utf8_lossy(&out.stdout).into_owned());
         }
         let err = String::from_utf8_lossy(&out.stderr);
-        if err.contains("database busy") && waited < BUSY_WAIT_MAX {
-            std::thread::sleep(delay);
-            waited += delay;
+        let busy = err.contains("database busy");
+        if busy && waited < busy_wait {
+            let delay_now = delay.min(busy_wait - waited);
+            std::thread::sleep(delay_now);
+            waited += delay_now;
             delay = (delay * 2).min(Duration::from_secs(8));
             continue;
         }
-        let command = args.first().map(String::as_str).unwrap_or("");
-        let reason = err
-            .lines()
-            .rfind(|l| !l.trim().is_empty())
-            .unwrap_or("")
-            .trim();
-        return Err(format!("`axil {command}` failed: {reason}"));
+        return Err((step_failed(args, &err), busy));
     }
 }
 
-/// Run session-heal and act on its hints. The one auto-fix today:
-/// `stale_structural_index` spawns a detached `axil index` so the next
-/// session's queries hit a fresh index. The lock file throttles repeats
-/// within the 5-minute stale window.
-fn session_heal(exe: &Path, db: &Path, session: &str, project_dir: &Path, problems: Option<&str>) {
+/// Why a job's step `args` failed, from what it printed on stderr: its last
+/// line.
+pub(crate) fn step_failed(args: &[String], stderr: &str) -> String {
+    let command = args.first().map(String::as_str).unwrap_or("");
+    let reason = stderr
+        .lines()
+        .rfind(|l| !l.trim().is_empty())
+        .unwrap_or("")
+        .trim();
+    format!("`axil {command}` failed: {reason}")
+}
+
+/// Run session-heal, unless an earlier run of the job did or a step before
+/// it gave up waiting for the database (see [`run_step`]), and act on its
+/// hints. The one auto-fix today: `stale_structural_index` spawns a
+/// detached `axil index` so the next session's queries hit a fresh index.
+/// The lock file throttles repeats within the 5-minute stale window.
+#[allow(clippy::too_many_arguments)]
+fn session_heal(
+    runner: &mut impl JobRunner,
+    claim: &JobClaim,
+    meta: &mut JobMeta,
+    exe: &Path,
+    db: &Path,
+    session: &str,
+    project_dir: &Path,
+    problems: Option<&str>,
+) {
+    if meta.did("session-heal") || claim.state() == Claim::Busy {
+        return;
+    }
     let mut args: Vec<String> = vec!["session-heal".into(), "--session".into(), session.into()];
     let problems_file = problems.map(|text| {
         let path = queue_dir(db).join(format!("{}.problems", sanitize_id(session)));
@@ -2788,11 +3484,11 @@ fn session_heal(exe: &Path, db: &Path, session: &str, project_dir: &Path, proble
         args.push("--problems-file".into());
         args.push(path.to_string_lossy().into_owned());
     }
-    let out = run_write(exe, db, &args, None);
+    let out = run_step(runner, claim, meta, &args, None, None);
     if let Some(path) = &problems_file {
         let _ = std::fs::remove_file(path);
     }
-    let Ok(out) = out else { return };
+    let Some(Ok(out)) = out else { return };
     let Ok(report) = serde_json::from_str::<Value>(out.trim()) else {
         return;
     };
@@ -5206,5 +5902,787 @@ mod tests {
         let lock = DrainLock::acquire_with(dir, refuse_os_lock)
             .expect("a free lock is still taken without OS locks");
         drop(lock);
+    }
+
+    /// A runner that records each step it is given, with what the queue
+    /// directory held while it ran, and answers as a database would.
+    struct Recorder {
+        dir: PathBuf,
+        steps: Vec<String>,
+        /// The queue's file names while each step ran.
+        seen: Vec<Vec<String>>,
+        /// Steps whose first word fails.
+        failing: Vec<&'static str>,
+        /// Steps whose first word finds the database busy past the wait,
+        /// and gives up.
+        busy: Vec<&'static str>,
+        /// Its drainer is stopping: a write of a job none of whose writes
+        /// started does not start.
+        stopping: bool,
+    }
+
+    impl Recorder {
+        fn new(dir: &Path) -> Self {
+            Self {
+                dir: dir.to_path_buf(),
+                steps: Vec::new(),
+                seen: Vec::new(),
+                failing: Vec::new(),
+                busy: Vec::new(),
+                stopping: false,
+            }
+        }
+
+        fn look(&mut self) {
+            let mut names: Vec<String> = std::fs::read_dir(&self.dir)
+                .unwrap()
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .filter(|n| n.ends_with(".job") || n.ends_with(".running"))
+                .collect();
+            names.sort();
+            self.seen.push(names);
+        }
+    }
+
+    impl JobRunner for Recorder {
+        fn write(
+            &mut self,
+            args: &[String],
+            stdin: Option<&str>,
+            _env: Option<&[(String, String)]>,
+            claim: &JobClaim,
+        ) -> std::result::Result<String, String> {
+            if !claim.start(!self.stopping) {
+                return Err(WITHHELD.into());
+            }
+            self.look();
+            let mut step = args.join(" ");
+            if let Some(stdin) = stdin {
+                step.push_str(&format!(" <{stdin}"));
+            }
+            self.steps.push(step);
+            if self.busy.contains(&args[0].as_str()) {
+                claim.give_up_busy();
+                return Err(step_failed(args, "Error: database busy\n"));
+            }
+            if self.failing.contains(&args[0].as_str()) {
+                return Err(step_failed(args, "{\"error\":\"on purpose\"}\n"));
+            }
+            Ok(match args[0].as_str() {
+                "store" => r#"{"id":"01M4Z06PE0FK6QVKK92X7R6JPE","table":"_sessions"}"#.into(),
+                _ => "{}".into(),
+            })
+        }
+
+        fn read(&mut self, args: &[&str], stdin: &[u8]) -> Option<String> {
+            self.look();
+            self.steps.push(format!(
+                "{} <{}",
+                args.join(" "),
+                String::from_utf8_lossy(stdin)
+            ));
+            Some(r#"[{"name":"validate_token","type":"code"}]"#.into())
+        }
+    }
+
+    fn close_session(problems: Option<&str>) -> Job {
+        close_session_of(vec!["src/auth.rs".into()], problems)
+    }
+
+    /// A claim on a fresh job file in `queue`, for a job run directly.
+    fn fresh_claim(queue: &Path) -> JobClaim {
+        let job = queue.join("0-fresh.job");
+        std::fs::write(&job, b"{}").unwrap();
+        JobClaim::new(&job)
+    }
+
+    fn close_session_of(files: Vec<String>, problems: Option<&str>) -> Job {
+        Job::CloseSession {
+            session: "s1".into(),
+            project_dir: PathBuf::from("/p"),
+            files,
+            content: "fn validate_token() {}".into(),
+            problems: problems.map(str::to_string),
+            ended_at: "2026-10-15T00:00:00Z".into(),
+        }
+    }
+
+    /// A session's close runs its steps in this order, each once: the
+    /// entities of what the session wrote, the `_sessions` row, its links,
+    /// the worker, beliefs, and session-heal with the session's problems.
+    #[test]
+    fn a_session_close_runs_its_steps_in_order() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("memory.axil");
+        let queue = queue_dir(&db);
+        std::fs::create_dir_all(&queue).unwrap();
+        let exe = Path::new("/nonexistent/axil");
+        let mut runner = Recorder::new(&queue);
+        run_job(
+            &mut runner,
+            &fresh_claim(&queue),
+            exe,
+            &db,
+            &close_session(Some("{\"kind\":\"x\"}\n")),
+            &mut JobMeta::default(),
+        )
+        .unwrap();
+        let problems = queue.join("s1.problems");
+        // A build without `auto-link` has no such step.
+        let linked = cfg!(all(feature = "embed", feature = "graph"));
+        let mut steps = vec![
+            "extract-entities - <fn validate_token() {}".to_string(),
+            format!(
+                "store _sessions {}",
+                json!({
+                    "session": "s1",
+                    "files_changed": ["src/auth.rs"],
+                    "file_count": 1,
+                    "entities": [{"name": "validate_token", "type": "code"}],
+                    "entity_count": 1,
+                    "ended_at": "2026-10-15T00:00:00Z",
+                })
+            ),
+            "auto-link 01M4Z06PE0FK6QVKK92X7R6JPE".to_string(),
+            "worker run".to_string(),
+            "beliefs --generate".to_string(),
+            format!(
+                "session-heal --session s1 --problems-file {}",
+                problems.display()
+            ),
+        ];
+        if !linked {
+            steps.remove(2);
+        }
+        assert_eq!(runner.steps, steps);
+        assert!(!problems.exists(), "the problems file is removed after");
+
+        // A session that wrote nothing is only healed.
+        let mut runner = Recorder::new(&queue);
+        let quiet = close_session_of(Vec::new(), None);
+        let meta = &mut JobMeta::default();
+        run_job(&mut runner, &fresh_claim(&queue), exe, &db, &quiet, meta).unwrap();
+        assert_eq!(runner.steps, ["session-heal --session s1"]);
+
+        // Without the `_sessions` row the job fails there; a step after it
+        // that fails does not stop the ones that follow.
+        let mut runner = Recorder::new(&queue);
+        runner.failing = vec!["store"];
+        let claim = fresh_claim(&queue);
+        let meta = &mut JobMeta::default();
+        let err = run_job(&mut runner, &claim, exe, &db, &close_session(None), meta).unwrap_err();
+        assert_eq!(err, r#"`axil store` failed: {"error":"on purpose"}"#);
+        assert_eq!(runner.steps.len(), 2, "{:?}", runner.steps);
+        let mut runner = Recorder::new(&queue);
+        runner.failing = vec!["auto-link", "worker"];
+        let claim = fresh_claim(&queue);
+        let meta = &mut JobMeta::default();
+        run_job(&mut runner, &claim, exe, &db, &close_session(None), meta).unwrap();
+        assert_eq!(
+            runner.steps.len(),
+            5 + usize::from(linked),
+            "{:?}",
+            runner.steps
+        );
+    }
+
+    /// The queue protocol: jobs run in the order their names sort, each
+    /// renamed from `.job` to `.running` while it runs and removed after,
+    /// a failed one logged and removed too, never run again.
+    #[test]
+    fn a_job_is_claimed_as_running_and_removed_once_run() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("memory.axil");
+        let exe = Path::new("/nonexistent/axil");
+        let queue = queue_dir(&db);
+        std::fs::create_dir_all(&queue).unwrap();
+        for (name, job) in [
+            ("2-a", Job::axil(&["store", "decisions", "{}"], None)),
+            (
+                "1-b",
+                Job::axil(&["store", "context", "-"], Some("{\"n\":1}")),
+            ),
+            ("3-c", Job::axil(&["auto-capture", "-"], Some("text"))),
+        ] {
+            std::fs::write(
+                queue.join(format!("{name}.job")),
+                serde_json::to_vec(&job).unwrap(),
+            )
+            .unwrap();
+        }
+        let mut runner = Recorder::new(&queue);
+        runner.failing = vec!["auto-capture"];
+        let mut ran = Vec::new();
+        while let Some(job) = next_job(&queue) {
+            ran.push(run_job_file(
+                &mut runner,
+                exe,
+                &db,
+                &queue,
+                &JobClaim::new(&job),
+            ));
+        }
+        assert_eq!(ran, [Some(true), Some(true), Some(false)]);
+        assert_eq!(
+            runner.steps,
+            [
+                "store context - <{\"n\":1}",
+                "store decisions {}",
+                "auto-capture - <text"
+            ]
+        );
+        assert_eq!(
+            runner.seen,
+            [
+                vec!["1-b.running", "2-a.job", "3-c.job"],
+                vec!["2-a.running", "3-c.job"],
+                vec!["3-c.running"],
+            ]
+        );
+        assert!(queue_files(&queue, "job").is_empty());
+        assert!(queue_files(&queue, "running").is_empty());
+        let log = std::fs::read_to_string(queue.join("drain.log")).unwrap();
+        assert!(
+            log.contains("job 3-c failed: `axil auto-capture` failed"),
+            "{log}"
+        );
+
+        // An unreadable job (a newer build's, say) is logged and set aside,
+        // and runs nothing.
+        std::fs::write(queue.join("4-d.job"), b"{nope").unwrap();
+        let job = next_job(&queue).unwrap();
+        let claim = JobClaim::new(&job);
+        assert_eq!(
+            run_job_file(&mut runner, exe, &db, &queue, &claim),
+            Some(false)
+        );
+        assert_eq!(runner.steps.len(), 3);
+        assert!(next_job(&queue).is_none());
+        assert!(queue.join("interrupted/4-d.job").is_file(), "never deleted");
+        let log = std::fs::read_to_string(queue.join("drain.log")).unwrap();
+        assert!(log.contains("job 4-d failed: unreadable job file"), "{log}");
+    }
+
+    /// A job is marked running only as its first write starts. A drainer
+    /// that stops before then leaves it queued whole; once one has started,
+    /// the job is in flight and its writes go on.
+    #[test]
+    fn a_job_is_claimed_only_as_its_first_write_starts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let queue = tmp.path().join("hook-queue");
+        std::fs::create_dir_all(&queue).unwrap();
+        let job = queue.join("1-a.job");
+        std::fs::write(&job, b"{}").unwrap();
+
+        let claim = JobClaim::new(&job);
+        assert!(!claim.start(false));
+        assert_eq!(claim.state(), Claim::Withheld);
+        assert!(!claim.start(true), "a withheld job stays withheld");
+        assert!(job.is_file());
+
+        let claim = JobClaim::new(&job);
+        assert!(claim.start(true));
+        assert!(queue.join("1-a.running").is_file());
+        assert!(claim.start(false), "a job in flight goes on");
+        assert!(claim.withhold());
+        assert_eq!(claim.state(), Claim::Claimed);
+
+        let gone = JobClaim::new(&queue.join("2-b.job"));
+        assert!(!gone.start(true));
+        assert_eq!(gone.state(), Claim::Lost);
+
+        // A drainer stopping before the job's first write leaves it queued
+        // and logs why; the read before that write ran, and runs again.
+        std::fs::remove_file(queue.join("1-a.running")).unwrap();
+        let db = tmp.path().join("memory.axil");
+        let exe = Path::new("/nonexistent/axil");
+        let close = queue.join("3-c.job");
+        std::fs::write(&close, serde_json::to_vec(&close_session(None)).unwrap()).unwrap();
+        let mut runner = Recorder::new(&queue);
+        runner.stopping = true;
+        let claim = JobClaim::new(&close);
+        assert_eq!(run_job_file(&mut runner, exe, &db, &queue, &claim), None);
+        assert_eq!(runner.steps.len(), 1, "{:?}", runner.steps);
+        assert!(close.is_file());
+        let log = std::fs::read_to_string(queue.join("drain.log")).unwrap();
+        assert!(
+            log.contains(&format!("job 3-c left queued: {WITHHELD}")),
+            "{log}"
+        );
+        assert!(!log.contains("failed"), "{log}");
+    }
+
+    /// A job a drainer that died left running is set aside, never run.
+    #[test]
+    fn an_interrupted_job_is_set_aside() {
+        let tmp = tempfile::tempdir().unwrap();
+        let queue = tmp.path().join("hook-queue");
+        std::fs::create_dir_all(&queue).unwrap();
+        std::fs::write(queue.join("1-a.running"), b"{}").unwrap();
+        std::fs::write(queue.join("2-b.job"), b"{}").unwrap();
+        set_aside_interrupted(&queue);
+        assert!(queue.join("interrupted/1-a.running").is_file());
+        assert_eq!(next_job(&queue), Some(queue.join("2-b.job")));
+        assert!(queue_files(&queue, "running").is_empty());
+    }
+
+    /// A queued `deps refresh` records the hook's dependency paths, and a
+    /// drainer's child runs with them, the hook's unset ones unset. A job
+    /// that records none, as one queued before they were, leaves the
+    /// child's.
+    #[test]
+    fn a_queued_deps_refresh_runs_with_the_hooks_dependency_paths() {
+        let job = Job::axil(&["deps", "refresh"], None).in_deps_env();
+        let Job::Axil { env: Some(env), .. } = &job else {
+            panic!("{job:?}");
+        };
+        let want: Vec<(String, String)> = crate::DEPS_ENV
+            .iter()
+            .filter_map(|name| Some((name.to_string(), std::env::var(name).ok()?)))
+            .collect();
+        assert_eq!(env, &want);
+        let back: Job = serde_json::from_str(&serde_json::to_string(&job).unwrap()).unwrap();
+        assert_eq!(back, job);
+        let old: Job = serde_json::from_str(r#"{"op":"axil","args":["deps","refresh"]}"#).unwrap();
+        assert_eq!(old, Job::axil(&["deps", "refresh"], None));
+
+        let envs = |cmd: &Command| -> Vec<(String, Option<String>)> {
+            let text = |s: &std::ffi::OsStr| s.to_str().unwrap().to_string();
+            cmd.get_envs()
+                .map(|(n, v)| (text(n), v.map(text)))
+                .collect()
+        };
+        let mut cmd = Command::new("axil");
+        cmd.env("GOPATH", "/drainer").env("CARGO_HOME", "/drainer");
+        set_deps_env(&mut cmd, Some(&[("CARGO_HOME".into(), "/hook".into())]));
+        let got = envs(&cmd);
+        assert!(
+            got.contains(&("CARGO_HOME".into(), Some("/hook".into()))),
+            "{got:?}"
+        );
+        assert!(got.contains(&("GOPATH".into(), None)), "{got:?}");
+        assert!(got.contains(&("GOMODCACHE".into(), None)), "{got:?}");
+        let mut cmd = Command::new("axil");
+        cmd.env("GOPATH", "/drainer");
+        set_deps_env(&mut cmd, None);
+        assert_eq!(envs(&cmd), [("GOPATH".into(), Some("/drainer".into()))]);
+    }
+
+    /// Each database file has a queue of its own; `memory.axil` keeps the
+    /// name its queue always had.
+    #[test]
+    fn databases_in_one_directory_queue_apart() {
+        let dir = Path::new("/p/.axil");
+        assert_eq!(queue_dir(&dir.join("memory.axil")), dir.join("hook-queue"));
+        assert_eq!(
+            queue_dir(&dir.join("memory.axil.branch.exp")),
+            dir.join("hook-queue.memory.axil.branch.exp")
+        );
+        assert_eq!(
+            queue_dir(&dir.join("other.axil")),
+            dir.join("hook-queue.other.axil")
+        );
+        // A name that is not text is not `memory.axil` either.
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            let odd = std::ffi::OsStr::from_bytes(b"odd\xff.axil");
+            assert_eq!(
+                queue_dir(&dir.join(odd)),
+                dir.join("hook-queue.odd\u{fffd}.axil")
+            );
+        }
+    }
+
+    /// A job queued by a hook the database's daemon does not serve says so
+    /// in its file, and still reads as the job it is for a drainer that
+    /// ignores the mark.
+    #[test]
+    fn a_job_for_its_hooks_own_drainer_is_marked() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("memory.axil");
+        let queue = queue_dir(&db);
+        let job = Job::axil(&["store", "decisions", "{}"], None);
+        assert!(write_job(&db, &job, true));
+        assert!(write_job(&db, &job, false));
+        let files = queue_files(&queue, "job");
+        assert_eq!(files.len(), 2);
+        assert_eq!(files.iter().filter(|f| for_own_drainer(f)).count(), 1);
+        for file in &files {
+            let read: Job = serde_json::from_slice(&std::fs::read(file).unwrap()).unwrap();
+            assert_eq!(read, job);
+        }
+    }
+
+    /// A drainer whose jobs the daemon leaves to it waits for the queue to
+    /// be let go of, and gives up once none of those jobs is left, or at
+    /// its deadline.
+    #[test]
+    fn a_drainer_waits_for_the_queue_to_be_handed_over() {
+        let _serial = drain_lock_serial();
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("memory.axil");
+        let queue = queue_dir(&db);
+        let job = Job::axil(&["store", "decisions", "{}"], None);
+        assert!(write_job(&db, &job, false));
+        let held = DrainLock::acquire(&queue).expect("free lock");
+        let later = Instant::now() + Duration::from_secs(10);
+        assert!(
+            wait_for_handover(&queue, later).is_none(),
+            "none of its jobs queued: nothing to wait for"
+        );
+
+        assert!(write_job(&db, &job, true));
+        let started = Instant::now();
+        let deadline = started + Duration::from_millis(300);
+        assert!(wait_for_handover(&queue, deadline).is_none());
+        assert!(started.elapsed() >= Duration::from_millis(300));
+        let log = std::fs::read_to_string(queue.join("drain.log")).unwrap();
+        assert!(log.contains("did not hand over the queue"), "{log}");
+
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            drop(held);
+        });
+        let later = Instant::now() + Duration::from_secs(10);
+        let taken = wait_for_handover(&queue, later);
+        release.join().unwrap();
+        assert!(taken.is_some(), "the queue let go of is taken");
+    }
+
+    /// The job file at `path`: its job and what it says beside it.
+    fn read_job(path: &Path) -> (Job, JobMeta) {
+        let body = std::fs::read(path).unwrap();
+        (
+            serde_json::from_slice(&body).unwrap(),
+            serde_json::from_slice(&body).unwrap(),
+        )
+    }
+
+    /// A step that gives up waiting for the database puts its job back in
+    /// the queue under its own name, never deleting it: the steps that ran
+    /// are recorded, with the `_sessions` row they stored, and the mark
+    /// for the hook's own drainer is cleared. The next drainer runs only
+    /// the steps left, from the one that gave up.
+    #[test]
+    fn a_step_the_database_stays_busy_for_goes_back_to_the_queue() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("memory.axil");
+        let exe = Path::new("/nonexistent/axil");
+        let queue = queue_dir(&db);
+        let job = close_session(None);
+        assert!(write_job(&db, &job, true));
+        let file = next_job(&queue).unwrap();
+        let mut runner = Recorder::new(&queue);
+        runner.busy = vec!["worker"];
+        let claim = JobClaim::new(&file);
+        assert_eq!(run_job_file(&mut runner, exe, &db, &queue, &claim), None);
+        assert_eq!(claim.state(), Claim::Busy);
+        let linked = cfg!(all(feature = "embed", feature = "graph"));
+        assert_eq!(
+            runner.steps.len(),
+            3 + usize::from(linked),
+            "{:?}",
+            runner.steps
+        );
+        assert_eq!(runner.steps.last().unwrap(), "worker run");
+
+        assert_eq!(
+            queue_files(&queue, "job"),
+            [file.clone()],
+            "same name, same place"
+        );
+        assert!(queue_files(&queue, "running").is_empty());
+        let (queued, meta) = read_job(&file);
+        assert_eq!(queued, job);
+        let mut done = vec!["store".to_string()];
+        if linked {
+            done.push("auto-link".into());
+        }
+        assert_eq!(
+            meta,
+            JobMeta {
+                db_file: Some("memory.axil".into()),
+                own_drainer: false,
+                done,
+                session_row: Some("01M4Z06PE0FK6QVKK92X7R6JPE".into()),
+                busy_give_ups: 1,
+                busy_at: None,
+            }
+        );
+        assert!(!for_own_drainer(&file), "any drainer may take it now");
+        let log = std::fs::read_to_string(queue.join("drain.log")).unwrap();
+        assert!(
+            log.contains("queued again: the database was busy at `axil worker`"),
+            "{log}"
+        );
+        assert!(log.contains("(1 of 3 give-ups)"), "{log}");
+        assert!(!log.contains("failed"), "{log}");
+
+        let mut runner = Recorder::new(&queue);
+        let claim = JobClaim::new(&file);
+        assert_eq!(
+            run_job_file(&mut runner, exe, &db, &queue, &claim),
+            Some(true)
+        );
+        assert_eq!(
+            runner.steps,
+            [
+                "worker run",
+                "beliefs --generate",
+                "session-heal --session s1"
+            ]
+        );
+        assert!(next_job(&queue).is_none());
+        assert!(queue_files(&queue, "running").is_empty());
+    }
+
+    /// A job given up on a busy database by three drainers in turn is set
+    /// aside in `interrupted/`, still `.job` and whole, never deleted; one
+    /// that ran a step before is resumed past it, never running it again.
+    #[test]
+    fn a_job_the_database_stays_busy_for_is_set_aside_at_last() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("memory.axil");
+        let exe = Path::new("/nonexistent/axil");
+        let queue = queue_dir(&db);
+        let job = Job::axil(&["store", "decisions", "{}"], None);
+        assert!(write_job(&db, &job, false));
+        let file = next_job(&queue).unwrap();
+        let name = file.file_name().unwrap().to_owned();
+        for give_ups in 1..=BUSY_GIVE_UPS_MAX {
+            let mut runner = Recorder::new(&queue);
+            runner.busy = vec!["store"];
+            let claim = JobClaim::new(&file);
+            assert_eq!(run_job_file(&mut runner, exe, &db, &queue, &claim), None);
+            assert_eq!(runner.steps, ["store decisions {}"]);
+            if give_ups < BUSY_GIVE_UPS_MAX {
+                assert_eq!(read_job(&file).1.busy_give_ups, give_ups);
+            }
+        }
+        assert!(next_job(&queue).is_none());
+        assert!(queue_files(&queue, "running").is_empty());
+        let set_aside = queue.join("interrupted").join(&name);
+        let (kept, meta) = read_job(&set_aside);
+        assert_eq!(kept, job);
+        assert_eq!(meta.busy_give_ups, BUSY_GIVE_UPS_MAX);
+        assert!(meta.done.is_empty());
+        let log = std::fs::read_to_string(queue.join("drain.log")).unwrap();
+        assert!(
+            log.contains("set aside, not run again: the database was busy at `axil store` for 3 drainers in turn (steps done: none)"),
+            "{log}"
+        );
+
+        // Moved back by hand, it runs from where it stopped.
+        let close = close_session(None);
+        let meta = JobMeta {
+            done: vec!["store".into(), "auto-link".into(), "worker".into()],
+            session_row: Some("01M4Z06PE0FK6QVKK92X7R6JPE".into()),
+            busy_give_ups: BUSY_GIVE_UPS_MAX,
+            ..JobMeta::default()
+        };
+        std::fs::write(&file, job_body(&close, &meta).unwrap()).unwrap();
+        let mut runner = Recorder::new(&queue);
+        let claim = JobClaim::new(&file);
+        assert_eq!(
+            run_job_file(&mut runner, exe, &db, &queue, &claim),
+            Some(true)
+        );
+        assert_eq!(
+            runner.steps,
+            ["beliefs --generate", "session-heal --session s1"]
+        );
+    }
+
+    /// `hook drain`'s runner: a child that finds the database busy for
+    /// the whole wait gives the step up, and the job, claimed as that
+    /// write started, goes back to the queue rather than being removed.
+    #[cfg(unix)]
+    #[test]
+    fn a_drainer_child_that_finds_the_database_busy_leaves_the_job_queued() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("memory.axil");
+        let exe = tmp.path().join("busy-axil");
+        std::fs::write(
+            &exe,
+            "#!/bin/sh\necho 'Error: database busy: already opened for writing by another process' >&2\nexit 1\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let queue = queue_dir(&db);
+        let job = Job::axil(&["store", "decisions", "{}"], None);
+        assert!(write_job(&db, &job, true));
+        let file = next_job(&queue).unwrap();
+        let mut runner = SubprocessRunner::new(&exe, &db).busy_wait(Duration::from_millis(300));
+        let claim = JobClaim::new(&file);
+        let started = Instant::now();
+        assert_eq!(run_job_file(&mut runner, &exe, &db, &queue, &claim), None);
+        assert!(started.elapsed() >= Duration::from_millis(300));
+        assert_eq!(claim.state(), Claim::Busy);
+        assert_eq!(queue_files(&queue, "job"), [file.clone()]);
+        let (queued, meta) = read_job(&file);
+        assert_eq!(queued, job);
+        assert_eq!(meta.busy_give_ups, 1);
+        assert!(!meta.own_drainer);
+    }
+
+    /// A job names the database file it was queued for, and a drainer of
+    /// another database's sets it aside, logged and never run; one for its
+    /// own database runs whatever sits beside it.
+    #[test]
+    fn a_job_runs_only_on_the_database_it_names() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("memory.axil");
+        std::fs::write(tmp.path().join("other.axil"), b"").unwrap();
+        let exe = Path::new("/nonexistent/axil");
+        let queue = queue_dir(&db);
+        let job = Job::axil(&["store", "decisions", "{}"], None);
+        assert!(write_job(&db, &job, false));
+        let mine = next_job(&queue).unwrap();
+        assert_eq!(read_job(&mine).1.db_file.as_deref(), Some("memory.axil"));
+        let theirs = queue.join("0-theirs.job");
+        let meta = JobMeta {
+            db_file: Some("other.axil".into()),
+            ..JobMeta::default()
+        };
+        std::fs::write(&theirs, job_body(&job, &meta).unwrap()).unwrap();
+
+        let mut runner = Recorder::new(&queue);
+        let claim = JobClaim::new(&theirs);
+        assert_eq!(
+            run_job_file(&mut runner, exe, &db, &queue, &claim),
+            Some(false)
+        );
+        assert!(runner.steps.is_empty());
+        assert!(queue.join("interrupted/0-theirs.job").is_file());
+        let log = std::fs::read_to_string(queue.join("drain.log")).unwrap();
+        assert!(
+            log.contains(
+                "job 0-theirs set aside, not run: it was queued for other.axil, not memory.axil"
+            ),
+            "{log}"
+        );
+
+        let claim = JobClaim::new(&mine);
+        assert_eq!(
+            run_job_file(&mut runner, exe, &db, &queue, &claim),
+            Some(true)
+        );
+        assert_eq!(runner.steps, ["store decisions {}"]);
+        assert!(next_job(&queue).is_none());
+    }
+
+    /// The databases beside `memory.axil` are its branches and any other
+    /// database, by name or by redb's header; its own companions, a
+    /// branch's, a branch being made and the other files in `.axil/` are
+    /// not.
+    #[test]
+    fn the_databases_beside_one_are_its_branches_and_other_databases() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let db = dir.join("memory.axil");
+        let redb = |name: &str| {
+            let mut bytes = REDB_MAGIC.to_vec();
+            bytes.extend_from_slice(b"rest of the file");
+            std::fs::write(dir.join(name), bytes).unwrap();
+        };
+        redb("memory.axil");
+        for companion in [
+            "memory.axil.vec",
+            "memory.axil.graph",
+            "memory.axil.ts",
+            "memory.axil.vec.code",
+            "memory.axil.reembed-bak",
+            "memory.axil.branch.exp.vec",
+            "memory.axil.branch.exp.staging-4242-1f3a0",
+        ] {
+            redb(companion);
+        }
+        std::fs::create_dir_all(dir.join("memory.axil.fts")).unwrap();
+        std::fs::create_dir_all(dir.join("hook-queue")).unwrap();
+        std::fs::create_dir_all(dir.join("run/memory.axil")).unwrap();
+        std::fs::create_dir_all(dir.join("backup/other.axil")).unwrap();
+        for other in [
+            "axil.toml",
+            "index-rust.scip",
+            "index-refresh.lock",
+            "memory.axil.helpers.ts",
+            "version",
+        ] {
+            std::fs::write(dir.join(other), b"not a database").unwrap();
+        }
+        assert_eq!(other_databases(&db), Vec::<String>::new());
+
+        redb("memory.axil.branch.exp");
+        std::fs::write(dir.join("notes.axil"), b"").unwrap();
+        redb("scratch.db");
+        assert_eq!(
+            other_databases(&db),
+            ["memory.axil.branch.exp", "notes.axil", "scratch.db"]
+        );
+    }
+
+    /// A job an older build queued names no database. In `hook-queue/` it
+    /// runs on `memory.axil` only while no other database sits beside it,
+    /// and is otherwise set aside, logged and never run, since every
+    /// database in the directory queued there; in another database's own
+    /// queue it is that database's, and runs.
+    #[test]
+    fn a_job_naming_no_database_runs_where_it_can_only_be_for_this_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("memory.axil");
+        std::fs::write(&db, REDB_MAGIC).unwrap();
+        std::fs::write(tmp.path().join("memory.axil.vec"), REDB_MAGIC).unwrap();
+        let exe = Path::new("/nonexistent/axil");
+        let queue = queue_dir(&db);
+        std::fs::create_dir_all(&queue).unwrap();
+        let legacy = |name: &str| {
+            let path = queue.join(format!("{name}.job"));
+            let job = Job::axil(&["store", "decisions", name], None);
+            std::fs::write(&path, serde_json::to_vec(&job).unwrap()).unwrap();
+            assert_eq!(read_job(&path).1.db_file, None);
+            path
+        };
+        let mut runner = Recorder::new(&queue);
+        let job = legacy("1-alone");
+        let claim = JobClaim::new(&job);
+        assert_eq!(
+            run_job_file(&mut runner, exe, &db, &queue, &claim),
+            Some(true)
+        );
+        assert_eq!(runner.steps, ["store decisions 1-alone"]);
+
+        let branch = tmp.path().join("memory.axil.branch.exp");
+        std::fs::write(&branch, REDB_MAGIC).unwrap();
+        let job = legacy("2-beside-a-branch");
+        let claim = JobClaim::new(&job);
+        assert_eq!(
+            run_job_file(&mut runner, exe, &db, &queue, &claim),
+            Some(false)
+        );
+        assert_eq!(runner.steps.len(), 1, "{:?}", runner.steps);
+        assert!(queue.join("interrupted/2-beside-a-branch.job").is_file());
+        let log = std::fs::read_to_string(queue.join("drain.log")).unwrap();
+        assert!(
+            log.contains("job 2-beside-a-branch set aside, not run: an older axil queued it without naming its database, which may be any of memory.axil, memory.axil.branch.exp"),
+            "{log}"
+        );
+
+        // The branch's own queue: a job there naming no database is the
+        // branch's, whatever sits beside it.
+        let queue = queue_dir(&branch);
+        std::fs::create_dir_all(&queue).unwrap();
+        let path = queue.join("3-the-branchs.job");
+        let job = Job::axil(&["store", "decisions", "branch"], None);
+        std::fs::write(&path, serde_json::to_vec(&job).unwrap()).unwrap();
+        let mut runner = Recorder::new(&queue);
+        let claim = JobClaim::new(&path);
+        assert_eq!(
+            run_job_file(&mut runner, exe, &branch, &queue, &claim),
+            Some(true)
+        );
+        assert_eq!(runner.steps, ["store decisions branch"]);
     }
 }

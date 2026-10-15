@@ -50,7 +50,7 @@ use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock, PoisonError, RwLock};
 use std::time::Duration;
 
@@ -80,13 +80,20 @@ pub struct Request {
     /// `AXIL_DB` resolves against it, and with neither the database is the
     /// `.axil/memory.axil` found walking up from it.
     pub cwd: PathBuf,
-    /// The client's values of the [`CLI_ENV`] variables it has set; one
-    /// missing here is unset. The host's own are never consulted.
+    /// The client's values of the [`CLI_ENV`] and [`crate::DEPS_ENV`]
+    /// variables it has set; one missing here is unset. The host's own
+    /// [`CLI_ENV`] values are never consulted, and its [`crate::DEPS_ENV`]
+    /// values only to refuse a `deps refresh` whose client's differ
+    /// ([`NotServed::Env`]).
     pub env: Vec<(OsString, OsString)>,
     /// Piped stdin. `None` stands for a terminal: nothing was piped.
     pub stdin: Option<Vec<u8>>,
     /// Whether the command may record a slow query in the database's log.
     pub slow_query_log: bool,
+    /// A step of a job the hooks queued, run by the host's drain thread. A
+    /// write a client sent goes ahead of the queue's between its steps
+    /// (see [`WarmState::writers_waiting`]).
+    pub queued: bool,
 }
 
 impl Request {
@@ -148,6 +155,9 @@ pub enum NotServed {
     /// a request panicked ([`WarmState::poisoned`]), the host's gate found
     /// the handle stale, or the request's thread couldn't start.
     Unavailable,
+    /// The command reads the [`crate::DEPS_ENV`] variables (`deps
+    /// refresh`), and the client's values of them are not the host's.
+    Env,
     /// The request's deadline passed before the command could start.
     Expired,
     /// The host let go of the database for a process that leased it.
@@ -163,6 +173,9 @@ impl fmt::Display for NotServed {
             NotServed::Lacks(need) => WarmLacks(*need).fmt(f),
             NotServed::Terminal => f.write_str("the command reads stdin from a terminal"),
             NotServed::Unavailable => f.write_str("the database is not open"),
+            NotServed::Env => f.write_str(
+                "the command reads CARGO_HOME, GOPATH or GOMODCACHE, and the client's differ",
+            ),
             NotServed::Expired => f.write_str("the request's deadline passed before it ran"),
             NotServed::Leased => f.write_str("the database is leased to another process"),
         }
@@ -180,6 +193,8 @@ pub struct WarmState {
     path: PathBuf,
     /// Held by a request that writes, so writes run one at a time.
     writer: Mutex<()>,
+    /// The writes clients sent that wait for [`WarmState::writer`].
+    writers_waiting: AtomicUsize,
     /// Set for good by a request that panicked; see [`WarmState::poisoned`].
     poisoned: AtomicBool,
     /// Held by the one [`WarmState::reopen`] running.
@@ -300,6 +315,7 @@ impl WarmState {
             path: warm.key().to_path_buf(),
             warm: RwLock::new(Some(warm)),
             writer: Mutex::new(()),
+            writers_waiting: AtomicUsize::new(0),
             poisoned: AtomicBool::new(false),
             reopening: AtomicBool::new(false),
             #[cfg(test)]
@@ -310,6 +326,25 @@ impl WarmState {
     /// The open handle, if there is one.
     pub fn handle(&self) -> Option<WarmDb> {
         self.slot_read().clone()
+    }
+
+    /// Tests only: make the next command run on the handle panic.
+    #[cfg(test)]
+    pub fn panic_on_next(&self) {
+        self.panic_next.store(true, Ordering::Release);
+    }
+
+    /// Debug builds only: the writer lock, held as a write holds it.
+    #[cfg(debug_assertions)]
+    pub fn debug_writer(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.writer.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// How many writes clients sent are waiting for the one running. The
+    /// queue's drain thread lets them go first: it starts its next step
+    /// only once none waits.
+    pub fn writers_waiting(&self) -> usize {
+        self.writers_waiting.load(Ordering::Acquire)
     }
 
     /// Whether a request panicked on the handle. Nothing is served after
@@ -513,11 +548,19 @@ fn execute(
     if req.stdin.is_none() && reads_stdin(&cli.command) {
         return Err(NotServed::Terminal);
     }
+    if reads_deps_env(&cli.command) && deps_env_differs(&req) {
+        return Err(NotServed::Env);
+    }
     let db_path = request_db(cli.db.as_deref(), &req.cwd).ok_or(NotServed::WrongDb)?;
     let writes = writes(&cli.command);
     // A write waits for the writes before it without holding the handle,
     // so a queue of writes never keeps a reopen waiting on it.
-    let _writing = writes.then(|| state.writer.lock().unwrap_or_else(PoisonError::into_inner));
+    let _writing = writes.then(|| {
+        let waiting = (!req.queued).then(|| Waiting::new(&state.writers_waiting));
+        let lock = state.writer.lock().unwrap_or_else(PoisonError::into_inner);
+        drop(waiting);
+        lock
+    });
     // A write that waited on the lock behind one that panicked.
     if state.poisoned() {
         return Err(NotServed::Unavailable);
@@ -552,6 +595,23 @@ fn execute(
             state.poison(held);
             Ok(panicked(printed, &*payload))
         }
+    }
+}
+
+/// A write a client sent, counted in [`WarmState::writers_waiting`] until
+/// dropped.
+struct Waiting<'a>(&'a AtomicUsize);
+
+impl<'a> Waiting<'a> {
+    fn new(count: &'a AtomicUsize) -> Self {
+        count.fetch_add(1, Ordering::AcqRel);
+        Self(count)
+    }
+}
+
+impl Drop for Waiting<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
@@ -604,6 +664,18 @@ pub fn route(command: &Command) -> Result<Vec<Need>, NotServed> {
     crate::hot_needs(command).ok_or(NotServed::Command)
 }
 
+/// Whether a host runs the command line `argv` (program name first)
+/// in-process at all, as far as [`route`] tells without a handle; one that
+/// does not parse it doesn't. Parsing needs `main`'s stack (see
+/// [`REQUEST_STACK`]).
+pub fn routes(argv: &[String]) -> bool {
+    let parser = parser();
+    let Ok(matches) = parser.command.clone().try_get_matches_from(argv) else {
+        return false;
+    };
+    Cli::from_arg_matches(&matches).is_ok_and(|cli| route(&cli.command).is_ok())
+}
+
 /// Whether `db` can serve `command` in-process: [`route`] accepts it and
 /// `db` has everything it needs, the same needs the command checks through
 /// [`cli_io::hot_db`]. A host can refuse a request on this alone, without
@@ -621,6 +693,17 @@ pub fn warm_route(command: &Command, db: &Axil) -> Result<(), NotServed> {
 pub fn writes(command: &Command) -> bool {
     match command {
         Command::Store { .. } => true,
+        Command::AutoCapture { dry_run, .. } => !dry_run,
+        #[cfg(all(feature = "embed", feature = "graph"))]
+        Command::AutoLink { .. } => true,
+        Command::Worker {
+            command: crate::WorkerCommand::Run { .. },
+        } => true,
+        Command::Beliefs { generate, .. } => *generate,
+        Command::SessionHeal { dry_run, .. } => !dry_run,
+        Command::Maintain { dry_run, .. } => !dry_run,
+        #[cfg(feature = "deps")]
+        Command::Deps(crate::DepsCommand::Refresh { .. }) => true,
         #[cfg(feature = "checkpoint")]
         Command::Checkpoint { arg, .. } => arg.as_deref() != Some("show"),
         #[cfg(feature = "embed")]
@@ -629,10 +712,35 @@ pub fn writes(command: &Command) -> bool {
     }
 }
 
-/// Whether `command` reads stdin whatever stdin is: `store <table> -`. A
-/// `checkpoint -` reads it only when it is not a terminal.
+/// Whether `command` reads stdin whatever stdin is: `store <table> -`,
+/// `auto-capture -` and `extract-entities -`. A `checkpoint -` reads it
+/// only when it is not a terminal.
 fn reads_stdin(command: &Command) -> bool {
-    matches!(command, Command::Store { json_data, .. } if json_data == "-")
+    match command {
+        Command::Store { json_data, .. } => json_data == "-",
+        Command::AutoCapture { text, .. } | Command::ExtractEntities { text } => text == "-",
+        _ => false,
+    }
+}
+
+/// Whether `command` reads the [`crate::DEPS_ENV`] variables: `deps
+/// refresh`, which finds dependency sources by them.
+fn reads_deps_env(command: &Command) -> bool {
+    #[cfg(feature = "deps")]
+    if let Command::Deps(crate::DepsCommand::Refresh { .. }) = command {
+        return true;
+    }
+    #[cfg(not(feature = "deps"))]
+    let _ = command;
+    false
+}
+
+/// Whether `req`'s client has any [`crate::DEPS_ENV`] variable set
+/// otherwise than the host, unset where it is set included.
+fn deps_env_differs(req: &Request) -> bool {
+    crate::DEPS_ENV
+        .iter()
+        .any(|name| req.env(name) != std::env::var_os(name).as_deref())
 }
 
 /// The database a command line runs on in the client's process: its `--db`
@@ -764,17 +872,24 @@ mod tests {
     use std::sync::Arc;
     use std::time::Instant;
 
-    /// A request from a client working in `cwd`. Its stdin is piped and
-    /// holds `stdin`, empty by default, like the one-shot children's.
+    /// A request from a client working in `cwd`, with this process's
+    /// [`crate::DEPS_ENV`] values, as the one-shot children have them. Its
+    /// stdin is piped and holds `stdin`, empty by default, like theirs.
     fn request(args: &[&str], cwd: &Path, axil_db: Option<&str>, stdin: Option<&[u8]>) -> Request {
+        let deps_env = crate::DEPS_ENV
+            .iter()
+            .filter_map(|name| Some((OsString::from(name), std::env::var_os(name)?)));
         Request {
             argv: parity::argv(args).into_iter().map(OsString::from).collect(),
             cwd: cwd.to_path_buf(),
             env: axil_db
-                .map(|db| vec![("AXIL_DB".into(), db.into())])
-                .unwrap_or_default(),
+                .map(|db| ("AXIL_DB".into(), db.into()))
+                .into_iter()
+                .chain(deps_env)
+                .collect(),
             stdin: Some(stdin.unwrap_or_default().to_vec()),
             slow_query_log: true,
+            queued: false,
         }
     }
 
@@ -1207,6 +1322,49 @@ mod tests {
         }
     }
 
+    /// `deps refresh` reads dependency sources where the
+    /// [`crate::DEPS_ENV`] variables say, so it is served only to a client
+    /// whose values are the host's, set or unset alike. Any other command is
+    /// served whatever they are.
+    #[test]
+    fn deps_refresh_is_served_only_with_the_hosts_dependency_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = build_fixture(tmp.path());
+        let state = WarmState::open(&proj.join(".axil/memory.axil")).unwrap();
+        let with_gopath = |args: &[&str], gopath: Option<&str>| {
+            let mut req = request(args, &proj, None, None);
+            req.env.retain(|(name, _)| name != "GOPATH");
+            if let Some(value) = gopath {
+                req.env.push(("GOPATH".into(), value.into()));
+            }
+            req
+        };
+        let host = std::env::var("GOPATH").ok();
+        let elsewhere = tmp.path().join("elsewhere");
+        let elsewhere = elsewhere.to_str().unwrap();
+        let boot = with_gopath(&["boot"], Some(elsewhere));
+        assert_eq!(execute_captured(boot, &state).map(|r| r.exit), Ok(0));
+        if !cfg!(feature = "deps") {
+            return;
+        }
+        let project = proj.to_str().unwrap();
+        let refresh = [
+            "deps",
+            "refresh",
+            "--if-stale",
+            "--quiet",
+            "--path",
+            project,
+        ];
+        let other = with_gopath(&refresh, Some(elsewhere));
+        assert_eq!(execute_captured(other, &state), Err(NotServed::Env));
+        let flipped = if host.is_some() { None } else { Some("") };
+        let flipped = with_gopath(&refresh, flipped);
+        assert_eq!(execute_captured(flipped, &state), Err(NotServed::Env));
+        let same = with_gopath(&refresh, host.as_deref());
+        assert_eq!(execute_captured(same, &state).map(|r| r.exit), Ok(0));
+    }
+
     /// The handle refusing from inside the command, as [`cli_io::hot_db`]
     /// does, is the same typed refusal; any other error prints as the
     /// one-shot binary prints it.
@@ -1560,5 +1718,62 @@ mod tests {
         );
         let err = String::from_utf8_lossy(&results[0].1 .1);
         assert!(err.contains("warning: removing corrupt edge zzzz"), "{err}");
+    }
+
+    /// The forms of the commands a queued job runs that a host leaves to
+    /// the client: one that spawns a process, inspects without applying,
+    /// names a path relative to the client's directory, or is another
+    /// subcommand than the queue's.
+    #[test]
+    fn only_some_forms_of_the_queued_commands_are_served() {
+        let mut cases: Vec<(Vec<&str>, bool)> = vec![
+            (vec!["auto-capture", "-"], true),
+            (vec!["auto-capture", "text", "--dry-run"], true),
+            (vec!["extract-entities", "-"], true),
+            (vec!["worker", "run"], !cfg!(feature = "decide")),
+            (vec!["worker", "status"], false),
+            (vec!["beliefs", "--generate"], true),
+            (vec!["beliefs"], false),
+            (vec!["session-heal", "--session", "s"], true),
+            (
+                vec!["session-heal", "--problems-file", "/abs/p.jsonl"],
+                true,
+            ),
+            (vec!["session-heal", "--problems-file", "p.jsonl"], false),
+            (vec!["session-heal", "--dry-run"], false),
+            (vec!["maintain", "--if-stale"], true),
+            (vec!["maintain", "--if-stale", "--in-background"], false),
+        ];
+        if cfg!(all(feature = "embed", feature = "graph")) {
+            cases.push((vec!["auto-link", "01ZZZZZZZZZZZZZZZZZZZZZZZZ"], true));
+        }
+        if cfg!(feature = "deps") {
+            cases.push((
+                vec!["deps", "refresh", "--if-stale", "--path", "/abs"],
+                true,
+            ));
+            cases.push((vec!["deps", "refresh", "--if-stale"], false));
+            cases.push((vec!["deps", "sync", "--path", "/abs"], false));
+        }
+        let got = std::thread::Builder::new()
+            .stack_size(REQUEST_STACK)
+            .spawn(move || {
+                cases
+                    .into_iter()
+                    .map(|(args, want)| {
+                        let argv: Vec<String> = std::iter::once("axil")
+                            .chain(args.iter().copied())
+                            .map(str::to_string)
+                            .collect();
+                        (args, routes(&argv), want)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+        for (args, routed, want) in got {
+            assert_eq!(routed, want, "{args:?}");
+        }
     }
 }

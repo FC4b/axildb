@@ -4,12 +4,17 @@
 open, with the embedding model and the graph loaded, and runs the hot commands
 (`recall`, `boot`, `recall-for-file`, `code-search`, `fts`, `since`, `store`,
 `checkpoint`) sent to it over a local socket, so a command neither opens the
-database nor loads a model on each call. Unix only.
+database nor loads a model on each call. It also runs the hooks' queued
+writes on the same handle, and serves the commands those are made of when
+typed too: `auto-capture`, `extract-entities`, `auto-link`, `worker run`,
+`beliefs --generate`, `session-heal`, `maintain` and `deps refresh`, in the
+forms listed [below](#the-hooks-queued-writes). Unix only.
 
-> **Started by hand only.** Once one runs, the hot commands you type and the
-> hooks' lookups go to it ([below](#how-commands-reach-it)). Every other
-> command, and the hooks' queued writes other than `store`, still run in their
-> own process and lease the database from the daemon
+> **Started by hand only.** Once one runs, the hot commands and the queued
+> writes' commands you type, the hooks' lookups and the hooks' queued writes
+> go to it
+> ([below](#how-commands-reach-it)). Every other command still runs in its own
+> process and leases the database from the daemon
 > ([below](#leasing-the-database)), which opens it again afterwards.
 
 ## Commands
@@ -35,8 +40,9 @@ adds whether a command from this shell is served (`this shell: not served,
 its environment differs from the daemon's in one of …`), the idle time left,
 the requests in flight, the requests refused and why (`refused: 4 (incompatible
 env 3, leased 1)`), each command's p50/p95 latency over its last 256
-requests, the reloads and why, the processes holding a lease, and the state
-of the engines and the graph.
+requests, the reloads and why, the processes holding a lease, what it has done
+with the hooks' queue ([below](#the-hooks-queued-writes)), and the state of the
+engines and the graph.
 
 `AXIL_DAEMON=off` keeps `start` from starting one.
 
@@ -44,7 +50,8 @@ of the engines and the graph.
 
 A hot command typed with a daemon running goes to it: `axil` sends the
 command line, its working directory and, for a command that reads it, its
-stdin (`store <table> -`, `checkpoint -`, `checkpoint` with input piped), and
+stdin (`store <table> -`, `auto-capture -`, `extract-entities -`,
+`checkpoint -`, `checkpoint` with input piped), and
 prints what the daemon's run printed, to stdout and stderr in the order it
 printed it, exiting with its code. A command given
 more than 32 MiB of stdin runs in its own process instead. Nothing reaches
@@ -55,6 +62,10 @@ process as it would with no daemon, and its open leases the database. A
 daemon still opening the database, opening it again after a lease or a
 change, or with every request slot taken is waited for, up to 10 s.
 
+A command the daemon has not started within 300 s (a write waiting behind
+others for the writer lock, say) is answered as expired, not run, and runs in
+the process instead. A write the daemon has started is waited for however
+long it runs; a read is given up on after the 300 s and runs in the process.
 If the connection breaks after the command was sent, a write is not run
 again, since the daemon may have run it:
 `{"error":"daemon connection lost; write status unknown"}` is printed and the
@@ -82,9 +93,82 @@ past it, a lookup's child waits for a lease only as long as the budget has
 left, and a child still running when it runs out is killed, so the hook
 prints what it has instead of being killed by the harness.
 
-The hooks' queued writes are still run by `hook drain`, a process of its own
-that runs each queued command as a child: a `store` goes to the daemon, and
-the rest lease the database.
+## The hooks' queued writes
+
+Hooks queue their writes as job files in `.axil/hook-queue/`, for a drainer
+to run. Each database has a queue of its own: a database file other than
+`memory.axil` (a branch, or one `AXIL_DB` names) queues in
+`hook-queue.<file name>/` beside it, so a drainer or daemon for one database
+never runs another's jobs. While a daemon runs, it is that drainer. Its drain
+thread holds the queue's `drain.lock`, the OS lock `axil hook drain` takes,
+from the moment it first gets it until the daemon stops. Like `hook drain`, it
+runs the jobs one at a time, in the order they were queued, each renamed to
+`.running` once its first write starts and removed after, a failed one logged
+in `drain.log`. A `.running` job a killed drainer left behind is moved to
+`interrupted/` and never run again; a job still waiting to start when its
+drainer was killed is still `.job`, and the next drainer runs it. A step run
+in a process of its own that finds the database busy (another process holds
+it) is retried for up to 120 s, then given up: the job goes back to the queue
+as `.job`, in its place, recording the steps that ran, and the next drainer
+resumes it at the step that gave up, never running one of those again. A job
+given up that way by three drainers in turn is moved to `interrupted/` and
+logged instead. No job is deleted unrun.
+
+Each job also names the database file it was queued for, and a drainer moves
+one queued for another to `interrupted/`, with a line in `drain.log`, and does
+not run it. Jobs an older axil queued name no database. Every database in a
+directory queued in `hook-queue/` then, so such a job there runs on
+`memory.axil` only while no other database sits beside it in `.axil/` (a
+branch such as `memory.axil.branch.<name>`, another `*.axil`, or any other
+file redb wrote); otherwise it is moved to `interrupted/` and logged, since it
+may be any of theirs.
+
+A hook asks the daemon, before it queues, whether it serves the hook's
+process. When it does, the hook pokes it and starts no drainer. When it
+doesn't (another build or environment), isn't asked (`AXIL_DAEMON=off`) or
+doesn't answer in time, the job is marked for the hook's own `hook drain`:
+the daemon lets go of the queue at that job, even while it is not serving (a
+lease, a reload), and takes it back once that drainer is done. With
+`AXIL_DAEMON=off`, that drainer's write finds the database busy while the
+daemon holds it, as any command run with the daemon off does: `hook drain`
+waits up to 120 s for it, then gives the step up, and the job goes back to the
+queue, no longer marked for that drainer. The write runs once a drainer finds
+the database free: the daemon, which takes the queue back and runs the job on
+its open handle, or a later hook's drainer. For it to run without that wait,
+leave `AXIL_DAEMON` unset for the hooks while a daemon runs, or stop the
+daemon before turning it off. When no drainer takes the job within 5 s, the
+daemon runs it itself. A job it can't read (one a newer build queued) is
+moved to `interrupted/` and logged, never deleted.
+
+These steps run on the open handle, as these forms do when typed: `store`,
+`auto-capture`, `extract-entities`, `auto-link` (which, without a vector
+store, fails on the open handle as the one-shot command does), `worker
+run` (not in a build with the `decide` feature, whose review loads a model),
+`beliefs --generate`, `session-heal` (not `--dry-run`, and with an absolute
+`--problems-file` if any), `deps refresh` with an absolute `--path`, and
+`maintain` in the foreground, which is what the session start's
+`maintain --in-background` runs. Before running a step it doesn't run, the
+daemon lets go of the database as for a lease, one of its own (`leased to: the
+hook queue's own steps`). It then runs the step as `hook drain` would, in a
+process of its own with `AXIL_DAEMON=off`. It keeps the database closed for the
+steps after it that also run that way, and opens it again at the next step it
+runs or once the queue is empty.
+
+A job starts only while the daemon serves. During a lease, a reload or the
+opening, the queue waits between jobs, and a job's step waits for the database
+to open again. Writes sent by clients go ahead of the queue's between its steps.
+When the daemon stops, it finishes the job running, if a write of it has
+started, the steps left each in a process of their own once it has closed the
+database; a job that was only waiting (for the writer lock, say) is left
+queued whole. It then lets go of the queue and starts `hook drain` for the
+jobs left, before it exits, so `daemon stop` waits for that job too. A daemon
+that can't close the database (a request still holds it) exits without
+finishing the job; one that was only waiting is still queued for the next
+hook's drainer.
+
+`daemon status` reports it: `hook queue: drained here; 12 jobs run (0 failed),
+steps: 30 on the open handle, 0 in a process of their own (the database let go
+of 0 times); 0 jobs left to the drainer of a hook not served`.
 
 ## Leasing the database
 
@@ -166,18 +250,39 @@ size and modification time), with the same compiled features and the same
 values of the environment variables that change what a command prints or
 reads: `AXIL_ENC_KEY`, `AXIL_ENC_KEY_FILE` (and the key file's size and
 modification time), `AXIL_LLM_API_KEY`, `AXIL_VERBOSE`, `AXIL_EMBED_SESSIONS`,
-`HOME`, `USERPROFILE`, `APPDATA` and `ORT_DYLIB_PATH`. Variables only commands
-the daemon doesn't run read (`CARGO_HOME`, `GOPATH`, `GOMODCACHE` for `deps`,
-`XDG_CONFIG_HOME` for `workspace`) don't count. The daemon clears `AXIL_VERBOSE` and
+`HOME`, `USERPROFILE`, `APPDATA` and `ORT_DYLIB_PATH`. A variable only
+commands the daemon doesn't run read (`XDG_CONFIG_HOME`, for `workspace`)
+doesn't count. `CARGO_HOME`, `GOPATH` and `GOMODCACHE`, where `deps refresh`
+reads dependency sources, count for that command alone: each request carries
+the client's values, and `deps refresh` from a client whose values differ
+from the daemon's is handed back (reason `env`) while everything else is
+still served. A hook's queued `deps refresh` records the hook's values, and
+the daemon runs it in a process of its own, with them, when they differ from
+its own. The daemon clears `AXIL_VERBOSE` and
 `AXIL_EMBED_SESSIONS` from its own environment, so a client with either set
 runs the command itself. Anything else, or a command the daemon doesn't run,
 is handed back to the client unrun, and the client runs it and leases the
 database. A command typed into a development build beside an installed
 build's daemon so runs on the code it was typed into.
 
-Vector search ranks as the one-shot command does: up to the same store size it
-scans every vector instead of building the approximate graph a long-lived
-process could build once.
+A vector search the daemon runs ranks as the one-shot command does: up to
+100,000 live vectors it scans every vector, as a one-shot command does,
+instead of building the approximate graph a long-lived process builds once.
+`worker run` is the exception. Run in its own process it counts as
+long-lived, and scans only up to 20,000 vectors, above which it builds the
+graph. So on a store of 20,000 to 100,000 vectors, a `worker run --brain`
+the daemon serves finds near-duplicates by an exact scan where its own
+process would search the approximate graph, and the clusters it reports can
+differ. (The hooks' queued `worker run`, without `--brain`, searches no
+vectors.) Neither threshold changes for the daemon: the one-shot ceiling is
+what keeps the other served commands ranking as their one-shot runs.
+
+A served `worker run` can also report `vectors_compacted` above 0 where the
+same run in its own process would report 0. The vector index counts the
+vectors removed or re-added since it was loaded, and compacts once those
+are more than `[healing]`'s `vector_rebuild_threshold` share of it. A process of its own
+loads the index fresh, with none counted; the daemon's handle has counted
+those of every write it served since it opened the database.
 
 ## When it reloads, and when it stops
 
@@ -185,9 +290,13 @@ Before a request, again before a write once it is next in line, and once a
 second, the daemon checks whether the files behind its open handle changed
 without it: the config file it reads, the inode of the database or of any
 companion store (a backup renamed over it, a store removed by `compact
---drop-engine` or created by another command), and the plugins directory. Any
-change, or a graph that failed to load, makes it finish the requests running
-on the old handle and open the database again. Until it has, every command is
+--drop-engine` or created by another command), the plugins directory, and the
+project manifests entity extraction reads its known names from (`Cargo.toml`
+and its workspace members', `package.json`, `pyproject.toml`). Any change, a
+graph that failed to load, or a `deps refresh` it ran that changed the
+database's dependencies makes it finish the requests running on the old
+handle and open the database again, so the names a new dependency adds are
+known to the commands after it. Until it has, every command is
 handed back unrun, so a write never lands in a file that is no longer the
 database.
 

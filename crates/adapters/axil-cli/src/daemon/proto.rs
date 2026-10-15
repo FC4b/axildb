@@ -129,17 +129,28 @@ pub enum Op {
     /// without running anything: answered by
     /// `{"op":"check","mismatch":null}`, or by what does not match
     /// (`proto`, `build`, `features` or `env`). `daemon start` and `status`
-    /// ask it for the shell they run in.
+    /// ask it for the shell they run in, and a hook before it queues a
+    /// write.
     Check(RunHeader),
+    /// A job was queued: the daemon's drain thread looks at the queue now
+    /// rather than at its next poll. Answered by `{"op":"poke","ok":true}`
+    /// when the daemon drains the queue, `"ok":false` when it is shutting
+    /// down.
+    Poke,
     /// Debug builds only: report the graph as failed to load, so a test can
     /// watch the daemon reload. Answered by `{"op":"debug_fail_graph","ok":true}`.
     #[cfg(debug_assertions)]
     DebugFailGraph,
     /// Debug builds only: hold the open database in the background for
     /// `ms` milliseconds, as a slow warm-up would, so a test can watch a
-    /// shutdown wait for it. Answered by `{"op":"debug_hold","ok":true}`.
+    /// shutdown wait for it; with `writer`, hold the writer lock too, as a
+    /// slow write would. Answered by `{"op":"debug_hold","ok":true}`.
     #[cfg(debug_assertions)]
-    DebugHold { ms: u64 },
+    DebugHold {
+        ms: u64,
+        #[serde(default)]
+        writer: bool,
+    },
     /// Debug builds only: run the open guard on the database the daemon
     /// serves, as a command that opened it would, so a test can see that
     /// the guard's check is armed in the daemon. Answered by
@@ -233,7 +244,8 @@ pub struct RunHeader {
     pub argv: Vec<String>,
     /// The client's working directory, absolute.
     pub cwd: String,
-    /// The client's values of the variables in [`exec::CLI_ENV`] it has set.
+    /// The client's values of the variables in [`exec::CLI_ENV`] and
+    /// [`crate::DEPS_ENV`] it has set.
     pub env: Vec<(String, String)>,
     /// A frame of stdin follows the header. Without one, the client's stdin
     /// is a terminal.
@@ -261,6 +273,7 @@ impl RunHeader {
                 .collect(),
             stdin,
             slow_query_log: self.slow_query_log,
+            queued: false,
         }
     }
 }
@@ -282,7 +295,7 @@ pub enum RunReply {
     /// Except `too_large`: the daemon ran it, and what it printed is over
     /// the frame limit; the client runs it unless it writes.
     NotServed {
-        /// `parse`, `wrong_db`, `command`, `lacks`, `terminal`,
+        /// `parse`, `wrong_db`, `command`, `lacks`, `terminal`, `env`,
         /// `unavailable` or `too_large`.
         reason: String,
         /// The reason in words.
@@ -364,6 +377,7 @@ impl RunReply {
             NotServed::Lacks(_) => "lacks",
             NotServed::Terminal => "terminal",
             NotServed::Unavailable => "unavailable",
+            NotServed::Env => "env",
         };
         RunReply::NotServed {
             reason: code.to_string(),
@@ -379,11 +393,14 @@ impl RunReply {
 /// modification time.
 ///
 /// A variable only commands the daemon does not serve read is left out, so
-/// a shell that sets it differently is still served: `CARGO_HOME`,
-/// `GOPATH` and `GOMODCACHE`, where `deps` finds the dependency sources it
-/// reads docs from, and `XDG_CONFIG_HOME`, where `workspace` keeps its
-/// registry. A daemon that serves `deps refresh` must cover the first three
-/// again.
+/// a shell that sets it differently is still served: `XDG_CONFIG_HOME`,
+/// where `workspace` keeps its registry. So are the [`crate::DEPS_ENV`]
+/// variables (`CARGO_HOME`, `GOPATH`, `GOMODCACHE`), which of the served
+/// commands only `deps refresh` reads: each request carries the client's
+/// values of them, and `deps refresh` alone is refused
+/// ([`exec::NotServed::Env`]) to a client whose values differ from the
+/// daemon's, so one variable set differently never stops a shell being
+/// served everything else.
 pub const FP_ENV: &[&str] = &[
     "AXIL_ENC_KEY",
     "AXIL_ENC_KEY_FILE",
@@ -538,6 +555,7 @@ impl Identity {
             cwd: cwd.to_string_lossy().into_owned(),
             env: exec::CLI_ENV
                 .iter()
+                .chain(crate::DEPS_ENV)
                 .filter_map(|name| {
                     let value = std::env::var(name).ok()?;
                     Some((name.to_string(), value))
@@ -960,6 +978,18 @@ mod tests {
         ("AXIL_DB", "carried by each request (exec::CLI_ENV)"),
         ("AXIL_MCP_TOOLS", "carried by each request (exec::CLI_ENV)"),
         (
+            "CARGO_HOME",
+            "carried by each request (DEPS_ENV); `deps refresh` is served only where it matches",
+        ),
+        (
+            "GOPATH",
+            "carried by each request (DEPS_ENV); `deps refresh` is served only where it matches",
+        ),
+        (
+            "GOMODCACHE",
+            "carried by each request (DEPS_ENV); `deps refresh` is served only where it matches",
+        ),
+        (
             "AXIL_SLOW_QUERY_LOG",
             "per request: the run header's slow_query_log",
         ),
@@ -978,15 +1008,19 @@ mod tests {
     const INDIRECT: &[(&str, &str)] = &[
         (
             "crates/adapters/axil-cli/src/daemon/exec.rs",
-            "the exec::CLI_ENV values, carried by each request",
+            "the exec::CLI_ENV values, carried by each request, and the host's DEPS_ENV values",
+        ),
+        (
+            "crates/adapters/axil-cli/src/daemon/drain.rs",
+            "the DEPS_ENV values a queued step's request carries",
         ),
         (
             "crates/adapters/axil-cli/src/hook_brain.rs",
-            "a hook's project directory; hooks are never served",
+            "a hook's project directory, and the DEPS_ENV values a queued job records; hooks are never served",
         ),
         (
             "crates/adapters/axil-cli/src/daemon/proto.rs",
-            "the FP_ENV and CLI_ENV values themselves",
+            "the FP_ENV, CLI_ENV and DEPS_ENV values themselves",
         ),
     ];
 
@@ -1125,23 +1159,15 @@ mod tests {
         ),
         ("CLAUDE_PROJECT_DIR", "hook commands"),
         (
+            "AXIL_DEBUG_BUSY_WAIT_MS",
+            "debug builds only: how long a queued step run in a process of its own waits for a busy database",
+        ),
+        (
             "PATH",
             "install, hook setup and `daemon start` look for an installed axil",
         ),
         ("USER", "the scheduled maintenance's log directory"),
         ("SystemRoot", "Windows only, where there is no daemon"),
-        (
-            "CARGO_HOME",
-            "`deps`, reading a crate's docs from its source",
-        ),
-        (
-            "GOPATH",
-            "`deps`, reading a Go module's docs from its source",
-        ),
-        (
-            "GOMODCACHE",
-            "`deps`, reading a Go module's docs from its source",
-        ),
         ("XDG_CONFIG_HOME", "`workspace`, finding its registry"),
     ];
 

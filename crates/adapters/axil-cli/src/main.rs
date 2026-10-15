@@ -3573,10 +3573,14 @@ enum HookCommand {
         #[arg(long)]
         event: Option<String>,
     },
-    /// Run the database writes hooks have queued in `<db dir>/hook-queue/`.
-    /// Hooks start this detached after queuing a write; it is safe to run by
-    /// hand. A job cut off mid-run is moved to `hook-queue/interrupted/`
-    /// and never retried.
+    /// Run the database writes hooks have queued in its queue
+    /// (`<db dir>/hook-queue/` for `memory.axil`, `hook-queue.<file>/` for
+    /// another database file). Hooks start this detached after queuing a
+    /// write; it is safe to run by hand. A job cut off mid-run is moved to
+    /// the queue's `interrupted/` and never retried. One whose step finds
+    /// the database busy past 120 s goes back to the queue, to resume at
+    /// that step; the third time, it is moved to `interrupted/` too, as is
+    /// a job queued for another database file.
     #[command(hide = true)]
     Drain,
 }
@@ -6824,10 +6828,7 @@ fn open_with_embedder(path: &Path) -> Result<Axil> {
         .is_none()
     {
         // Require an existing vector store — don't silently create one on read operations.
-        anyhow::bail!(
-            "no vector store found — run `axil init <path>` or store with \
-             `--embed <field>` to create one"
-        );
+        anyhow::bail!(NO_VECTOR_STORE);
     }
     // The store exists, so `attach_detected_engines` attaches the vector index
     // + embedder itself (unless the operator disabled the engine in axil.toml).
@@ -6837,12 +6838,31 @@ fn open_with_embedder(path: &Path) -> Result<Axil> {
         .build()
         .context("failed to open database")?;
     if !db.has_embedder() {
-        anyhow::bail!(
-            "the vector engine is disabled in axil.toml ([engines] disabled) — \
-             re-enable it to run embedding commands"
-        );
+        anyhow::bail!(VECTOR_ENGINE_DISABLED);
     }
     Ok(db)
+}
+
+const NO_VECTOR_STORE: &str = "no vector store found — run `axil init <path>` or store with \
+     `--embed <field>` to create one";
+
+const VECTOR_ENGINE_DISABLED: &str = "the vector engine is disabled in axil.toml \
+     ([engines] disabled) — re-enable it to run embedding commands";
+
+/// The error [`open_with_embedder`] fails with for the database at `path`
+/// whatever else is so, if it does: there is no vector store, or the vector
+/// engine is disabled in axil.toml. `None` when neither holds. It opens
+/// nothing, so a daemon can ask it of the database it holds.
+#[cfg(all(feature = "embed", feature = "graph"))]
+fn embedder_unavailable(path: &Path) -> Option<anyhow::Error> {
+    if !axil_vector::vector_db_path(path).exists() {
+        return Some(anyhow::anyhow!(NO_VECTOR_STORE));
+    }
+    let disabled = path
+        .parent()
+        .and_then(|dir| axil_core::load_config_from(dir).ok())
+        .is_some_and(|config| config.is_engine_disabled("vec"));
+    disabled.then(|| anyhow::anyhow!(VECTOR_ENGINE_DISABLED))
 }
 
 /// Like [`open_with_embedder`], but for write commands with an explicit
@@ -7200,7 +7220,11 @@ impl axil_core::Adapter for CliAdapter {
 /// command it runs must rank as the one-shot command the client would
 /// otherwise run, and the one-shot ceiling scans exactly where the graph
 /// would answer approximately. Up to that ceiling the daemon pays the exact
-/// scan on each search instead of building the graph once.
+/// scan on each search instead of building the graph once. `worker run` is
+/// the exception: served, it scans up to the one-shot ceiling where its own
+/// process, long-lived, builds the graph above
+/// `axil_vector::hnsw::EXACT_SCAN_MAX`, so `worker run --brain` can cluster
+/// differently on a store between the two.
 #[cfg(feature = "vector")]
 fn is_long_lived(command: &Command) -> bool {
     match command {
@@ -7212,6 +7236,15 @@ fn is_long_lived(command: &Command) -> bool {
         _ => false,
     }
 }
+
+/// The variables `deps refresh` finds dependency sources by: Cargo's
+/// registry under `CARGO_HOME`, Go's module cache under `GOMODCACHE` or
+/// `GOPATH`. No other command the daemon serves reads them, so they are
+/// left out of its environment fingerprint: each request carries the
+/// client's values instead, and the daemon runs `deps refresh` only for a
+/// client whose values are its own. A queued `deps refresh` records the
+/// hook's values, for whichever process runs it.
+pub(crate) const DEPS_ENV: &[&str] = &["CARGO_HOME", "GOPATH", "GOMODCACHE"];
 
 /// What an open handle must already have for `command` to run on it: the
 /// stores and providers the command's own open would attach or create. Checked
@@ -7256,6 +7289,36 @@ fn hot_needs(command: &Command) -> Option<Vec<cli_io::Need>> {
         #[cfg(feature = "checkpoint")]
         Command::Checkpoint { .. } => Some(Vec::new()),
         Command::Boot { .. } | Command::RecallForFile { .. } => Some(Vec::new()),
+        Command::AutoCapture { .. } | Command::ExtractEntities { .. } => Some(Vec::new()),
+        // It needs the vector store and the embedder, which its arm checks
+        // itself: a handle without them fails as the one-shot open does.
+        #[cfg(all(feature = "embed", feature = "graph"))]
+        Command::AutoLink { .. } => Some(Vec::new()),
+        // The possible-contradiction review loads its model in the process
+        // that runs the worker, which a daemon would then keep.
+        #[cfg(not(feature = "decide"))]
+        Command::Worker {
+            command: WorkerCommand::Run { .. },
+        } => Some(Vec::new()),
+        Command::Beliefs { generate: true, .. } => Some(Vec::new()),
+        // A dry run opens for inspection, which a warm handle can't stand
+        // in for, and a relative problems file is the client's to find.
+        Command::SessionHeal {
+            dry_run: false,
+            problems_file,
+            ..
+        } if problems_file.as_deref().is_none_or(Path::is_absolute) => Some(Vec::new()),
+        // In the background it spawns a child, which the daemon must not;
+        // that child, run in the foreground, is served.
+        Command::Maintain {
+            in_background: false,
+            ..
+        } => Some(Vec::new()),
+        // A relative path is the client's to find. It reads dependency
+        // sources where the `DEPS_ENV` variables say, so it is served only
+        // to a client whose values of those are the daemon's.
+        #[cfg(feature = "deps")]
+        Command::Deps(DepsCommand::Refresh { path, .. }) if path.is_absolute() => Some(Vec::new()),
         _ => None,
     }
 }
@@ -8962,7 +9025,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
             // downsample purges (deletes) records past the retention window,
             // so auto-firing it from the hook would silently destroy memory.
             // Keep downsampling explicit via `axil heal`.
-            let db = open_with_all_detected(&db_path)?;
+            let db = cli_io::hot_db(&db_path, &needs, || open_with_all_detected(&db_path))?;
             let now_secs = chrono::Utc::now().timestamp();
             let runs = db.list("_maintenance_runs").unwrap_or_default();
             let last_run = |task: &str| -> Option<i64> {
@@ -11160,9 +11223,9 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
             let db_path = require_db(&db_opt)?;
             let config = load_config(&db_path)?;
             let db = if dry_run {
-                open_for_inspection(&db_path)?
+                std::sync::Arc::new(open_for_inspection(&db_path)?)
             } else {
-                open_with_all_detected(&db_path)?
+                cli_io::hot_db(&db_path, &needs, || open_with_all_detected(&db_path))?
             };
 
             let problems = problems_file
@@ -12609,7 +12672,18 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
             if !(0.5..=1.0).contains(&threshold) {
                 anyhow::bail!("--threshold must be between 0.5 and 1.0");
             }
-            let db = open_with_embedder(&db_path)?;
+            let db = cli_io::hot_db(&db_path, &needs, || open_with_embedder(&db_path))?;
+            // Only a warm handle can lack them, the one-shot open having
+            // failed first. When that open would fail (no vector store, or
+            // the engine disabled), so does this run, with its error, rather
+            // than leave the command to a process of its own that fails so.
+            let lacks = [cli_io::Need::Vectors, cli_io::Need::Embedder]
+                .into_iter()
+                .find(|need| !need.met_by(&db));
+            if let Some(need) = lacks {
+                return Err(embedder_unavailable(&db_path)
+                    .unwrap_or_else(|| cli_io::WarmLacks(need).into()));
+            }
             let rid = RecordId::from_string(&id).context("invalid record ID")?;
             let report = db
                 .auto_link(&rid, Some(threshold))
@@ -14584,7 +14658,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
             generate,
         } => {
             let db_path = require_db(&db_opt)?;
-            let db = open_with_all_detected(&db_path)?;
+            let db = cli_io::hot_db(&db_path, &needs, || open_with_all_detected(&db_path))?;
             let bs = axil_core::beliefs::BeliefSystem::new(&db);
 
             if generate {
@@ -14711,7 +14785,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
                 }));
             } else {
                 let db_path = require_db(&db_opt)?;
-                let db = open_with_all_detected(&db_path)?;
+                let db = cli_io::hot_db(&db_path, &needs, || open_with_all_detected(&db_path))?;
                 let mut stored = Vec::new();
                 for cap in &actionable {
                     let (table, data) = axil_core::auto_capture::capture_to_record(cap);
@@ -15926,7 +16000,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
 
         Command::Worker { command } => {
             let db_path = require_db(&db_opt)?;
-            let db = open_with_all_detected(&db_path)?;
+            let db = cli_io::hot_db(&db_path, &needs, || open_with_all_detected(&db_path))?;
             match command {
                 WorkerCommand::Run { brain } => {
                     let worker = if brain {
@@ -15960,7 +16034,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
                     }
                 }
                 WorkerCommand::Daemon { interval, duration } => {
-                    let db_arc = std::sync::Arc::new(db);
+                    let db_arc = db;
                     let iv = std::time::Duration::from_secs(interval);
 
                     if duration == 0 {
@@ -16721,7 +16795,7 @@ fn try_deps_extension_dispatch(
         (None, DepsCommand::List { .. }) => return Ok(None),
         (None, _) => require_db(db_opt)?,
     };
-    let db = open_with_all_detected(&db_path)?;
+    let db = cli_io::hot_db(&db_path, &[], || open_with_all_detected(&db_path))?;
     let consumed_stdin = invocation.stdin.is_some();
     match axil_core::dispatch_cli(&db, &db.extensions(), &invocation)? {
         axil_core::Dispatch::Handled(output) => {
@@ -16971,7 +17045,7 @@ fn run_deps(cmd: DepsCommand, db_opt: &Option<PathBuf>, out: &Output) -> Result<
             transitive,
         } => {
             let db_path = require_db(db_opt)?;
-            let db = open_with_all_detected(&db_path)?;
+            let db = cli_io::hot_db(&db_path, &[], || open_with_all_detected(&db_path))?;
             let all = axil_docs::detect_manifests(&path);
 
             let mut drift_report: Vec<Value> = Vec::new();

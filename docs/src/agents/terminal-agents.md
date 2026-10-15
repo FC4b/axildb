@@ -32,8 +32,10 @@ session end    → session close queued (record, worker, beliefs, heal)
 ```
 
 Hooks never write to the database themselves: each write is a job file in
-`.axil/hook-queue/`, run by one detached `axil hook drain`, so an agent's
-hook timeout can't cut a write off halfway. Agents with no session-end
+`.axil/hook-queue/` (a queue per database file), run by one drainer (the database's
+[daemon](../cli/daemon.md#the-hooks-queued-writes) when one runs, else a
+detached `axil hook drain`), so an agent's hook timeout can't cut a write off
+halfway. Agents with no session-end
 event close the session at each stop instead, through the same queue.
 
 Because it's one loop, a memory stored under Codex is recalled under Claude
