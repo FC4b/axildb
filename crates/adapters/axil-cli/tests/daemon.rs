@@ -1762,6 +1762,54 @@ fn a_job_the_killed_daemon_was_running_is_set_aside() {
     assert!(listed.contains("the write after it"), "{listed}");
 }
 
+/// The daemon stopped with a job queued that it could not start, the
+/// database leased to a command it doesn't run: once it has closed the
+/// database it starts `hook drain`, which runs the job when the lease
+/// holder is done.
+#[test]
+fn a_job_left_when_the_daemon_stops_goes_to_a_drainer() {
+    let fx = fixture();
+    fx.start();
+    let mut cmd = Command::new(BIN);
+    cmd.args(["worker", "daemon", "--interval", "60", "--duration", "5"])
+        .current_dir(&fx.proj)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    for name in ENV {
+        cmd.env_remove(name);
+    }
+    let mut holder = cmd.spawn().unwrap();
+    let pid = u64::from(holder.id());
+    assert!(
+        wait_for(Duration::from_secs(10), || fx.holders() == [pid]),
+        "{}",
+        fx.live()
+    );
+    let data = serde_json::json!({"summary": "queued while leased"});
+    fx.queue_job(
+        0,
+        &serde_json::json!({"op": "axil", "args": ["store", "decisions", data.to_string()]}),
+    );
+    let drain = fx.axil(&["hook", "drain"]);
+    assert!(drain.status.success(), "{}", text(&drain.stderr));
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(fx.queued().len(), 1, "{}", fx.live());
+
+    let stop = fx.axil(&["daemon", "stop", "--wait", "20"]);
+    assert!(stop.status.success(), "{}", text(&stop.stderr));
+    assert!(holder.wait().unwrap().success());
+    assert!(
+        wait_for(Duration::from_secs(60), || fx.queued().is_empty()),
+        "{:?}",
+        fx.queued()
+    );
+    let listed = text(&fx.axil(&["list", "decisions"]).stdout);
+    assert_eq!(listed.matches("queued while leased").count(), 1, "{listed}");
+    let log = std::fs::read_to_string(fx.queue().join("drain.log")).unwrap_or_default();
+    assert!(log.contains("stopped with jobs queued"), "{log}");
+}
+
 /// A drainer from before OS locks takes the queue by creating `drain.lock`,
 /// and leaves it while the file is there and fresh. The daemon leaves the
 /// queue to a live one, and while it holds the queue itself it keeps the
@@ -2010,8 +2058,12 @@ fn a_hook_recall_under_a_lease_returns_nothing_at_once() {
     };
     // With the daemon serving, it runs the hook's recall, which finds the
     // memory and leases nothing.
-    let (context, _) = hook("s-served");
-    assert!(context.contains("auth timeout"), "{context}");
+    let (context, took) = hook("s-served");
+    assert!(
+        context.contains("auth timeout"),
+        "{context:?} after {took:?}: {}",
+        fx.live()
+    );
     assert_eq!(fx.served("recall"), 1, "{}", fx.live());
     assert_eq!(fx.live()["leases_granted"], 0, "{}", fx.live());
 
