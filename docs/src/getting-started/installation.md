@@ -198,7 +198,130 @@ Available models:
 | `granite-embedding-small-english-r2` (`granite-small`) | 384 | 188 MB | Experimental, see below |
 
 The model is set with `[database] embedding_model` in `axil.toml`
-(see [Configuration](configuration.md)).
+(see [Configuration](configuration.md)). Changing it needs a rebuild of the
+vector store; see [Switching embedding models](#switching-embedding-models).
+
+### Switching embedding models
+
+Vectors from two models can't be compared, even when they have the same
+width: `bge-small-en-v1.5` and `granite-embedding-small-english-r2` both write
+384 dimensions. So the vector store (`memory.axil.vec`) records the model
+that built it, and every command that loads a model checks that record
+against `[database] embedding_model` first. A store that holds another
+model's vectors is refused, never mixed:
+
+- each command prints one warning, naming the configured model, the model
+  the store records (or that it records none), and the fix, and recall ranks
+  without vectors (keyword, recency, graph and its other signals);
+- nothing new is embedded into the store: `store --embed`, `embed`, and a raw
+  `--vector` for the default space fail with the same message, as do the raw
+  vector commands on it (`add-vector`, `similar`), and a plain `store` saves
+  the record without a vector;
+- `doctor` reports a `vector_engine` error, `boot` lists it under
+  `degraded`, and the [daemon](../cli/daemon.md) leaves the database to
+  one-shot commands, which report it every time, until it is fixed.
+
+To switch, name the new model, then rebuild the store under it:
+
+```bash
+axil config set database.embedding_model granite-small
+axil reembed
+```
+
+`axil reembed` (without `--field`) builds a new store beside the old one
+(`memory.axil.vec-rebuild`) and records the new model in it. It re-embeds
+every memory record, and every other row that had a vector: code-index rows,
+dependency docs, recall chunks, checkpoints, cached answers, and the
+episodes, sessions, entity facts, procedures and preferences of the memory
+types, each from the text its writer embeds, and any other row (one stored
+with `store <table> … --embed <field>`, or embedded with `axil embed <id>
+<field>`) from its searchable text. An internal-table row that had no vector
+keeps none, so a rebuild does not change which of those rows compete in
+recall; one with no text to embed, such as a raw vector its caller supplied,
+loses its vector, and the report counts it under `dropped`. The old store
+stays in place, untouched, until the new one is complete, which then
+replaces it in one rename. A failure, or an interruption at any point,
+leaves the old store as it was: an unfinished `memory.axil.vec-rebuild` is
+never read, and the next `reembed` deletes it. `--model` rebuilds under
+another model than the configured one, after which every command refuses the
+store until `axil.toml` names that model. To keep the old store instead, set
+`embedding_model` back to the model the warning names.
+
+`reembed` holds the database for the whole rebuild, which takes as long as
+embedding every row does. Meanwhile other commands on it wait for the
+writer lock and then fail as busy (`store` after about 10 s, `recall` at
+once), and so do an agent's hooks, which stall or are killed for as long as
+it runs: run it with no agent session or MCP server open on the database. A
+second `reembed` of the same database stops at once, naming the one that
+runs (it holds `memory.axil.reembed-lock`).
+
+Earlier versions rebuilt the store in place and set the old one aside as
+`memory.axil.reembed-bak`. If one of them was interrupted, that file is still
+there, and which copy holds the right vectors depends on what was stored
+since, so `reembed` stops and names both: move the backup back over
+`memory.axil.vec` if nothing was stored since the interrupted run, otherwise
+delete it, and run `reembed` again.
+
+Each built-in model is recorded under its own name. bge-small's int8 export
+(`bge-small-int8`) counts as a model of its own: its vectors approximate
+bge-small's, but how closely has not been measured, so switching between the
+two needs a rebuild too. A custom model (`axil model-add`) is recorded by the
+path of its ONNX file, so moving the file counts as a change of model.
+
+**Stores from before model records.** A store written by an older Axil names
+no model, so the configured model is the only evidence of which one built
+it. Such a store is taken to hold the configured model's vectors when it has
+that model's width and the model is one Axil had then: `bge-small-en-v1.5`,
+`bge-small-en-v1.5-int8`, `bge-base-en-v1.5`, `nomic-embed-text-v1.5`,
+`bge-m3` or `gte-modernbert-base`. Nothing has to be done on upgrade, and
+nothing is written until the next vector is, which records the model. Under
+the default model this is silent; under any other, each command prints one
+note (`[axil vector] note: …`) until that write, saying the store was taken
+as that model's and naming `axil reembed` in case another model built it.
+Meanwhile the [daemon](../cli/daemon.md) leaves the database to one-shot
+commands, as it does for any open that prints: a daemon that meets the note
+exits, and serves the database again only once a vector write has recorded
+the model and `axil daemon start` starts it again.
+
+Two configured models never take over such a store, and get the refusal
+instead: granite, which came after model records, so no store from before
+them holds its vectors; and a custom model `axil.toml` names, since before
+model records the CLI and the MCP server never loaded a custom model named
+there (bge-small embedded in its place), so the store may hold either
+model's vectors. A store that holds no vectors yet is taken over by whichever
+configured model of its width opens it.
+
+A program using Axil as a library passes its model to its opens
+(`with_embedder_model`, `VectorEngine::with_model`). When the database's
+`axil.toml` names no model, the model passed in stands for the configured
+one, with one difference: a custom model of the store's width takes it over
+too, with the note, since that program really embedded with it, so it is the
+best evidence of who built the store. When `axil.toml` names a model, the
+CLI, the MCP server and an agent's hooks embed with that one, so an open
+that passes any other model, built-in or custom, gets the refusal rather
+than writing its vectors beside theirs.
+
+> **Upgrade note.** A database whose `axil.toml` names a custom model was
+> embedded with bge-small by earlier versions of the CLI and the MCP server,
+> which did not load a custom model named there. After upgrading, its vector
+> store is refused, with a warning naming `axil reembed`, and recall runs
+> without vectors until `axil reembed` rebuilds the store with the custom
+> model. A library caller that passed its custom model in directly keeps
+> its store when `axil.toml` names no model: the next vector it writes
+> records the model. When `axil.toml` names another model, the store is
+> refused to it too, since the CLI may have added that model's vectors.
+
+Only the configured model takes over a store from before model records. A
+command that names a model with `--model` (`embed`, and `reembed --field …
+--table …`, which keeps the other tables' vectors) can use a store only if
+the store records that model, or holds no vectors yet for a scoped
+`reembed`: a store from before model records is taken to hold the
+configured model's vectors, so carrying them into a store that records the
+named model would mix the two. `embed --model` with another model than the
+configured one does not start a store either, since every open under the
+configured model would refuse it. Both stop with the reason and the two
+ways forward: drop `--model`, or name the model in `axil.toml` and run
+`axil reembed`.
 
 ### granite-small is experimental
 
@@ -206,15 +329,10 @@ The model is set with `[database] embedding_model` in `axil.toml`
 against the default, not as a recommendation. The default stays
 `bge-small-en-v1.5`. Before switching to granite, know two things:
 
-- **A switch between granite and bge-small is not detected.** Both write
-  384-dimension vectors, so a store embedded with one opens under the other
-  with no error, and recall then compares vectors from two different models.
-  After switching in either direction, rebuild every vector: move the
-  `.axil.vec` file to another directory, then run `axil init` and
-  `axil heal --reindex` (see
-  [A damaged vector store](../cli/diagnostics.md#a-damaged-vector-store)).
-  That route leaves code-index and dependency-doc rows without vectors;
-  [`axil heal --embed-internal`](../cli/diagnostics.md#heal) embeds them.
+- **Switching to or from granite needs a rebuild.** Nothing in a store's
+  size tells granite's vectors from bge-small's; the model the store records
+  does, and a store built by the other model is refused until `axil reembed`
+  rebuilds it (see [Switching embedding models](#switching-embedding-models)).
 - **The similarity thresholds were tuned on bge-small.** The 0.92
   auto-supersede threshold (`[healing] supersede_similarity_threshold`) and
   the 0.65 floor for possible-conflict candidates are absolute cosines set with

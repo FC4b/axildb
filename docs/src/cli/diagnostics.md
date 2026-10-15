@@ -21,7 +21,9 @@ report with fix recommendations, use `health-report`.
 axil doctor
 ```
 
-Checks: companion-file presence/consistency, vector dimension mismatch, memory
+Checks: companion-file presence/consistency, the embedding model the vector
+store holds vectors of against the configured one (the `vector_index` check
+names it as `model=…`; a mismatch is a `vector_engine` error), memory
 records missing an embedding (an error once more than 10% of them are), rows
 missing an embedding in the internal tables whose writers embed them (code
 proxies, file / module / project summaries, dependency docs, recall chunks,
@@ -65,12 +67,38 @@ Inspection commands (`doctor`, `detect`, `health-report`, `stats`, `info`,
 `heal --dry-run` and `session-heal --dry-run`) leave the notes alone; `doctor`
 lists them under `orphaned_vectors`.
 
-`heal` never creates or resizes a vector store. With no store, `heal --reindex`
-reports `vector_store: {"status": "missing"}` and the `init` command to run
-instead of restoring nothing silently. A store sized for a different model
-than the configured one fails to open; `heal` then stops and names
-`axil reembed --model <model> --field <field>` or the `init` + `heal --reindex`
-route above.
+`heal` never creates a vector store or rebuilds one under another model. With
+no store, `heal --reindex` reports `vector_store: {"status": "missing"}` and
+the `init` command to run instead of restoring nothing silently. A store that
+holds another model's vectors is refused by every open (see below). The heals
+that would embed into it (`--reindex`, `--embed-internal` and `--rechunk`)
+then stop and name `axil reembed`, which rebuilds it; any other heal,
+`--dry-run` included, runs without the vector engine and lists it under
+`degraded`.
+
+#### A vector store built by another model
+
+`memory.axil.vec` records the embedding model whose vectors it holds. When
+that is not the model `axil.toml` configures (`[database] embedding_model`,
+bge-small when unset), whether the two differ in width or not, the store is
+refused rather than mixed with the configured model's vectors:
+
+- every command prints `[axil vector] warning: vector engine unavailable: …`
+  once, naming the model the store holds, the configured one, and the fix;
+- `doctor`, `info`, `heal`, `boot`, the prompt hook's recall block and MCP
+  `recall` report it as for a damaged store (above), and recall ranks without
+  vectors;
+- nothing is embedded into the store: `store --embed`, `embed` and a raw
+  `--vector` for the default space fail with the same message, as do
+  `add-vector` and `similar` on the default space, and records stored
+  meanwhile get their vectors from the rebuild.
+
+`axil reembed` rebuilds the store under the configured model, re-embedding
+every memory record and every row that had a vector, beside the old store,
+which it replaces only once the new one is complete; setting
+`embedding_model` back to the model the warning names keeps the store as it
+is. See [Switching embedding models](../getting-started/installation.md#switching-embedding-models),
+which also says how a store from before model records is treated.
 
 #### The `_entities` key index
 
