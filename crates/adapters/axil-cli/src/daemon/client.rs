@@ -49,9 +49,10 @@ const CLI_ANSWER_WAIT: Duration = Duration::from_secs(300);
 const LOOKUP_DEADLINE: Duration = Duration::from_millis(2000);
 const RECALL_DEADLINE: Duration = Duration::from_millis(2100);
 
-/// How long a hook's boot waits for a daemon that is still opening the
-/// database: the first boot of a session may come right after it started.
-const BOOT_STARTING_WAIT: Duration = Duration::from_secs(8);
+/// How long a hook's boot may take in all, asking again while the daemon
+/// opens the database: the first boot of a session may come right after
+/// the daemon started.
+const BOOT_WAIT: Duration = Duration::from_secs(8);
 
 /// How much longer than its deadline a client waits for the answer, for
 /// the reply to cross the socket.
@@ -102,6 +103,9 @@ pub struct Opts {
     /// How long to keep asking a daemon that answers it is opening the
     /// database, or has every request slot taken.
     pub starting_wait: Duration,
+    /// When the answer must be in by, all tries included: no try's
+    /// deadline runs past it.
+    pub until: Option<Instant>,
 }
 
 /// This process's identity, worked out once.
@@ -144,17 +148,43 @@ pub fn forward(
     };
     let mut header = identity.header(argv, cwd, stdin.is_some());
     header.slow_query_log = opts.slow_query_log;
-    let retry_until = Instant::now() + opts.starting_wait;
+    let mut retry_until = Instant::now() + opts.starting_wait;
+    if let Some(until) = opts.until {
+        retry_until = retry_until.min(until);
+    }
+    let mut last = None;
     loop {
-        match ask(&run, &mut header, stdin.as_deref(), opts.deadline) {
-            Ask::Again(_) if Instant::now() + RETRY_EVERY < retry_until => {
+        let deadline = match opts.until {
+            None => opts.deadline,
+            Some(until) => {
+                let left = until
+                    .saturating_duration_since(Instant::now())
+                    .saturating_sub(ANSWER_SLACK);
+                if left < RETRY_EVERY {
+                    return given_up(last);
+                }
+                Some(opts.deadline.map_or(left, |d| d.min(left)))
+            }
+        };
+        match ask(&run, &mut header, stdin.as_deref(), deadline) {
+            Ask::Again(reply) if Instant::now() + RETRY_EVERY < retry_until => {
+                last = Some(reply);
                 thread::sleep(RETRY_EVERY);
             }
-            Ask::Again(RunReply::Starting) => return Forwarded::StartingTimeout,
-            Ask::Again(RunReply::Overloaded) => return Forwarded::Refused("overloaded"),
-            Ask::Again(_) => return Forwarded::Refused("unavailable"),
+            Ask::Again(reply) => return given_up(Some(reply)),
             Ask::Done(forwarded) => return forwarded,
         }
+    }
+}
+
+/// What asking came to when the time to ask ran out, after `last` (`None`:
+/// before the first try).
+fn given_up(last: Option<RunReply>) -> Forwarded {
+    match last {
+        Some(RunReply::Starting) => Forwarded::StartingTimeout,
+        Some(RunReply::Overloaded) => Forwarded::Refused("overloaded"),
+        Some(_) => Forwarded::Refused("unavailable"),
+        None => Forwarded::Refused("expired"),
     }
 }
 
@@ -247,6 +277,7 @@ pub fn forward_cli(cli: &Cli) -> Option<i32> {
         slow_query_log: std::env::var("AXIL_SLOW_QUERY_LOG").map_or(true, |v| v != "0"),
         deadline: None,
         starting_wait: CLI_STARTING_WAIT,
+        until: None,
     };
     match forward(&db, argv, &cwd, stdin.clone(), &opts) {
         Forwarded::Served {
@@ -278,7 +309,7 @@ pub fn forward_cli(cli: &Cli) -> Option<i32> {
 /// `Some` with what the daemon's run answered (`Some(stdout)` when it ran
 /// and exited 0, `None` for no context), `None` when the hook is to run the
 /// lookup in a child process as it does with no daemon.
-pub fn forward_lookup(db: &Path, args: &[&str]) -> Option<Option<String>> {
+pub fn forward_lookup(db: &Path, args: &[&str], until: Instant) -> Option<Option<String>> {
     if control::mode() == Mode::Off || !may_have_daemon(db) {
         return None;
     }
@@ -289,10 +320,14 @@ pub fn forward_lookup(db: &Path, args: &[&str]) -> Option<Option<String>> {
     ];
     argv.extend(args.iter().map(|a| a.to_string()));
     let cwd = std::env::current_dir().ok()?;
-    let (deadline, starting_wait) = match args.first().copied() {
-        Some("recall") => (RECALL_DEADLINE, Duration::ZERO),
-        Some("boot") => (LOOKUP_DEADLINE, BOOT_STARTING_WAIT),
-        _ => (LOOKUP_DEADLINE, Duration::ZERO),
+    let (deadline, starting_wait, until) = match args.first().copied() {
+        Some("recall") => (RECALL_DEADLINE, Duration::ZERO, until),
+        Some("boot") => (
+            LOOKUP_DEADLINE,
+            BOOT_WAIT,
+            until.min(Instant::now() + BOOT_WAIT),
+        ),
+        _ => (LOOKUP_DEADLINE, Duration::ZERO, until),
     };
     // A hook's read must not write, even a slow-query entry, under the
     // harness's kill timeout.
@@ -300,6 +335,7 @@ pub fn forward_lookup(db: &Path, args: &[&str]) -> Option<Option<String>> {
         slow_query_log: false,
         deadline: Some(deadline),
         starting_wait,
+        until: Some(until),
     };
     match forward(db, argv, &cwd, None, &opts) {
         Forwarded::Served {
@@ -341,6 +377,8 @@ mod tests {
         Reply(RunReply, Vec<u8>),
         /// Read the request, then close without a word.
         Hang,
+        /// Read the request, and say nothing for a long while.
+        Stall,
     }
 
     /// A daemon on `run`'s socket answering its connections in turn, the
@@ -369,6 +407,12 @@ mod tests {
                         }
                     }
                     Then::Hang => drop(stream),
+                    Then::Stall => {
+                        thread::spawn(move || {
+                            thread::sleep(Duration::from_secs(10));
+                            drop(stream);
+                        });
+                    }
                 }
             }
         });
@@ -384,6 +428,7 @@ mod tests {
             slow_query_log: true,
             deadline: None,
             starting_wait: Duration::from_secs(5),
+            until: None,
         }
     }
 
@@ -450,6 +495,7 @@ mod tests {
             slow_query_log: false,
             deadline: Some(Duration::from_secs(2)),
             starting_wait: Duration::ZERO,
+            until: None,
         };
         let argv = argv(&["axil", "store", "decisions", "-"]);
         let got = forward(&db, argv.clone(), &cwd, Some(b"{}".to_vec()), &opts);
@@ -505,13 +551,45 @@ mod tests {
         for (reply, want) in cases {
             let (_tmp, db, run) = new_db();
             let asked = daemon(&run, vec![Then::Reply(reply.clone(), b"ctx".to_vec())]);
-            let got = forward_lookup(&db, &["recall", "auth"]);
+            let got = forward_lookup(&db, &["recall", "auth"], far());
             assert_eq!(got, want, "{reply:?}");
             let header = asked.lock().unwrap().pop().unwrap();
             assert!(!header.slow_query_log);
             assert_eq!(header.argv[..3], ["axil", "--db", db.to_str().unwrap()]);
         }
         let (_tmp, db, _run) = new_db();
-        assert_eq!(forward_lookup(&db, &["boot"]), None);
+        assert_eq!(forward_lookup(&db, &["boot"], far()), None);
+    }
+
+    /// A deadline far enough off not to matter.
+    fn far() -> Instant {
+        Instant::now() + Duration::from_secs(60)
+    }
+
+    /// A boot asks again while the daemon opens the database, but is done
+    /// by the hook's deadline, the try it is waiting on included; and by
+    /// its own wait when the hook has longer.
+    #[test]
+    fn a_boot_lookup_is_done_by_the_hooks_deadline() {
+        let starting = || Then::Reply(RunReply::Starting, Vec::new());
+        let (_tmp, db, run) = new_db();
+        let asked = daemon(&run, vec![starting(), starting(), Then::Stall]);
+        let started = Instant::now();
+        let until = started + Duration::from_millis(1500);
+        let got = forward_lookup(&db, &["boot"], until);
+        let took = started.elapsed();
+        assert_eq!(got, Some(None));
+        assert!(took < Duration::from_millis(1600), "{took:?}");
+        let last = asked.lock().unwrap().pop().unwrap();
+        let by = epoch_ms() + 1600 - u64::try_from(took.as_millis()).unwrap();
+        assert!(last.deadline_ms.unwrap() <= by);
+
+        let (_tmp, db, run) = new_db();
+        let _asked = daemon(&run, vec![starting()]);
+        let started = Instant::now();
+        assert_eq!(forward_lookup(&db, &["boot"], far()), Some(None));
+        let took = started.elapsed();
+        assert!(took >= BOOT_WAIT - Duration::from_millis(500), "{took:?}");
+        assert!(took < BOOT_WAIT + Duration::from_millis(500), "{took:?}");
     }
 }

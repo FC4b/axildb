@@ -55,13 +55,18 @@ command exits 1. A read runs in the process instead.
 
 A hook's lookup (the prompt's recall, the session's boot, a file's memories,
 a search) goes to the daemon first, with the slow-query log off and a
-deadline: 2.1 s for a recall, 2 s for the rest. A boot also waits up to 8 s
-for a daemon still opening the database, as at the start of a session. The
-hook uses what a run that exited 0 printed. It injects nothing when the run
-failed, the database is leased or opening, the daemon is shutting down or
-the deadline passed. With no daemon, a command it doesn't run, or a daemon
-of another build, the hook runs the lookup in a child process as before,
-which leases the database.
+deadline: 2.1 s for a recall, 2 s for the rest. A boot asks again while the
+daemon is still opening the database, as at the start of a session, for up
+to 8 s in all. The hook uses what a run that exited 0 printed. It injects
+nothing when the run failed, the database is leased or opening, the daemon
+is shutting down or the deadline passed. With no daemon, a command it
+doesn't run, or a daemon of another build, the hook runs the lookup in a
+child process as before, which leases the database.
+
+Each hook has a budget inside the timeout `axil install` gives its
+event: 2.5 s for a prompt, 4 s for a post-tool or session-end hook, 9 s for
+a session start or pre-tool hook, 14 s for a stop. No deadline above runs
+past it, and no lookup starts once it ran out.
 
 The hooks' queued writes are still run by `hook drain`, a process of its own
 that runs each queued command as a child: a `store` goes to the daemon, and

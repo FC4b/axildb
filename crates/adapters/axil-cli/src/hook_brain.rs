@@ -45,11 +45,14 @@
 //! Every path is best-effort: a memory hook must never break the agent
 //! loop, so child failures are swallowed and the process always exits 0
 //! once the input parses.
+//!
+//! A hook has a budget ([`hook_budget`]), inside the harness's timeout for
+//! its event: no lookup is started past it.
 
 use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -915,9 +918,27 @@ fn first_patch_path(patch: &str) -> Option<String> {
 
 // ── The brain ────────────────────────────────────────────────────────
 
+/// How long a hook for `kind` may take: a margin inside the shortest
+/// timeout `axil install` gives the event in any harness (3 s for a
+/// prompt, 5 s for some post-tool matchers and Claude's session end, 10 s
+/// for a session start or pre-tool, 15 s for a stop), so the hook prints
+/// what it has before the harness kills it.
+fn hook_budget(kind: EventKind) -> Duration {
+    match kind {
+        EventKind::UserPrompt => Duration::from_millis(2500),
+        EventKind::PostTool | EventKind::SessionEnd => Duration::from_secs(4),
+        EventKind::SessionStart | EventKind::PreTool | EventKind::PreModel => {
+            Duration::from_secs(9)
+        }
+        EventKind::Stop => Duration::from_secs(14),
+    }
+}
+
 struct HookCtx {
     dialect: Dialect,
     event: HookEvent,
+    /// When the hook must be done ([`hook_budget`]).
+    until: Instant,
     sid: String,
     project_dir: PathBuf,
     exe: PathBuf,
@@ -1003,6 +1024,7 @@ impl SessionFiles {
 
 impl HookCtx {
     fn new(dialect: Dialect, event: HookEvent) -> Option<Self> {
+        let until = Instant::now() + hook_budget(event.kind);
         let sid = sanitize_id(&event.session_id);
         if sid.is_empty() {
             return None;
@@ -1022,6 +1044,7 @@ impl HookCtx {
         Some(Self {
             dialect,
             event,
+            until,
             sid,
             project_dir,
             exe,
@@ -1260,8 +1283,11 @@ impl HookCtx {
     /// through [`HookCtx::enqueue`] instead.
     fn axil_db_out(&self, args: &[&str]) -> Option<String> {
         let db = self.db.as_ref()?;
+        if Instant::now() >= self.until {
+            return None;
+        }
         #[cfg(unix)]
-        if let Some(answered) = crate::daemon::client::forward_lookup(db, args) {
+        if let Some(answered) = crate::daemon::client::forward_lookup(db, args, self.until) {
             return answered;
         }
         run_capture(
@@ -3724,6 +3750,7 @@ mod tests {
                 stop_hook_active: false,
                 tool: None,
             },
+            until: Instant::now() + Duration::from_secs(60),
             sid: sid.clone(),
             project_dir: project.to_path_buf(),
             exe: PathBuf::from("axil"),
@@ -4315,6 +4342,7 @@ mod tests {
                 stop_hook_active: false,
                 tool: None,
             },
+            until: Instant::now() + Duration::from_secs(60),
             sid: "s1".into(),
             project_dir: dir.to_path_buf(),
             exe,
@@ -4333,6 +4361,41 @@ mod tests {
         std::fs::read_to_string(dir.join("calls"))
             .map(|s| s.lines().map(str::to_string).collect())
             .unwrap_or_default()
+    }
+
+    /// Each hook's budget leaves a margin inside the shortest timeout the
+    /// Claude install gives its event, over every matcher.
+    #[test]
+    fn every_hook_budget_fits_inside_its_installed_timeout() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("settings.json");
+        crate::install_hooks_to_settings(&path).unwrap();
+        let settings: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let kinds = [
+            EventKind::UserPrompt,
+            EventKind::SessionStart,
+            EventKind::PreTool,
+            EventKind::PostTool,
+            EventKind::Stop,
+            EventKind::SessionEnd,
+        ];
+        for kind in kinds {
+            let name = claude_event_name(kind);
+            let shortest = settings["hooks"][name]
+                .as_array()
+                .unwrap()
+                .iter()
+                .flat_map(|group| group["hooks"].as_array().unwrap())
+                .filter_map(|hook| hook["timeout"].as_u64())
+                .min()
+                .unwrap();
+            let margin = Duration::from_millis(500);
+            assert!(
+                hook_budget(kind) + margin <= Duration::from_secs(shortest),
+                "{name}: {shortest}s"
+            );
+        }
     }
 
     #[cfg(unix)]

@@ -2019,6 +2019,7 @@ mod tests {
             slow_query_log: true,
             deadline: None,
             starting_wait: Duration::from_secs(10),
+            until: None,
         };
         check_parity_with(
             &fixture,
