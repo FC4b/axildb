@@ -367,10 +367,17 @@ impl RunReply {
 }
 
 /// The variables the environment fingerprint covers: each one changes what
-/// a command prints or the data it reads. A served command uses the
+/// a served command prints or the data it reads. A served command uses the
 /// daemon's values of these, so it is served only to a client whose values
 /// are the same. `AXIL_ENC_KEY_FILE` also covers the key file's size and
 /// modification time.
+///
+/// A variable only commands the daemon does not serve read is left out, so
+/// a shell that sets it differently is still served: `CARGO_HOME`,
+/// `GOPATH` and `GOMODCACHE`, where `deps` finds the dependency sources it
+/// reads docs from, and `XDG_CONFIG_HOME`, where `workspace` keeps its
+/// registry. A daemon that serves `deps refresh` must cover the first three
+/// again.
 pub const FP_ENV: &[&str] = &[
     "AXIL_ENC_KEY",
     "AXIL_ENC_KEY_FILE",
@@ -380,12 +387,8 @@ pub const FP_ENV: &[&str] = &[
     "AXIL_EMBED_SESSIONS",
     "HOME",
     "USERPROFILE",
-    "XDG_CONFIG_HOME",
     "APPDATA",
     "ORT_DYLIB_PATH",
-    "CARGO_HOME",
-    "GOPATH",
-    "GOMODCACHE",
 ];
 
 /// The variables the daemon removes from its own environment before it
@@ -1121,6 +1124,10 @@ mod tests {
         ),
         ("USER", "the scheduled maintenance's log directory"),
         ("SystemRoot", "Windows only, where there is no daemon"),
+        ("CARGO_HOME", "`deps`, reading a crate's docs from its source"),
+        ("GOPATH", "`deps`, reading a Go module's docs from its source"),
+        ("GOMODCACHE", "`deps`, reading a Go module's docs from its source"),
+        ("XDG_CONFIG_HOME", "`workspace`, finding its registry"),
     ];
 
     /// The socket checks pass for a daemon of this user's, and the peer's
