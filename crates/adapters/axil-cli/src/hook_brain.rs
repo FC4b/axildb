@@ -2329,6 +2329,7 @@ fn spawn_drainer(exe: &Path, db: &Path, cwd: &Path) {
 pub(crate) fn drain(db: &Path) -> Result<i32> {
     let exe = std::env::current_exe()?;
     let dir = queue_dir(db);
+    let mut runner = SubprocessRunner::new(&exe, db);
     loop {
         let Some(lock) = DrainLock::acquire(&dir) else {
             return Ok(0);
@@ -2336,7 +2337,7 @@ pub(crate) fn drain(db: &Path) -> Result<i32> {
         set_aside_interrupted(&dir);
         while let Some(job) = next_job(&dir) {
             lock.touch();
-            run_job_file(&exe, db, &dir, &job);
+            run_job_file(&mut runner, &exe, db, &dir, &job);
         }
         drop(lock);
         // A job queued after the last scan but before the lock dropped saw a
@@ -2650,7 +2651,13 @@ fn drain_log(dir: &Path, line: &str) {
 
 /// Claim a job (rename to `.running`, the in-flight mark), run it, and
 /// remove it. A failed job is logged and dropped, not retried.
-fn run_job_file(exe: &Path, db: &Path, dir: &Path, job_path: &Path) {
+pub(crate) fn run_job_file(
+    runner: &mut impl JobRunner,
+    exe: &Path,
+    db: &Path,
+    dir: &Path,
+    job_path: &Path,
+) {
     let running = job_path.with_extension("running");
     if std::fs::rename(job_path, &running).is_err() {
         return;
@@ -2663,16 +2670,84 @@ fn run_job_file(exe: &Path, db: &Path, dir: &Path, job_path: &Path) {
         .ok()
         .and_then(|body| serde_json::from_slice::<Job>(&body).ok())
         .ok_or_else(|| "unreadable job file".to_string())
-        .and_then(|job| run_job(exe, db, &job));
+        .and_then(|job| run_job(runner, exe, db, &job));
     if let Err(e) = result {
         drain_log(dir, &format!("job {name} failed: {e}"));
     }
     let _ = std::fs::remove_file(&running);
 }
 
-fn run_job(exe: &Path, db: &Path, job: &Job) -> std::result::Result<(), String> {
+/// What runs the steps of a queued job, each one axil command line: a
+/// child process per step for `hook drain`, the open database in the
+/// database's daemon.
+pub(crate) trait JobRunner {
+    /// Run `axil --db <db> <args>` on the queue's database, with `stdin`
+    /// piped in (`None`: an empty stdin), and return what it printed on
+    /// stdout when it exited 0, or why it failed.
+    fn write(
+        &mut self,
+        args: &[String],
+        stdin: Option<&str>,
+    ) -> std::result::Result<String, String>;
+
+    /// Run `axil <args>`, a command that opens no database, with `stdin`
+    /// piped in, and return what it printed on stdout when it exited 0.
+    fn read(&mut self, args: &[&str], stdin: &[u8]) -> Option<String>;
+}
+
+/// The runner `hook drain` uses: each step a child process of `exe`,
+/// waiting while another process holds the writer lock.
+pub(crate) struct SubprocessRunner<'a> {
+    exe: &'a Path,
+    db: &'a Path,
+    /// Set on every child.
+    env: Vec<(&'static str, &'static str)>,
+}
+
+impl<'a> SubprocessRunner<'a> {
+    pub(crate) fn new(exe: &'a Path, db: &'a Path) -> Self {
+        Self {
+            exe,
+            db,
+            env: Vec::new(),
+        }
+    }
+
+    /// The same, with `name=value` set on every child.
+    #[cfg_attr(not(unix), allow(dead_code))] // the daemon's
+    pub(crate) fn with_env(mut self, name: &'static str, value: &'static str) -> Self {
+        self.env.push((name, value));
+        self
+    }
+}
+
+impl JobRunner for SubprocessRunner<'_> {
+    fn write(
+        &mut self,
+        args: &[String],
+        stdin: Option<&str>,
+    ) -> std::result::Result<String, String> {
+        run_write(self.exe, self.db, args, stdin, &self.env)
+    }
+
+    fn read(&mut self, args: &[&str], stdin: &[u8]) -> Option<String> {
+        run_capture_stdin(
+            Command::new(self.exe)
+                .envs(self.env.iter().copied())
+                .args(args),
+            stdin,
+        )
+    }
+}
+
+fn run_job(
+    runner: &mut impl JobRunner,
+    exe: &Path,
+    db: &Path,
+    job: &Job,
+) -> std::result::Result<(), String> {
     match job {
-        Job::Axil { args, stdin } => run_write(exe, db, args, stdin.as_deref()).map(drop),
+        Job::Axil { args, stdin } => runner.write(args, stdin.as_deref()).map(drop),
         Job::CloseSession {
             session,
             project_dir,
@@ -2684,12 +2759,7 @@ fn run_job(exe: &Path, db: &Path, job: &Job) -> std::result::Result<(), String> 
             if !files.is_empty() {
                 let entities: Value = Some(content.as_str())
                     .filter(|c| !c.is_empty())
-                    .and_then(|c| {
-                        run_capture_stdin(
-                            Command::new(exe).args(["extract-entities", "-"]),
-                            c.as_bytes(),
-                        )
-                    })
+                    .and_then(|c| runner.read(&["extract-entities", "-"], c.as_bytes()))
                     .and_then(|out| serde_json::from_str(out.trim()).ok())
                     .unwrap_or_else(|| json!([]));
                 let entity_count = entities.as_array().map_or(0, Vec::len);
@@ -2701,9 +2771,7 @@ fn run_job(exe: &Path, db: &Path, job: &Job) -> std::result::Result<(), String> 
                     "entity_count": entity_count,
                     "ended_at": ended_at,
                 });
-                let stored = run_write(
-                    exe,
-                    db,
+                let stored = runner.write(
                     &["store".into(), "_sessions".into(), record.to_string()],
                     None,
                 )?;
@@ -2711,13 +2779,13 @@ fn run_job(exe: &Path, db: &Path, job: &Job) -> std::result::Result<(), String> 
                     .ok()
                     .and_then(|v| v.get("id").and_then(Value::as_str).map(str::to_string))
                 {
-                    let _ = run_write(exe, db, &["auto-link".into(), id], None);
+                    let _ = runner.write(&["auto-link".into(), id], None);
                 }
                 // Consolidation, connections, inference, decay — then beliefs.
-                let _ = run_write(exe, db, &["worker".into(), "run".into()], None);
-                let _ = run_write(exe, db, &["beliefs".into(), "--generate".into()], None);
+                let _ = runner.write(&["worker".into(), "run".into()], None);
+                let _ = runner.write(&["beliefs".into(), "--generate".into()], None);
             }
-            session_heal(exe, db, session, project_dir, problems.as_deref());
+            session_heal(runner, exe, db, session, project_dir, problems.as_deref());
             Ok(())
         }
     }
@@ -2731,12 +2799,14 @@ fn run_write(
     db: &Path,
     args: &[String],
     stdin: Option<&str>,
+    env: &[(&str, &str)],
 ) -> std::result::Result<String, String> {
     use std::io::Write as _;
     let mut delay = Duration::from_millis(250);
     let mut waited = Duration::ZERO;
     loop {
         let child = Command::new(exe)
+            .envs(env.iter().copied())
             .arg("--db")
             .arg(db)
             .args(args)
@@ -2763,21 +2833,34 @@ fn run_write(
             delay = (delay * 2).min(Duration::from_secs(8));
             continue;
         }
-        let command = args.first().map(String::as_str).unwrap_or("");
-        let reason = err
-            .lines()
-            .rfind(|l| !l.trim().is_empty())
-            .unwrap_or("")
-            .trim();
-        return Err(format!("`axil {command}` failed: {reason}"));
+        return Err(step_failed(args, &err));
     }
+}
+
+/// Why a job's step `args` failed, from what it printed on stderr: its last
+/// line.
+pub(crate) fn step_failed(args: &[String], stderr: &str) -> String {
+    let command = args.first().map(String::as_str).unwrap_or("");
+    let reason = stderr
+        .lines()
+        .rfind(|l| !l.trim().is_empty())
+        .unwrap_or("")
+        .trim();
+    format!("`axil {command}` failed: {reason}")
 }
 
 /// Run session-heal and act on its hints. The one auto-fix today:
 /// `stale_structural_index` spawns a detached `axil index` so the next
 /// session's queries hit a fresh index. The lock file throttles repeats
 /// within the 5-minute stale window.
-fn session_heal(exe: &Path, db: &Path, session: &str, project_dir: &Path, problems: Option<&str>) {
+fn session_heal(
+    runner: &mut impl JobRunner,
+    exe: &Path,
+    db: &Path,
+    session: &str,
+    project_dir: &Path,
+    problems: Option<&str>,
+) {
     let mut args: Vec<String> = vec!["session-heal".into(), "--session".into(), session.into()];
     let problems_file = problems.map(|text| {
         let path = queue_dir(db).join(format!("{}.problems", sanitize_id(session)));
@@ -2788,7 +2871,7 @@ fn session_heal(exe: &Path, db: &Path, session: &str, project_dir: &Path, proble
         args.push("--problems-file".into());
         args.push(path.to_string_lossy().into_owned());
     }
-    let out = run_write(exe, db, &args, None);
+    let out = runner.write(&args, None);
     if let Some(path) = &problems_file {
         let _ = std::fs::remove_file(path);
     }
@@ -5206,5 +5289,226 @@ mod tests {
         let lock = DrainLock::acquire_with(dir, refuse_os_lock)
             .expect("a free lock is still taken without OS locks");
         drop(lock);
+    }
+
+    /// A runner that records each step it is given, with what the queue
+    /// directory held while it ran, and answers as a database would.
+    struct Recorder {
+        dir: PathBuf,
+        steps: Vec<String>,
+        /// The queue's file names while each step ran.
+        seen: Vec<Vec<String>>,
+        /// Steps whose first word fails.
+        failing: Vec<&'static str>,
+    }
+
+    impl Recorder {
+        fn new(dir: &Path) -> Self {
+            Self {
+                dir: dir.to_path_buf(),
+                steps: Vec::new(),
+                seen: Vec::new(),
+                failing: Vec::new(),
+            }
+        }
+
+        fn look(&mut self) {
+            let mut names: Vec<String> = std::fs::read_dir(&self.dir)
+                .unwrap()
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .filter(|n| n.ends_with(".job") || n.ends_with(".running"))
+                .collect();
+            names.sort();
+            self.seen.push(names);
+        }
+    }
+
+    impl JobRunner for Recorder {
+        fn write(
+            &mut self,
+            args: &[String],
+            stdin: Option<&str>,
+        ) -> std::result::Result<String, String> {
+            self.look();
+            let mut step = args.join(" ");
+            if let Some(stdin) = stdin {
+                step.push_str(&format!(" <{stdin}"));
+            }
+            self.steps.push(step);
+            if self.failing.contains(&args[0].as_str()) {
+                return Err(step_failed(args, "{\"error\":\"on purpose\"}\n"));
+            }
+            Ok(match args[0].as_str() {
+                "store" => r#"{"id":"01M4Z06PE0FK6QVKK92X7R6JPE","table":"_sessions"}"#.into(),
+                _ => "{}".into(),
+            })
+        }
+
+        fn read(&mut self, args: &[&str], stdin: &[u8]) -> Option<String> {
+            self.look();
+            self.steps.push(format!(
+                "{} <{}",
+                args.join(" "),
+                String::from_utf8_lossy(stdin)
+            ));
+            Some(r#"[{"name":"validate_token","type":"code"}]"#.into())
+        }
+    }
+
+    fn close_session(problems: Option<&str>) -> Job {
+        close_session_of(vec!["src/auth.rs".into()], problems)
+    }
+
+    fn close_session_of(files: Vec<String>, problems: Option<&str>) -> Job {
+        Job::CloseSession {
+            session: "s1".into(),
+            project_dir: PathBuf::from("/p"),
+            files,
+            content: "fn validate_token() {}".into(),
+            problems: problems.map(str::to_string),
+            ended_at: "2026-10-15T00:00:00Z".into(),
+        }
+    }
+
+    /// A session's close runs its steps in this order, each once: the
+    /// entities of what the session wrote, the `_sessions` row, its links,
+    /// the worker, beliefs, and session-heal with the session's problems.
+    #[test]
+    fn a_session_close_runs_its_steps_in_order() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("memory.axil");
+        let queue = queue_dir(&db);
+        std::fs::create_dir_all(&queue).unwrap();
+        let exe = Path::new("/nonexistent/axil");
+        let mut runner = Recorder::new(&queue);
+        run_job(
+            &mut runner,
+            exe,
+            &db,
+            &close_session(Some("{\"kind\":\"x\"}\n")),
+        )
+        .unwrap();
+        let problems = queue.join("s1.problems");
+        assert_eq!(
+            runner.steps,
+            [
+                "extract-entities - <fn validate_token() {}".to_string(),
+                format!(
+                    "store _sessions {}",
+                    json!({
+                        "session": "s1",
+                        "files_changed": ["src/auth.rs"],
+                        "file_count": 1,
+                        "entities": [{"name": "validate_token", "type": "code"}],
+                        "entity_count": 1,
+                        "ended_at": "2026-10-15T00:00:00Z",
+                    })
+                ),
+                "auto-link 01M4Z06PE0FK6QVKK92X7R6JPE".to_string(),
+                "worker run".to_string(),
+                "beliefs --generate".to_string(),
+                format!(
+                    "session-heal --session s1 --problems-file {}",
+                    problems.display()
+                ),
+            ]
+        );
+        assert!(!problems.exists(), "the problems file is removed after");
+
+        // A session that wrote nothing is only healed.
+        let mut runner = Recorder::new(&queue);
+        let quiet = close_session_of(Vec::new(), None);
+        run_job(&mut runner, exe, &db, &quiet).unwrap();
+        assert_eq!(runner.steps, ["session-heal --session s1"]);
+
+        // Without the `_sessions` row the job fails there; a step after it
+        // that fails does not stop the ones that follow.
+        let mut runner = Recorder::new(&queue);
+        runner.failing = vec!["store"];
+        let err = run_job(&mut runner, exe, &db, &close_session(None)).unwrap_err();
+        assert_eq!(err, r#"`axil store` failed: {"error":"on purpose"}"#);
+        assert_eq!(runner.steps.len(), 2, "{:?}", runner.steps);
+        let mut runner = Recorder::new(&queue);
+        runner.failing = vec!["auto-link", "worker"];
+        run_job(&mut runner, exe, &db, &close_session(None)).unwrap();
+        assert_eq!(runner.steps.len(), 6, "{:?}", runner.steps);
+    }
+
+    /// The queue protocol: jobs run in the order their names sort, each
+    /// renamed from `.job` to `.running` while it runs and removed after,
+    /// a failed one logged and removed too, never run again.
+    #[test]
+    fn a_job_is_claimed_as_running_and_removed_once_run() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("memory.axil");
+        let exe = Path::new("/nonexistent/axil");
+        let queue = queue_dir(&db);
+        std::fs::create_dir_all(&queue).unwrap();
+        for (name, job) in [
+            ("2-a", Job::axil(&["store", "decisions", "{}"], None)),
+            (
+                "1-b",
+                Job::axil(&["store", "context", "-"], Some("{\"n\":1}")),
+            ),
+            ("3-c", Job::axil(&["auto-capture", "-"], Some("text"))),
+        ] {
+            std::fs::write(
+                queue.join(format!("{name}.job")),
+                serde_json::to_vec(&job).unwrap(),
+            )
+            .unwrap();
+        }
+        let mut runner = Recorder::new(&queue);
+        runner.failing = vec!["auto-capture"];
+        while let Some(job) = next_job(&queue) {
+            run_job_file(&mut runner, exe, &db, &queue, &job);
+        }
+        assert_eq!(
+            runner.steps,
+            [
+                "store context - <{\"n\":1}",
+                "store decisions {}",
+                "auto-capture - <text"
+            ]
+        );
+        assert_eq!(
+            runner.seen,
+            [
+                vec!["1-b.running", "2-a.job", "3-c.job"],
+                vec!["2-a.running", "3-c.job"],
+                vec!["3-c.running"],
+            ]
+        );
+        assert!(queue_files(&queue, "job").is_empty());
+        assert!(queue_files(&queue, "running").is_empty());
+        let log = std::fs::read_to_string(queue.join("drain.log")).unwrap();
+        assert!(
+            log.contains("job 3-c failed: `axil auto-capture` failed"),
+            "{log}"
+        );
+
+        // An unreadable job is logged and removed, and runs nothing.
+        std::fs::write(queue.join("4-d.job"), b"{nope").unwrap();
+        let job = next_job(&queue).unwrap();
+        run_job_file(&mut runner, exe, &db, &queue, &job);
+        assert_eq!(runner.steps.len(), 3);
+        assert!(next_job(&queue).is_none());
+        let log = std::fs::read_to_string(queue.join("drain.log")).unwrap();
+        assert!(log.contains("job 4-d failed: unreadable job file"), "{log}");
+    }
+
+    /// A job a drainer that died left running is set aside, never run.
+    #[test]
+    fn an_interrupted_job_is_set_aside() {
+        let tmp = tempfile::tempdir().unwrap();
+        let queue = tmp.path().join("hook-queue");
+        std::fs::create_dir_all(&queue).unwrap();
+        std::fs::write(queue.join("1-a.running"), b"{}").unwrap();
+        std::fs::write(queue.join("2-b.job"), b"{}").unwrap();
+        set_aside_interrupted(&queue);
+        assert!(queue.join("interrupted/1-a.running").is_file());
+        assert_eq!(next_job(&queue), Some(queue.join("2-b.job")));
+        assert!(queue_files(&queue, "running").is_empty());
     }
 }
