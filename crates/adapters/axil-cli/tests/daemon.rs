@@ -1240,10 +1240,14 @@ fn the_hot_commands_go_to_the_daemon_and_print_as_without_one() {
     }
     if built_with(cfg!(feature = "checkpoint"), "checkpoint") {
         cases.push((vec!["checkpoint", cp], None));
-        cases.push((vec!["checkpoint", "-"], Some(cp.as_bytes())));
+        // Not the same checkpoint again: a recall ranks two records with
+        // the same text and score in no set order.
+        let piped = br#"{"goal":"g2","state":"s2","next_steps":["m"]}"#;
+        cases.push((vec!["checkpoint", "-"], Some(piped)));
     }
     // Both streams on one pipe: a recall prints its results, then a hint
-    // on stderr.
+    // on stderr. Run first, on the fixture as both runs start it: records
+    // stored within the same second list in no set order.
     let mut merged: Vec<Vec<&str>> = vec![vec!["boot"], vec!["store", "decisions", "{nope"]];
     if cfg!(feature = "embed") {
         merged.push(vec!["recall", "auth timeout"]);
@@ -1255,14 +1259,14 @@ fn the_hot_commands_go_to_the_daemon_and_print_as_without_one() {
         // is the same id in both.
         let mut ids = Normalizer::new(&fx.ids);
         let mut outputs = Vec::new();
+        for args in &merged {
+            let (both, code) = axil_merged(&fx.proj, args, env);
+            outputs.push((ids.apply(&both), "(merged)".to_string(), code));
+        }
         for (args, stdin) in &cases {
             let out = axil_env(BIN, &fx.proj, args, *stdin, env);
             let stdout = ids.apply(&out.stdout);
             outputs.push((stdout, ids.apply(&out.stderr), out.status.code()));
-        }
-        for args in &merged {
-            let (both, code) = axil_merged(&fx.proj, args, env);
-            outputs.push((ids.apply(&both), "(merged)".to_string(), code));
         }
         outputs
     };
@@ -1284,7 +1288,7 @@ fn the_hot_commands_go_to_the_daemon_and_print_as_without_one() {
     std::fs::remove_dir_all(fx.proj.join(".axil")).unwrap();
     copy_dir(&saved, &fx.proj.join(".axil"));
     let alone = run_all(&[("AXIL_DAEMON", "off")]);
-    let names = cases.iter().map(|(args, _)| args).chain(&merged);
+    let names = merged.iter().chain(cases.iter().map(|(args, _)| args));
     for (args, (sent, alone)) in names.zip(sent.iter().zip(&alone)) {
         assert_eq!(sent, alone, "{args:?}");
     }
