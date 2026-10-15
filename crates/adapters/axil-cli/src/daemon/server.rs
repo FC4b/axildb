@@ -1755,10 +1755,21 @@ fn rotate_log(run: &RunDir) {
     }
 }
 
+/// How long a daemon starting waits for the lock while the daemon holding
+/// it says nothing: it may be retiring, or done shutting down and about to
+/// let go.
+const QUIET_WAIT: Duration = Duration::from_secs(5);
+
 /// Take the daemon lock, or find that another daemon has it. `None` means
-/// another daemon answers, or still held the lock after 5 s, or after
-/// [`STOPPING_WAIT`] while it said it was stopping: this one exits.
+/// another daemon answers, or still held the lock [`QUIET_WAIT`] after it
+/// last said anything, or [`STOPPING_WAIT`] after this began while it said
+/// it was stopping: this one exits.
 fn elect(run: &RunDir) -> io::Result<Option<File>> {
+    elect_within(run, QUIET_WAIT, STOPPING_WAIT)
+}
+
+/// [`elect`], with its two waits.
+fn elect_within(run: &RunDir, quiet: Duration, stopping: Duration) -> io::Result<Option<File>> {
     let file = OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -1766,6 +1777,10 @@ fn elect(run: &RunDir) -> io::Result<Option<File>> {
         .write(true)
         .open(run.lock())?;
     let started = Instant::now();
+    // When the holder last answered or said it was shutting down. One that
+    // is done records it stopped before it lets the lock go: the wait for
+    // it then counts from there, not from when this began to wait.
+    let mut heard = started;
     loop {
         match file.try_lock() {
             Ok(()) => return Ok(Some(file)),
@@ -1774,16 +1789,19 @@ fn elect(run: &RunDir) -> io::Result<Option<File>> {
                 // retiring, so wait for it to let go, longer when it says
                 // it is shutting down.
                 let hello = proto::hello(run.socket(), Duration::from_millis(500)).ok();
-                let stopping = Phase::Stopping.name();
-                if hello.as_ref().is_some_and(|hello| hello.state != stopping) {
+                let stopping_name = Phase::Stopping.name();
+                if hello
+                    .as_ref()
+                    .is_some_and(|hello| hello.state != stopping_name)
+                {
                     return Ok(None);
                 }
-                let wait = if hello.is_some() || said_stopping(run) {
-                    STOPPING_WAIT
-                } else {
-                    Duration::from_secs(5)
-                };
-                if started.elapsed() >= wait {
+                if hello.is_some() || said_stopping(run) {
+                    heard = Instant::now();
+                    if started.elapsed() >= stopping {
+                        return Ok(None);
+                    }
+                } else if heard.elapsed() >= quiet {
                     return Ok(None);
                 }
                 thread::sleep(Duration::from_millis(50));
@@ -2696,6 +2714,57 @@ mod tests {
         assert_eq!(exit, 0);
         assert!(String::from_utf8_lossy(&out).contains("written under the lease"));
         stop(server);
+    }
+
+    /// A daemon starting while another shuts down takes the lock once the
+    /// other lets go, also when the other records that it stopped a while
+    /// before it does, and shut down for longer than a quiet holder is
+    /// waited for: the wait for it counts from when it last said anything.
+    #[test]
+    fn a_daemon_starting_waits_for_one_that_just_stopped() {
+        let tmp = tempfile::Builder::new().prefix("e").tempdir().unwrap();
+        let key = tmp.path().canonicalize().unwrap().join("memory.axil");
+        fs::write(&key, b"").unwrap();
+        let run = RunDir::of(&key);
+        run.create().unwrap();
+        let held = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(run.lock())
+            .unwrap();
+        held.try_lock().unwrap();
+        let record = |state: &str| {
+            let info = DaemonInfo {
+                state: state.into(),
+                ..DaemonInfo::default()
+            };
+            write_atomic(&run.info(), &serde_json::to_vec(&info).unwrap()).unwrap();
+        };
+        record(Phase::Stopping.name());
+        let quiet = Duration::from_millis(300);
+        thread::scope(|s| {
+            let electing = s.spawn(|| elect_within(&run, quiet, Duration::from_secs(30)));
+            thread::sleep(quiet * 3);
+            record("stopped");
+            thread::sleep(quiet / 2);
+            drop(held);
+            assert!(electing.join().unwrap().unwrap().is_some());
+        });
+
+        // One that never says anything is waited for no longer than that.
+        let held = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(run.lock())
+            .unwrap();
+        held.try_lock().unwrap();
+        let started = Instant::now();
+        assert!(elect_within(&run, quiet, Duration::from_secs(30))
+            .unwrap()
+            .is_none());
+        assert!(started.elapsed() < Duration::from_secs(5));
     }
 
     /// A client that goes away before its answer, with the command sent or
