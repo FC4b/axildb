@@ -337,8 +337,10 @@ pub struct Storage {
 }
 
 impl Storage {
-    /// Open (or create) a writable database at the given path.
+    /// Open (or create) a writable database at the given path. The installed
+    /// open guard runs first (see [`crate::open_guard`]).
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+        crate::open_guard(path.as_ref());
         let db = Database::create(path.as_ref())?;
 
         #[allow(unused_mut)]
@@ -394,8 +396,9 @@ impl Storage {
     /// writer). Any mutation method on the returned `Storage` also fails with
     /// `Busy` — a read-only handle cannot open a write transaction. The file
     /// must already exist (it is created only on the writable
-    /// [`Storage::open`] path).
+    /// [`Storage::open`] path). The installed open guard runs first.
     pub fn open_read_only(path: impl AsRef<Path>) -> Result<Self> {
+        crate::open_guard(path.as_ref());
         let db = ReadOnlyDatabase::open(path.as_ref())?;
         Ok(Self {
             db: StorageDb::ReadOnly(db),

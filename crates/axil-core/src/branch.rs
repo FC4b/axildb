@@ -567,7 +567,9 @@ pub fn branch_delete(db_path: &Path, name: &str) -> Result<()> {
         return Err(AxilError::plugin(format!("branch '{name}' does not exist")));
     }
 
-    // Delete companion files first, then the main branch file.
+    // A process that has the branch open is asked to let go first (see
+    // `crate::open_guard`). Then companion files, then the main branch file.
+    crate::open_guard(&dest);
     remove_branch_companions(&dest);
     fs::remove_file(&dest)
         .map_err(|e| AxilError::plugin(format!("failed to delete branch: {e}")))?;

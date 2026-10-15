@@ -7,9 +7,10 @@ open, with the embedding model and the graph loaded, and runs the hot commands
 database nor loads a model on each call. Unix only.
 
 > **Started by hand only, and nothing forwards to it yet.** The CLI and the
-> hooks still run every command in their own process. While a daemon runs it
-> holds the database's writer lock, so those commands find the database busy:
-> start one to try it, and stop it when you are done.
+> hooks still run every command in their own process, and each one first
+> leases the database from the daemon ([below](#leasing-the-database)), so
+> the daemon is cold again after every command: start one to try it, and stop
+> it when you are done.
 
 ## Commands
 
@@ -29,10 +30,54 @@ nothing is sent SIGTERM, once `stop` has checked that the process is this
 database's daemon. `status` works whether or not a daemon runs: it reads what
 the last one recorded and probes the lock and the socket. While one runs it
 adds the idle time left, the requests in flight, each command's p50/p95
-latency over its last 256 requests, the reloads and why, and the state of the
-engines and the graph.
+latency over its last 256 requests, the reloads and why, the processes
+holding a lease, and the state of the engines and the graph.
 
 `AXIL_DAEMON=off` keeps `start` from starting one.
+
+## Leasing the database
+
+Only one process can have a database open, and a running daemon has its
+database open. So every other `axil` process asks the daemon to let go before
+it opens the database (or reads the vector store ahead of the open): the
+daemon stops serving, answering commands sent meanwhile `leased`, waits for
+the requests it is running and for its warm-up, closes the database, and the
+process goes on to open it as if no daemon ran. A command that needs a store
+the daemon's handle lacks (`fts` with no full-text index yet, `since` with no
+time-series store, `store --embed` with no vector store) is handed back
+unrun; run in its own process, it leases the database and creates the store,
+and the daemon serves the command once it has opened the database again.
+
+The lease lasts as long as the process. It holds a connection to the socket
+that it never reads again and that the programs it starts don't inherit, so
+it ends when the process exits, however it exits: killed with SIGKILL, say.
+250 ms after the last lease ends, the daemon opens the database again and
+warms it up, unless another process asked for a lease meanwhile. `axil mcp`
+and `axil serve` hold theirs for their whole life; `daemon status` lists the
+holders (`leased to: pid 4242 for 30s`).
+
+While a lease is held, the process holding it has the database open, as
+without a daemon: a hook's recall finds it held and returns no context at
+once, and another command waits for it as it would for any process.
+
+A daemon that can't let go within 10 s, because a request it runs takes
+longer, says so (`lease_timeout`) and serves on; the process prints one line
+saying the daemon has the database open and that `axil daemon stop` frees
+it, then opens the database as it would beside any process that has it
+open: a write waits up to 10 s for the lock, and a read retries briefly and
+then reports it busy. A process asks once per database while its lease
+holds: again once the daemon that granted it has exited (another may have
+started since), 30 s after a refusal, and at every open while no daemon
+runs.
+
+A lease runs nothing for the process that asks, so it is granted whatever the
+asker's build, features or environment, with the same socket checks as a
+command (see below). A daemon too old to know leases is asked to stop
+instead. With `AXIL_DAEMON=off` no lease is asked for, and a command finds a
+running daemon's database busy. `compact --drop-engine`, `reembed` and
+`branch delete` move or remove files before anything opens the database, so
+they ask first; a store removed by anything else is found gone, and the
+daemon reloads.
 
 ## Files
 
@@ -45,7 +90,7 @@ created `0700` and refused if another user owns them:
 |------|------------|
 | `daemon.lock` | Held by the daemon for its whole life. Of several started at once, one gets it; the others exit. |
 | `axil.sock` | The socket (`0600`). When its path would be 100 bytes or more, too long for a socket address, it moves to `axil-<uid>/<hash>.sock` in this user's own temporary directory on macOS (the one `getconf DARWIN_USER_TEMP_DIR` prints), in `/run/user/<uid>` on Linux when that is the user's and private, and in `/tmp` otherwise. None of it comes from the environment, so every client finds the same socket. |
-| `daemon.json` | What the daemon last recorded about itself: pid, build, state, and why it stopped. |
+| `daemon.json` | What the daemon last recorded about itself: pid, build, state (`starting`, `ready`, `reloading`, `leasing`, `leased`, `stopping`, `stopped`), and why it stopped. |
 | `daemon.log` | Its own output, rotated to `daemon.log.1` at 1 MiB. A command's output goes to the client that sent it; only the few warnings printed inside recall's ranking (such as `recall ran without vector search`) land here instead. |
 | `daemon.blocked` | Why it would not serve the database. `start` tries again; a daemon that then serves removes it. |
 | `spawn.stamp` | When `start` last spawned one. |

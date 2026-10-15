@@ -95,6 +95,15 @@ fn fixture() -> Fixture {
     }
 }
 
+/// Whether the binary was built with what a test needs (`has`, from
+/// `cfg!`), saying when it was not: CI also tests a core-only build.
+fn built_with(has: bool, what: &str) -> bool {
+    if !has {
+        eprintln!("skipped: this build lacks {what}");
+    }
+    has
+}
+
 fn text(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
@@ -192,6 +201,67 @@ impl Fixture {
         std::fs::read_to_string(self.run_dir().join("daemon.log")).unwrap_or_default()
     }
 
+    /// What the running daemon says it is doing.
+    fn live(&self) -> Value {
+        self.status()["live"].clone()
+    }
+
+    /// Until the daemon has the database open again after the leases on
+    /// it ended, and serves a command.
+    fn warm_again(&self) {
+        assert!(
+            wait_for(Duration::from_secs(30), || self.live()["state"] == "ready"),
+            "{}",
+            self.live()
+        );
+        let boot = self.send(&["boot"], None);
+        assert!(boot.status.success(), "{}", text(&boot.stderr));
+    }
+
+    /// Run `args` here as a one-shot command, which leases the database:
+    /// it must succeed without finding the database busy.
+    fn leasing(&self, args: &[&str]) -> Output {
+        let out = self.axil(args);
+        let printed = format!("{}{}", text(&out.stdout), text(&out.stderr));
+        assert!(out.status.success(), "{args:?}: {printed}");
+        assert!(!printed.contains("busy"), "{args:?}: {printed}");
+        out
+    }
+
+    /// `axil mcp` on the database, its stdin and stdout piped.
+    fn mcp(&self) -> Mcp {
+        let mut cmd = Command::new(BIN);
+        cmd.arg("mcp")
+            .current_dir(&self.proj)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        for name in ENV {
+            cmd.env_remove(name);
+        }
+        let mut child = cmd.spawn().unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            use std::io::BufRead;
+            for line in std::io::BufReader::new(stdout).lines() {
+                let Ok(line) = line else { break };
+                if tx.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        Mcp { child, lines: rx }
+    }
+
+    /// The lease holders the daemon reports, by pid.
+    fn holders(&self) -> Vec<u64> {
+        self.live()["lease_holders"]
+            .as_array()
+            .map(|h| h.iter().filter_map(|h| h["pid"].as_u64()).collect())
+            .unwrap_or_default()
+    }
+
     /// The stores no handle has open any more: each opens read-only, which
     /// redb refuses for a file a writer left without closing.
     fn closed_cleanly(&self) -> Result<(), String> {
@@ -211,6 +281,46 @@ impl Drop for Fixture {
         if self.locked() {
             let _ = self.axil(&["daemon", "stop", "--wait", "10"]);
         }
+    }
+}
+
+/// An `axil mcp` server, spoken to over its stdin and stdout.
+struct Mcp {
+    child: std::process::Child,
+    lines: std::sync::mpsc::Receiver<String>,
+}
+
+impl Mcp {
+    /// Send one JSON-RPC message, and read the answer when it has an id.
+    fn call(&mut self, message: Value) -> Option<Value> {
+        let stdin = self.child.stdin.as_mut().unwrap();
+        writeln!(stdin, "{message}").unwrap();
+        stdin.flush().unwrap();
+        message.get("id")?;
+        let line = self
+            .lines
+            .recv_timeout(Duration::from_secs(60))
+            .expect("mcp did not answer");
+        Some(serde_json::from_str(&line).unwrap())
+    }
+
+    fn initialize(&mut self) {
+        let init = self.call(serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "daemon-test", "version": "0"},
+            },
+        }));
+        assert!(init.unwrap()["result"].is_object());
+        self.call(serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
+    }
+
+    /// Close its stdin, and wait for it to exit.
+    fn close(mut self) -> std::process::ExitStatus {
+        drop(self.child.stdin.take());
+        self.child.wait().unwrap()
     }
 }
 
@@ -420,15 +530,27 @@ fn replacing_the_executable_retires_the_daemon() {
 
 #[test]
 fn a_dropped_engine_and_a_failed_graph_reload_the_daemon() {
+    let engines = cfg!(all(
+        feature = "timeseries",
+        feature = "fts",
+        feature = "graph"
+    ));
+    if !built_with(engines, "the time-series, full-text or graph store") {
+        return;
+    }
     let fx = fixture();
     let socket = PathBuf::from(fx.start()["socket"].as_str().unwrap());
     let reloads = || fx.status()["live"]["reloads"].as_u64().unwrap();
     assert!(fx.send(&["since", "1h"], None).status.success());
     assert_eq!(reloads(), 0);
 
-    // `compact --drop-engine` removes the store without opening the database.
-    let dropped = fx.axil(&["compact", "--drop-engine", "ts"]);
-    assert!(dropped.status.success(), "{}", text(&dropped.stderr));
+    // A store removed by something that never asks the daemon first.
+    let ts = fx.proj.join(".axil/memory.axil.ts");
+    if ts.is_dir() {
+        std::fs::remove_dir_all(&ts).unwrap();
+    } else {
+        std::fs::remove_file(&ts).unwrap();
+    }
     std::thread::sleep(Duration::from_millis(300));
     let since = fx.send_settled(&["since", "1h"]);
     assert_eq!(since.status.code(), Some(125), "{}", text(&since.stderr));
@@ -438,6 +560,16 @@ fn a_dropped_engine_and_a_failed_graph_reload_the_daemon() {
         .as_str()
         .unwrap()
         .contains(".ts was removed"));
+
+    // `compact --drop-engine` removes one with the database leased, and
+    // the daemon opens it again without it rather than reload.
+    fx.leasing(&["compact", "--drop-engine", "fts"]);
+    fx.warm_again();
+    let fts = fx.send(&["fts", "tokens"], None);
+    assert_eq!(fts.status.code(), Some(125), "{}", text(&fts.stderr));
+    assert!(text(&fts.stderr).contains("\"reason\":\"lacks\""));
+    assert_eq!(fx.live()["leases_granted"], 1);
+    assert_eq!(reloads(), 1);
 
     let ack = raw_call(&socket, r#"{"op":"debug_fail_graph"}"#);
     assert_eq!(ack["ok"], true);
@@ -457,35 +589,59 @@ fn the_hot_commands_print_nothing_into_the_log() {
     let fx = fixture();
     fx.start();
     let cp = r#"{"goal":"g","state":"s","next_steps":["n"]}"#;
-    let cases: Vec<(Vec<&str>, Option<&[u8]>)> = vec![
-        (vec!["boot"], None),
-        (vec!["boot", "--boot-format", "narrative"], None),
-        (vec!["boot", "--files", "src/auth.rs"], None),
-        (vec!["recall-for-file", "src/auth.rs"], None),
-        (vec!["recall", "auth timeout"], None),
+    // Each with whether this build serves it.
+    let recall = cfg!(feature = "embed");
+    let cases: Vec<(Vec<&str>, Option<&[u8]>, bool)> = vec![
+        (vec!["boot"], None, true),
+        (vec!["boot", "--boot-format", "narrative"], None, true),
+        (vec!["boot", "--files", "src/auth.rs"], None, true),
+        (vec!["recall-for-file", "src/auth.rs"], None, true),
+        (vec!["recall", "auth timeout"], None, recall),
         (
             vec!["recall", "auth timeout", "--recall-format", "context-block"],
             None,
+            recall,
         ),
-        (vec!["--format", "table", "recall", "auth timeout"], None),
-        (vec!["code-search", "validate token"], None),
-        (vec!["fts", "tokens"], None),
-        (vec!["fts", "tokens", "--jsonl"], None),
-        (vec!["since", "1h"], None),
-        (vec!["store", "decisions", r#"{"summary":"sent"}"#], None),
+        (
+            vec!["--format", "table", "recall", "auth timeout"],
+            None,
+            recall,
+        ),
+        (
+            vec!["code-search", "validate token"],
+            None,
+            cfg!(feature = "indexer"),
+        ),
+        (vec!["fts", "tokens"], None, cfg!(feature = "fts")),
+        (
+            vec!["fts", "tokens", "--jsonl"],
+            None,
+            cfg!(feature = "fts"),
+        ),
+        (vec!["since", "1h"], None, cfg!(feature = "timeseries")),
+        (
+            vec!["store", "decisions", r#"{"summary":"sent"}"#],
+            None,
+            true,
+        ),
         (
             vec!["store", "context", "-"],
             Some(br#"{"summary":"piped"}"#),
+            true,
         ),
-        (vec!["store", "decisions", "{nope"], None),
-        (vec!["checkpoint", cp], None),
-        (vec!["checkpoint", "-"], Some(cp.as_bytes())),
-        (vec!["--help"], None),
-        (vec!["store"], None),
-        (vec!["--version"], None),
+        (vec!["store", "decisions", "{nope"], None, true),
+        (vec!["checkpoint", cp], None, cfg!(feature = "checkpoint")),
+        (
+            vec!["checkpoint", "-"],
+            Some(cp.as_bytes()),
+            cfg!(feature = "checkpoint"),
+        ),
+        (vec!["--help"], None, true),
+        (vec!["store"], None, true),
+        (vec!["--version"], None, true),
     ];
     let mut served = 0;
-    for (args, stdin) in &cases {
+    for (args, stdin, _) in &cases {
         let out = fx.send(args, *stdin);
         if out.status.code() != Some(125) {
             served += 1;
@@ -493,9 +649,22 @@ fn the_hot_commands_print_nothing_into_the_log() {
                 !out.stdout.is_empty() || !out.stderr.is_empty(),
                 "{args:?} printed nothing"
             );
+            // The daemon's open guard fails a debug build's command that
+            // opens the database itself rather than use the open handle.
+            assert!(
+                !text(&out.stderr).contains("panicked"),
+                "{args:?}: {}",
+                text(&out.stderr)
+            );
         }
     }
-    assert!(served >= cases.len() - 2, "only {served} served");
+    let servable = cases.iter().filter(|(_, _, served)| *served).count();
+    assert!(served >= servable - 2, "only {served} served");
+    let live = fx.live();
+    assert_eq!(
+        (&live["state"], &live["panics"]),
+        (&Value::from("ready"), &Value::from(0))
+    );
     let log = fx.log();
     let foreign: Vec<&str> = log
         .lines()
@@ -511,9 +680,16 @@ fn the_hot_commands_print_nothing_into_the_log() {
         foreign.join("\n")
     );
     assert!(log.contains("ready"), "{log}");
+    // ...and the check those commands ran under is armed.
+    let socket = PathBuf::from(fx.live()["socket"].as_str().unwrap());
+    let guard = raw_call(&socket, r#"{"op":"debug_open_guard"}"#);
+    assert_eq!(guard["tripped"], true, "{guard}");
 
     // A checkpoint given its JSON does not read stdin, so an open pipe
     // nobody writes to does not hold it up.
+    if !built_with(cfg!(feature = "checkpoint"), "checkpoint") {
+        return;
+    }
     let mut cmd = Command::new(BIN);
     cmd.args(["daemon", "send", "--", "checkpoint", cp])
         .current_dir(&fx.proj)
@@ -745,4 +921,303 @@ fn stop_signals_a_daemon_that_does_not_answer() {
     assert!(wait_for(Duration::from_secs(15), || !fx.locked()));
     assert_eq!(fx.info()["exit_reason"], "signal 15");
     fx.closed_cleanly().unwrap();
+}
+
+/// Commands the daemon does not run lease the database from it: each one
+/// opens it as with no daemon, its vector store and embedder included, and
+/// the daemon serves again once it is done.
+#[test]
+fn the_commands_it_does_not_serve_lease_the_database() {
+    let fx = fixture();
+    fx.start();
+
+    let listed = fx.leasing(&["list", "decisions"]);
+    fx.warm_again();
+    let rows: Value = serde_json::from_slice(&listed.stdout).unwrap();
+    let id = rows[0]["id"].as_str().unwrap().to_string();
+    let got = fx.leasing(&["get", &id]);
+    assert!(
+        text(&got.stdout).contains("512 bytes"),
+        "{}",
+        text(&got.stdout)
+    );
+    fx.warm_again();
+
+    // Exits 1 for the warning that no code graph is indexed.
+    let doctor = fx.axil(&["doctor"]);
+    let printed = format!("{}{}", text(&doctor.stdout), text(&doctor.stderr));
+    assert!(!printed.contains("busy"), "{printed}");
+    let report: Value = serde_json::from_slice(&doctor.stdout).unwrap();
+    let failed: Vec<&Value> = report["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["status"] == "error")
+        .collect();
+    assert!(failed.is_empty(), "{report}");
+    if fx.vectors {
+        let vector = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == "vector_index")
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(vector["status"], "ok", "{report}");
+    }
+    fx.warm_again();
+
+    if built_with(cfg!(feature = "indexer"), "index") {
+        let index = fx.leasing(&["index"]);
+        if fx.vectors {
+            // The embedder announces itself once a process loads it.
+            assert!(
+                text(&index.stderr).contains("[axil-vector]"),
+                "indexed without the embedder: {}",
+                text(&index.stderr)
+            );
+        }
+        fx.warm_again();
+    }
+    if fx.vectors {
+        let reembed = fx.leasing(&["reembed", "--field", "summary"]);
+        let report: Value = serde_json::from_slice(&reembed.stdout).unwrap();
+        assert!(report["reembedded"].as_u64().unwrap() > 0, "{report}");
+        fx.warm_again();
+    }
+    if built_with(cfg!(feature = "deps"), "deps") {
+        fx.leasing(&["deps", "refresh"]);
+        fx.warm_again();
+    }
+
+    if !built_with(
+        cfg!(all(feature = "mcp", feature = "embed")),
+        "mcp or recall",
+    ) {
+        assert_eq!(fx.live()["reloads"], 0, "{}", fx.live());
+        return;
+    }
+    let mut mcp = fx.mcp();
+    mcp.initialize();
+    let pid = u64::from(mcp.child.id());
+    assert!(
+        wait_for(Duration::from_secs(10), || fx.holders() == [pid]),
+        "{}",
+        fx.live()
+    );
+    let mut store = serde_json::json!({
+        "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+        "params": {"name": "store", "arguments": {
+            "table": "decisions", "data": {"summary": "stored over mcp"},
+        }},
+    });
+    if fx.vectors {
+        store["params"]["arguments"]["embed_fields"] = serde_json::json!(["summary"]);
+    }
+    let stored = mcp.call(store).unwrap();
+    let said = stored["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or("");
+    assert!(stored["result"]["isError"] != true, "{stored}");
+    assert!(!said.contains("failed"), "{stored}");
+    // Served while the server runs: its lease holds the database.
+    let boot = fx.send(&["boot"], None);
+    assert_eq!(boot.status.code(), Some(125));
+    assert!(
+        text(&boot.stderr).contains("leased"),
+        "{}",
+        text(&boot.stderr)
+    );
+    assert!(mcp.close().success());
+    fx.warm_again();
+    let found = fx.send(&["recall", "stored over mcp"], None);
+    assert!(
+        text(&found.stdout).contains("stored over mcp"),
+        "{}",
+        text(&found.stdout)
+    );
+    assert_eq!(fx.live()["reloads"], 0, "{}", fx.live());
+}
+
+/// `AXIL_DAEMON=off` turns the lease off with the rest: the command opens
+/// as with no daemon, and finds the database the daemon has open busy.
+#[test]
+fn with_the_daemon_off_a_command_asks_for_no_lease() {
+    let fx = fixture();
+    fx.start();
+    let mut cmd = Command::new(BIN);
+    cmd.args([
+        "store",
+        "decisions",
+        r#"{"summary":"stored with the daemon off"}"#,
+    ])
+    .current_dir(&fx.proj)
+    .stdin(Stdio::null());
+    for name in ENV {
+        cmd.env_remove(name);
+    }
+    let out = cmd.env("AXIL_DAEMON", "off").output().unwrap();
+    assert!(!out.status.success(), "{}", text(&out.stdout));
+    assert!(text(&out.stderr).contains("busy"), "{}", text(&out.stderr));
+    let live = fx.live();
+    assert_eq!(live["leases_granted"], 0, "{live}");
+    assert_eq!(live["state"], "ready", "{live}");
+}
+
+/// `reembed` has the database leased before it touches the vector store,
+/// even to put back the copy an interrupted run left: here one it cannot
+/// move into place.
+#[test]
+fn reembed_leases_before_it_moves_the_vector_store() {
+    let fx = fixture();
+    if !fx.vectors {
+        return;
+    }
+    fx.start();
+    std::fs::create_dir_all(fx.proj.join(".axil/memory.axil.reembed-bak/x")).unwrap();
+    let out = fx.axil(&["reembed", "--field", "summary"]);
+    assert!(!out.status.success());
+    assert!(
+        text(&out.stderr).contains("failed to restore"),
+        "{}",
+        text(&out.stderr)
+    );
+    assert_eq!(fx.live()["leases_granted"], 1, "{}", fx.live());
+    fx.warm_again();
+}
+
+/// A command for a store the daemon's handle lacks is not served; the
+/// one-shot command leases the database and creates the store, and once
+/// the daemon has opened the database again it serves the command.
+#[test]
+fn a_store_the_daemon_lacks_is_created_under_a_lease() {
+    let engines = cfg!(all(feature = "fts", feature = "timeseries"));
+    if !built_with(engines, "the full-text or time-series store") {
+        return;
+    }
+    let fx = fixture();
+    let mut engines = vec!["fts", "ts"];
+    if fx.vectors {
+        engines.push("vec");
+    } else {
+        eprintln!("store --embed is not tried: it needs the model");
+    }
+    for engine in &engines {
+        let dropped = fx.axil(&["compact", "--drop-engine", engine]);
+        assert!(dropped.status.success(), "{}", text(&dropped.stderr));
+    }
+    fx.start();
+    let mut cases = vec![vec!["fts", "tokens"], vec!["since", "1h"]];
+    if fx.vectors {
+        cases.push(vec![
+            "store",
+            "decisions",
+            r#"{"summary":"embedded on creation"}"#,
+            "--embed",
+            "summary",
+        ]);
+    }
+    for args in &cases {
+        let refused = fx.send(args, None);
+        assert_eq!(refused.status.code(), Some(125), "{args:?}");
+        assert!(
+            text(&refused.stderr).contains("\"reason\":\"lacks\""),
+            "{args:?}: {}",
+            text(&refused.stderr)
+        );
+        fx.leasing(args);
+        fx.warm_again();
+        let served = fx.send(args, None);
+        assert_eq!(
+            served.status.code(),
+            Some(0),
+            "{args:?}: {}",
+            text(&served.stderr)
+        );
+    }
+    let engines = fx.live()["engines"].clone();
+    assert_eq!(
+        (&engines["fts"], &engines["timeseries"]),
+        (&Value::Bool(true), &Value::Bool(true))
+    );
+    if fx.vectors {
+        assert_eq!(engines["embedder"], true, "{engines}");
+    }
+}
+
+/// While a server holds the lease, a hook's recall finds the database
+/// held and returns no context, at once.
+#[test]
+fn a_hook_recall_under_a_lease_returns_nothing_at_once() {
+    let needs = cfg!(all(feature = "mcp", feature = "embed", feature = "fts"));
+    if !built_with(needs, "mcp or recall") {
+        return;
+    }
+    let fx = fixture();
+    fx.start();
+    let hook = |session: &str| {
+        let event = serde_json::json!({
+            "hook_event_name": "UserPromptSubmit",
+            "session_id": session,
+            "cwd": fx.proj,
+            "prompt": "auth timeout during uploads",
+        });
+        let started = Instant::now();
+        let out = axil_in(
+            BIN,
+            &fx.proj,
+            &["hook", "run", "--dialect", "claude"],
+            Some(event.to_string().as_bytes()),
+        );
+        assert!(out.status.success(), "{}", text(&out.stderr));
+        (text(&out.stdout), started.elapsed())
+    };
+    // With the daemon serving, the hook's recall leases it and finds the
+    // memory.
+    let (context, _) = hook("s-served");
+    assert!(context.contains("auth timeout"), "{context}");
+    fx.warm_again();
+
+    let mut mcp = fx.mcp();
+    mcp.initialize();
+    let pid = u64::from(mcp.child.id());
+    assert!(wait_for(Duration::from_secs(10), || fx.holders() == [pid]));
+    let (context, took) = hook("s-leased");
+    assert_eq!(context, "");
+    assert!(took < Duration::from_secs(5), "took {took:?}");
+    // The server still holds it. The recall's own lease, which ended with
+    // its process, may not be counted out yet.
+    assert!(fx.holders().contains(&pid), "{}", fx.live());
+    assert!(mcp.close().success());
+    fx.warm_again();
+}
+
+/// A lease held by a process that is killed ends with it: the daemon opens
+/// the database again and serves.
+#[test]
+fn a_killed_lease_holder_lets_the_daemon_open_again() {
+    if !built_with(cfg!(feature = "mcp"), "mcp, the lease holder here") {
+        return;
+    }
+    let fx = fixture();
+    fx.start();
+    let mut mcp = fx.mcp();
+    mcp.initialize();
+    let pid = u64::from(mcp.child.id());
+    assert!(wait_for(Duration::from_secs(10), || fx.holders() == [pid]));
+    assert_eq!(fx.live()["state"], "leased");
+    let human = text(&fx.axil(&["daemon", "status"]).stdout);
+    assert!(human.contains(&format!("leased to: pid {pid}")), "{human}");
+    assert!(human.contains("engines: the database is closed"), "{human}");
+
+    signal(pid, "-KILL");
+    let _ = mcp.child.wait();
+    fx.warm_again();
+    assert!(fx.holders().is_empty());
+    let log = fx.log();
+    assert!(
+        log.contains(&format!("pid {pid} let go of its lease")),
+        "{log}"
+    );
+    assert!(log.contains("opened the database again"), "{log}");
 }

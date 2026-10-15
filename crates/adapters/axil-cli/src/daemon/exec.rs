@@ -137,6 +137,8 @@ pub enum NotServed {
     Unavailable,
     /// The request's deadline passed before the command could start.
     Expired,
+    /// The host let go of the database for a process that leased it.
+    Leased,
 }
 
 impl fmt::Display for NotServed {
@@ -149,6 +151,7 @@ impl fmt::Display for NotServed {
             NotServed::Terminal => f.write_str("the command reads stdin from a terminal"),
             NotServed::Unavailable => f.write_str("the database is not open"),
             NotServed::Expired => f.write_str("the request's deadline passed before it ran"),
+            NotServed::Leased => f.write_str("the database is leased to another process"),
         }
     }
 }
@@ -198,9 +201,15 @@ impl std::error::Error for OpenPrinted {}
 /// and said so on the host's own stderr. The open would repair it too and
 /// print that it did, which would keep the database from being served for
 /// a line a one-shot run prints once, in the first command after the crash.
+///
+/// The host's own open skips the open guard ([`axil_core::without_open_guard`]):
+/// the guard asks the host to let go, or, in the daemon, checks that nothing
+/// but this opens the database.
 fn open_warm(path: &Path) -> anyhow::Result<WarmDb> {
-    repair_vector_store(path);
-    let (stdout, stderr, warm) = cli_io::capture(ReqCtx::default(), || WarmDb::open(path));
+    let (stdout, stderr, warm) = axil_core::without_open_guard(|| {
+        repair_vector_store(path);
+        cli_io::capture(ReqCtx::default(), || WarmDb::open(path))
+    });
     let warm = warm?;
     if stdout.is_empty() && stderr.is_empty() {
         return Ok(warm);
@@ -345,6 +354,14 @@ impl WarmState {
                 *self.slot_write() = Some(old);
                 return Err(ReopenError::InUse);
             }
+        }
+        // Opening creates a database that is not there: one removed from
+        // under the handle is not brought back empty.
+        if !self.path.is_file() {
+            return Err(ReopenError::Open(anyhow::anyhow!(
+                "{} no longer exists",
+                self.path.display()
+            )));
         }
         let warm = open_warm(&self.path).map_err(ReopenError::Open)?;
         *self.slot_write() = Some(warm);
@@ -984,13 +1001,17 @@ mod tests {
         };
         let differs = Some("bogus");
         assert_ne!(host_tools.as_deref(), differs.map(OsStr::new));
+        // Only `mcp` reads one, and a build without it has no such command.
+        let mcp = cfg!(feature = "mcp");
         for args in [&["mcp"][..], &["mcp", "--help"]] {
             let got = execute_captured(with_tools(args, differs), &state);
-            assert_eq!(got, Err(NotServed::Parse), "{args:?}");
+            if mcp {
+                assert_eq!(got, Err(NotServed::Parse), "{args:?}");
+            }
         }
         let r = execute_captured(with_tools(&["boot"], differs), &state).unwrap();
         assert_eq!(r.exit, 0, "{}", String::from_utf8_lossy(&r.stderr));
-        if host_tools.is_none() {
+        if mcp && host_tools.is_none() {
             let got = execute_captured(with_tools(&["mcp"], None), &state);
             assert_eq!(got, Err(NotServed::Command));
         }
@@ -1035,6 +1056,10 @@ mod tests {
             .unwrap();
         parsed.sort_unstable();
         parsed.dedup();
+        // A build without `mcp` lacks the one argument that reads this.
+        if !cfg!(feature = "mcp") {
+            carried.retain(|name| *name != "AXIL_MCP_TOOLS");
+        }
         assert_eq!(parsed, carried, "the variables the parser reads");
     }
 
@@ -1317,6 +1342,22 @@ mod tests {
         });
         assert!(first.upgrade().is_none(), "the old handle is still open");
         assert_eq!(execute_captured(boot(), &state).unwrap().exit, 0);
+    }
+
+    /// A reopen of a database removed from under the open handle fails
+    /// rather than create an empty one in its place.
+    #[test]
+    fn a_reopen_never_creates_a_removed_database() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = build_fixture(tmp.path());
+        let db = proj.join(".axil/memory.axil");
+        let state = WarmState::open(&db).unwrap();
+        std::fs::remove_file(&db).unwrap();
+        assert!(matches!(
+            state.reopen(Duration::from_secs(5)),
+            Err(ReopenError::Open(_))
+        ));
+        assert!(!db.exists());
     }
 
     /// The host relies on catching a request's panic, so no build may abort

@@ -8,10 +8,11 @@
 //! answers with one JSON frame; a served run is followed by two raw frames,
 //! stdout then stderr.
 //!
-//! `hello` and `shutdown` are frozen: every daemon answers them the same way
-//! whatever its [`DAEMON_PROTO`], so a client of any build can ask what is
-//! running and ask it to go. Everything else may change with the protocol
-//! version, which a run header carries and the daemon checks.
+//! `hello`, `shutdown` and `lease` are frozen: every daemon answers them the
+//! same way whatever its [`DAEMON_PROTO`], so a client of any build can ask
+//! what is running, ask it to go, and ask it to let go of the database (see
+//! [`super::lease`]). Everything else may change with the protocol version,
+//! which a run header carries and the daemon checks.
 
 use std::collections::BTreeSet;
 use std::ffi::OsString;
@@ -29,8 +30,9 @@ use serde::{Deserialize, Serialize};
 use super::exec::{self, NotServed};
 use super::paths::{fnv1a64, trusted_socket, uid};
 
-/// The protocol version a run header must carry.
-pub const DAEMON_PROTO: u32 = 1;
+/// The protocol version a run header must carry. 2 added the `leased` run
+/// reply.
+pub const DAEMON_PROTO: u32 = 2;
 
 /// The largest frame either side sends or accepts: 32 MiB.
 pub const MAX_FRAME: usize = 32 * 1024 * 1024;
@@ -82,6 +84,13 @@ pub fn read_json<T: DeserializeOwned>(r: &mut impl Read) -> io::Result<T> {
     serde_json::from_slice(&bytes).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 
+/// Whether `db`, a database path as a peer sent it, names `key`. A path
+/// goes over the wire in its display form, which replaces what is not
+/// UTF-8, so such a path is compared in that form.
+pub fn names_db(db: &str, key: &Path) -> bool {
+    Path::new(db) == key || db == key.to_string_lossy()
+}
+
 /// A request.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
@@ -93,6 +102,24 @@ pub enum Op {
     Shutdown {
         #[serde(default)]
         reason: String,
+    },
+    /// Frozen: `{"op":"lease","db":"...","wait_ms":10000,"pid":42}`: close
+    /// the database `db` for process `pid`, waiting up to `wait_ms` for the
+    /// requests running on it, and keep it closed until every connection
+    /// that asked has closed. Answered by [`LeaseReply`]. Unlike a run, it
+    /// skips the handshake: it runs nothing for the client, so a client of
+    /// any build is answered, and one whose build the daemon does not serve
+    /// can still open the database.
+    Lease {
+        /// The database the client is about to open ([`crate::cli_io::db_key`]).
+        #[serde(default)]
+        db: String,
+        /// How long the client waits for the daemon to let go.
+        #[serde(default)]
+        wait_ms: u64,
+        /// The client's process id, for `daemon status`.
+        #[serde(default)]
+        pid: u32,
     },
     /// Run one command line; see [`RunHeader`].
     Run(RunHeader),
@@ -107,6 +134,12 @@ pub enum Op {
     /// shutdown wait for it. Answered by `{"op":"debug_hold","ok":true}`.
     #[cfg(debug_assertions)]
     DebugHold { ms: u64 },
+    /// Debug builds only: run the open guard on the database the daemon
+    /// serves, as a command that opened it would, so a test can see that
+    /// the guard's check is armed in the daemon. Answered by
+    /// `{"op":"debug_open_guard","tripped":true}` when the check fired.
+    #[cfg(debug_assertions)]
+    DebugOpenGuard,
 }
 
 /// The frozen answer to `hello`.
@@ -122,7 +155,8 @@ pub struct Hello {
     pub version: String,
     /// The daemon's process id.
     pub pid: u32,
-    /// `starting`, `ready`, `reloading` or `stopping`.
+    /// `starting`, `ready`, `reloading`, `leasing`, `leased` or
+    /// `stopping`.
     pub state: String,
     /// The database it serves ([`crate::cli_io::db_key`]).
     #[serde(default)]
@@ -136,6 +170,44 @@ pub struct Ack {
     pub op: String,
     /// Always true: the daemon does what was asked.
     pub ok: bool,
+}
+
+/// The frozen answer to `lease`: `{"op":"lease","granted":true}` once the
+/// database is closed, `{"op":"lease","granted":false,"reason":"..."}`
+/// otherwise.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LeaseReply {
+    /// Always `"lease"`.
+    pub op: String,
+    /// The database is closed, and stays closed while the connection is
+    /// open.
+    pub granted: bool,
+    /// Why it was not: `lease_timeout` (requests still held the database
+    /// when the wait ran out), `stopping` (the daemon is shutting down, and
+    /// closes the database as it goes), `wrong_db` (it serves another
+    /// database) or `overloaded` (every connection is taken).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+impl LeaseReply {
+    /// The database is closed.
+    pub fn granted() -> Self {
+        Self {
+            op: "lease".into(),
+            granted: true,
+            reason: None,
+        }
+    }
+
+    /// It was not closed, for `reason`.
+    pub fn refused(reason: &str) -> Self {
+        Self {
+            op: "lease".into(),
+            granted: false,
+            reason: Some(reason.into()),
+        }
+    }
 }
 
 /// One command line to run, as the client's process was asked to run it.
@@ -211,6 +283,9 @@ pub enum RunReply {
     },
     /// The database is still opening.
     Starting,
+    /// The database is closed while another process holds a lease on it
+    /// (see [`Op::Lease`]).
+    Leased,
     /// The daemon is shutting down.
     Stopping,
     /// Too many requests are running.
@@ -229,6 +304,7 @@ impl RunReply {
     pub fn not_served(reason: NotServed) -> RunReply {
         let code = match reason {
             NotServed::Expired => return RunReply::Expired,
+            NotServed::Leased => return RunReply::Leased,
             NotServed::Parse => "parse",
             NotServed::WrongDb => "wrong_db",
             NotServed::Command => "command",
@@ -559,7 +635,23 @@ pub fn run(
 mod tests {
     use super::*;
 
-    /// `hello` and `shutdown` look like this to every build, forever.
+    /// A database path that is not UTF-8 still names its daemon, whose
+    /// hello and status, and the lease asked of it, carry it in display form.
+    #[test]
+    fn a_path_names_its_database_in_display_form() {
+        let key = Path::new(std::ffi::OsStr::from_bytes(b"/p/\xff/.axil/memory.axil"));
+        assert!(key.to_str().is_none());
+        assert!(names_db(&key.display().to_string(), key));
+        let plain = Path::new("/p/.axil/memory.axil");
+        assert!(names_db("/p/.axil/memory.axil", plain));
+        assert!(names_db("/p//.axil/memory.axil", plain));
+        assert!(!names_db("/q/.axil/memory.axil", plain));
+        assert!(!names_db("/q/.axil/memory.axil", key));
+        assert!(!names_db(&plain.display().to_string(), key));
+    }
+
+    /// `hello`, `shutdown` and `lease` look like this to every build,
+    /// forever.
     #[test]
     fn the_frozen_ops_keep_their_shape() {
         assert_eq!(
@@ -616,7 +708,37 @@ mod tests {
             serde_json::to_string(&ack).unwrap(),
             r#"{"op":"shutdown","ok":true}"#
         );
-        assert_eq!(DAEMON_PROTO, 1);
+
+        let lease = Op::Lease {
+            db: "/p/.axil/memory.axil".into(),
+            wait_ms: 10_000,
+            pid: 42,
+        };
+        assert_eq!(
+            serde_json::to_string(&lease).unwrap(),
+            r#"{"op":"lease","db":"/p/.axil/memory.axil","wait_ms":10000,"pid":42}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<Op>(r#"{"op":"lease"}"#).unwrap(),
+            Op::Lease {
+                db: String::new(),
+                wait_ms: 0,
+                pid: 0
+            }
+        );
+        assert_eq!(
+            serde_json::to_string(&LeaseReply::granted()).unwrap(),
+            r#"{"op":"lease","granted":true}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&LeaseReply::refused("lease_timeout")).unwrap(),
+            r#"{"op":"lease","granted":false,"reason":"lease_timeout"}"#
+        );
+        // A later daemon's answer may carry more; it is still an answer.
+        let more: LeaseReply =
+            serde_json::from_str(r#"{"op":"lease","granted":true,"holders":2}"#).unwrap();
+        assert_eq!(more, LeaseReply::granted());
+        assert_eq!(DAEMON_PROTO, 2);
     }
 
     #[test]
@@ -666,7 +788,14 @@ mod tests {
         let cases = [
             (
                 RunHeader {
-                    proto: 2,
+                    proto: DAEMON_PROTO + 1,
+                    ..ok.clone()
+                },
+                "proto",
+            ),
+            (
+                RunHeader {
+                    proto: DAEMON_PROTO - 1,
                     ..ok.clone()
                 },
                 "proto",
@@ -740,7 +869,7 @@ mod tests {
         ),
         (
             "AXIL_DAEMON",
-            "the kill switch, read where a daemon is started",
+            "the kill switch, read where a daemon is started and where a process leases its database",
         ),
     ];
 

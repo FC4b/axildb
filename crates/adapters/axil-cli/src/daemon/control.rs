@@ -1,6 +1,7 @@
 //! `axil daemon {start, stop, status, logs}`: running a database's daemon by
 //! hand. Nothing forwards commands to it on its own yet; `daemon send` sends
-//! one command line, to try it.
+//! one command line, to try it. Every other command leases the database from
+//! it (see [`super::lease`]).
 //!
 //! `AXIL_DAEMON` is the kill switch: `off` keeps `daemon start` from
 //! starting one. Unset, it is `on`: a daemon runs only when started by hand.
@@ -154,7 +155,7 @@ fn hello_for(key: &Path, run: &RunDir, timeout: Duration) -> Result<Option<Hello
     // One that does not say is taken to be this database's: the socket is
     // in its run directory.
     anyhow::ensure!(
-        hello.db.is_empty() || Path::new(&hello.db) == key,
+        hello.db.is_empty() || proto::names_db(&hello.db, key),
         "{} is answered by the daemon of another database, {}",
         run.socket().display(),
         hello.db
@@ -185,7 +186,9 @@ fn start(db: &Path, idle_timeout: Duration, wait: Duration, out: &Output) -> Res
     let mut blocked: Option<String> = None;
     loop {
         if let Some(hello) = hello_for(&key, &run, Duration::from_secs(1))? {
-            if hello.state == "ready" {
+            // One that let go of the database for a lease serves again
+            // once the lease ends.
+            if hello.state == "ready" || hello.state == "leased" {
                 out.print(&json!({
                     "started": child.as_ref().is_some_and(|c| c.id() == hello.pid),
                     "running": true,
@@ -377,7 +380,7 @@ fn report(key: &Path, run: &RunDir) -> Value {
     let other_db = answer
         .as_ref()
         .and_then(|a| a["db"].as_str())
-        .filter(|db| Path::new(db) != key)
+        .filter(|db| !proto::names_db(db, key))
         .map(str::to_string);
     let live = answer.filter(|_| other_db.is_none());
     let lock_held = server::lock_held(run);
@@ -391,7 +394,10 @@ fn report(key: &Path, run: &RunDir) -> Value {
         "db": key,
         "running": live.is_some(),
         "lock_held": lock_held,
-        "stopping": live.is_none() && lock_held && server::said_stopping(run),
+        // One that answers while it shuts down has not removed its socket
+        // yet.
+        "stopping": live.as_ref().is_some_and(|l| l["state"] == "stopping")
+            || (live.is_none() && lock_held && server::said_stopping(run)),
         "socket": {
             "path": run.socket(),
             "exists": run.socket().exists(),
@@ -424,14 +430,19 @@ fn describe(report: &Value) -> Vec<String> {
     let mut lines = Vec::new();
     let live = &report["live"];
     let last = &report["last"];
-    if live.is_object() {
+    if report["stopping"] == true {
+        let pid = if live.is_object() {
+            &live["pid"]
+        } else {
+            &last["pid"]
+        };
+        lines.push(format!("daemon: stopping (pid {pid})"));
+    } else if live.is_object() {
         lines.push(format!(
             "daemon: running, {} (pid {})",
             live["state"].as_str().unwrap_or("?"),
             live["pid"]
         ));
-    } else if report["stopping"] == true {
-        lines.push(format!("daemon: stopping (pid {})", last["pid"]));
     } else if report["lock_held"] == true {
         lines.push("daemon: holds the lock but does not answer".to_string());
     } else if last.is_object() {
@@ -483,6 +494,20 @@ fn describe(report: &Value) -> Vec<String> {
         "idle: {}s, stops after {}s more",
         live["idle_secs"], live["idle_left_secs"]
     ));
+    if let Some(holders) = live["lease_holders"].as_array().filter(|h| !h.is_empty()) {
+        let pids: Vec<String> = holders
+            .iter()
+            .map(|h| {
+                let waiting = if h["granted"] == true {
+                    ""
+                } else {
+                    ", waiting"
+                };
+                format!("pid {} for {}s{waiting}", h["pid"], h["secs"])
+            })
+            .collect();
+        lines.push(format!("leased to: {}", pids.join("; ")));
+    }
     lines.push(format!(
         "in flight: {}, abandoned recalls: {}, panics: {}, reloads: {}{}",
         live["in_flight"],
@@ -499,15 +524,20 @@ fn describe(report: &Value) -> Vec<String> {
         .into_iter()
         .filter(|e| live["engines"][e] == true)
         .collect();
-    lines.push(format!(
-        "engines: {}; graph backend: {}",
-        if engines.is_empty() {
-            "none".to_string()
-        } else {
-            engines.join(", ")
-        },
-        graph_name(&graph)
-    ));
+    if live["engines"].is_null() {
+        // Not open: leased, or between a close and the open after it.
+        lines.push("engines: the database is closed".to_string());
+    } else {
+        lines.push(format!(
+            "engines: {}; graph backend: {}",
+            if engines.is_empty() {
+                "none".to_string()
+            } else {
+                engines.join(", ")
+            },
+            graph_name(&graph)
+        ));
+    }
     if let Some(ops) = live["ops"].as_object() {
         for (op, figures) in ops {
             let ms = |v: &Value| {

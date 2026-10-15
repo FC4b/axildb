@@ -179,7 +179,9 @@ pub fn restore_snapshot(db_path: &Path, snapshot_id: &str) -> io::Result<Snapsho
         }
     }
 
-    // redb locks the file while a handle has it open.
+    // A process that may hold it is asked to let go first (see
+    // `crate::open_guard`); redb locks the file while a handle has it open.
+    crate::open_guard(db_path);
     let _held = match fs::File::open(db_path) {
         Ok(file) => match file.try_lock() {
             Ok(()) => Some(file),

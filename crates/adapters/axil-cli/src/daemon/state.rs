@@ -24,6 +24,13 @@ pub enum Phase {
     Reloading = 2,
     /// Shutting down; nothing new is served.
     Stopping = 3,
+    /// Letting go of the database for a process that asked to lease it:
+    /// waiting for the requests running on it, and answering new ones
+    /// `leased`.
+    Leasing = 4,
+    /// The database is closed while processes hold a lease on it; requests
+    /// are answered `leased`. Once the last lease ends it is opened again.
+    Leased = 5,
 }
 
 impl Phase {
@@ -34,6 +41,8 @@ impl Phase {
             Phase::Ready => "ready",
             Phase::Reloading => "reloading",
             Phase::Stopping => "stopping",
+            Phase::Leasing => "leasing",
+            Phase::Leased => "leased",
         }
     }
 }
@@ -54,6 +63,8 @@ impl PhaseCell {
             0 => Phase::Starting,
             1 => Phase::Ready,
             2 => Phase::Reloading,
+            4 => Phase::Leasing,
+            5 => Phase::Leased,
             _ => Phase::Stopping,
         }
     }
@@ -80,7 +91,8 @@ pub struct DaemonInfo {
     pub proto: u32,
     /// Its process id.
     pub pid: u32,
-    /// `starting`, `ready`, `reloading`, `stopping` or `stopped`.
+    /// `starting`, `ready`, `reloading`, `leasing`, `leased`, `stopping`
+    /// or `stopped`.
     pub state: String,
     /// Its `axil --version`.
     pub version: String,
