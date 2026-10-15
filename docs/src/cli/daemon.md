@@ -58,6 +58,10 @@ process as it would with no daemon, and its open leases the database. A
 daemon still opening the database, opening it again after a lease or a
 change, or with every request slot taken is waited for, up to 10 s.
 
+A command the daemon has not started within 300 s (a write waiting behind
+others for the writer lock, say) is answered as expired, not run, and runs in
+the process instead. A write the daemon has started is waited for however
+long it runs; a read is given up on after the 300 s and runs in the process.
 If the connection breaks after the command was sent, a write is not run
 again, since the daemon may have run it:
 `{"error":"daemon connection lost; write status unknown"}` is printed and the

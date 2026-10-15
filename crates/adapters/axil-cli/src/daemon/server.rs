@@ -2370,6 +2370,8 @@ mod tests {
             deadline: None,
             starting_wait: Duration::from_secs(10),
             until: None,
+            start_wait: Duration::from_secs(300),
+            writes: false,
         };
         check_parity_with(
             &fixture,
