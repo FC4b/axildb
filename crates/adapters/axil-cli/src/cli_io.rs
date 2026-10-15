@@ -752,6 +752,20 @@ pub(crate) mod tests {
         assert_eq!(lines, ["a", "b"]);
     }
 
+    /// Stdin read ahead for the database's daemon and given back is what
+    /// the command reads, by either reader, and then its end.
+    #[cfg(unix)]
+    #[test]
+    fn stdin_given_back_is_read_before_the_process_stdin() {
+        put_back_stdin(b"abc".to_vec());
+        assert_eq!(read_stdin(2).unwrap(), "ab");
+        let mut rest = String::new();
+        stdin_reader().read_to_string(&mut rest).unwrap();
+        assert_eq!(rest, "c");
+        assert_eq!(read_stdin(u64::MAX).unwrap(), "");
+        *READ_AHEAD.lock().unwrap() = None;
+    }
+
     #[test]
     fn hot_db_serves_the_warm_handle_only_for_its_own_database() {
         let tmp = tempfile::tempdir().unwrap();
