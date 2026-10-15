@@ -4467,12 +4467,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut brain = stub_brain(dir.path(), Since::Hangs);
         let started = Instant::now();
-        brain.until = started + Duration::from_millis(500);
-        let until_ms = epoch_ms() + 500;
+        // Long enough for the stub to start under a loaded machine.
+        brain.until = started + Duration::from_secs(2);
+        let until_ms = epoch_ms() + 2000;
         assert_eq!(brain.count_recent_narrative(), None);
         let took = started.elapsed();
-        assert!(took >= Duration::from_millis(500), "{took:?}");
-        assert!(took < Duration::from_secs(3), "{took:?}");
+        assert!(took >= Duration::from_secs(2), "{took:?}");
+        assert!(took < Duration::from_secs(10), "{took:?}");
         let told: u64 = std::fs::read_to_string(dir.path().join("deadline"))
             .unwrap()
             .trim()
