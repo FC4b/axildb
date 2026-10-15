@@ -239,6 +239,11 @@ impl Embedder {
         self.model.name()
     }
 
+    /// The model this embeds with.
+    pub(crate) fn model(&self) -> &EmbeddingModel {
+        &self.model
+    }
+
     /// Embed a search query, with the model's query prefix.
     pub fn embed_query(&self, text: &str) -> Result<Vec<f32>, String> {
         self.embed(&prefixed(self.model.query_prefix(), text))

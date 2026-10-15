@@ -101,8 +101,7 @@ impl<'a> PreferenceMemory<'a> {
             let updated = self.db.update(&existing.id, data)?;
 
             if self.db.has_vector_index() {
-                let embed_text = format!("{key}: {value}");
-                let _ = self.db.embed_text(&existing.id, &embed_text);
+                let _ = self.db.embed_row(&updated);
             }
 
             return Ok(updated);
@@ -120,8 +119,7 @@ impl<'a> PreferenceMemory<'a> {
         let record = self.db.insert(TABLE_PREFERENCES, data)?;
 
         if self.db.has_vector_index() {
-            let embed_text = format!("{key}: {value}");
-            let _ = self.db.embed_text(&record.id, &embed_text);
+            let _ = self.db.embed_row(&record);
         }
 
         Ok(record)

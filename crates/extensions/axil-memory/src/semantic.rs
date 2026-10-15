@@ -63,8 +63,7 @@ impl<'a> SemanticMemory<'a> {
 
         // Auto-embed the fact if embedder is available.
         if self.db.has_vector_index() {
-            let embed_text = format!("{entity}: {fact}");
-            let _ = self.db.embed_text(&record.id, &embed_text);
+            let _ = self.db.embed_row(&record);
         }
 
         // Check for superseding within entity facts.

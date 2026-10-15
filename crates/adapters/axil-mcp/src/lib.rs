@@ -80,7 +80,7 @@ fn resolve_embedding_model(db_path: &std::path::Path) -> axil_vector::models::Em
     let dir = db_path.parent().unwrap_or(std::path::Path::new("."));
     if let Ok(config) = axil_core::load_config_from(dir) {
         if let Some(name) = config.database.embedding_model.as_deref() {
-            if let Some(model) = axil_vector::models::EmbeddingModel::from_name(name) {
+            if let Some(model) = axil_vector::models::EmbeddingModel::from_config_name(name) {
                 return model;
             }
         }
@@ -134,16 +134,18 @@ pub(crate) fn attach_detected_engines(
                     // auto-embed-on-insert work end-to-end. Resolve the model from
                     // the same `axil.toml` the CLI uses so MCP and CLI agree on
                     // which model to load — hard-coding BgeSmall would break any
-                    // DB built with nomic/bge-base/bge-m3/custom.
+                    // DB built with nomic/bge-base/bge-m3/custom. A store holding
+                    // another model's vectors comes back detached and recorded as
+                    // degraded, as in the CLI, rather than as an error.
                     #[cfg(feature = "embed")]
                     {
                         // `with_embedder_model` consumes the builder, so the
-                        // raw-vector fallback starts from a fresh one; both
-                        // re-register the named-space factory added above.
+                        // fallback starts from a fresh one; both re-register
+                        // the named-space factory added above.
                         let model = resolve_embedding_model(&path);
                         let with_embed =
                             axil_vector::with_vector_spaces(axil_core::Axil::open(&path))
-                                .with_embedder_model(model);
+                                .with_embedder_model(model.clone());
                         builder = match with_embed {
                             Ok(b) => b,
                             Err(e) => {
@@ -151,8 +153,14 @@ pub(crate) fn attach_detected_engines(
                                     "axil-mcp: warning: embedder not attached ({e}); \
                                      recall cannot embed queries and runs keyword-only"
                                 );
-                                axil_vector::with_vector_spaces(axil_core::Axil::open(&path))
-                                    .with_vector_auto()?
+                                // The store without the model, checked against
+                                // the model as the CLI's raw vector commands
+                                // check it: a store of another model's is
+                                // refused, not attached raw.
+                                axil_vector::with_model_store(
+                                    axil_vector::with_vector_spaces(axil_core::Axil::open(&path)),
+                                    &model,
+                                )?
                             }
                         };
                     }
@@ -1277,8 +1285,63 @@ mod vector_store_health_tests {
 
         let server = McpServer::open(&path).unwrap();
         let db = server.db_for_tests();
-        assert_eq!(db.vector_count(), Some(1), "repair must keep the vector");
-        assert!(db.degraded_engines().is_empty());
+        // Without an embedder the store attaches as raw vectors. With one, a
+        // 4-dimension store holds no configured model's vectors: it is
+        // repaired, then refused rather than mixed with bge-small's.
+        #[cfg(not(feature = "embed"))]
+        {
+            assert_eq!(db.vector_count(), Some(1), "repair must keep the vector");
+            assert!(db.degraded_engines().is_empty());
+        }
+        #[cfg(feature = "embed")]
+        {
+            assert_eq!(db.degraded_engines()[0].engine, "vector");
+            let stored = axil_vector::read_stored_model(&path).unwrap().unwrap();
+            assert_eq!(stored.vectors, 1, "repair must keep the vector");
+        }
+    }
+
+    /// granite's vectors are as wide as bge-small's, so only the model the
+    /// store records tells them apart: the server leaves such a store
+    /// detached, and says why, before it would load a model.
+    #[cfg(feature = "embed")]
+    #[test]
+    fn a_store_of_another_model_of_the_same_width_is_refused() {
+        use axil_vector::models::EmbeddingModel;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("axil.toml"),
+            "[database]\nembedding_model = \"bge-small\"\n",
+        )
+        .unwrap();
+        let path = dir.path().join("m.axil");
+        let id = Axil::open(&path)
+            .build()
+            .unwrap()
+            .insert("decisions", json!({"summary": "pool size is 32"}))
+            .unwrap()
+            .id;
+        let axil_vector::ModelStore::Open(store) =
+            axil_vector::open_store_for_model(&path, &EmbeddingModel::GraniteSmallR2).unwrap()
+        else {
+            panic!("a new store is never refused");
+        };
+        let mut v = vec![0.0f32; 384];
+        v[0] = 1.0;
+        store.add(id, &v).unwrap();
+        drop(store);
+
+        let server = McpServer::open(&path).unwrap();
+        let db = server.db_for_tests();
+        assert!(!db.has_vector_index() && !db.has_embedder());
+        let degraded = db.degraded_engines();
+        assert!(
+            degraded.iter().any(|d| d.engine == "vector"
+                && d.reason.contains("granite-embedding-small-english-r2")
+                && d.reason.contains("bge-small-en-v1.5")
+                && d.fix.contains("reembed")),
+            "{degraded:?}"
+        );
     }
 
     #[test]

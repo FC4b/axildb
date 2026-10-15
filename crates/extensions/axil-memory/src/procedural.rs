@@ -83,8 +83,7 @@ impl<'a> ProceduralMemory<'a> {
         let record = self.db.insert(TABLE_PROCEDURES, data)?;
 
         if self.db.has_vector_index() {
-            let embed_text = format!("{pattern_name}: {description}");
-            let _ = self.db.embed_text(&record.id, &embed_text);
+            let _ = self.db.embed_row(&record);
         }
 
         // Link to source episode if provided.
@@ -122,13 +121,7 @@ impl<'a> ProceduralMemory<'a> {
         let record = self.db.update(id, data)?;
 
         if self.db.has_vector_index() {
-            let pattern_name = record
-                .data
-                .get("pattern_name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let embed_text = format!("{pattern_name}: {new_description}");
-            let _ = self.db.embed_text(id, &embed_text);
+            let _ = self.db.embed_row(&record);
         }
 
         Ok(record)
@@ -240,9 +233,7 @@ impl<'a> ProceduralMemory<'a> {
         let record = self.db.insert(TABLE_PROCEDURES, data)?;
 
         if self.db.has_vector_index() {
-            let field = |key: &str| record.data.get(key).and_then(|v| v.as_str()).unwrap_or("");
-            let embed_text = format!("{}: {}", field("pattern_name"), field("description"));
-            let _ = self.db.embed_text(&record.id, &embed_text);
+            let _ = self.db.embed_row(&record);
         }
         Ok(record)
     }

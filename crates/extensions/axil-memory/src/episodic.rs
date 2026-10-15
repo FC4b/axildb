@@ -102,7 +102,7 @@ impl<'a> EpisodicMemory<'a> {
         let episode = self.db.insert(TABLE_EPISODES, data)?;
 
         if self.db.has_vector_index() {
-            let _ = self.db.embed_text(&episode.id, &summary);
+            let _ = self.db.embed_row(&episode);
         }
 
         // Link episode to entities mentioned in the summary.
@@ -134,7 +134,7 @@ impl<'a> EpisodicMemory<'a> {
         let episode = self.db.insert(TABLE_EPISODES, data)?;
 
         if self.db.has_vector_index() {
-            let _ = self.db.embed_text(&episode.id, summary);
+            let _ = self.db.embed_row(&episode);
         }
 
         self.link_to_entities(&episode, summary)?;
