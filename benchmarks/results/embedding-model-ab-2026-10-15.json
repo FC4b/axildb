@@ -1,7 +1,7 @@
 {
   "item": "Embedding-model A/B on Axil's own harnesses: bge-small-en-v1.5 (default) vs granite-embedding-small-english-r2 vs gte-modernbert-base, all unprompted",
   "date": "2026-10-15",
-  "status": "partial: dogfood, CLI latency and LongMemEval s20 for bge-small and granite measured; gte s20 running; m5 and s60 run on a second machine",
+  "status": "partial: dogfood, CLI latency and LongMemEval s20 measured for all three models on the Mac; m5 and s60 run on a second machine (benchmarks/longmemeval/model-ab/)",
   "raw_outputs": {
     "mac": "benchmarks/results/model-ab-mac/ (per-question dogfood reports, store rebuild reports, LongMemEval reports with .meta/.load/.err, CLI latency, parity oracle, and the scripts that made them)",
     "second_machine": "benchmarks/results/model-ab-pc/ (written by benchmarks/longmemeval/model-ab/run.sh)"
@@ -98,6 +98,18 @@
     "dogfood": "python3 benchmarks/dogfood-recall/run.py --axil <axil> --snapshot <per-model snapshot> --fetch 10. Each model's snapshot is snap-prefix with its .vec rebuilt by crates/engines/axil-vector/examples/swap_model.rs: the same 1,444 vector owners (232 memory records, 1,042 code proxies, 141 file summaries, 26 recall chunks, 3 checkpoints), each embedded with the new model from the text insert or its writer embeds; the 870 orphan vectors are dropped as heal --reindex drops them; axil.toml names the model. Rebuilt with bge-small it reproduces 1,443 of 1,444 stored vectors at cosine >= 0.99, and its eval differs from the untouched snapshot (control) on one question (q29, 3 -> 1), the orphans' effect seen on 2026-10-04.",
     "longmemeval": "longmemeval-bench --variant s --limit 20 --strategy recall-qtc --top-k 5 --model <m> --jobs 1; exact vector scan (per-question stores are far below the 20k threshold), one binary and one lockfile for all arms",
     "latency": "axil recall <q> --recall-format context-block --budget 2000 --top-k 5 (the prompt hook's call), one-shot process per question, the three snapshots interleaved question by question, one warm-up"
+  },
+  "recommendation": {
+    "status": "preliminary: m5 and s60 are still to run on the second machine; switching the default is the user's decision",
+    "default": "keep bge-small-en-v1.5 for now",
+    "reasons": [
+      "Dogfood (57 coding-memory questions, the CLI path agents use): the three models are within one or two questions of each other. NDCG@10 is 0.821 for bge-small, 0.820 for granite and 0.814 for gte. granite and gte each answer 2 more questions in the prompt hook's block (0.895 -> 0.930).",
+      "LongMemEval s20 (single-session-user only): granite finds the same sessions as bge-small and ranks them better (NDCG@10 0.857 -> 0.912). gte finds one more (recall_all 0.90 -> 0.95, NDCG@10 0.919). That is one question type of six, 20 questions.",
+      "Cost on this machine, every figure taken under load: granite takes about 4x bge-small's embedding time per stored session on LongMemEval and 3.6x per vector on dogfood; gte takes about 9x and 12x. The prompt hook's recall p50 is 1.3x (granite) and 3.5x (gte) bge-small's; gte's 8.9 s is far past the hook's 1.8 s deadline.",
+      "granite places unrelated text much closer than bge-small: the median same-table cosine is 0.80 vs 0.66, every pair clears the 0.65 conflict-candidate floor, and 1.8x as many pairs clear the 0.92 supersede threshold. Switching to it needs those thresholds re-tuned first, plus a re-embed, which no dimension check forces since both are 384-d."
+    ],
+    "granite": "the only candidate worth a decision. Decide after s60 (all six question types) and m5 come back: switch only if granite leads bge-small on s60 NDCG@10 by more than 0.02 across types without losing hits, and only together with re-tuned supersede and candidate thresholds",
+    "gte-modernbert-base": "not as a default: its quality edge over granite on s20 is within one question, and it costs 2x (LongMemEval) to 3.4x (dogfood) granite's embedding time, a 2.2x larger vector store and a 572 MB model. Keep it registered (now with correct [CLS] pooling) for GPU users who want 768-d"
   },
   "dogfood": {
     "bge-small": {
@@ -756,12 +768,41 @@
         }
       },
       "gte": {
-        "status": "running"
+        "overall": {
+          "hit_rate": 0.95,
+          "avg_recall": 0.95,
+          "recall_all": 0.95,
+          "ndcg_at_10": 0.9193,
+          "turn_recall_full": 0.95,
+          "tokens_full": 15133.3625
+        },
+        "misses": [
+          "5d3d2817"
+        ],
+        "timing": {
+          "ingest_s_per_question_mean": 419.9,
+          "ingest_ms_per_session": 8570.0,
+          "sessions": 980,
+          "query_s_per_question_median": 0.1,
+          "query_s_per_question_max": 0.8,
+          "wall_s": 8408.0,
+          "max_rss_gib": 4.58,
+          "load_average_1m": {
+            "samples": 280,
+            "min": 12.85,
+            "median": 49.84,
+            "max": 219.48
+          },
+          "window": [
+            "start 2026-10-15T05:54:03Z",
+            "end 2026-10-15T08:14:23Z"
+          ]
+        }
       },
       "bge_reproduces_committed_baseline": "same hit_rate, recall_all, ndcg_at_10 (0.8565) and misses as benchmarks/longmemeval/baselines/s-recall-qtc-k5-n20.json"
     },
     "m5": {
-      "status": "to run on a second machine with benchmarks/longmemeval/model-ab/run.sh (all arms on one machine)",
+      "status": "to run on a second machine with benchmarks/longmemeval/model-ab/run.sh (all arms on one machine); gte not run, see gte_m5_gate",
       "questions": "first 5 of LongMemEval-M, all single-session-assistant"
     },
     "s60": {
@@ -770,7 +811,20 @@
     },
     "gte_m5_gate": {
       "rule": "run gte m5 only if gte's s20 NDCG@10 beats both bge-small's and granite's s20 NDCG@10 by more than 0.02 (bar set before gte's s20 finished)",
-      "verdict": "pending: gte s20 still running"
+      "ndcg_at_10": {
+        "bge-small": 0.8565,
+        "granite": 0.9118,
+        "gte": 0.9193
+      },
+      "gte_minus_bge": 0.0628,
+      "gte_minus_granite": 0.0075,
+      "verdict": "gte m5 not run: gte's s20 does not clear the bar",
+      "note": "gte clears the bar against bge-small but not against granite. On recall_all it leads both by 0.05, one question of 20 (726462e0, which bge-small and granite miss); the bar was NDCG@10, chosen before the result",
+      "gte_s20": {
+        "hit_rate": 0.95,
+        "recall_all": 0.95,
+        "ndcg_at_10": 0.9193
+      }
     }
   }
 }
