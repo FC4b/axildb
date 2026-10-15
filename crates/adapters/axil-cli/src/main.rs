@@ -7262,6 +7262,13 @@ fn hot_needs(command: &Command) -> Option<Vec<cli_io::Need>> {
             command: WorkerCommand::Run { .. },
         } => Some(Vec::new()),
         Command::Beliefs { generate: true, .. } => Some(Vec::new()),
+        // A dry run opens for inspection, which a warm handle can't stand
+        // in for, and a relative problems file is the client's to find.
+        Command::SessionHeal {
+            dry_run: false,
+            problems_file,
+            ..
+        } if problems_file.as_deref().is_none_or(Path::is_absolute) => Some(Vec::new()),
         _ => None,
     }
 }
@@ -11165,9 +11172,9 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
             let db_path = require_db(&db_opt)?;
             let config = load_config(&db_path)?;
             let db = if dry_run {
-                open_for_inspection(&db_path)?
+                std::sync::Arc::new(open_for_inspection(&db_path)?)
             } else {
-                open_with_all_detected(&db_path)?
+                cli_io::hot_db(&db_path, &needs, || open_with_all_detected(&db_path))?
             };
 
             let problems = problems_file

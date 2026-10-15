@@ -817,6 +817,7 @@ fn the_hot_commands_print_nothing_into_the_log() {
         ),
         (vec!["worker", "run"], None, !cfg!(feature = "decide")),
         (vec!["beliefs", "--generate"], None, true),
+        (vec!["session-heal", "--session", "s1"], None, true),
         (vec!["checkpoint", cp], None, cfg!(feature = "checkpoint")),
         (
             vec!["checkpoint", "-"],
