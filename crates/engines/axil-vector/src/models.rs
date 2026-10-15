@@ -28,12 +28,12 @@ pub enum EmbeddingModel {
     /// multi-vector retrieval, and sparse retrieval from one checkpoint.
     /// Strongest general-purpose embedder in the BGE family; use it when
     /// retrieval quality matters more than insert throughput and disk.
-    /// XLM-RoBERTa backbone → uses mean pooling like Nomic.
+    /// XLM-RoBERTa backbone; its dense head pools on [CLS].
     BgeM3,
     /// Alibaba-NLP/gte-modernbert-base: 768 dimensions, ~569 MB ONNX, 8192-token context.
     ///
     /// ModernBERT backbone, Apache-2.0, MTEB 64.38 (vs bge-small 62.17).
-    /// 16× longer context than bge-small without truncation. Mean pooling.
+    /// 16× longer context than bge-small without truncation. [CLS] pooling.
     /// Registered as an additional option in — bge-small
     /// remains the default; switch via `axil.toml` `model = "gte-modernbert-base"`.
     GteModernbertBase,
@@ -161,13 +161,10 @@ impl EmbeddingModel {
             // FlagEmbedding's dense retrieval head.
             Self::BgeM3 => PoolingStrategy::Cls,
             Self::Nomic => PoolingStrategy::Mean,
-            // gte-modernbert-base uses mean pooling per the model card and
-            // upstream sentence-transformers config; CLS is unprojected and
-            // does not produce a useful sentence vector for this model.
-            Self::GteModernbertBase => PoolingStrategy::Mean,
-            // Its sentence-transformers config pools on [CLS], as the
-            // model card's transformers example does.
-            Self::GraniteSmallR2 => PoolingStrategy::Cls,
+            // Both ModernBERT embedders pool on [CLS]: their
+            // sentence-transformers configs say so, as do the model cards'
+            // transformers examples (`last_hidden_state[:, 0]`).
+            Self::GteModernbertBase | Self::GraniteSmallR2 => PoolingStrategy::Cls,
             Self::Custom { pooling, .. } => *pooling,
         }
     }
@@ -421,7 +418,7 @@ mod tests {
         assert_eq!(m.dimensions(), 768);
         assert_eq!(m.name(), "gte-modernbert-base");
         assert_eq!(m.max_seq_len(), 8192);
-        assert_eq!(m.pooling(), PoolingStrategy::Mean);
+        assert_eq!(m.pooling(), PoolingStrategy::Cls);
         assert!(!m.supports_mrl());
     }
 
