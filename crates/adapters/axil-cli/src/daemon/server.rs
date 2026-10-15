@@ -696,12 +696,32 @@ impl Server {
         self.request_stop(StopReason::Blocked(why));
     }
 
+    /// Record the phase. Read with the record locked: a shutdown sets its
+    /// phase before it records it, so whichever records last records the
+    /// phase that stands.
     fn write_info(&self) {
-        self.write_info_as(self.phase.get().name());
+        let mut info = self.info.lock().unwrap_or_else(PoisonError::into_inner);
+        let state = self.phase.get().name();
+        self.write_locked(&mut info, state);
     }
 
     fn write_info_as(&self, state: &str) {
         let mut info = self.info.lock().unwrap_or_else(PoisonError::into_inner);
+        self.write_locked(&mut info, state);
+    }
+
+    /// Record `state` ahead of the phase it stands for, as long as the phase
+    /// is still `now`: never over a shutdown that began meanwhile.
+    fn write_info_while(&self, now: Phase, state: &str) -> bool {
+        let mut info = self.info.lock().unwrap_or_else(PoisonError::into_inner);
+        if self.phase.get() != now {
+            return false;
+        }
+        self.write_locked(&mut info, state);
+        true
+    }
+
+    fn write_locked(&self, info: &mut DaemonInfo, state: &str) {
         info.state = state.to_string();
         let bytes = serde_json::to_vec_pretty(&*info).unwrap_or_default();
         if let Err(e) = write_atomic(&self.run.info(), &bytes) {
@@ -1145,9 +1165,11 @@ impl Server {
                 // Idle from now, not from before the lease.
                 self.touch();
                 log("opened the database again");
-                // On disk before a client can see it, as at the first open.
-                self.write_info_as(Phase::Ready.name());
-                self.phase.advance(Phase::Reloading, Phase::Ready);
+                // On disk before a client can see it, as at the first open,
+                // unless a shutdown began.
+                if self.write_info_while(Phase::Reloading, Phase::Ready.name()) {
+                    self.phase.advance(Phase::Reloading, Phase::Ready);
+                }
                 self.prewarm_on(state);
             }
             Err(failed) => self.stop_blocked(format!("reopening after a lease: {failed}")),
@@ -2615,6 +2637,26 @@ mod tests {
         wait_for_phase(&server, Phase::Ready);
         assert_eq!(holders(&server), 0);
         served(send(&server, &["boot"], &proj, None));
+        stop(server);
+    }
+
+    /// The record of a phase written ahead of it never lands over a
+    /// shutdown that began meanwhile.
+    #[test]
+    fn a_phase_recorded_ahead_never_overwrites_stopping() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = build_fixture(tmp.path());
+        let server = start(&proj.join(".axil/memory.axil"));
+        quiet(&server);
+        assert!(server.phase.advance(Phase::Ready, Phase::Reloading));
+        assert!(server.write_info_while(Phase::Reloading, "ready"));
+        assert_eq!(info_of(&server).state, "ready");
+        server.phase.set(Phase::Stopping);
+        server.write_info_as("stopping");
+        assert!(!server.write_info_while(Phase::Reloading, "ready"));
+        assert_eq!(info_of(&server).state, "stopping");
+        server.write_info();
+        assert_eq!(info_of(&server).state, "stopping");
         stop(server);
     }
 
