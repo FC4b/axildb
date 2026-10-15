@@ -344,9 +344,30 @@ fn without(original: &str, phrase: std::ops::Range<usize>) -> String {
     }
 }
 
+/// Whether the text at `end` carries on a name: a `/` or a `.` and a word
+/// character. `\b` stops at both, so without this "in march.rs" and
+/// "in 2024/notes" would name spans; "in March." ends a sentence and still
+/// does.
+fn continues_a_name(lower: &str, end: usize) -> bool {
+    let mut rest = lower[end..].chars();
+    match rest.next() {
+        Some('/') => true,
+        Some('.') => rest.next().is_some_and(|c| c.is_alphanumeric() || c == '_'),
+        _ => false,
+    }
+}
+
+/// The first match of a span `pattern` that is not part of a path or file
+/// name ([`continues_a_name`]).
+fn span_match<'t>(pattern: &Regex, lower: &'t str) -> Option<regex::Captures<'t>> {
+    pattern
+        .captures_iter(lower)
+        .find(|c| c.get(0).is_some_and(|m| !continues_a_name(lower, m.end())))
+}
+
 /// A span the query names, with the byte range of the phrase naming it.
 fn parse_span(lower: &str, now: &DateTime<Utc>) -> Option<(TimeRange, std::ops::Range<usize>)> {
-    if let Some(c) = BETWEEN.captures(lower).or_else(|| FROM_TO.captures(lower)) {
+    if let Some(c) = span_match(&BETWEEN, lower).or_else(|| span_match(&FROM_TO, lower)) {
         let first = date_span(&c[1], now)?;
         let second = date_span(&c[2], now)?;
         let (start, end) = if first.0 < second.1 {
@@ -360,7 +381,7 @@ fn parse_span(lower: &str, now: &DateTime<Utc>) -> Option<(TimeRange, std::ops::
         };
         return Some((range, c.get(0)?.range()));
     }
-    if let Some(c) = BEFORE.captures(lower) {
+    if let Some(c) = span_match(&BEFORE, lower) {
         let (start, _) = date_span(&c[1], now)?;
         let range = TimeRange {
             start: None,
@@ -368,7 +389,7 @@ fn parse_span(lower: &str, now: &DateTime<Utc>) -> Option<(TimeRange, std::ops::
         };
         return Some((range, c.get(0)?.range()));
     }
-    if let Some(c) = AFTER.captures(lower) {
+    if let Some(c) = span_match(&AFTER, lower) {
         let (start, end) = date_span(&c[2], now)?;
         let from = if &c[1] == "since" { start } else { end };
         let range = TimeRange {
@@ -378,11 +399,11 @@ fn parse_span(lower: &str, now: &DateTime<Utc>) -> Option<(TimeRange, std::ops::
         return Some((range, c.get(0)?.range()));
     }
     // "in March 15" names a day: leave it to the point forms.
-    let in_period = IN_PERIOD.captures(lower).filter(|c| {
+    let in_period = span_match(&IN_PERIOD, lower).filter(|c| {
         let rest = &lower[c.get(0).map_or(0, |m| m.end())..];
         !rest.trim_start().starts_with(|ch: char| ch.is_ascii_digit())
     });
-    if let Some(c) = in_period.or_else(|| MONTH_YEAR.captures(lower)) {
+    if let Some(c) = in_period.or_else(|| span_match(&MONTH_YEAR, lower)) {
         let (start, end) = date_span(&c[1], now)?;
         let range = TimeRange {
             start: Some(start),
@@ -390,11 +411,10 @@ fn parse_span(lower: &str, now: &DateTime<Utc>) -> Option<(TimeRange, std::ops::
         };
         return Some((range, c.get(0)?.range()));
     }
-    let lookback = LAST_N
-        .captures(lower)
+    let lookback = span_match(&LAST_N, lower)
         .and_then(|c| Some((count_value(&c[1])? * unit_days(&c[2]), c.get(0)?.range())))
         .or_else(|| {
-            let c = WITHIN_LAST.captures(lower)?;
+            let c = span_match(&WITHIN_LAST, lower)?;
             Some((unit_days(&c[1]), c.get(0)?.range()))
         });
     if let Some((span_days, phrase)) = lookback {
@@ -764,6 +784,35 @@ mod tests {
             assert!((start - (now - Duration::days(days_back))).num_seconds().abs() < 2, "{query}");
             assert_eq!(rest, cleaned, "{query}");
         }
+    }
+
+    #[test]
+    fn a_path_or_file_name_names_no_span() {
+        let now = fixed_now();
+        for query in [
+            "what changed in march.rs",
+            "the notes in 2024/notes",
+            "during may/notes.md",
+            "rename the module in march_v2.rs",
+            "errors since 2026-04-01.log",
+            "between march and april.md",
+            "what landed in March 2025/archive",
+        ] {
+            let range = parse_temporal(query, &now).and_then(|(t, _)| t.range);
+            assert!(range.is_none(), "{query}: {range:?}");
+        }
+
+        // A sentence that ends on the span still names it.
+        let (range, _) = span("what did we decide in March.");
+        assert_eq!(range.start, Some(day(2026, 3, 1)));
+        assert_eq!(range.end, Some(day(2026, 4, 1)));
+        let (range, _) = span("what broke in 2025. Anything else?");
+        assert_eq!(range.start, Some(day(2025, 1, 1)));
+
+        // A path does not hide a span named after it.
+        let (range, _) = span("the fix in march.rs that we made in April");
+        assert_eq!(range.start, Some(day(2026, 4, 1)));
+        assert_eq!(range.end, Some(day(2026, 5, 1)));
     }
 
     #[test]
