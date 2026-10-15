@@ -681,6 +681,7 @@ pub fn writes(command: &Command) -> bool {
         Command::Worker {
             command: crate::WorkerCommand::Run { .. },
         } => true,
+        Command::Beliefs { generate, .. } => *generate,
         #[cfg(feature = "checkpoint")]
         Command::Checkpoint { arg, .. } => arg.as_deref() != Some("show"),
         #[cfg(feature = "embed")]

@@ -1729,6 +1729,7 @@ pub(crate) mod tests {
                 )
                 .stdin(b"Fixed the auth timeout in validate_token (src/auth.rs)"),
                 case("worker run", &["--db", db, "worker", "run"]).volatile(),
+                case("beliefs --generate", &["--db", db, "beliefs", "--generate"]).volatile(),
                 case("clap usage error", &["store"]),
                 case("clap unknown flag", &["boot", "--bogus"]),
                 case("--help", &["--help"]),

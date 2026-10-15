@@ -7261,6 +7261,7 @@ fn hot_needs(command: &Command) -> Option<Vec<cli_io::Need>> {
         Command::Worker {
             command: WorkerCommand::Run { .. },
         } => Some(Vec::new()),
+        Command::Beliefs { generate: true, .. } => Some(Vec::new()),
         _ => None,
     }
 }
@@ -14580,7 +14581,7 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
             generate,
         } => {
             let db_path = require_db(&db_opt)?;
-            let db = open_with_all_detected(&db_path)?;
+            let db = cli_io::hot_db(&db_path, &needs, || open_with_all_detected(&db_path))?;
             let bs = axil_core::beliefs::BeliefSystem::new(&db);
 
             if generate {
