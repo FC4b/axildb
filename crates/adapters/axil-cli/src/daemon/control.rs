@@ -525,7 +525,13 @@ fn describe(report: &Value) -> Vec<String> {
         .into_iter()
         .filter(|e| live["engines"][e] == true)
         .collect();
-    if live["engines"].is_null() {
+    if live["held_elsewhere"] == true {
+        lines.push(
+            "engines: the database is closed: another process has it open without a lease, \
+             and commands run in their own process until it lets go"
+                .to_string(),
+        );
+    } else if live["engines"].is_null() {
         // Not open: leased, or between a close and the open after it.
         lines.push("engines: the database is closed".to_string());
     } else {

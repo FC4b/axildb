@@ -75,7 +75,8 @@ pub enum Forwarded {
     },
     /// No daemon answers for the database.
     NoDaemon,
-    /// Another process holds a lease on the database.
+    /// Another process holds a lease on the database, or has it open
+    /// without one.
     Leased,
     /// The daemon did not run it and wrote nothing, for this reason
     /// ([`RunReply::NotServed`]).

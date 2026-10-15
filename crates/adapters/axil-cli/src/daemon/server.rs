@@ -137,6 +137,10 @@ const TICK: Duration = Duration::from_secs(1);
 /// The size at which the log moves to `daemon.log.1`.
 const LOG_ROTATE_BYTES: u64 = 1024 * 1024;
 
+/// Between two tries to open the database while another process holds it
+/// without a lease.
+const HELD_ELSEWHERE_RETRY: Duration = Duration::from_millis(100);
+
 /// How many times in a row a failed graph is reloaded before the daemon
 /// gives up on the database.
 const GRAPH_RELOADS: u32 = 1;
@@ -152,7 +156,9 @@ const LEASED: &str = "the database was leased";
 pub struct Options {
     /// Stop after this long without a run request.
     pub idle_timeout: Duration,
-    /// How long to retry an open that another process's lock blocks.
+    /// How long to retry the first open while another process's lock
+    /// blocks it. Opening again after a lease or a change waits for such a
+    /// process for as long as it holds the database.
     pub open_wait: Duration,
     /// How long a reopen waits for the requests on the old handle.
     pub reopen_wait: Duration,
@@ -319,6 +325,9 @@ pub struct Server {
     /// The warm-up of the open handle was put off for a lease asked for
     /// meanwhile; see [`Server::prewarm_on`].
     unwarmed: AtomicBool,
+    /// Opening the database again found another process holding it without
+    /// a lease; see [`Server::held_elsewhere`].
+    held_elsewhere: AtomicBool,
     accept: Mutex<Option<JoinHandle<()>>>,
     /// The warm-ups and reloads started, which shutting down waits for;
     /// `None` once it has begun, when nothing more starts.
@@ -427,6 +436,7 @@ impl Server {
             graph_reloads: AtomicU32::new(0),
             fail_graph: AtomicBool::new(false),
             unwarmed: AtomicBool::new(false),
+            held_elsewhere: AtomicBool::new(false),
             accept: Mutex::new(None),
             background: Mutex::new(Some(Vec::new())),
             launch,
@@ -698,6 +708,24 @@ impl Server {
     fn stop_blocked(&self, why: String) {
         self.block(&why);
         self.request_stop(StopReason::Blocked(why));
+    }
+
+    /// Opening the database again found another process holding it without
+    /// a lease: a build from before leases, or one run with
+    /// `AXIL_DAEMON=off`. The daemon waits for it for as long as it holds
+    /// the database, and a command sent meanwhile is answered `leased`, so
+    /// it runs in its own process at once, as beside a lease holder.
+    fn held_elsewhere(&self) {
+        if !self.held_elsewhere.swap(true, Ordering::AcqRel) {
+            log("another process has the database open without a lease: waiting for it");
+        }
+    }
+
+    /// The database opened again: no other process holds it.
+    fn let_go_elsewhere(&self) {
+        if self.held_elsewhere.swap(false, Ordering::AcqRel) {
+            log("the other process let go of the database");
+        }
     }
 
     /// Record the phase. Read with the record locked: a shutdown sets its
@@ -1135,7 +1163,6 @@ impl Server {
             return;
         };
         log("the last lease ended: opening the database again");
-        let deadline = Instant::now() + self.opts.open_wait;
         let opened = loop {
             if self.phase.get() == Phase::Stopping {
                 return;
@@ -1150,13 +1177,15 @@ impl Server {
             }
             let before = FileFp::read(&self.key);
             match state.reopen(self.opts.reopen_wait) {
-                Ok(()) => break Ok(before),
+                Ok(()) => {
+                    self.let_go_elsewhere();
+                    break Ok(before);
+                }
                 // A request panicked; the daemon is stopping.
                 Err(ReopenError::Poisoned) => return,
-                Err(ReopenError::Open(e))
-                    if crate::is_lock_contention(&e) && Instant::now() < deadline =>
-                {
-                    thread::sleep(Duration::from_millis(100));
+                Err(ReopenError::Open(e)) if crate::is_lock_contention(&e) => {
+                    self.held_elsewhere();
+                    thread::sleep(HELD_ELSEWHERE_RETRY);
                 }
                 Err(ReopenError::Open(e)) => break Err(format!("{e:#}")),
                 Err(e) => break Err(e.to_string()),
@@ -1243,6 +1272,11 @@ impl Server {
         match self.phase.get() {
             Phase::Starting => return refused(RunReply::Starting),
             Phase::Stopping => return refused(RunReply::Stopping),
+            // Another process holds the database without a lease: the
+            // command runs in its own process, as beside a lease holder.
+            Phase::Leased | Phase::Reloading if self.held_elsewhere.load(Ordering::Acquire) => {
+                return refused(RunReply::Leased)
+            }
             // With no holder left, the database is about to be opened
             // again: the client may wait for it as for a daemon starting.
             Phase::Leasing | Phase::Leased if !self.lease_asked() => {
@@ -1445,25 +1479,32 @@ impl Server {
         enum Outcome {
             Reopened(FileFp),
             Postponed,
+            Leased,
             Stopping,
             Failed(String),
         }
-        let deadline = Instant::now() + self.opts.open_wait;
         let outcome = loop {
             if self.phase.get() == Phase::Stopping {
                 break Outcome::Stopping;
             }
             let before = FileFp::read(&self.key);
             match state.reopen(self.opts.reopen_wait) {
-                Ok(()) => break Outcome::Reopened(before),
+                Ok(()) => {
+                    self.let_go_elsewhere();
+                    break Outcome::Reopened(before);
+                }
                 Err(ReopenError::Running) | Err(ReopenError::InUse) => break Outcome::Postponed,
                 Err(ReopenError::Poisoned) => {
                     break Outcome::Failed("a request panicked".to_string())
                 }
-                Err(ReopenError::Open(e))
-                    if crate::is_lock_contention(&e) && Instant::now() < deadline =>
-                {
-                    thread::sleep(Duration::from_millis(100));
+                Err(ReopenError::Open(e)) if crate::is_lock_contention(&e) => {
+                    self.held_elsewhere();
+                    // The old handle is closed: a lease asked for is
+                    // granted, and its end opens the database again.
+                    if self.lease_asked() {
+                        break Outcome::Leased;
+                    }
+                    thread::sleep(HELD_ELSEWHERE_RETRY);
                 }
                 Err(ReopenError::Open(e)) => break Outcome::Failed(format!("{e:#}")),
             }
@@ -1471,6 +1512,12 @@ impl Server {
         match outcome {
             // Shutting down closes whatever handle there is.
             Outcome::Stopping => {}
+            Outcome::Leased => {
+                if self.phase.advance(Phase::Reloading, Phase::Leased) {
+                    self.write_info();
+                }
+                self.unlease_if_unheld();
+            }
             Outcome::Reopened(_) if self.phase.get() == Phase::Stopping => {}
             Outcome::Reopened(before) => {
                 if let Some(why) = unservable(state) {
@@ -1666,6 +1713,7 @@ impl Server {
             },
             "in_flight": self.in_flight.load(Ordering::SeqCst),
             "stale": stale,
+            "held_elsewhere": self.held_elsewhere.load(Ordering::Acquire),
             "lease_holders": leases,
             "leases_granted": leases_granted,
             "abandoned_recalls": cli_io::RECALL_SLOTS.live(),
@@ -2757,16 +2805,36 @@ mod tests {
         stop(server);
     }
 
-    /// A request that comes while the database opens again after a lease
-    /// (the holder still has it open here, so the reopen waits) is not
-    /// served, and the holder's writes are not taken for an overwrite.
+    /// A process with the database open but no lease (a build from before
+    /// leases, say) when the last lease ends, or when a change has the
+    /// daemon reopen it: the daemon waits for it for as long as it holds the
+    /// database, past the open wait, and survives. Meanwhile a command is
+    /// answered `leased`, so it runs in its own process at once, and a lease
+    /// is granted at once. The holder's writes are not taken for an
+    /// overwrite.
     #[test]
-    fn a_request_during_the_reopen_after_a_lease_is_not_served() {
+    fn a_holder_without_a_lease_is_waited_for_and_commands_run_elsewhere() {
         let tmp = tempfile::tempdir().unwrap();
         let proj = build_fixture(tmp.path());
         let db = proj.join(".axil/memory.axil");
-        let server = start(&db);
+        let backup = proj.join(".axil/backup.axil");
+        fs::copy(&db, &backup).unwrap();
+        let opts = Options {
+            open_wait: Duration::from_millis(300),
+            ..options(Duration::from_secs(3600))
+        };
+        let open_wait = opts.open_wait;
+        let server = start_with(&db, opts);
         quiet(&server);
+        let held_elsewhere = || {
+            let deadline = Instant::now() + Duration::from_secs(30);
+            while !server.held_elsewhere.load(Ordering::Acquire) {
+                assert!(Instant::now() < deadline, "{}", server.status());
+                thread::sleep(Duration::from_millis(10));
+            }
+        };
+        let leased = |args: &[&str]| send(&server, args, &proj, None).reply == RunReply::Leased;
+
         let (reply, held) = ask(&server, &server.key, 10_000);
         assert_eq!(reply, LeaseReply::granted());
         let holder = axil_core::Axil::open(&db).build().unwrap();
@@ -2774,16 +2842,43 @@ mod tests {
             .insert("decisions", json!({"summary": "written under the lease"}))
             .unwrap();
         drop(held);
-        wait_for_phase(&server, Phase::Reloading);
-        let outcome = send(&server, &["boot"], &proj, None);
-        assert!(unavailable(&outcome), "{:?}", outcome.reply);
-        assert!(!server.state.get().unwrap().poisoned());
+        held_elsewhere();
+        assert!(leased(&["boot"]));
+        let started = Instant::now();
+        let (reply, other) = ask(&server, &server.key, 10_000);
+        assert_eq!(reply, LeaseReply::granted());
+        assert!(started.elapsed() < Duration::from_secs(5));
+        drop(other);
+        thread::sleep(UNLEASE_DELAY + open_wait * 3);
         assert_eq!(server.stop_reason(), None);
+        assert_eq!(server.phase.get(), Phase::Reloading);
+        assert_eq!(server.status()["held_elsewhere"], true);
+        assert!(leased(&["boot"]));
+        assert!(!server.state.get().unwrap().poisoned());
         drop(holder);
         wait_for_phase(&server, Phase::Ready);
+        assert_eq!(server.status()["held_elsewhere"], false);
         let (out, _, exit) = served(send(&server, &["boot"], &proj, None));
         assert_eq!(exit, 0);
         assert!(String::from_utf8_lossy(&out).contains("written under the lease"));
+
+        // A backup renamed over the database, which another process opens
+        // before the daemon reopens it.
+        fs::rename(&backup, &db).unwrap();
+        let holder = axil_core::Axil::open(&db).build().unwrap();
+        thread::sleep(FRESH_FOR + Duration::from_millis(50));
+        let first = send(&server, &["boot"], &proj, None);
+        assert!(unavailable(&first), "{first:?}");
+        held_elsewhere();
+        assert!(leased(&["boot"]));
+        let (reply, other) = ask(&server, &server.key, 10_000);
+        assert_eq!(reply, LeaseReply::granted());
+        drop(other);
+        thread::sleep(UNLEASE_DELAY + open_wait * 3);
+        assert_eq!(server.stop_reason(), None);
+        drop(holder);
+        wait_for_phase(&server, Phase::Ready);
+        served(send(&server, &["boot"], &proj, None));
         stop(server);
     }
 

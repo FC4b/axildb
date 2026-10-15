@@ -287,7 +287,7 @@ pub enum RunReply {
     /// lease on it ended. Asked again shortly, the daemon serves.
     Starting,
     /// The database is closed while another process holds a lease on it
-    /// (see [`Op::Lease`]).
+    /// (see [`Op::Lease`]), or has it open without one.
     Leased,
     /// The daemon is shutting down.
     Stopping,

@@ -102,6 +102,15 @@ once, and another command waits for it as it would for any process. Once the
 last lease ended, a command sent is told the database is opening, and waits
 for the daemon as at its start.
 
+A process that opens the database without a lease (a build from before
+leases, or one run with `AXIL_DAEMON=off`) may take it between a lease's end
+and the daemon's open, or a backup renamed over the database before the
+daemon reopens it. The daemon then waits for that process for as long as it
+holds the database, and a command sent meanwhile runs in its own process at
+once, as beside a lease holder: it finds the database busy, as it would
+without a daemon. `daemon status` says so (`another process has it open
+without a lease`).
+
 A daemon that can't let go within 10 s, because a request it runs takes
 longer, says so (`lease_timeout`) and serves on; the process prints one line
 saying the daemon has the database open and that `axil daemon stop` frees
