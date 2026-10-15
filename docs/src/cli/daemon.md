@@ -61,18 +61,23 @@ without a daemon: a hook's recall finds it held and returns no context at
 once, and another command waits for it as it would for any process.
 
 A daemon that can't let go within 10 s, because a request it runs takes
-longer, says so (`lease_timeout`) and serves on; the process then opens the
-database as it would beside any process that has it open: a write waits up
-to 10 s for the lock, and a read retries briefly and then reports it busy. A
-lease is asked for once per process and database.
+longer, says so (`lease_timeout`) and serves on; the process prints one line
+saying the daemon has the database open and that `axil daemon stop` frees
+it, then opens the database as it would beside any process that has it
+open: a write waits up to 10 s for the lock, and a read retries briefly and
+then reports it busy. A process asks once per database while its lease
+holds: again once the daemon that granted it has exited (another may have
+started since), 30 s after a refusal, and at every open while no daemon
+runs.
 
 A lease runs nothing for the process that asks, so it is granted whatever the
 asker's build, features or environment, with the same socket checks as a
 command (see below). A daemon too old to know leases is asked to stop
 instead. With `AXIL_DAEMON=off` no lease is asked for, and a command finds a
-running daemon's database busy. `compact --drop-engine` removes a store
-without opening the database, so it asks for none: the daemon finds the store
-gone and reloads.
+running daemon's database busy. `compact --drop-engine`, `reembed` and
+`branch delete` move or remove files before anything opens the database, so
+they ask first; a store removed by anything else is found gone, and the
+daemon reloads.
 
 ## Files
 
