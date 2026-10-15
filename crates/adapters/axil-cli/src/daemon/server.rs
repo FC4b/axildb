@@ -958,7 +958,7 @@ impl Server {
         wait_ms: u64,
         pid: u32,
     ) -> io::Result<()> {
-        if !db.is_empty() && Path::new(db) != self.key {
+        if !db.is_empty() && !proto::names_db(db, &self.key) {
             return write_json(stream, &LeaseReply::refused("wrong_db"));
         }
         let wait = Duration::from_millis(wait_ms).min(MAX_LEASE_WAIT);

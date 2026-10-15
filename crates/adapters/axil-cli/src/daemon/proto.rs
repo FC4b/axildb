@@ -84,6 +84,13 @@ pub fn read_json<T: DeserializeOwned>(r: &mut impl Read) -> io::Result<T> {
     serde_json::from_slice(&bytes).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 
+/// Whether `db`, a database path as a peer sent it, names `key`. A path
+/// goes over the wire in its display form, which replaces what is not
+/// UTF-8, so such a path is compared in that form.
+pub fn names_db(db: &str, key: &Path) -> bool {
+    Path::new(db) == key || db == key.to_string_lossy()
+}
+
 /// A request.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
@@ -627,6 +634,21 @@ pub fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A database path that is not UTF-8 still names its daemon, whose
+    /// hello and status, and the lease asked of it, carry it in display form.
+    #[test]
+    fn a_path_names_its_database_in_display_form() {
+        let key = Path::new(std::ffi::OsStr::from_bytes(b"/p/\xff/.axil/memory.axil"));
+        assert!(key.to_str().is_none());
+        assert!(names_db(&key.display().to_string(), key));
+        let plain = Path::new("/p/.axil/memory.axil");
+        assert!(names_db("/p/.axil/memory.axil", plain));
+        assert!(names_db("/p//.axil/memory.axil", plain));
+        assert!(!names_db("/q/.axil/memory.axil", plain));
+        assert!(!names_db("/q/.axil/memory.axil", key));
+        assert!(!names_db(&plain.display().to_string(), key));
+    }
 
     /// `hello`, `shutdown` and `lease` look like this to every build,
     /// forever.

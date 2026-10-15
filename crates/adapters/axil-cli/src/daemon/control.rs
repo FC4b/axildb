@@ -155,7 +155,7 @@ fn hello_for(key: &Path, run: &RunDir, timeout: Duration) -> Result<Option<Hello
     // One that does not say is taken to be this database's: the socket is
     // in its run directory.
     anyhow::ensure!(
-        hello.db.is_empty() || Path::new(&hello.db) == key,
+        hello.db.is_empty() || proto::names_db(&hello.db, key),
         "{} is answered by the daemon of another database, {}",
         run.socket().display(),
         hello.db
@@ -380,7 +380,7 @@ fn report(key: &Path, run: &RunDir) -> Value {
     let other_db = answer
         .as_ref()
         .and_then(|a| a["db"].as_str())
-        .filter(|db| Path::new(db) != key)
+        .filter(|db| !proto::names_db(db, key))
         .map(str::to_string);
     let live = answer.filter(|_| other_db.is_none());
     let lock_held = server::lock_held(run);
