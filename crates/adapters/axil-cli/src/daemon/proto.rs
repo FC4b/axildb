@@ -276,7 +276,9 @@ pub enum RunReply {
         /// The reason in words.
         detail: String,
     },
-    /// The client and the daemon don't match; the client runs it.
+    /// The client and the daemon don't match; the client runs it. Frozen,
+    /// as `overloaded` and `error` are: a daemon answers them before it
+    /// compares protocol versions.
     Incompatible {
         /// `proto`, `build`, `features` or `env`.
         reason: String,
@@ -739,6 +741,33 @@ mod tests {
         let more: LeaseReply =
             serde_json::from_str(r#"{"op":"lease","granted":true,"holders":2}"#).unwrap();
         assert_eq!(more, LeaseReply::granted());
+
+        // The run replies a daemon gives before it compares protocol
+        // versions: a client of any version must read them, or it would
+        // take a refusal for a connection lost after a write was sent.
+        let frozen = [
+            (
+                RunReply::Incompatible {
+                    reason: "proto".into(),
+                },
+                r#"{"reply":"incompatible","reason":"proto"}"#,
+            ),
+            (RunReply::Overloaded, r#"{"reply":"overloaded"}"#),
+            (
+                RunReply::Error {
+                    message: "bad request".into(),
+                },
+                r#"{"reply":"error","message":"bad request"}"#,
+            ),
+        ];
+        for (reply, json) in frozen {
+            assert_eq!(serde_json::to_string(&reply).unwrap(), json);
+            assert_eq!(serde_json::from_str::<RunReply>(json).unwrap(), reply);
+        }
+        assert_eq!(
+            serde_json::from_str::<RunReply>(r#"{"reply":"overloaded","in_flight":16}"#).unwrap(),
+            RunReply::Overloaded
+        );
         assert_eq!(DAEMON_PROTO, 2);
     }
 
