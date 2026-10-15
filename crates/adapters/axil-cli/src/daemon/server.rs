@@ -363,6 +363,9 @@ pub(super) enum Queued {
     /// Not at all: the daemon is stopping with the database closed, or a
     /// request panicked.
     Stopped,
+    /// It did not run: its job's claim said no as it was to start (see
+    /// [`crate::hook_brain::JobClaim`]).
+    Withheld,
 }
 
 /// A run request counted against [`MAX_IN_FLIGHT`] until dropped.
@@ -660,22 +663,18 @@ impl Server {
         {
             let _ = accept.join();
         }
-        let mut background = self
+        let background = self
             .background
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .take()
             .unwrap_or_default();
-        // The queue's drain thread finishes the job it is on, and stops.
+        // The queue's drain thread finishes the job it is on, and stops. It
+        // is not waited for here: a step it runs on the handle counts as a
+        // request in flight, and one it runs in a process of its own needs
+        // the database closed first. The process joins it once it is (see
+        // [`Server::finish_queue`]).
         self.wake_drain();
-        if let Some(drain) = self
-            .drain
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .take()
-        {
-            background.push(drain);
-        }
         let working = || background.iter().filter(|h| !h.is_finished()).count();
         let deadline = Instant::now() + self.opts.drain_wait;
         while (self.in_flight.load(Ordering::SeqCst) > 0 || working() > 0)
@@ -721,6 +720,23 @@ impl Server {
             Finish::Exit(reason.exit_code())
         } else {
             Finish::Abandoned
+        }
+    }
+
+    /// After a shutdown that closed the database: wait for the queue's drain
+    /// thread to finish the job it is on, its steps now each in a process
+    /// of its own, and stop.
+    pub fn finish_queue(&self) {
+        let drain = self
+            .drain
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        if let Some(drain) = drain {
+            if !drain.is_finished() {
+                log("finishing the queued job it is on");
+            }
+            let _ = drain.join();
         }
     }
 
@@ -1765,6 +1781,8 @@ impl Server {
     /// Run one step of a queued job, `argv` run in `cwd` with `stdin` and
     /// the environment values `env` (see [`exec::Request::env`]), on the
     /// open handle, as a client's request runs (see [`Server::run`]),
+    /// `start` asked last before it runs (once it has the writer lock): the
+    /// step is [`Queued::Withheld`] when that says no,
     /// for the queue's drain thread. It is not refused for the cap on
     /// requests, nor once shutting down has begun while the database is
     /// still open: the job it belongs to finishes first. It counts as use,
@@ -1775,6 +1793,7 @@ impl Server {
         cwd: &Path,
         stdin: &[u8],
         env: &[(std::ffi::OsString, std::ffi::OsString)],
+        start: &(dyn Fn() -> bool + Sync),
     ) -> Queued {
         let Some(state) = self.state.get() else {
             return Queued::Wait;
@@ -1818,11 +1837,22 @@ impl Server {
             queued: true,
         };
         let started = Instant::now();
-        let gate = |writes: bool| self.gate(None, writes);
+        let withheld = AtomicBool::new(false);
+        let gate = |writes: bool| {
+            self.gate(None, writes)?;
+            if start() {
+                return Ok(());
+            }
+            withheld.store(true, Ordering::Release);
+            Err(NotServed::Unavailable)
+        };
         let result = {
             let _busy = self.busy();
             exec::execute_gated(request, state, &gate)
         };
+        if withheld.load(Ordering::Acquire) {
+            return Queued::Withheld;
+        }
         if state.poisoned() {
             self.request_stop(StopReason::Panicked);
             return Queued::Stopped;
@@ -2156,18 +2186,21 @@ pub fn run_daemon(
     };
     let reason = server.serve();
     let finish = server.shutdown(&reason);
-    // Jobs queued since the drain thread stopped go to a drainer of their
-    // own, once the queue's lock is free.
-    if !server.queue.holding() {
-        super::drain::hand_back(&key);
-    }
     match finish {
         Finish::Exit(code) => {
+            server.finish_queue();
+            // The jobs left, the ones queued since the drain thread stopped
+            // or that it left whole, go to a drainer of their own.
+            super::drain::hand_back(&key);
             drop(server);
             drop(lock);
             Ok(code)
         }
         Finish::Abandoned => {
+            // The drain thread can't finish: the handle stays open. A job
+            // it is on that only waited is left queued whole for the next
+            // hook's drainer.
+            server.queue.withhold();
             // Nothing is dropped: the handle stays open, and the lock held,
             // until the process is gone, so no daemon opens the database
             // before then and `daemon stop` waits for the exit.

@@ -2440,7 +2440,7 @@ pub(crate) fn drain(db: &Path) -> Result<i32> {
         set_aside_interrupted(&dir);
         while let Some(job) = next_job(&dir) {
             lock.touch();
-            let _ = run_job_file(&mut runner, &exe, db, &dir, &job);
+            let _ = run_job_file(&mut runner, &exe, db, &dir, &JobClaim::new(&job));
         }
         drop(lock);
         // A job queued after the last scan but before the lock dropped saw a
@@ -2788,34 +2788,120 @@ pub(crate) fn drain_log(dir: &Path, line: &str) {
     append_line(&path, &format!("{} {line}", now_iso()));
 }
 
-/// Claim a job (rename to `.running`, the in-flight mark), run it, and
-/// remove it. A failed job is logged and dropped, not retried. Returns
-/// whether it ran and succeeded.
+/// Where a queued job's run stands: whether a write of it has started.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Claim {
+    /// None has: the file is still `.job`.
+    Waiting,
+    /// One has: the file is `.running`, the in-flight mark.
+    Claimed,
+    /// One was kept from starting, its drainer stopping: the job is left
+    /// queued, whole, for the next drainer.
+    Withheld,
+    /// The file was gone when a write was to start: another drainer has
+    /// it.
+    Lost,
+}
+
+/// A queued job, claimed lazily: renamed from `.job` to `.running` only as
+/// its first write starts. A drainer stopping (a daemon shutting down)
+/// while the job still waits, for the writer lock or for the database,
+/// leaves it queued whole, rather than marked in flight and so set aside
+/// as interrupted, never run. Once a write has started, the job is in
+/// flight for good: its drainer runs the rest, and one killed then leaves
+/// it `.running`, never run again.
+pub(crate) struct JobClaim {
+    job: PathBuf,
+    state: std::sync::Mutex<Claim>,
+}
+
+impl JobClaim {
+    pub(crate) fn new(job: &Path) -> Self {
+        Self {
+            job: job.to_path_buf(),
+            state: std::sync::Mutex::new(Claim::Waiting),
+        }
+    }
+
+    /// For a write about to start: whether it may, the job claimed if this
+    /// is its first. With `may_claim` false (the drainer is stopping), a
+    /// job none of whose writes has started is withheld instead, and none
+    /// of its writes starts.
+    pub(crate) fn start(&self, may_claim: bool) -> bool {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if *state == Claim::Waiting {
+            *state = if !may_claim {
+                Claim::Withheld
+            } else if std::fs::rename(&self.job, self.job.with_extension("running")).is_ok() {
+                Claim::Claimed
+            } else {
+                Claim::Lost
+            };
+        }
+        *state == Claim::Claimed
+    }
+
+    /// Keep any write of the job from starting from now on, unless one
+    /// has: whether one has.
+    #[cfg_attr(not(unix), allow(dead_code))] // the daemon's
+    pub(crate) fn withhold(&self) -> bool {
+        self.start(false)
+    }
+
+    pub(crate) fn state(&self) -> Claim {
+        *self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+/// Why a write of a job its drainer withheld did not run.
+pub(crate) const WITHHELD: &str = "its drainer stopped before it started";
+
+/// Run the queued job `claim` is for, claiming it as its first write
+/// starts (see [`JobClaim`]), and remove it. A failed job is logged and
+/// dropped, not retried. Returns whether it ran and succeeded, or `None`
+/// when it did not run: withheld, left queued for the next drainer, or
+/// taken by another.
 pub(crate) fn run_job_file(
     runner: &mut impl JobRunner,
     exe: &Path,
     db: &Path,
     dir: &Path,
-    job_path: &Path,
-) -> bool {
-    let running = job_path.with_extension("running");
-    if std::fs::rename(job_path, &running).is_err() {
-        return false;
-    }
-    let name = running
+    claim: &JobClaim,
+) -> Option<bool> {
+    let name = claim
+        .job
         .file_stem()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let result = std::fs::read(&running)
-        .ok()
-        .and_then(|body| serde_json::from_slice::<Job>(&body).ok())
-        .ok_or_else(|| "unreadable job file".to_string())
-        .and_then(|job| run_job(runner, exe, db, &job));
+    let body = std::fs::read(&claim.job).ok()?;
+    let result = serde_json::from_slice::<Job>(&body)
+        .map_err(|_| "unreadable job file".to_string())
+        .and_then(|job| run_job(runner, claim, exe, db, &job));
+    match claim.state() {
+        Claim::Lost => return None,
+        Claim::Withheld => {
+            drain_log(dir, &format!("job {name} left queued: {WITHHELD}"));
+            return None;
+        }
+        // Run (or failed) in full; or none of its writes started, each
+        // failing before it could, and it is done all the same.
+        Claim::Claimed => {
+            let _ = std::fs::remove_file(claim.job.with_extension("running"));
+        }
+        Claim::Waiting => {
+            let _ = std::fs::remove_file(&claim.job);
+        }
+    }
     if let Err(e) = &result {
         drain_log(dir, &format!("job {name} failed: {e}"));
     }
-    let _ = std::fs::remove_file(&running);
-    result.is_ok()
+    Some(result.is_ok())
 }
 
 /// What runs the steps of a queued job, each one axil command line: a
@@ -2825,12 +2911,15 @@ pub(crate) trait JobRunner {
     /// Run `axil --db <db> <args>` on the queue's database, with `stdin`
     /// piped in (`None`: an empty stdin) and the [`crate::DEPS_ENV`] values
     /// `env` (see [`Job::Axil`]), and return what it printed on stdout when
-    /// it exited 0, or why it failed.
+    /// it exited 0, or why it failed. The step is a write of the job
+    /// `claim` is for: it asks [`JobClaim::start`] as it starts, and does
+    /// not run when refused.
     fn write(
         &mut self,
         args: &[String],
         stdin: Option<&str>,
         env: Option<&[(String, String)]>,
+        claim: &JobClaim,
     ) -> std::result::Result<String, String>;
 
     /// Run `axil <args>`, a command that opens no database, with `stdin`
@@ -2889,7 +2978,11 @@ impl JobRunner for SubprocessRunner<'_> {
         args: &[String],
         stdin: Option<&str>,
         env: Option<&[(String, String)]>,
+        claim: &JobClaim,
     ) -> std::result::Result<String, String> {
+        if !claim.start(true) {
+            return Err("another drainer took the job".into());
+        }
         let command = || {
             let mut cmd = self.command();
             set_deps_env(&mut cmd, env);
@@ -2905,13 +2998,14 @@ impl JobRunner for SubprocessRunner<'_> {
 
 fn run_job(
     runner: &mut impl JobRunner,
+    claim: &JobClaim,
     exe: &Path,
     db: &Path,
     job: &Job,
 ) -> std::result::Result<(), String> {
     match job {
         Job::Axil { args, stdin, env } => runner
-            .write(args, stdin.as_deref(), env.as_deref())
+            .write(args, stdin.as_deref(), env.as_deref(), claim)
             .map(drop),
         Job::CloseSession {
             session,
@@ -2940,18 +3034,20 @@ fn run_job(
                     &["store".into(), "_sessions".into(), record.to_string()],
                     None,
                     None,
+                    claim,
                 )?;
                 if let Some(id) = serde_json::from_str::<Value>(stored.trim())
                     .ok()
                     .and_then(|v| v.get("id").and_then(Value::as_str).map(str::to_string))
                 {
-                    let _ = runner.write(&["auto-link".into(), id], None, None);
+                    let _ = runner.write(&["auto-link".into(), id], None, None, claim);
                 }
                 // Consolidation, connections, inference, decay — then beliefs.
-                let _ = runner.write(&["worker".into(), "run".into()], None, None);
-                let _ = runner.write(&["beliefs".into(), "--generate".into()], None, None);
+                let _ = runner.write(&["worker".into(), "run".into()], None, None, claim);
+                let _ = runner.write(&["beliefs".into(), "--generate".into()], None, None, claim);
             }
-            session_heal(runner, exe, db, session, project_dir, problems.as_deref());
+            let problems = problems.as_deref();
+            session_heal(runner, claim, exe, db, session, project_dir, problems);
             Ok(())
         }
     }
@@ -3019,6 +3115,7 @@ pub(crate) fn step_failed(args: &[String], stderr: &str) -> String {
 /// within the 5-minute stale window.
 fn session_heal(
     runner: &mut impl JobRunner,
+    claim: &JobClaim,
     exe: &Path,
     db: &Path,
     session: &str,
@@ -3035,7 +3132,7 @@ fn session_heal(
         args.push("--problems-file".into());
         args.push(path.to_string_lossy().into_owned());
     }
-    let out = runner.write(&args, None, None);
+    let out = runner.write(&args, None, None, claim);
     if let Some(path) = &problems_file {
         let _ = std::fs::remove_file(path);
     }
@@ -5464,6 +5561,9 @@ mod tests {
         seen: Vec<Vec<String>>,
         /// Steps whose first word fails.
         failing: Vec<&'static str>,
+        /// Its drainer is stopping: a write of a job none of whose writes
+        /// started does not start.
+        stopping: bool,
     }
 
     impl Recorder {
@@ -5473,6 +5573,7 @@ mod tests {
                 steps: Vec::new(),
                 seen: Vec::new(),
                 failing: Vec::new(),
+                stopping: false,
             }
         }
 
@@ -5494,7 +5595,11 @@ mod tests {
             args: &[String],
             stdin: Option<&str>,
             _env: Option<&[(String, String)]>,
+            claim: &JobClaim,
         ) -> std::result::Result<String, String> {
+            if !claim.start(!self.stopping) {
+                return Err(WITHHELD.into());
+            }
             self.look();
             let mut step = args.join(" ");
             if let Some(stdin) = stdin {
@@ -5525,6 +5630,13 @@ mod tests {
         close_session_of(vec!["src/auth.rs".into()], problems)
     }
 
+    /// A claim on a fresh job file in `queue`, for a job run directly.
+    fn fresh_claim(queue: &Path) -> JobClaim {
+        let job = queue.join("0-fresh.job");
+        std::fs::write(&job, b"{}").unwrap();
+        JobClaim::new(&job)
+    }
+
     fn close_session_of(files: Vec<String>, problems: Option<&str>) -> Job {
         Job::CloseSession {
             session: "s1".into(),
@@ -5549,6 +5661,7 @@ mod tests {
         let mut runner = Recorder::new(&queue);
         run_job(
             &mut runner,
+            &fresh_claim(&queue),
             exe,
             &db,
             &close_session(Some("{\"kind\":\"x\"}\n")),
@@ -5584,19 +5697,21 @@ mod tests {
         // A session that wrote nothing is only healed.
         let mut runner = Recorder::new(&queue);
         let quiet = close_session_of(Vec::new(), None);
-        run_job(&mut runner, exe, &db, &quiet).unwrap();
+        run_job(&mut runner, &fresh_claim(&queue), exe, &db, &quiet).unwrap();
         assert_eq!(runner.steps, ["session-heal --session s1"]);
 
         // Without the `_sessions` row the job fails there; a step after it
         // that fails does not stop the ones that follow.
         let mut runner = Recorder::new(&queue);
         runner.failing = vec!["store"];
-        let err = run_job(&mut runner, exe, &db, &close_session(None)).unwrap_err();
+        let claim = fresh_claim(&queue);
+        let err = run_job(&mut runner, &claim, exe, &db, &close_session(None)).unwrap_err();
         assert_eq!(err, r#"`axil store` failed: {"error":"on purpose"}"#);
         assert_eq!(runner.steps.len(), 2, "{:?}", runner.steps);
         let mut runner = Recorder::new(&queue);
         runner.failing = vec!["auto-link", "worker"];
-        run_job(&mut runner, exe, &db, &close_session(None)).unwrap();
+        let claim = fresh_claim(&queue);
+        run_job(&mut runner, &claim, exe, &db, &close_session(None)).unwrap();
         assert_eq!(runner.steps.len(), 6, "{:?}", runner.steps);
     }
 
@@ -5628,9 +5743,15 @@ mod tests {
         runner.failing = vec!["auto-capture"];
         let mut ran = Vec::new();
         while let Some(job) = next_job(&queue) {
-            ran.push(run_job_file(&mut runner, exe, &db, &queue, &job));
+            ran.push(run_job_file(
+                &mut runner,
+                exe,
+                &db,
+                &queue,
+                &JobClaim::new(&job),
+            ));
         }
-        assert_eq!(ran, [true, true, false]);
+        assert_eq!(ran, [Some(true), Some(true), Some(false)]);
         assert_eq!(
             runner.steps,
             [
@@ -5658,11 +5779,64 @@ mod tests {
         // An unreadable job is logged and removed, and runs nothing.
         std::fs::write(queue.join("4-d.job"), b"{nope").unwrap();
         let job = next_job(&queue).unwrap();
-        assert!(!run_job_file(&mut runner, exe, &db, &queue, &job));
+        let claim = JobClaim::new(&job);
+        assert_eq!(
+            run_job_file(&mut runner, exe, &db, &queue, &claim),
+            Some(false)
+        );
         assert_eq!(runner.steps.len(), 3);
         assert!(next_job(&queue).is_none());
         let log = std::fs::read_to_string(queue.join("drain.log")).unwrap();
         assert!(log.contains("job 4-d failed: unreadable job file"), "{log}");
+    }
+
+    /// A job is marked running only as its first write starts. A drainer
+    /// that stops before then leaves it queued whole; once one has started,
+    /// the job is in flight and its writes go on.
+    #[test]
+    fn a_job_is_claimed_only_as_its_first_write_starts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let queue = tmp.path().join("hook-queue");
+        std::fs::create_dir_all(&queue).unwrap();
+        let job = queue.join("1-a.job");
+        std::fs::write(&job, b"{}").unwrap();
+
+        let claim = JobClaim::new(&job);
+        assert!(!claim.start(false));
+        assert_eq!(claim.state(), Claim::Withheld);
+        assert!(!claim.start(true), "a withheld job stays withheld");
+        assert!(job.is_file());
+
+        let claim = JobClaim::new(&job);
+        assert!(claim.start(true));
+        assert!(queue.join("1-a.running").is_file());
+        assert!(claim.start(false), "a job in flight goes on");
+        assert!(claim.withhold());
+        assert_eq!(claim.state(), Claim::Claimed);
+
+        let gone = JobClaim::new(&queue.join("2-b.job"));
+        assert!(!gone.start(true));
+        assert_eq!(gone.state(), Claim::Lost);
+
+        // A drainer stopping before the job's first write leaves it queued
+        // and logs why; the read before that write ran, and runs again.
+        std::fs::remove_file(queue.join("1-a.running")).unwrap();
+        let db = tmp.path().join("memory.axil");
+        let exe = Path::new("/nonexistent/axil");
+        let close = queue.join("3-c.job");
+        std::fs::write(&close, serde_json::to_vec(&close_session(None)).unwrap()).unwrap();
+        let mut runner = Recorder::new(&queue);
+        runner.stopping = true;
+        let claim = JobClaim::new(&close);
+        assert_eq!(run_job_file(&mut runner, exe, &db, &queue, &claim), None);
+        assert_eq!(runner.steps.len(), 1, "{:?}", runner.steps);
+        assert!(close.is_file());
+        let log = std::fs::read_to_string(queue.join("drain.log")).unwrap();
+        assert!(
+            log.contains(&format!("job 3-c left queued: {WITHHELD}")),
+            "{log}"
+        );
+        assert!(!log.contains("failed"), "{log}");
     }
 
     /// A job a drainer that died left running is set aside, never run.

@@ -1915,9 +1915,10 @@ fn a_sessions_hooks_need_no_lease() {
     );
 }
 
-/// The daemon killed in the middle of a job: the job, left `.running`, is
-/// set aside into `interrupted/` by the next drainer, here the next
-/// daemon, and never run again; the job after it runs.
+/// A daemon killed while a queued write waits for the writer lock leaves
+/// it queued, not marked running, since it had not started: the next
+/// daemon runs it. A job a killed drainer left marked running is set
+/// aside, never run again.
 #[test]
 fn a_job_the_killed_daemon_was_running_is_set_aside() {
     if !built_with(cfg!(debug_assertions), "the debug ops") {
@@ -1929,38 +1930,147 @@ fn a_job_the_killed_daemon_was_running_is_set_aside() {
     // A write can't start while the writer lock is held.
     let hold = raw_call(&socket, r#"{"op":"debug_hold","ms":60000,"writer":true}"#);
     assert_eq!(hold["ok"], true);
-    for (n, summary) in ["the interrupted write", "the write after it"]
-        .iter()
-        .enumerate()
-    {
+    let store = |summary: &str| {
         let data = serde_json::json!({ "summary": summary });
-        fx.queue_job(
-            n,
-            &serde_json::json!({"op": "axil", "args": ["store", "decisions", data.to_string()]}),
-        );
-    }
+        serde_json::json!({"op": "axil", "args": ["store", "decisions", data.to_string()]})
+    };
+    fx.queue_job(0, &store("the waiting write"));
     let drain = fx.axil(&["hook", "drain"]);
     assert!(drain.status.success(), "{}", text(&drain.stderr));
-    let running = fx.queue().join("20260101T000000.000000000Z-1-0.running");
     assert!(
-        wait_for(Duration::from_secs(10), || running.is_file()),
+        wait_for(Duration::from_secs(10), || fx.live()["in_flight"] == 1),
         "{}",
         fx.live()
     );
+    let waiting = fx.queue().join("20260101T000000.000000000Z-1-0.job");
+    assert!(waiting.is_file(), "{:?}", fx.queued());
     signal(started["pid"].as_u64().unwrap(), "-KILL");
     assert!(wait_for(Duration::from_secs(10), || !fx.locked()));
-    assert!(running.is_file());
+    assert!(waiting.is_file(), "{:?}", fx.queued());
+    // As a drainer killed mid-write leaves its job.
+    let running = fx.queue().join("20260101T000000.000000001Z-1-1.running");
+    std::fs::write(&running, store("the interrupted write").to_string()).unwrap();
 
     fx.start();
     assert!(fx.drained(1), "{}", fx.live());
     assert!(!running.exists());
     assert!(fx
         .queue()
-        .join("interrupted/20260101T000000.000000000Z-1-0.running")
+        .join("interrupted/20260101T000000.000000001Z-1-1.running")
         .is_file());
     let listed = text(&fx.axil(&["list", "decisions"]).stdout);
     assert!(!listed.contains("the interrupted write"), "{listed}");
-    assert!(listed.contains("the write after it"), "{listed}");
+    assert_eq!(listed.matches("the waiting write").count(), 1, "{listed}");
+}
+
+/// The CloseSession job the stop tests queue, then a store after it.
+fn queue_close_and_store(fx: &Fixture) {
+    fx.queue_job(
+        0,
+        &serde_json::json!({
+            "op": "close_session",
+            "session": "s-stop",
+            "project_dir": fx.proj,
+            "files": ["src/auth.rs"],
+            "content": "Fixed the auth timeout in validate_token",
+            "ended_at": "2026-01-01T00:00:00Z",
+        }),
+    );
+    let data = serde_json::json!({"summary": "the job after it"});
+    fx.queue_job(
+        1,
+        &serde_json::json!({"op": "axil", "args": ["store", "decisions", data.to_string()]}),
+    );
+}
+
+/// Each job [`queue_close_and_store`] queued ran once.
+fn close_and_store_ran_once(fx: &Fixture) {
+    let sessions: Value = serde_json::from_slice(&fx.axil(&["list", "_sessions"]).stdout).unwrap();
+    assert_eq!(sessions.as_array().map(Vec::len), Some(1), "{sessions}");
+    let listed = text(&fx.axil(&["list", "decisions"]).stdout);
+    assert_eq!(listed.matches("the job after it").count(), 1, "{listed}");
+    assert!(!fx.queue().join("interrupted").exists());
+}
+
+/// A stop that lands while a queued session close waits for the writer
+/// lock, none of its writes started: the daemon leaves the job queued
+/// whole, never marked running, and once it has closed the database the
+/// drainer it starts runs that job and the one after it, each once.
+#[test]
+fn a_stop_while_a_job_waits_leaves_it_whole_for_a_drainer() {
+    if !built_with(cfg!(debug_assertions), "the debug ops") {
+        return;
+    }
+    let fx = fixture();
+    let started = fx.start();
+    let socket = PathBuf::from(started["socket"].as_str().unwrap());
+    let hold = raw_call(&socket, r#"{"op":"debug_hold","ms":4000,"writer":true}"#);
+    assert_eq!(hold["ok"], true, "{hold}");
+    queue_close_and_store(&fx);
+    let drain = fx.axil(&["hook", "drain"]);
+    assert!(drain.status.success(), "{}", text(&drain.stderr));
+    // Its `_sessions` row waits for the writer lock.
+    assert!(
+        wait_for(Duration::from_secs(10), || fx.live()["in_flight"] == 1),
+        "{}",
+        fx.live()
+    );
+    let stop = fx.axil(&["daemon", "stop", "--wait", "60"]);
+    let stopped: Value = serde_json::from_slice(&stop.stdout).unwrap();
+    assert_eq!(stopped["clean"], true, "{stopped}");
+    assert!(
+        wait_for(Duration::from_secs(60), || fx.queued().is_empty()),
+        "{:?}",
+        fx.queued()
+    );
+    close_and_store_ran_once(&fx);
+    let log = std::fs::read_to_string(fx.queue().join("drain.log")).unwrap_or_default();
+    assert!(log.contains("left queued"), "{log}");
+    assert!(log.contains("stopped with jobs queued"), "{log}");
+    assert!(!log.contains("failed"), "{log}");
+}
+
+/// A stop that can't close the database (a request holds it past the
+/// shutdown's waits) while a queued write waits for the writer lock: the
+/// daemon exits without the write marked running, so the next drainer runs
+/// it rather than setting it aside.
+#[test]
+fn a_daemon_that_exits_holding_the_database_leaves_a_waiting_job_queued() {
+    if !built_with(cfg!(debug_assertions), "the debug ops") {
+        return;
+    }
+    let fx = fixture();
+    let started = fx.start();
+    let socket = PathBuf::from(started["socket"].as_str().unwrap());
+    let hold = raw_call(&socket, r#"{"op":"debug_hold","ms":16000,"writer":true}"#);
+    assert_eq!(hold["ok"], true, "{hold}");
+    let data = serde_json::json!({"summary": "the waiting write"});
+    fx.queue_job(
+        0,
+        &serde_json::json!({"op": "axil", "args": ["store", "decisions", data.to_string()]}),
+    );
+    let drain = fx.axil(&["hook", "drain"]);
+    assert!(drain.status.success(), "{}", text(&drain.stderr));
+    assert!(
+        wait_for(Duration::from_secs(10), || fx.live()["in_flight"] == 1),
+        "{}",
+        fx.live()
+    );
+    let stop = fx.axil(&["daemon", "stop", "--wait", "60"]);
+    let stopped: Value = serde_json::from_slice(&stop.stdout).unwrap();
+    assert_eq!(stopped["clean"], false, "{stopped}");
+    assert_eq!(fx.queued().len(), 1, "{:?}", fx.queued());
+    assert!(fx.queued()[0].extension().is_some_and(|x| x == "job"));
+    let drain = fx.axil(&["hook", "drain"]);
+    assert!(drain.status.success(), "{}", text(&drain.stderr));
+    assert!(
+        wait_for(Duration::from_secs(60), || fx.queued().is_empty()),
+        "{:?}",
+        fx.queued()
+    );
+    let listed = text(&fx.axil(&["list", "decisions"]).stdout);
+    assert_eq!(listed.matches("the waiting write").count(), 1, "{listed}");
+    assert!(!fx.queue().join("interrupted").exists());
 }
 
 /// The daemon stopped with a job queued that it could not start, the

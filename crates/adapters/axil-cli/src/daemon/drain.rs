@@ -14,9 +14,10 @@
 //!   fresh, since the thread touches it at least once a minute.
 //! - Each time it takes the lock it sets aside, into `interrupted/`, any
 //!   `.running` job a drainer that died left behind, never running it again.
-//! - It claims a job by renaming it from `.job` to `.running`, runs it, and
-//!   removes it, whether or not its steps succeeded; jobs run in the order
-//!   their names sort, one at a time.
+//! - It claims a job by renaming it from `.job` to `.running` as the job's
+//!   first write starts, not before ([`JobClaim`]), runs it, and removes it,
+//!   whether or not its steps succeeded; jobs run in the order their names
+//!   sort, one at a time.
 //!
 //! It wakes when a hook pokes it ([`super::proto::Op::Poke`]), when the
 //! database opens again, and every 2 s. A job is started only while the
@@ -38,10 +39,17 @@
 //! drainer takes it within a few seconds, the thread runs the job itself
 //! rather than leave the queue stuck.
 //!
-//! When the daemon stops, the thread finishes the job it is on and lets go
-//! of the lock; the daemon then starts `hook drain` for the jobs left, once
-//! it has closed the database. A step of that job the closing database can
-//! no longer run runs in a process of its own, as `hook drain` runs it.
+//! When the daemon stops, the thread finishes the job it is on, if a write
+//! of it has started, and lets go of the lock. A job none of whose writes
+//! started (one waiting for the writer lock, say) is left queued whole. The
+//! daemon is not held up by the thread to close the database: a step it
+//! runs on the handle is a request in flight, which the shutdown waits for,
+//! and once the database is closed the job's remaining steps each run in a
+//! process of their own, as `hook drain` runs them. The process waits for
+//! the thread, then starts `hook drain` for the jobs left. A daemon that
+//! exits without closing the database (a request still held it) does not
+//! wait: a job the thread is on that only waited is left queued whole, and
+//! one with a write started stays `.running`, set aside by the next drainer.
 //!
 //! The thread is the only one in the daemon that starts processes, and the
 //! only one that lets go of the lock, so no process it starts can hold a
@@ -54,7 +62,7 @@ use std::ffi::OsString;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -64,7 +72,7 @@ use super::exec;
 use super::server::{Queued, Server};
 use crate::hook_brain::{
     self, drain_log, for_own_drainer, next_job, project_dir_of, queue_dir, run_job_file,
-    set_aside_interrupted, step_failed, DrainLock, JobRunner, SubprocessRunner,
+    set_aside_interrupted, step_failed, DrainLock, JobClaim, JobRunner, SubprocessRunner, WITHHELD,
 };
 
 /// How often the thread looks at the queue without being poked.
@@ -100,14 +108,11 @@ pub struct QueueStats {
     /// Times the thread left the queue to the drainer of a hook it does
     /// not serve.
     handed_over: AtomicU64,
+    /// The job the thread is on.
+    current: Mutex<Option<Arc<JobClaim>>>,
 }
 
 impl QueueStats {
-    /// Whether the drain thread holds the queue's lock.
-    pub fn holding(&self) -> bool {
-        self.holding.load(Ordering::Acquire)
-    }
-
     /// The figures, as `daemon status` reports them.
     pub fn report(&self) -> Value {
         let n = |c: &AtomicU64| c.load(Ordering::Acquire);
@@ -120,6 +125,22 @@ impl QueueStats {
             "yields": n(&self.yields),
             "handed_over": n(&self.handed_over),
         })
+    }
+
+    /// For a daemon about to exit without the drain thread finishing: keep
+    /// any write of the job it is on from starting, unless one has, so a
+    /// job that only waited is left queued whole (see [`JobClaim`]).
+    pub fn withhold(&self) {
+        let current = self.current.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(claim) = current.as_ref() {
+            if !claim.withhold() {
+                super::server::log("left the queued job it had not started for the next drainer");
+            }
+        }
+    }
+
+    fn on(&self, claim: Option<Arc<JobClaim>>) {
+        *self.current.lock().unwrap_or_else(PoisonError::into_inner) = claim;
     }
 
     /// One more job run, which failed when `failed`.
@@ -212,8 +233,13 @@ fn run(server: &Arc<Server>) {
         }
         held.touch();
         runner.touched = Instant::now();
-        let ran = run_job_file(&mut runner, &exe, &db, &dir, &job);
-        server.queue().ran(!ran);
+        let claim = Arc::new(JobClaim::new(&job));
+        server.queue().on(Some(claim.clone()));
+        let ran = run_job_file(&mut runner, &exe, &db, &dir, &claim);
+        server.queue().on(None);
+        if let Some(ok) = ran {
+            server.queue().ran(!ok);
+        }
     }
     runner.end_yield();
     server.queue().holding.store(false, Ordering::Release);
@@ -346,7 +372,13 @@ impl JobRunner for WarmRunner<'_> {
         args: &[String],
         stdin: Option<&str>,
         env: Option<&[(String, String)]>,
+        claim: &JobClaim,
     ) -> Result<String, String> {
+        // Once the daemon stops, a job none of whose writes started is left
+        // queued whole, for the drainer the daemon hands the queue to.
+        if self.server.stopping() && !claim.start(false) {
+            return Err(WITHHELD.into());
+        }
         let args_ref: Vec<&str> = args.iter().map(String::as_str).collect();
         let argv = self.argv(&args_ref);
         if self.yielded.is_some() {
@@ -357,20 +389,24 @@ impl JobRunner for WarmRunner<'_> {
                         .queue()
                         .own_process_steps
                         .fetch_add(1, Ordering::AcqRel);
-                    return self.subprocess().write(args, stdin, env);
+                    return self.subprocess().write(args, stdin, env, claim);
                 }
             }
         }
         let Some(argv) = argv else {
-            return self.own_process(args, stdin, env, "the database's path is not text");
+            let why = "the database's path is not text";
+            return self.own_process(args, stdin, env, claim, why);
         };
         let request_env = deps_env_of(env);
+        let server = self.server;
+        // Asked as the step starts, once it has the writer lock.
+        let start = || claim.start(!server.stopping());
         loop {
             self.let_writers_go_first();
             let piped = stdin.unwrap_or_default().as_bytes();
             match self
                 .server
-                .run_queued(&argv, &self.cwd, piped, &request_env)
+                .run_queued(&argv, &self.cwd, piped, &request_env, &start)
             {
                 Queued::Ran(response) => {
                     self.server
@@ -387,14 +423,16 @@ impl JobRunner for WarmRunner<'_> {
                     };
                 }
                 Queued::NotServed(why) => {
-                    return self.own_process(args, stdin, env, &why.to_string());
+                    return self.own_process(args, stdin, env, claim, &why.to_string());
                 }
+                Queued::Withheld => return Err(WITHHELD.into()),
                 Queued::Wait if !self.server.stopping() => {
                     self.keep_lock_fresh();
                     self.server.wait_for_wake(POLL);
                 }
                 Queued::Wait | Queued::Stopped => {
-                    return self.own_process(args, stdin, env, "the daemon is stopping");
+                    let why = "the daemon is stopping";
+                    return self.own_process(args, stdin, env, claim, why);
                 }
             }
         }
@@ -405,7 +443,9 @@ impl JobRunner for WarmRunner<'_> {
         // of its own runs it without the daemon letting go of anything.
         if self.yielded.is_none() {
             if let Some(argv) = self.argv(args) {
-                if let Queued::Ran(response) = self.server.run_queued(&argv, &self.cwd, stdin, &[])
+                if let Queued::Ran(response) =
+                    self.server
+                        .run_queued(&argv, &self.cwd, stdin, &[], &|| true)
                 {
                     self.server
                         .queue()
@@ -427,15 +467,20 @@ impl JobRunner for WarmRunner<'_> {
 impl WarmRunner<'_> {
     /// Run a step the daemon does not run in a process of its own, once the
     /// daemon has let go of the database. Once the daemon is stopping, the
-    /// database is closing, if not closed: the step runs without waiting
-    /// for it, as `hook drain` runs it, waiting out the close.
+    /// database is closing, if not closed: a step of the job in progress
+    /// runs without waiting for it, as `hook drain` runs it, waiting out
+    /// the close, and a job none of whose writes started is left queued.
     fn own_process(
         &mut self,
         args: &[String],
         stdin: Option<&str>,
         env: Option<&[(String, String)]>,
+        claim: &JobClaim,
         why: &str,
     ) -> Result<String, String> {
+        if self.server.stopping() && !claim.start(false) {
+            return Err(WITHHELD.into());
+        }
         super::server::log(format!(
             "running queued `axil {}` in a process of its own: {why}",
             args.first().map(String::as_str).unwrap_or("")
@@ -444,11 +489,14 @@ impl WarmRunner<'_> {
             self.keep_lock_fresh();
             self.server.wait_for_wake(POLL);
         }
+        if !claim.start(!self.server.stopping()) {
+            return Err(WITHHELD.into());
+        }
         self.server
             .queue()
             .own_process_steps
             .fetch_add(1, Ordering::AcqRel);
-        self.subprocess().write(args, stdin, env)
+        self.subprocess().write(args, stdin, env, claim)
     }
 }
 

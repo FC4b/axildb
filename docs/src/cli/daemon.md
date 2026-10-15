@@ -95,9 +95,10 @@ never runs another's jobs. While a daemon runs, it is that drainer. Its drain
 thread holds the queue's `drain.lock`, the OS lock `axil hook drain` takes,
 from the moment it first gets it until the daemon stops. Like `hook drain`, it
 runs the jobs one at a time, in the order they were queued, each renamed to
-`.running` while it runs and removed after, a failed one logged in
-`drain.log`. A `.running` job a killed drainer left behind is moved to
-`interrupted/` and never run again.
+`.running` once its first write starts and removed after, a failed one logged
+in `drain.log`. A `.running` job a killed drainer left behind is moved to
+`interrupted/` and never run again; a job still waiting to start when its
+drainer was killed is still `.job`, and the next drainer runs it.
 
 A hook asks the daemon, before it queues, whether it serves the hook's
 process. When it does, the hook pokes it and starts no drainer. When it
@@ -122,8 +123,14 @@ runs or once the queue is empty.
 A job starts only while the daemon serves. During a lease, a reload or the
 opening, the queue waits between jobs, and a job's step waits for the database
 to open again. Writes sent by clients go ahead of the queue's between its steps.
-When the daemon stops, it finishes the job running, lets go of the queue, and
-starts `hook drain` for the jobs left once it has closed the database.
+When the daemon stops, it finishes the job running, if a write of it has
+started, the steps left each in a process of their own once it has closed the
+database; a job that was only waiting (for the writer lock, say) is left
+queued whole. It then lets go of the queue and starts `hook drain` for the
+jobs left, before it exits, so `daemon stop` waits for that job too. A daemon
+that can't close the database (a request still holds it) exits without
+finishing the job; one that was only waiting is still queued for the next
+hook's drainer.
 
 `daemon status` reports it: `hook queue: drained here; 12 jobs run (0 failed),
 steps: 30 on the open handle, 0 in a process of their own (the database let go
