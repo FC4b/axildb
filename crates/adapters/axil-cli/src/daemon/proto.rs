@@ -958,6 +958,10 @@ mod tests {
             "AXIL_DAEMON",
             "the kill switch, read where a daemon is started and where a process leases its database",
         ),
+        (
+            "AXIL_HOOK_DEADLINE_MS",
+            "set on a hook's lookup child, which sends nothing to the daemon; read where it leases",
+        ),
     ];
 
     /// Reads that name no variable at the call: the name comes from a
