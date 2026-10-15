@@ -6,11 +6,11 @@ open, with the embedding model and the graph loaded, and runs the hot commands
 `checkpoint`) sent to it over a local socket, so a command neither opens the
 database nor loads a model on each call. Unix only.
 
-> **Started by hand only, and nothing forwards to it yet.** The CLI and the
-> hooks still run every command in their own process, and each one first
-> leases the database from the daemon ([below](#leasing-the-database)), so
-> the daemon is cold again after every command: start one to try it, and stop
-> it when you are done.
+> **Started by hand only.** Once one runs, the hot commands you type and the
+> hooks' lookups go to it ([below](#how-commands-reach-it)). Every other
+> command, and the hooks' queued writes other than `store`, still run in their
+> own process and lease the database from the daemon
+> ([below](#leasing-the-database)), which opens it again afterwards.
 
 ## Commands
 
@@ -35,6 +35,38 @@ holding a lease, and the state of the engines and the graph.
 
 `AXIL_DAEMON=off` keeps `start` from starting one.
 
+## How commands reach it
+
+A hot command typed with a daemon running goes to it: `axil` sends the
+command line, its working directory and, for a command that reads it, its
+stdin (`store <table> -`, `checkpoint -`, `checkpoint` with input piped), and
+prints what the daemon's run printed, exiting with its code. Nothing reaches
+the daemon with `AXIL_DAEMON=off`, or when no database is found from the
+working directory or `--db`. When the daemon doesn't run the command (no
+daemon, another build, a command or store it lacks), the command runs in the
+process as it would with no daemon, and its open leases the database. A
+daemon still opening the database, opening it again after a lease or a
+change, or with every request slot taken is waited for, up to 10 s.
+
+If the connection breaks after the command was sent, a write is not run
+again, since the daemon may have run it:
+`{"error":"daemon connection lost; write status unknown"}` is printed and the
+command exits 1. A read runs in the process instead.
+
+A hook's lookup (the prompt's recall, the session's boot, a file's memories,
+a search) goes to the daemon first, with the slow-query log off and a
+deadline: 2.1 s for a recall, 2 s for the rest. A boot also waits up to 8 s
+for a daemon still opening the database, as at the start of a session. The
+hook uses what a run that exited 0 printed. It injects nothing when the run
+failed, the database is leased or opening, the daemon is shutting down or
+the deadline passed. With no daemon, a command it doesn't run, or a daemon
+of another build, the hook runs the lookup in a child process as before,
+which leases the database.
+
+The hooks' queued writes are still run by `hook drain`, a process of its own
+that runs each queued command as a child: a `store` goes to the daemon, and
+the rest lease the database.
+
 ## Leasing the database
 
 Only one process can have a database open, and a running daemon has its
@@ -58,7 +90,9 @@ holders (`leased to: pid 4242 for 30s`).
 
 While a lease is held, the process holding it has the database open, as
 without a daemon: a hook's recall finds it held and returns no context at
-once, and another command waits for it as it would for any process.
+once, and another command waits for it as it would for any process. Once the
+last lease ended, a command sent is told the database is opening, and waits
+for the daemon as at its start.
 
 A daemon that can't let go within 10 s, because a request it runs takes
 longer, says so (`lease_timeout`) and serves on; the process prints one line
@@ -108,7 +142,9 @@ modification time), `AXIL_LLM_API_KEY`, `AXIL_VERBOSE`, `AXIL_EMBED_SESSIONS`,
 `CARGO_HOME`, `GOPATH` and `GOMODCACHE`. The daemon clears `AXIL_VERBOSE` and
 `AXIL_EMBED_SESSIONS` from its own environment, so a client with either set
 runs the command itself. Anything else, or a command the daemon doesn't run,
-is handed back to the client unrun.
+is handed back to the client unrun, and the client runs it and leases the
+database. A command typed into a development build beside an installed
+build's daemon so runs on the code it was typed into.
 
 Vector search ranks as the one-shot command does: up to the same store size it
 scans every vector instead of building the approximate graph a long-lived
