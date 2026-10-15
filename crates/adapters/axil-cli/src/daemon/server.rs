@@ -2104,24 +2104,29 @@ mod tests {
             Some("the database was replaced")
         );
 
-        axil_core::drop_engine_companion(&db, "fts").unwrap();
-        after_change();
-        let fts = send(&server, &["fts", "cache"], &cwd, None);
-        assert_eq!(reloads(), 3);
+        // A build without the store or the graph has neither to lose.
+        let mut expected = 2;
         if cfg!(feature = "fts") {
+            axil_core::drop_engine_companion(&db, "fts").unwrap();
+            after_change();
+            let fts = send(&server, &["fts", "cache"], &cwd, None);
+            expected += 1;
+            assert_eq!(reloads(), expected);
             assert!(
                 matches!(&fts.reply, RunReply::NotServed { reason, .. } if reason == "lacks"),
                 "{fts:?}"
             );
         }
-
-        server.fail_graph.store(true, Ordering::Release);
-        served(send(&server, &["boot"], &cwd, None));
-        assert_eq!(reloads(), 4);
-        assert_eq!(
-            server.stats.last_reload().as_deref(),
-            Some("the graph failed to load")
-        );
+        if cfg!(feature = "graph") {
+            server.fail_graph.store(true, Ordering::Release);
+            served(send(&server, &["boot"], &cwd, None));
+            expected += 1;
+            assert_eq!(reloads(), expected);
+            assert_eq!(
+                server.stats.last_reload().as_deref(),
+                Some("the graph failed to load")
+            );
+        }
         assert_eq!(server.phase.get(), Phase::Ready);
         stop(server);
     }

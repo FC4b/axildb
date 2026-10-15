@@ -1001,13 +1001,17 @@ mod tests {
         };
         let differs = Some("bogus");
         assert_ne!(host_tools.as_deref(), differs.map(OsStr::new));
+        // Only `mcp` reads one, and a build without it has no such command.
+        let mcp = cfg!(feature = "mcp");
         for args in [&["mcp"][..], &["mcp", "--help"]] {
             let got = execute_captured(with_tools(args, differs), &state);
-            assert_eq!(got, Err(NotServed::Parse), "{args:?}");
+            if mcp {
+                assert_eq!(got, Err(NotServed::Parse), "{args:?}");
+            }
         }
         let r = execute_captured(with_tools(&["boot"], differs), &state).unwrap();
         assert_eq!(r.exit, 0, "{}", String::from_utf8_lossy(&r.stderr));
-        if host_tools.is_none() {
+        if mcp && host_tools.is_none() {
             let got = execute_captured(with_tools(&["mcp"], None), &state);
             assert_eq!(got, Err(NotServed::Command));
         }
@@ -1052,6 +1056,10 @@ mod tests {
             .unwrap();
         parsed.sort_unstable();
         parsed.dedup();
+        // A build without `mcp` lacks the one argument that reads this.
+        if !cfg!(feature = "mcp") {
+            carried.retain(|name| *name != "AXIL_MCP_TOOLS");
+        }
         assert_eq!(parsed, carried, "the variables the parser reads");
     }
 
