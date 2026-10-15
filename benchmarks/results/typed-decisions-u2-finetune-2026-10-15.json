@@ -1,0 +1,2769 @@
+{
+  "benchmark": "typed-decisions-u2-finetune",
+  "date": "2026-10-15",
+  "question": "Does fine-tuning nli-deberta-v3-xsmall on GitHub issue->PR pairs from held-out repos lift U2 (error resolved?) above the best prior arm?",
+  "code_commit": "e63c13641966e9f797734fbe466a221237027034",
+  "machine": {
+    "platform": "x86_64 Linux-6.18.40.1-microsoft-standard-WSL2-x86_64-with-glibc2.39",
+    "description": "AMD Ryzen 7 5800X (8C/16T), WSL2 20 GB; training on NVIDIA GeForce RTX 3080 10 GB",
+    "onnxruntime_scoring": "1.20.1"
+  },
+  "machine_load_note": "Scoring and training ran beside a CPU-bound LongMemEval benchmark (1-minute load 8-19 on 16 threads); latencies are recorded but not comparable to other runs.",
+  "base_model": {
+    "repo": "cross-encoder/nli-deberta-v3-xsmall",
+    "revision": "a150876415327c80daeff35ca6f68f5ed8cf5c24"
+  },
+  "u2_template": "This problem has been fixed: {}",
+  "training_data": {
+    "args": {
+      "max_pages": 12,
+      "allow_partial": false
+    },
+    "query_sha256_12": "f38206cd4847",
+    "positives_per_repo": 150,
+    "dev_share_percent_of_repos": 10,
+    "pairs": 11822,
+    "positives": 5579,
+    "by_split_kind": {
+      "dev/downstream_workaround": 97,
+      "dev/fixed": 1308,
+      "dev/mentioned_not_fix": 133,
+      "dev/other_fix": 1251,
+      "train/downstream_workaround": 489,
+      "train/fixed": 4271,
+      "train/mentioned_not_fix": 274,
+      "train/other_fix": 3999
+    },
+    "dropped": {
+      "xref_from_test_repo": 10,
+      "shares_text_with_sets": 0,
+      "conflicting_label_pairs_dropped": 18
+    },
+    "failed_repos": [],
+    "pairs_sha256": "174abaa2f34a90d4e2a3f2d460d88fc5ce90e2920f4cd0784bf4c8395097c070"
+  },
+  "training_repos": [
+    "PyO3/pyo3",
+    "alacritty/alacritty",
+    "apache/arrow-rs",
+    "apache/datafusion",
+    "astral-sh/ruff",
+    "bevyengine/bevy",
+    "biomejs/biome",
+    "bytecodealliance/wasmtime",
+    "caddyserver/caddy",
+    "clap-rs/clap",
+    "cli/cli",
+    "denoland/deno",
+    "diesel-rs/diesel",
+    "encode/httpx",
+    "gfx-rs/wgpu",
+    "gohugoio/hugo",
+    "helix-editor/helix",
+    "huggingface/tokenizers",
+    "hyperium/hyper",
+    "junegunn/fzf",
+    "launchbadge/sqlx",
+    "matplotlib/matplotlib",
+    "meilisearch/meilisearch",
+    "microsoft/TypeScript",
+    "nushell/nushell",
+    "oven-sh/bun",
+    "pallets/click",
+    "pallets/flask",
+    "pandas-dev/pandas",
+    "pola-rs/polars",
+    "prettier/prettier",
+    "prometheus/prometheus",
+    "psf/black",
+    "pydantic/pydantic",
+    "pypa/pip",
+    "pytest-dev/pytest",
+    "python-poetry/poetry",
+    "python/mypy",
+    "qdrant/qdrant",
+    "rayon-rs/rayon",
+    "rust-lang/cargo",
+    "rust-lang/regex",
+    "rust-lang/rust-analyzer",
+    "rust-lang/rust-clippy",
+    "rust-lang/rustfmt",
+    "rust-lang/rustup",
+    "rustls/rustls",
+    "scrapy/scrapy",
+    "seanmonstar/reqwest",
+    "serde-rs/serde",
+    "sharkdp/bat",
+    "sharkdp/fd",
+    "spf13/cobra",
+    "starship/starship",
+    "sveltejs/svelte",
+    "tauri-apps/tauri",
+    "tokio-rs/axum",
+    "tokio-rs/tracing",
+    "vitejs/vite",
+    "vuejs/core",
+    "withastro/astro",
+    "zellij-org/zellij"
+  ],
+  "ablation_dropped_repos": "astral-sh/ruff,tokio-rs/axum,tokio-rs/tracing,rust-lang/regex,hyperium/hyper,seanmonstar/reqwest,pypa/pip,python-poetry/poetry",
+  "runs": {
+    "v2-s13": {
+      "base_revision": "a150876415327c80daeff35ca6f68f5ed8cf5c24",
+      "args": {
+        "out": "data/u2_finetune/v2-s13",
+        "epochs": 3,
+        "batch": 16,
+        "lr": 2e-05,
+        "warmup": 0.1,
+        "evals_per_epoch": 2,
+        "threads": 2,
+        "seed": 13,
+        "device": "cuda",
+        "drop_repos": ""
+      },
+      "n_train": 9033,
+      "n_train_pos": 4271,
+      "n_dev": 2789,
+      "dev_auroc_before": 0.5078723979788844,
+      "exported_dev_auroc": 0.7991919048002527,
+      "exported_step": 1692,
+      "train_seconds": 750,
+      "device": "cuda",
+      "gpu": "NVIDIA GeForce RTX 3080",
+      "torch": "2.5.1+cu124",
+      "truncated_pairs": {
+        "train": 0,
+        "dev": 0
+      },
+      "onnx_max_abs_prob_diff_vs_torch": 1.2516975402832031e-06,
+      "pairs_sha256": "174abaa2f34a90d4e2a3f2d460d88fc5ce90e2920f4cd0784bf4c8395097c070",
+      "history": [
+        {
+          "step": 282,
+          "epoch": 0.5,
+          "loss": 0.6609,
+          "dev_auroc": 0.7403,
+          "elapsed_s": 154
+        },
+        {
+          "step": 564,
+          "epoch": 1.0,
+          "loss": 0.3811,
+          "dev_auroc": 0.7689,
+          "elapsed_s": 270
+        },
+        {
+          "step": 846,
+          "epoch": 1.5,
+          "loss": 0.3859,
+          "dev_auroc": 0.7847,
+          "elapsed_s": 378
+        },
+        {
+          "step": 1128,
+          "epoch": 2.0,
+          "loss": 0.4709,
+          "dev_auroc": 0.7936,
+          "elapsed_s": 482
+        },
+        {
+          "step": 1410,
+          "epoch": 2.5,
+          "loss": 0.4547,
+          "dev_auroc": 0.7984,
+          "elapsed_s": 588
+        },
+        {
+          "step": 1692,
+          "epoch": 2.99,
+          "loss": 0.502,
+          "dev_auroc": 0.7992,
+          "elapsed_s": 687
+        },
+        {
+          "step": 1695,
+          "epoch": 3.0,
+          "loss": 0.5902,
+          "dev_auroc": 0.7992,
+          "elapsed_s": 694
+        }
+      ],
+      "model_onnx_sha256": "9ace298de226109d1df9ccca6204aeea0efbe01f38377751253f4106fe59b922"
+    },
+    "v2-s29": {
+      "base_revision": "a150876415327c80daeff35ca6f68f5ed8cf5c24",
+      "args": {
+        "out": "data/u2_finetune/v2-s29",
+        "epochs": 3,
+        "batch": 16,
+        "lr": 2e-05,
+        "warmup": 0.1,
+        "evals_per_epoch": 2,
+        "threads": 2,
+        "seed": 29,
+        "device": "cuda",
+        "drop_repos": ""
+      },
+      "n_train": 9033,
+      "n_train_pos": 4271,
+      "n_dev": 2789,
+      "dev_auroc_before": 0.5078723979788844,
+      "exported_dev_auroc": 0.8028689599349146,
+      "exported_step": 1692,
+      "train_seconds": 684,
+      "device": "cuda",
+      "gpu": "NVIDIA GeForce RTX 3080",
+      "torch": "2.5.1+cu124",
+      "truncated_pairs": {
+        "train": 0,
+        "dev": 0
+      },
+      "onnx_max_abs_prob_diff_vs_torch": 1.6689300537109375e-06,
+      "pairs_sha256": "174abaa2f34a90d4e2a3f2d460d88fc5ce90e2920f4cd0784bf4c8395097c070",
+      "history": [
+        {
+          "step": 282,
+          "epoch": 0.5,
+          "loss": 0.4793,
+          "dev_auroc": 0.7458,
+          "elapsed_s": 109
+        },
+        {
+          "step": 564,
+          "epoch": 1.0,
+          "loss": 0.8945,
+          "dev_auroc": 0.7712,
+          "elapsed_s": 208
+        },
+        {
+          "step": 846,
+          "epoch": 1.5,
+          "loss": 0.7466,
+          "dev_auroc": 0.794,
+          "elapsed_s": 307
+        },
+        {
+          "step": 1128,
+          "epoch": 2.0,
+          "loss": 0.3924,
+          "dev_auroc": 0.7993,
+          "elapsed_s": 409
+        },
+        {
+          "step": 1410,
+          "epoch": 2.5,
+          "loss": 0.3722,
+          "dev_auroc": 0.8,
+          "elapsed_s": 510
+        },
+        {
+          "step": 1692,
+          "epoch": 2.99,
+          "loss": 0.2924,
+          "dev_auroc": 0.8029,
+          "elapsed_s": 609
+        },
+        {
+          "step": 1695,
+          "epoch": 3.0,
+          "loss": 0.5459,
+          "dev_auroc": 0.8029,
+          "elapsed_s": 616
+        }
+      ],
+      "model_onnx_sha256": "01592317f9f0d0f25733dd98f91068dfd1e849d50d6b1e0978d8daeb2bbb28f3"
+    },
+    "v2-s47": {
+      "base_revision": "a150876415327c80daeff35ca6f68f5ed8cf5c24",
+      "args": {
+        "out": "data/u2_finetune/v2-s47",
+        "epochs": 3,
+        "batch": 16,
+        "lr": 2e-05,
+        "warmup": 0.1,
+        "evals_per_epoch": 2,
+        "threads": 2,
+        "seed": 47,
+        "device": "cuda",
+        "drop_repos": ""
+      },
+      "n_train": 9033,
+      "n_train_pos": 4271,
+      "n_dev": 2789,
+      "dev_auroc_before": 0.5078723979788844,
+      "exported_dev_auroc": 0.8000911649497096,
+      "exported_step": 1692,
+      "train_seconds": 380,
+      "device": "cuda",
+      "gpu": "NVIDIA GeForce RTX 3080",
+      "torch": "2.5.1+cu124",
+      "truncated_pairs": {
+        "train": 0,
+        "dev": 0
+      },
+      "onnx_max_abs_prob_diff_vs_torch": 1.7583370208740234e-06,
+      "pairs_sha256": "174abaa2f34a90d4e2a3f2d460d88fc5ce90e2920f4cd0784bf4c8395097c070",
+      "history": [
+        {
+          "step": 282,
+          "epoch": 0.5,
+          "loss": 0.7176,
+          "dev_auroc": 0.7465,
+          "elapsed_s": 104
+        },
+        {
+          "step": 564,
+          "epoch": 1.0,
+          "loss": 0.5415,
+          "dev_auroc": 0.7696,
+          "elapsed_s": 155
+        },
+        {
+          "step": 846,
+          "epoch": 1.5,
+          "loss": 0.4818,
+          "dev_auroc": 0.7876,
+          "elapsed_s": 206
+        },
+        {
+          "step": 1128,
+          "epoch": 2.0,
+          "loss": 0.5667,
+          "dev_auroc": 0.7945,
+          "elapsed_s": 261
+        },
+        {
+          "step": 1410,
+          "epoch": 2.5,
+          "loss": 0.3614,
+          "dev_auroc": 0.7992,
+          "elapsed_s": 309
+        },
+        {
+          "step": 1692,
+          "epoch": 2.99,
+          "loss": 0.3988,
+          "dev_auroc": 0.8001,
+          "elapsed_s": 353
+        },
+        {
+          "step": 1695,
+          "epoch": 3.0,
+          "loss": 0.2379,
+          "dev_auroc": 0.8001,
+          "elapsed_s": 356
+        }
+      ],
+      "model_onnx_sha256": "f78e209bdf5cbb7d2195c4f80cc9303a5d5bc154efa1c8d96e625df6e9b0f99f"
+    },
+    "v2-s13-nosib": {
+      "base_revision": "a150876415327c80daeff35ca6f68f5ed8cf5c24",
+      "args": {
+        "out": "data/u2_finetune/v2-s13-nosib",
+        "epochs": 3,
+        "batch": 16,
+        "lr": 2e-05,
+        "warmup": 0.1,
+        "evals_per_epoch": 2,
+        "threads": 2,
+        "seed": 13,
+        "device": "cuda",
+        "drop_repos": "astral-sh/ruff,tokio-rs/axum,tokio-rs/tracing,rust-lang/regex,hyperium/hyper,seanmonstar/reqwest,pypa/pip,python-poetry/poetry"
+      },
+      "n_train": 7958,
+      "n_train_pos": 3767,
+      "n_dev": 2789,
+      "dev_auroc_before": 0.5078723979788844,
+      "exported_dev_auroc": 0.7941959003648663,
+      "exported_step": 1494,
+      "train_seconds": 253,
+      "device": "cuda",
+      "gpu": "NVIDIA GeForce RTX 3080",
+      "torch": "2.5.1+cu124",
+      "truncated_pairs": {
+        "train": 0,
+        "dev": 0
+      },
+      "onnx_max_abs_prob_diff_vs_torch": 1.9073486328125e-06,
+      "pairs_sha256": "174abaa2f34a90d4e2a3f2d460d88fc5ce90e2920f4cd0784bf4c8395097c070",
+      "history": [
+        {
+          "step": 249,
+          "epoch": 0.5,
+          "loss": 0.498,
+          "dev_auroc": 0.7379,
+          "elapsed_s": 45
+        },
+        {
+          "step": 498,
+          "epoch": 1.0,
+          "loss": 0.4575,
+          "dev_auroc": 0.7677,
+          "elapsed_s": 83
+        },
+        {
+          "step": 747,
+          "epoch": 1.5,
+          "loss": 0.6671,
+          "dev_auroc": 0.786,
+          "elapsed_s": 124
+        },
+        {
+          "step": 996,
+          "epoch": 2.0,
+          "loss": 0.7111,
+          "dev_auroc": 0.7901,
+          "elapsed_s": 165
+        },
+        {
+          "step": 1245,
+          "epoch": 2.5,
+          "loss": 0.7154,
+          "dev_auroc": 0.7917,
+          "elapsed_s": 190
+        },
+        {
+          "step": 1494,
+          "epoch": 3.0,
+          "loss": 0.2192,
+          "dev_auroc": 0.7942,
+          "elapsed_s": 232
+        }
+      ],
+      "model_onnx_sha256": "5ffe13b9f1978bf3ac6f79c8b510596d2f1e4a5c5dfc8b84b1e372f8634916d9"
+    }
+  },
+  "verdict": {
+    "summary": "The tuned model clearly beats the untuned base. It does not clear the 0.70 bar or the best prior arm (Laya typed-decisions) at 95%, and on the Axil-sourced slice Laya ranks first.",
+    "bar_0_70": "not met at 95%: per-seed cluster lower bounds 0.719, 0.699, 0.721",
+    "u2_auroc_three_seeds": {
+      "mean": 0.8061,
+      "sd": 0.0064
+    },
+    "vs_base": "paired gain 0.182 to 0.194; lower bounds 0.044 to 0.069, all above 0",
+    "vs_laya": "paired gain 0.099 to 0.112; 95% intervals from -0.021 to +0.226; 1 of 3 intervals exclude 0",
+    "axil_subset": {
+      "note": "15 test rows (10 negatives): too few to decide, but it is the only slice from Axil's own records",
+      "auroc": {
+        "nli-deberta-v3-xsmall": 0.44,
+        "convaiinnovations/laya/typed-decisions": 0.76,
+        "v2-s13": 0.64,
+        "v2-s29": 0.62,
+        "v2-s47": 0.66
+      }
+    },
+    "by_negative_group": {
+      "negatives": {
+        "topic": 42,
+        "mention": 11,
+        "state": 4
+      },
+      "auroc_fixed_vs_group": {
+        "nli-deberta-v3-xsmall": {
+          "topic": 0.6186,
+          "mention": 0.5808,
+          "state": 0.713
+        },
+        "convaiinnovations/laya/typed-decisions": {
+          "topic": 0.7132,
+          "mention": 0.697,
+          "state": 0.5741
+        },
+        "v2-s13": {
+          "topic": 0.8122,
+          "mention": 0.8249,
+          "state": 0.6991
+        },
+        "v2-s29": {
+          "topic": 0.806,
+          "mention": 0.8199,
+          "state": 0.6759
+        },
+        "v2-s47": {
+          "topic": 0.828,
+          "mention": 0.7963,
+          "state": 0.6898
+        }
+      },
+      "note": "state negatives (the same bug, not fixed) are the ones a deployed judge meets after Axil's topic filter; there are 4, no evidence either way"
+    },
+    "sibling_repo_ablation": "one seed: 0.808 without the test repos' sibling projects against 0.807 with them; within seed noise (sd 0.006)",
+    "u1_side_effect": "U1 AUROC 0.745 untuned, 0.683 to 0.689 tuned: the tuned model is U2-only, never a U1 judge",
+    "operating_point": "test FPR at the train-fit threshold 0.070 to 0.123, above the 0.05 target, and optimistic: test rows share issues with the rows the threshold is fit on. A top-3 suggestion list per error would rely on per-error ranking, which pooled AUROC does not measure; it is unmeasured",
+    "limits": "111 test rows in 56 dependent clusters; 42 of 57 test negatives are fixes for another bug; repo-level correlation is not modelled. Not for README, docs or CLI output (see the typed-decisions README numbers policy)."
+  },
+  "reproduced_prior": {
+    "source": "benchmarks/results/typed-decisions-bakeoff-2026-09-27.json",
+    "nli-deberta-v3-xsmall U2 auroc_test": [
+      0.6179337231968811,
+      0.6179337231968811
+    ],
+    "laya typed-decisions U2 auroc_test": [
+      0.7002923976608187,
+      0.7002923976608187
+    ]
+  },
+  "bakeoff": {
+    "nli-deberta-v3-xsmall": {
+      "repo": "cross-encoder/nli-deberta-v3-xsmall",
+      "onnx": "onnx/model.onnx",
+      "load_ms": 4230.1,
+      "size_mb": 284.2,
+      "U1": {
+        "n_train": 102,
+        "n_test": 147,
+        "auroc_test": 0.7450822962665596,
+        "auroc_test_ci95_cluster": [
+          0.6455595380326563,
+          0.84
+        ],
+        "n_test_clusters": 120,
+        "auroc_all": 0.7271769662921348,
+        "threshold_from_train": 0.8495689224944903,
+        "at_threshold_test": {
+          "tpr": 0.39622641509433965,
+          "fpr": 0.0851063829787234,
+          "precision": 0.7241379310344828
+        },
+        "at_argmax_test": {
+          "tpr": 0.5283018867924528,
+          "fpr": 0.0851063829787234,
+          "precision": 0.7777777777777778
+        },
+        "ece_test_raw": 0.20861611591134843,
+        "ece_test_platt": 0.10020917221506433,
+        "accuracy_by_kind_test": {
+          "both_hold": "40/42",
+          "contradiction": "3/4",
+          "negation_other_subject": "2/3",
+          "refinement": "3/4",
+          "restatement": "1/2",
+          "reversal": "3/3",
+          "same_topic": "40/43",
+          "update": "15/46"
+        },
+        "auroc_test_by_source": {
+          "axil-dogfood": 0.819047619047619,
+          "longmemeval_oracle": 0.7085526315789473
+        },
+        "latency_ms_p50": 109.33,
+        "latency_ms_p95": 212.31
+      },
+      "U1+sym": {
+        "n_train": 102,
+        "n_test": 147,
+        "auroc_test": 0.7460859092733841,
+        "auroc_test_ci95_cluster": [
+          0.6567226890756303,
+          0.837299771167048
+        ],
+        "n_test_clusters": 120,
+        "auroc_all": 0.7155898876404494,
+        "threshold_from_train": 0.9485306536422816,
+        "at_threshold_test": {
+          "tpr": 0.3584905660377358,
+          "fpr": 0.09574468085106383,
+          "precision": 0.6785714285714286
+        },
+        "at_argmax_test": {
+          "tpr": 0.5283018867924528,
+          "fpr": 0.0851063829787234,
+          "precision": 0.7777777777777778
+        },
+        "ece_test_raw": 0.1977903366853977,
+        "ece_test_platt": 0.1181934174248236,
+        "accuracy_by_kind_test": {
+          "both_hold": "40/42",
+          "contradiction": "4/4",
+          "negation_other_subject": "2/3",
+          "refinement": "3/4",
+          "restatement": "1/2",
+          "reversal": "3/3",
+          "same_topic": "39/43",
+          "update": "12/46"
+        },
+        "auroc_test_by_source": {
+          "axil-dogfood": 0.8238095238095238,
+          "longmemeval_oracle": 0.7200657894736842
+        },
+        "latency_ms_p50": 207.26,
+        "latency_ms_p95": 350.88
+      },
+      "U2": {
+        "n_train": 90,
+        "n_test": 111,
+        "auroc_test": 0.6179337231968811,
+        "auroc_test_ci95_cluster": [
+          0.5236666666666666,
+          0.7094043887147335
+        ],
+        "n_test_clusters": 56,
+        "auroc_all": 0.5665334665334665,
+        "threshold_from_train": 0.09841849386996802,
+        "at_threshold_test": {
+          "tpr": 0.14814814814814814,
+          "fpr": 0.03508771929824561,
+          "precision": 0.8
+        },
+        "at_argmax_test": {
+          "tpr": 0.07407407407407407,
+          "fpr": 0.03508771929824561,
+          "precision": 0.6666666666666666
+        },
+        "ece_test_raw": 0.4503722929357163,
+        "ece_test_platt": 0.13206331802649898,
+        "accuracy_by_kind_test": {
+          "downstream_workaround": "5/6",
+          "fixed": "8/53",
+          "fixed_implicit": "0/1",
+          "lexical_trap": "1/1",
+          "mentioned_not_fix": "5/5",
+          "merged_not_shipped": "1/1",
+          "other_fix": "35/36",
+          "other_fix_same_area": "1/1",
+          "planned": "1/1",
+          "still_broken": "1/1",
+          "unrelated_same_area": "5/5"
+        },
+        "auroc_test_by_source": {
+          "axil-dogfood": 0.44,
+          "github": 0.6144159791576205
+        },
+        "latency_ms_p50": 35.55,
+        "latency_ms_p95": 58.07
+      }
+    },
+    "v2-s13": {
+      "repo": "data/u2_finetune/v2-s13",
+      "onnx": "model.onnx",
+      "load_ms": 2406.6,
+      "size_mb": 284.2,
+      "U1": {
+        "n_train": 102,
+        "n_test": 147,
+        "auroc_test": 0.6830590124448013,
+        "auroc_test_ci95_cluster": [
+          0.5838709677419355,
+          0.7769679300291545
+        ],
+        "n_test_clusters": 120,
+        "auroc_all": 0.6543539325842697,
+        "threshold_from_train": 0.8108220824024777,
+        "at_threshold_test": {
+          "tpr": 0.16981132075471697,
+          "fpr": 0.0425531914893617,
+          "precision": 0.6923076923076923
+        },
+        "at_argmax_test": {
+          "tpr": 0.3584905660377358,
+          "fpr": 0.11702127659574468,
+          "precision": 0.6333333333333333
+        },
+        "ece_test_raw": 0.2385718102017716,
+        "ece_test_platt": 0.10673760992948679,
+        "accuracy_by_kind_test": {
+          "both_hold": "41/42",
+          "contradiction": "2/4",
+          "negation_other_subject": "2/3",
+          "refinement": "4/4",
+          "restatement": "1/2",
+          "reversal": "2/3",
+          "same_topic": "42/43",
+          "update": "5/46"
+        },
+        "auroc_test_by_source": {
+          "axil-dogfood": 0.5904761904761905,
+          "longmemeval_oracle": 0.6542763157894737
+        },
+        "latency_ms_p50": 99.95,
+        "latency_ms_p95": 174.18
+      },
+      "U1+sym": {
+        "n_train": 102,
+        "n_test": 147,
+        "auroc_test": 0.6716178241670012,
+        "auroc_test_ci95_cluster": [
+          0.5689990281827016,
+          0.7688453159041394
+        ],
+        "n_test_clusters": 120,
+        "auroc_all": 0.6372191011235955,
+        "threshold_from_train": 0.8910892721819502,
+        "at_threshold_test": {
+          "tpr": 0.20754716981132076,
+          "fpr": 0.031914893617021274,
+          "precision": 0.7857142857142857
+        },
+        "at_argmax_test": {
+          "tpr": 0.3584905660377358,
+          "fpr": 0.11702127659574468,
+          "precision": 0.6333333333333333
+        },
+        "ece_test_raw": 0.22333136810090265,
+        "ece_test_platt": 0.08430402797439261,
+        "accuracy_by_kind_test": {
+          "both_hold": "41/42",
+          "contradiction": "2/4",
+          "negation_other_subject": "2/3",
+          "refinement": "4/4",
+          "restatement": "2/2",
+          "reversal": "2/3",
+          "same_topic": "42/43",
+          "update": "7/46"
+        },
+        "auroc_test_by_source": {
+          "axil-dogfood": 0.6904761904761905,
+          "longmemeval_oracle": 0.6351973684210527
+        },
+        "latency_ms_p50": 188.99,
+        "latency_ms_p95": 359.01
+      },
+      "U2": {
+        "n_train": 90,
+        "n_test": 111,
+        "auroc_test": 0.8066926575698505,
+        "auroc_test_ci95_cluster": [
+          0.7192982456140351,
+          0.8862745098039215
+        ],
+        "n_test_clusters": 56,
+        "auroc_all": 0.7825174825174825,
+        "threshold_from_train": 0.6027377500745694,
+        "at_threshold_test": {
+          "tpr": 0.5740740740740741,
+          "fpr": 0.12280701754385964,
+          "precision": 0.8157894736842105
+        },
+        "at_argmax_test": {
+          "tpr": 0.7407407407407407,
+          "fpr": 0.3157894736842105,
+          "precision": 0.6896551724137931
+        },
+        "ece_test_raw": 0.08222898684419068,
+        "ece_test_platt": 0.13978858529325291,
+        "accuracy_by_kind_test": {
+          "downstream_workaround": "6/6",
+          "fixed": "31/53",
+          "fixed_implicit": "0/1",
+          "lexical_trap": "1/1",
+          "mentioned_not_fix": "5/5",
+          "merged_not_shipped": "1/1",
+          "other_fix": "30/36",
+          "other_fix_same_area": "1/1",
+          "planned": "1/1",
+          "still_broken": "0/1",
+          "unrelated_same_area": "5/5"
+        },
+        "auroc_test_by_source": {
+          "axil-dogfood": 0.64,
+          "github": 0.8219713417281806
+        },
+        "latency_ms_p50": 45.99,
+        "latency_ms_p95": 74.56
+      }
+    },
+    "v2-s29": {
+      "repo": "data/u2_finetune/v2-s29",
+      "onnx": "model.onnx",
+      "load_ms": 2338.7,
+      "size_mb": 284.2,
+      "U1": {
+        "n_train": 102,
+        "n_test": 147,
+        "auroc_test": 0.6894821356884785,
+        "auroc_test_ci95_cluster": [
+          0.594636524822695,
+          0.7835164835164835
+        ],
+        "n_test_clusters": 120,
+        "auroc_all": 0.6651685393258427,
+        "threshold_from_train": 0.7714956804083896,
+        "at_threshold_test": {
+          "tpr": 0.20754716981132076,
+          "fpr": 0.06382978723404255,
+          "precision": 0.6470588235294118
+        },
+        "at_argmax_test": {
+          "tpr": 0.37735849056603776,
+          "fpr": 0.1276595744680851,
+          "precision": 0.625
+        },
+        "ece_test_raw": 0.21593249142123597,
+        "ece_test_platt": 0.09803613030795903,
+        "accuracy_by_kind_test": {
+          "both_hold": "41/42",
+          "contradiction": "2/4",
+          "negation_other_subject": "2/3",
+          "refinement": "2/4",
+          "restatement": "1/2",
+          "reversal": "2/3",
+          "same_topic": "42/43",
+          "update": "7/46"
+        },
+        "auroc_test_by_source": {
+          "axil-dogfood": 0.5428571428571428,
+          "longmemeval_oracle": 0.6733552631578947
+        },
+        "latency_ms_p50": 99.96,
+        "latency_ms_p95": 197.55
+      },
+      "U1+sym": {
+        "n_train": 102,
+        "n_test": 147,
+        "auroc_test": 0.6774387796065837,
+        "auroc_test_ci95_cluster": [
+          0.5821894303363074,
+          0.7721611721611722
+        ],
+        "n_test_clusters": 120,
+        "auroc_all": 0.6457162921348315,
+        "threshold_from_train": 0.9058485948656234,
+        "at_threshold_test": {
+          "tpr": 0.1509433962264151,
+          "fpr": 0.02127659574468085,
+          "precision": 0.8
+        },
+        "at_argmax_test": {
+          "tpr": 0.37735849056603776,
+          "fpr": 0.1276595744680851,
+          "precision": 0.625
+        },
+        "ece_test_raw": 0.2171676299474211,
+        "ece_test_platt": 0.07586172385540269,
+        "accuracy_by_kind_test": {
+          "both_hold": "41/42",
+          "contradiction": "1/4",
+          "negation_other_subject": "2/3",
+          "refinement": "4/4",
+          "restatement": "2/2",
+          "reversal": "1/3",
+          "same_topic": "43/43",
+          "update": "6/46"
+        },
+        "auroc_test_by_source": {
+          "axil-dogfood": 0.6095238095238096,
+          "longmemeval_oracle": 0.6598684210526315
+        },
+        "latency_ms_p50": 205.43,
+        "latency_ms_p95": 352.48
+      },
+      "U2": {
+        "n_train": 90,
+        "n_test": 111,
+        "auroc_test": 0.799545159194282,
+        "auroc_test_ci95_cluster": [
+          0.6992892290869327,
+          0.8878424657534246
+        ],
+        "n_test_clusters": 56,
+        "auroc_all": 0.7682317682317682,
+        "threshold_from_train": 0.6880650338052782,
+        "at_threshold_test": {
+          "tpr": 0.4444444444444444,
+          "fpr": 0.07017543859649122,
+          "precision": 0.8571428571428571
+        },
+        "at_argmax_test": {
+          "tpr": 0.7037037037037037,
+          "fpr": 0.3157894736842105,
+          "precision": 0.6785714285714286
+        },
+        "ece_test_raw": 0.11825091187805724,
+        "ece_test_platt": 0.15719072762182656,
+        "accuracy_by_kind_test": {
+          "downstream_workaround": "6/6",
+          "fixed": "24/53",
+          "fixed_implicit": "0/1",
+          "lexical_trap": "1/1",
+          "mentioned_not_fix": "5/5",
+          "merged_not_shipped": "1/1",
+          "other_fix": "33/36",
+          "other_fix_same_area": "1/1",
+          "planned": "1/1",
+          "still_broken": "0/1",
+          "unrelated_same_area": "5/5"
+        },
+        "auroc_test_by_source": {
+          "axil-dogfood": 0.62,
+          "github": 0.822405557967868
+        },
+        "latency_ms_p50": 36.62,
+        "latency_ms_p95": 72.47
+      }
+    },
+    "v2-s47": {
+      "repo": "data/u2_finetune/v2-s47",
+      "onnx": "model.onnx",
+      "load_ms": 2330.4,
+      "size_mb": 284.2,
+      "U1": {
+        "n_train": 102,
+        "n_test": 147,
+        "auroc_test": 0.688478522681654,
+        "auroc_test_ci95_cluster": [
+          0.5914208074534162,
+          0.785
+        ],
+        "n_test_clusters": 120,
+        "auroc_all": 0.6629915730337078,
+        "threshold_from_train": 0.8008284889537917,
+        "at_threshold_test": {
+          "tpr": 0.18867924528301888,
+          "fpr": 0.07446808510638298,
+          "precision": 0.5882352941176471
+        },
+        "at_argmax_test": {
+          "tpr": 0.4716981132075472,
+          "fpr": 0.14893617021276595,
+          "precision": 0.6410256410256411
+        },
+        "ece_test_raw": 0.1828067925995959,
+        "ece_test_platt": 0.08114576798012595,
+        "accuracy_by_kind_test": {
+          "both_hold": "41/42",
+          "contradiction": "2/4",
+          "negation_other_subject": "2/3",
+          "refinement": "2/4",
+          "restatement": "1/2",
+          "reversal": "1/3",
+          "same_topic": "41/43",
+          "update": "7/46"
+        },
+        "auroc_test_by_source": {
+          "axil-dogfood": 0.5571428571428572,
+          "longmemeval_oracle": 0.6638157894736842
+        },
+        "latency_ms_p50": 95.32,
+        "latency_ms_p95": 167.4
+      },
+      "U1+sym": {
+        "n_train": 102,
+        "n_test": 147,
+        "auroc_test": 0.6639903653151344,
+        "auroc_test_ci95_cluster": [
+          0.5646591970121382,
+          0.7608879492600423
+        ],
+        "n_test_clusters": 120,
+        "auroc_all": 0.6406601123595506,
+        "threshold_from_train": 0.8965030638396186,
+        "at_threshold_test": {
+          "tpr": 0.16981132075471697,
+          "fpr": 0.031914893617021274,
+          "precision": 0.75
+        },
+        "at_argmax_test": {
+          "tpr": 0.4716981132075472,
+          "fpr": 0.14893617021276595,
+          "precision": 0.6410256410256411
+        },
+        "ece_test_raw": 0.20430130476267405,
+        "ece_test_platt": 0.066946847567665,
+        "accuracy_by_kind_test": {
+          "both_hold": "41/42",
+          "contradiction": "1/4",
+          "negation_other_subject": "2/3",
+          "refinement": "4/4",
+          "restatement": "2/2",
+          "reversal": "0/3",
+          "same_topic": "42/43",
+          "update": "8/46"
+        },
+        "auroc_test_by_source": {
+          "axil-dogfood": 0.6333333333333333,
+          "longmemeval_oracle": 0.6342105263157894
+        },
+        "latency_ms_p50": 200.37,
+        "latency_ms_p95": 375.71
+      },
+      "U2": {
+        "n_train": 90,
+        "n_test": 111,
+        "auroc_test": 0.8122157244964262,
+        "auroc_test_ci95_cluster": [
+          0.7205663189269746,
+          0.8932215743440233
+        ],
+        "n_test_clusters": 56,
+        "auroc_all": 0.788011988011988,
+        "threshold_from_train": 0.5526384048415995,
+        "at_threshold_test": {
+          "tpr": 0.5925925925925926,
+          "fpr": 0.08771929824561403,
+          "precision": 0.8648648648648649
+        },
+        "at_argmax_test": {
+          "tpr": 0.7222222222222222,
+          "fpr": 0.3157894736842105,
+          "precision": 0.6842105263157895
+        },
+        "ece_test_raw": 0.14488115669574775,
+        "ece_test_platt": 0.16044390872205783,
+        "accuracy_by_kind_test": {
+          "downstream_workaround": "6/6",
+          "fixed": "31/53",
+          "fixed_implicit": "1/1",
+          "lexical_trap": "1/1",
+          "mentioned_not_fix": "5/5",
+          "merged_not_shipped": "1/1",
+          "other_fix": "32/36",
+          "other_fix_same_area": "1/1",
+          "planned": "1/1",
+          "still_broken": "0/1",
+          "unrelated_same_area": "5/5"
+        },
+        "auroc_test_by_source": {
+          "axil-dogfood": 0.66,
+          "github": 0.8319583152409901
+        },
+        "latency_ms_p50": 38.33,
+        "latency_ms_p95": 70.82
+      }
+    },
+    "v2-s13-nosib": {
+      "repo": "data/u2_finetune/v2-s13-nosib",
+      "onnx": "model.onnx",
+      "load_ms": 2568.1,
+      "size_mb": 284.2,
+      "U1": {
+        "n_train": 102,
+        "n_test": 147,
+        "auroc_test": 0.6756322761942994,
+        "auroc_test_ci95_cluster": [
+          0.5788701393983859,
+          0.775238886580806
+        ],
+        "n_test_clusters": 120,
+        "auroc_all": 0.6448033707865168,
+        "threshold_from_train": 0.8547366297366342,
+        "at_threshold_test": {
+          "tpr": 0.1509433962264151,
+          "fpr": 0.05319148936170213,
+          "precision": 0.6153846153846154
+        },
+        "at_argmax_test": {
+          "tpr": 0.4528301886792453,
+          "fpr": 0.14893617021276595,
+          "precision": 0.631578947368421
+        },
+        "ece_test_raw": 0.20177520075582378,
+        "ece_test_platt": 0.09453200074434165,
+        "accuracy_by_kind_test": {
+          "both_hold": "41/42",
+          "contradiction": "1/4",
+          "negation_other_subject": "2/3",
+          "refinement": "3/4",
+          "restatement": "2/2",
+          "reversal": "2/3",
+          "same_topic": "41/43",
+          "update": "5/46"
+        },
+        "auroc_test_by_source": {
+          "axil-dogfood": 0.5476190476190477,
+          "longmemeval_oracle": 0.6440789473684211
+        },
+        "latency_ms_p50": 107.59,
+        "latency_ms_p95": 203.55
+      },
+      "U1+sym": {
+        "n_train": 102,
+        "n_test": 147,
+        "auroc_test": 0.6597751906864713,
+        "auroc_test_ci95_cluster": [
+          0.5592903828197946,
+          0.7595833333333334
+        ],
+        "n_test_clusters": 120,
+        "auroc_all": 0.6299157303370787,
+        "threshold_from_train": 0.9182825328495181,
+        "at_threshold_test": {
+          "tpr": 0.24528301886792453,
+          "fpr": 0.031914893617021274,
+          "precision": 0.8125
+        },
+        "at_argmax_test": {
+          "tpr": 0.4528301886792453,
+          "fpr": 0.14893617021276595,
+          "precision": 0.631578947368421
+        },
+        "ece_test_raw": 0.23533440821185855,
+        "ece_test_platt": 0.08092538876077815,
+        "accuracy_by_kind_test": {
+          "both_hold": "41/42",
+          "contradiction": "3/4",
+          "negation_other_subject": "2/3",
+          "refinement": "3/4",
+          "restatement": "2/2",
+          "reversal": "2/3",
+          "same_topic": "43/43",
+          "update": "8/46"
+        },
+        "auroc_test_by_source": {
+          "axil-dogfood": 0.6857142857142857,
+          "longmemeval_oracle": 0.6210526315789474
+        },
+        "latency_ms_p50": 200.37,
+        "latency_ms_p95": 329.87
+      },
+      "U2": {
+        "n_train": 90,
+        "n_test": 111,
+        "auroc_test": 0.8076673164392463,
+        "auroc_test_ci95_cluster": [
+          0.7204415954415955,
+          0.8871908863573215
+        ],
+        "n_test_clusters": 56,
+        "auroc_all": 0.7864135864135864,
+        "threshold_from_train": 0.5699554821385043,
+        "at_threshold_test": {
+          "tpr": 0.5370370370370371,
+          "fpr": 0.10526315789473684,
+          "precision": 0.8285714285714286
+        },
+        "at_argmax_test": {
+          "tpr": 0.7407407407407407,
+          "fpr": 0.2631578947368421,
+          "precision": 0.7272727272727273
+        },
+        "ece_test_raw": 0.08128203078488118,
+        "ece_test_platt": 0.12773063625950443,
+        "accuracy_by_kind_test": {
+          "downstream_workaround": "6/6",
+          "fixed": "29/53",
+          "fixed_implicit": "0/1",
+          "lexical_trap": "1/1",
+          "mentioned_not_fix": "5/5",
+          "merged_not_shipped": "1/1",
+          "other_fix": "31/36",
+          "other_fix_same_area": "1/1",
+          "planned": "1/1",
+          "still_broken": "0/1",
+          "unrelated_same_area": "5/5"
+        },
+        "auroc_test_by_source": {
+          "axil-dogfood": 0.64,
+          "github": 0.8323925314806774
+        },
+        "latency_ms_p50": 44.94,
+        "latency_ms_p95": 77.38
+      }
+    },
+    "convaiinnovations/laya/typed-decisions": {
+      "model": "convaiinnovations/laya/typed-decisions",
+      "load_ms": 5601.2,
+      "device": "cpu",
+      "threads": 2,
+      "U1": {
+        "n_train": 102,
+        "n_test": 147,
+        "auroc_test": 0.6897832195905259,
+        "auroc_test_ci95_cluster": [
+          0.592266775777414,
+          0.7831867057673509
+        ],
+        "n_test_clusters": 120,
+        "auroc_all": 0.6741221910112359,
+        "threshold_from_train": 0.2612,
+        "at_threshold_test": {
+          "tpr": 0.32075471698113206,
+          "fpr": 0.0851063829787234,
+          "precision": 0.68
+        },
+        "at_argmax_test": {
+          "tpr": 0.1509433962264151,
+          "fpr": 0.0,
+          "precision": 1.0
+        },
+        "ece_test_raw": 0.1447,
+        "ece_test_platt": 0.053350086767992445,
+        "accuracy_by_kind_test": {
+          "both_hold": "38/42",
+          "contradiction": "3/4",
+          "negation_other_subject": "3/3",
+          "refinement": "3/4",
+          "restatement": "1/2",
+          "reversal": "2/3",
+          "same_topic": "41/43",
+          "update": "12/46"
+        },
+        "auroc_test_by_source": {
+          "axil-dogfood": 0.9333333333333333,
+          "longmemeval_oracle": 0.6129934210526315
+        },
+        "latency_ms_p50": 2331.8,
+        "latency_ms_p95": 3135.84,
+        "question": "Does the NEW statement replace, update, or contradict the OLD statement, so that the OLD statement is no longer current?"
+      },
+      "U2": {
+        "n_train": 90,
+        "n_test": 111,
+        "auroc_test": 0.7002923976608187,
+        "auroc_test_ci95_cluster": [
+          0.5795214637579169,
+          0.799863387978142
+        ],
+        "n_test_clusters": 56,
+        "auroc_all": 0.7038461538461539,
+        "threshold_from_train": 0.5399,
+        "at_threshold_test": {
+          "tpr": 0.12962962962962962,
+          "fpr": 0.05263157894736842,
+          "precision": 0.7
+        },
+        "at_argmax_test": {
+          "tpr": 0.25925925925925924,
+          "fpr": 0.07017543859649122,
+          "precision": 0.7777777777777778
+        },
+        "ece_test_raw": 0.13719459459459457,
+        "ece_test_platt": 0.14269719674937087,
+        "accuracy_by_kind_test": {
+          "downstream_workaround": "6/6",
+          "fixed": "6/53",
+          "fixed_implicit": "1/1",
+          "lexical_trap": "0/1",
+          "mentioned_not_fix": "5/5",
+          "merged_not_shipped": "1/1",
+          "other_fix": "35/36",
+          "other_fix_same_area": "1/1",
+          "planned": "1/1",
+          "still_broken": "1/1",
+          "unrelated_same_area": "4/5"
+        },
+        "auroc_test_by_source": {
+          "axil-dogfood": 0.76,
+          "github": 0.7071211463308728
+        },
+        "latency_ms_p50": 1334.49,
+        "latency_ms_p95": 1713.33,
+        "question": "Does the LATER note show that the ERROR has actually been fixed?"
+      }
+    }
+  },
+  "u2_test_paired_vs_base": {
+    "set": "U2 test split (sets/u2_repo.jsonl + sets/u2_github.jsonl)",
+    "n_test": 111,
+    "n_test_pos": 54,
+    "n_clusters": 56,
+    "negatives_by_group": {
+      "topic": 42,
+      "mention": 11,
+      "state": 4
+    },
+    "bootstrap": "2000 cluster resamples, shared by every arm (paired); repo-level correlation not modelled",
+    "bar": 0.7,
+    "reference_arm": "nli-deberta-v3-xsmall",
+    "arms": {
+      "convaiinnovations/laya/typed-decisions": {
+        "auroc": 0.7003,
+        "auroc_ci95_cluster": [
+          0.5795,
+          0.7999
+        ],
+        "lower_bound_clears_bar": false,
+        "diff_vs_ref": 0.0824,
+        "diff_vs_ref_ci95": [
+          -0.0328,
+          0.1825
+        ],
+        "fixed_vs_negative_group": {
+          "topic": {
+            "auroc": 0.7132,
+            "n": 96,
+            "n_neg": 42
+          },
+          "mention": {
+            "auroc": 0.697,
+            "n": 65,
+            "n_neg": 11
+          },
+          "state": {
+            "auroc": 0.5741,
+            "n": 58,
+            "n_neg": 4
+          }
+        },
+        "auroc_by_repo": {
+          "BurntSushi/ripgrep": {
+            "auroc": 0.5667,
+            "n": 16,
+            "n_neg": 6
+          },
+          "astral-sh/uv": {
+            "auroc": 0.6713,
+            "n": 24,
+            "n_neg": 13
+          },
+          "axil-dogfood": {
+            "auroc": 0.76,
+            "n": 15,
+            "n_neg": 10
+          },
+          "cberner/redb": {
+            "auroc": 0.7321,
+            "n": 15,
+            "n_neg": 7
+          },
+          "pykeio/ort": {
+            "auroc": null,
+            "n": 1,
+            "n_neg": 1
+          },
+          "quickwit-oss/tantivy": {
+            "auroc": 0.75,
+            "n": 21,
+            "n_neg": 9
+          },
+          "tokio-rs/tokio": {
+            "auroc": 0.8636,
+            "n": 19,
+            "n_neg": 11
+          }
+        }
+      },
+      "nli-deberta-v3-xsmall": {
+        "auroc": 0.6179,
+        "auroc_ci95_cluster": [
+          0.5237,
+          0.7094
+        ],
+        "lower_bound_clears_bar": false,
+        "diff_vs_ref": null,
+        "diff_vs_ref_ci95": null,
+        "fixed_vs_negative_group": {
+          "topic": {
+            "auroc": 0.6186,
+            "n": 96,
+            "n_neg": 42
+          },
+          "mention": {
+            "auroc": 0.5808,
+            "n": 65,
+            "n_neg": 11
+          },
+          "state": {
+            "auroc": 0.713,
+            "n": 58,
+            "n_neg": 4
+          }
+        },
+        "auroc_by_repo": {
+          "BurntSushi/ripgrep": {
+            "auroc": 0.5333,
+            "n": 16,
+            "n_neg": 6
+          },
+          "astral-sh/uv": {
+            "auroc": 0.5804,
+            "n": 24,
+            "n_neg": 13
+          },
+          "axil-dogfood": {
+            "auroc": 0.44,
+            "n": 15,
+            "n_neg": 10
+          },
+          "cberner/redb": {
+            "auroc": 0.5357,
+            "n": 15,
+            "n_neg": 7
+          },
+          "pykeio/ort": {
+            "auroc": null,
+            "n": 1,
+            "n_neg": 1
+          },
+          "quickwit-oss/tantivy": {
+            "auroc": 0.6944,
+            "n": 21,
+            "n_neg": 9
+          },
+          "tokio-rs/tokio": {
+            "auroc": 0.5568,
+            "n": 19,
+            "n_neg": 11
+          }
+        }
+      },
+      "v2-s13": {
+        "auroc": 0.8067,
+        "auroc_ci95_cluster": [
+          0.7193,
+          0.8863
+        ],
+        "lower_bound_clears_bar": true,
+        "diff_vs_ref": 0.1888,
+        "diff_vs_ref_ci95": [
+          0.0652,
+          0.308
+        ],
+        "fixed_vs_negative_group": {
+          "topic": {
+            "auroc": 0.8122,
+            "n": 96,
+            "n_neg": 42
+          },
+          "mention": {
+            "auroc": 0.8249,
+            "n": 65,
+            "n_neg": 11
+          },
+          "state": {
+            "auroc": 0.6991,
+            "n": 58,
+            "n_neg": 4
+          }
+        },
+        "auroc_by_repo": {
+          "BurntSushi/ripgrep": {
+            "auroc": 0.7833,
+            "n": 16,
+            "n_neg": 6
+          },
+          "astral-sh/uv": {
+            "auroc": 0.8112,
+            "n": 24,
+            "n_neg": 13
+          },
+          "axil-dogfood": {
+            "auroc": 0.64,
+            "n": 15,
+            "n_neg": 10
+          },
+          "cberner/redb": {
+            "auroc": 0.7143,
+            "n": 15,
+            "n_neg": 7
+          },
+          "pykeio/ort": {
+            "auroc": null,
+            "n": 1,
+            "n_neg": 1
+          },
+          "quickwit-oss/tantivy": {
+            "auroc": 0.8889,
+            "n": 21,
+            "n_neg": 9
+          },
+          "tokio-rs/tokio": {
+            "auroc": 0.8523,
+            "n": 19,
+            "n_neg": 11
+          }
+        }
+      },
+      "v2-s13-nosib": {
+        "auroc": 0.8077,
+        "auroc_ci95_cluster": [
+          0.7204,
+          0.8872
+        ],
+        "lower_bound_clears_bar": true,
+        "diff_vs_ref": 0.1897,
+        "diff_vs_ref_ci95": [
+          0.0625,
+          0.3077
+        ],
+        "fixed_vs_negative_group": {
+          "topic": {
+            "auroc": 0.8108,
+            "n": 96,
+            "n_neg": 42
+          },
+          "mention": {
+            "auroc": 0.8434,
+            "n": 65,
+            "n_neg": 11
+          },
+          "state": {
+            "auroc": 0.6759,
+            "n": 58,
+            "n_neg": 4
+          }
+        },
+        "auroc_by_repo": {
+          "BurntSushi/ripgrep": {
+            "auroc": 0.7667,
+            "n": 16,
+            "n_neg": 6
+          },
+          "astral-sh/uv": {
+            "auroc": 0.8252,
+            "n": 24,
+            "n_neg": 13
+          },
+          "axil-dogfood": {
+            "auroc": 0.64,
+            "n": 15,
+            "n_neg": 10
+          },
+          "cberner/redb": {
+            "auroc": 0.7143,
+            "n": 15,
+            "n_neg": 7
+          },
+          "pykeio/ort": {
+            "auroc": null,
+            "n": 1,
+            "n_neg": 1
+          },
+          "quickwit-oss/tantivy": {
+            "auroc": 0.8889,
+            "n": 21,
+            "n_neg": 9
+          },
+          "tokio-rs/tokio": {
+            "auroc": 0.8864,
+            "n": 19,
+            "n_neg": 11
+          }
+        }
+      },
+      "v2-s29": {
+        "auroc": 0.7995,
+        "auroc_ci95_cluster": [
+          0.6993,
+          0.8878
+        ],
+        "lower_bound_clears_bar": false,
+        "diff_vs_ref": 0.1816,
+        "diff_vs_ref_ci95": [
+          0.044,
+          0.3094
+        ],
+        "fixed_vs_negative_group": {
+          "topic": {
+            "auroc": 0.806,
+            "n": 96,
+            "n_neg": 42
+          },
+          "mention": {
+            "auroc": 0.8199,
+            "n": 65,
+            "n_neg": 11
+          },
+          "state": {
+            "auroc": 0.6759,
+            "n": 58,
+            "n_neg": 4
+          }
+        },
+        "auroc_by_repo": {
+          "BurntSushi/ripgrep": {
+            "auroc": 0.8,
+            "n": 16,
+            "n_neg": 6
+          },
+          "astral-sh/uv": {
+            "auroc": 0.8252,
+            "n": 24,
+            "n_neg": 13
+          },
+          "axil-dogfood": {
+            "auroc": 0.62,
+            "n": 15,
+            "n_neg": 10
+          },
+          "cberner/redb": {
+            "auroc": 0.6607,
+            "n": 15,
+            "n_neg": 7
+          },
+          "pykeio/ort": {
+            "auroc": null,
+            "n": 1,
+            "n_neg": 1
+          },
+          "quickwit-oss/tantivy": {
+            "auroc": 0.8889,
+            "n": 21,
+            "n_neg": 9
+          },
+          "tokio-rs/tokio": {
+            "auroc": 0.8295,
+            "n": 19,
+            "n_neg": 11
+          }
+        }
+      },
+      "v2-s47": {
+        "auroc": 0.8122,
+        "auroc_ci95_cluster": [
+          0.7206,
+          0.8932
+        ],
+        "lower_bound_clears_bar": true,
+        "diff_vs_ref": 0.1943,
+        "diff_vs_ref_ci95": [
+          0.0692,
+          0.3136
+        ],
+        "fixed_vs_negative_group": {
+          "topic": {
+            "auroc": 0.828,
+            "n": 96,
+            "n_neg": 42
+          },
+          "mention": {
+            "auroc": 0.7963,
+            "n": 65,
+            "n_neg": 11
+          },
+          "state": {
+            "auroc": 0.6898,
+            "n": 58,
+            "n_neg": 4
+          }
+        },
+        "auroc_by_repo": {
+          "BurntSushi/ripgrep": {
+            "auroc": 0.7833,
+            "n": 16,
+            "n_neg": 6
+          },
+          "astral-sh/uv": {
+            "auroc": 0.8112,
+            "n": 24,
+            "n_neg": 13
+          },
+          "axil-dogfood": {
+            "auroc": 0.66,
+            "n": 15,
+            "n_neg": 10
+          },
+          "cberner/redb": {
+            "auroc": 0.7679,
+            "n": 15,
+            "n_neg": 7
+          },
+          "pykeio/ort": {
+            "auroc": null,
+            "n": 1,
+            "n_neg": 1
+          },
+          "quickwit-oss/tantivy": {
+            "auroc": 0.8611,
+            "n": 21,
+            "n_neg": 9
+          },
+          "tokio-rs/tokio": {
+            "auroc": 0.8636,
+            "n": 19,
+            "n_neg": 11
+          }
+        }
+      }
+    },
+    "seed_summary": {
+      "v2-s": {
+        "arms": 3,
+        "auroc_mean": 0.8061,
+        "auroc_sd": 0.0064
+      }
+    }
+  },
+  "u2_test_paired_vs_laya": {
+    "set": "U2 test split (sets/u2_repo.jsonl + sets/u2_github.jsonl)",
+    "n_test": 111,
+    "n_test_pos": 54,
+    "n_clusters": 56,
+    "negatives_by_group": {
+      "topic": 42,
+      "mention": 11,
+      "state": 4
+    },
+    "bootstrap": "2000 cluster resamples, shared by every arm (paired); repo-level correlation not modelled",
+    "bar": 0.7,
+    "reference_arm": "convaiinnovations/laya/typed-decisions",
+    "arms": {
+      "convaiinnovations/laya/typed-decisions": {
+        "auroc": 0.7003,
+        "auroc_ci95_cluster": [
+          0.5795,
+          0.7999
+        ],
+        "lower_bound_clears_bar": false,
+        "diff_vs_ref": null,
+        "diff_vs_ref_ci95": null,
+        "fixed_vs_negative_group": {
+          "topic": {
+            "auroc": 0.7132,
+            "n": 96,
+            "n_neg": 42
+          },
+          "mention": {
+            "auroc": 0.697,
+            "n": 65,
+            "n_neg": 11
+          },
+          "state": {
+            "auroc": 0.5741,
+            "n": 58,
+            "n_neg": 4
+          }
+        },
+        "auroc_by_repo": {
+          "BurntSushi/ripgrep": {
+            "auroc": 0.5667,
+            "n": 16,
+            "n_neg": 6
+          },
+          "astral-sh/uv": {
+            "auroc": 0.6713,
+            "n": 24,
+            "n_neg": 13
+          },
+          "axil-dogfood": {
+            "auroc": 0.76,
+            "n": 15,
+            "n_neg": 10
+          },
+          "cberner/redb": {
+            "auroc": 0.7321,
+            "n": 15,
+            "n_neg": 7
+          },
+          "pykeio/ort": {
+            "auroc": null,
+            "n": 1,
+            "n_neg": 1
+          },
+          "quickwit-oss/tantivy": {
+            "auroc": 0.75,
+            "n": 21,
+            "n_neg": 9
+          },
+          "tokio-rs/tokio": {
+            "auroc": 0.8636,
+            "n": 19,
+            "n_neg": 11
+          }
+        }
+      },
+      "nli-deberta-v3-xsmall": {
+        "auroc": 0.6179,
+        "auroc_ci95_cluster": [
+          0.5237,
+          0.7094
+        ],
+        "lower_bound_clears_bar": false,
+        "diff_vs_ref": -0.0824,
+        "diff_vs_ref_ci95": [
+          -0.1825,
+          0.0328
+        ],
+        "fixed_vs_negative_group": {
+          "topic": {
+            "auroc": 0.6186,
+            "n": 96,
+            "n_neg": 42
+          },
+          "mention": {
+            "auroc": 0.5808,
+            "n": 65,
+            "n_neg": 11
+          },
+          "state": {
+            "auroc": 0.713,
+            "n": 58,
+            "n_neg": 4
+          }
+        },
+        "auroc_by_repo": {
+          "BurntSushi/ripgrep": {
+            "auroc": 0.5333,
+            "n": 16,
+            "n_neg": 6
+          },
+          "astral-sh/uv": {
+            "auroc": 0.5804,
+            "n": 24,
+            "n_neg": 13
+          },
+          "axil-dogfood": {
+            "auroc": 0.44,
+            "n": 15,
+            "n_neg": 10
+          },
+          "cberner/redb": {
+            "auroc": 0.5357,
+            "n": 15,
+            "n_neg": 7
+          },
+          "pykeio/ort": {
+            "auroc": null,
+            "n": 1,
+            "n_neg": 1
+          },
+          "quickwit-oss/tantivy": {
+            "auroc": 0.6944,
+            "n": 21,
+            "n_neg": 9
+          },
+          "tokio-rs/tokio": {
+            "auroc": 0.5568,
+            "n": 19,
+            "n_neg": 11
+          }
+        }
+      },
+      "v2-s13": {
+        "auroc": 0.8067,
+        "auroc_ci95_cluster": [
+          0.7193,
+          0.8863
+        ],
+        "lower_bound_clears_bar": true,
+        "diff_vs_ref": 0.1064,
+        "diff_vs_ref_ci95": [
+          -0.0032,
+          0.2258
+        ],
+        "fixed_vs_negative_group": {
+          "topic": {
+            "auroc": 0.8122,
+            "n": 96,
+            "n_neg": 42
+          },
+          "mention": {
+            "auroc": 0.8249,
+            "n": 65,
+            "n_neg": 11
+          },
+          "state": {
+            "auroc": 0.6991,
+            "n": 58,
+            "n_neg": 4
+          }
+        },
+        "auroc_by_repo": {
+          "BurntSushi/ripgrep": {
+            "auroc": 0.7833,
+            "n": 16,
+            "n_neg": 6
+          },
+          "astral-sh/uv": {
+            "auroc": 0.8112,
+            "n": 24,
+            "n_neg": 13
+          },
+          "axil-dogfood": {
+            "auroc": 0.64,
+            "n": 15,
+            "n_neg": 10
+          },
+          "cberner/redb": {
+            "auroc": 0.7143,
+            "n": 15,
+            "n_neg": 7
+          },
+          "pykeio/ort": {
+            "auroc": null,
+            "n": 1,
+            "n_neg": 1
+          },
+          "quickwit-oss/tantivy": {
+            "auroc": 0.8889,
+            "n": 21,
+            "n_neg": 9
+          },
+          "tokio-rs/tokio": {
+            "auroc": 0.8523,
+            "n": 19,
+            "n_neg": 11
+          }
+        }
+      },
+      "v2-s13-nosib": {
+        "auroc": 0.8077,
+        "auroc_ci95_cluster": [
+          0.7204,
+          0.8872
+        ],
+        "lower_bound_clears_bar": true,
+        "diff_vs_ref": 0.1074,
+        "diff_vs_ref_ci95": [
+          -0.0041,
+          0.2252
+        ],
+        "fixed_vs_negative_group": {
+          "topic": {
+            "auroc": 0.8108,
+            "n": 96,
+            "n_neg": 42
+          },
+          "mention": {
+            "auroc": 0.8434,
+            "n": 65,
+            "n_neg": 11
+          },
+          "state": {
+            "auroc": 0.6759,
+            "n": 58,
+            "n_neg": 4
+          }
+        },
+        "auroc_by_repo": {
+          "BurntSushi/ripgrep": {
+            "auroc": 0.7667,
+            "n": 16,
+            "n_neg": 6
+          },
+          "astral-sh/uv": {
+            "auroc": 0.8252,
+            "n": 24,
+            "n_neg": 13
+          },
+          "axil-dogfood": {
+            "auroc": 0.64,
+            "n": 15,
+            "n_neg": 10
+          },
+          "cberner/redb": {
+            "auroc": 0.7143,
+            "n": 15,
+            "n_neg": 7
+          },
+          "pykeio/ort": {
+            "auroc": null,
+            "n": 1,
+            "n_neg": 1
+          },
+          "quickwit-oss/tantivy": {
+            "auroc": 0.8889,
+            "n": 21,
+            "n_neg": 9
+          },
+          "tokio-rs/tokio": {
+            "auroc": 0.8864,
+            "n": 19,
+            "n_neg": 11
+          }
+        }
+      },
+      "v2-s29": {
+        "auroc": 0.7995,
+        "auroc_ci95_cluster": [
+          0.6993,
+          0.8878
+        ],
+        "lower_bound_clears_bar": false,
+        "diff_vs_ref": 0.0993,
+        "diff_vs_ref_ci95": [
+          -0.0213,
+          0.2259
+        ],
+        "fixed_vs_negative_group": {
+          "topic": {
+            "auroc": 0.806,
+            "n": 96,
+            "n_neg": 42
+          },
+          "mention": {
+            "auroc": 0.8199,
+            "n": 65,
+            "n_neg": 11
+          },
+          "state": {
+            "auroc": 0.6759,
+            "n": 58,
+            "n_neg": 4
+          }
+        },
+        "auroc_by_repo": {
+          "BurntSushi/ripgrep": {
+            "auroc": 0.8,
+            "n": 16,
+            "n_neg": 6
+          },
+          "astral-sh/uv": {
+            "auroc": 0.8252,
+            "n": 24,
+            "n_neg": 13
+          },
+          "axil-dogfood": {
+            "auroc": 0.62,
+            "n": 15,
+            "n_neg": 10
+          },
+          "cberner/redb": {
+            "auroc": 0.6607,
+            "n": 15,
+            "n_neg": 7
+          },
+          "pykeio/ort": {
+            "auroc": null,
+            "n": 1,
+            "n_neg": 1
+          },
+          "quickwit-oss/tantivy": {
+            "auroc": 0.8889,
+            "n": 21,
+            "n_neg": 9
+          },
+          "tokio-rs/tokio": {
+            "auroc": 0.8295,
+            "n": 19,
+            "n_neg": 11
+          }
+        }
+      },
+      "v2-s47": {
+        "auroc": 0.8122,
+        "auroc_ci95_cluster": [
+          0.7206,
+          0.8932
+        ],
+        "lower_bound_clears_bar": true,
+        "diff_vs_ref": 0.1119,
+        "diff_vs_ref_ci95": [
+          0.0071,
+          0.2262
+        ],
+        "fixed_vs_negative_group": {
+          "topic": {
+            "auroc": 0.828,
+            "n": 96,
+            "n_neg": 42
+          },
+          "mention": {
+            "auroc": 0.7963,
+            "n": 65,
+            "n_neg": 11
+          },
+          "state": {
+            "auroc": 0.6898,
+            "n": 58,
+            "n_neg": 4
+          }
+        },
+        "auroc_by_repo": {
+          "BurntSushi/ripgrep": {
+            "auroc": 0.7833,
+            "n": 16,
+            "n_neg": 6
+          },
+          "astral-sh/uv": {
+            "auroc": 0.8112,
+            "n": 24,
+            "n_neg": 13
+          },
+          "axil-dogfood": {
+            "auroc": 0.66,
+            "n": 15,
+            "n_neg": 10
+          },
+          "cberner/redb": {
+            "auroc": 0.7679,
+            "n": 15,
+            "n_neg": 7
+          },
+          "pykeio/ort": {
+            "auroc": null,
+            "n": 1,
+            "n_neg": 1
+          },
+          "quickwit-oss/tantivy": {
+            "auroc": 0.8611,
+            "n": 21,
+            "n_neg": 9
+          },
+          "tokio-rs/tokio": {
+            "auroc": 0.8636,
+            "n": 19,
+            "n_neg": 11
+          }
+        }
+      }
+    },
+    "seed_summary": {
+      "v2-s": {
+        "arms": 3,
+        "auroc_mean": 0.8061,
+        "auroc_sd": 0.0064
+      }
+    }
+  },
+  "u2_test_scores": {
+    "nli-deberta-v3-xsmall": {
+      "e1-03": 7.201591473806927e-05,
+      "e1-04": 0.0008237942477188841,
+      "e1-06": 0.00016532790718201925,
+      "e1-09": 0.0013323975492830723,
+      "e1-10": 0.019081244094454802,
+      "e0-01": 0.0006789190207748235,
+      "e0-02": 0.00017174622735508186,
+      "e0-04": 0.0002581977431805585,
+      "e0-06": 0.0009158866373971665,
+      "e0-07": 0.0008608380682163651,
+      "e0-10": 0.0001202058444726843,
+      "e0-11": 0.02588188548255112,
+      "e0-12": 0.0002908978439941766,
+      "e0-13": 0.0025861253753111406,
+      "e0-14": 0.0014026191530640965,
+      "gh-ort-609-downstream_workaround": 0.000923475095903314,
+      "gh-redb-1072-fixed": 0.001361467884755055,
+      "gh-redb-1072-other_fix": 0.0034311908034800544,
+      "gh-redb-1331-fixed": 0.0027891654336394006,
+      "gh-redb-1331-other_fix": 0.001101337893402296,
+      "gh-redb-364-fixed": 0.011135279025609226,
+      "gh-redb-405-fixed": 0.00022336321351284683,
+      "gh-redb-450-other_fix": 0.018551822920560537,
+      "gh-redb-471-fixed": 0.014464859102997574,
+      "gh-redb-594-fixed": 0.006707212083431919,
+      "gh-redb-594-other_fix": 0.013019901840331053,
+      "gh-redb-629-other_fix": 0.05270628920676414,
+      "gh-redb-715-fixed": 0.9720914560355558,
+      "gh-redb-715-other_fix": 0.002499957514651634,
+      "gh-redb-798-fixed": 0.027526893005676182,
+      "gh-redb-798-other_fix": 0.002585460380576456,
+      "gh-ripgrep-2574-fixed": 0.07126277790193443,
+      "gh-ripgrep-2574-other_fix": 0.07464561785753664,
+      "gh-ripgrep-2767-fixed": 0.01582275620236797,
+      "gh-ripgrep-2884-other_fix": 0.02778157833927627,
+      "gh-ripgrep-2956-fixed": 0.000678947665231441,
+      "gh-ripgrep-3076-fixed": 0.027718395093947742,
+      "gh-ripgrep-3135-fixed": 0.12954840675915893,
+      "gh-ripgrep-3155-fixed": 0.013535876392205614,
+      "gh-ripgrep-3173-other_fix": 0.05562920333814265,
+      "gh-ripgrep-3180-fixed": 0.11031728317561254,
+      "gh-ripgrep-3184-fixed": 0.9444542865952944,
+      "gh-ripgrep-3184-mentioned_not_fix": 0.00442075153139339,
+      "gh-ripgrep-3419-downstream_workaround": 0.004906919459544425,
+      "gh-ripgrep-3419-fixed": 0.0007822178506268003,
+      "gh-ripgrep-3419-other_fix": 0.023129186529516756,
+      "gh-ripgrep-3453-fixed": 0.007448432669903081,
+      "gh-tantivy-1291-fixed": 0.012729065469073273,
+      "gh-tantivy-1291-other_fix": 0.05769238501234013,
+      "gh-tantivy-1303-fixed": 0.009904301462732154,
+      "gh-tantivy-1303-other_fix": 0.00108536653995084,
+      "gh-tantivy-1366-other_fix": 0.6629207312924666,
+      "gh-tantivy-1757-fixed": 0.00046154578260249144,
+      "gh-tantivy-1859-fixed": 0.08766350416258083,
+      "gh-tantivy-1863-fixed": 0.004524857423458834,
+      "gh-tantivy-1863-other_fix": 0.003932698509595742,
+      "gh-tantivy-1967-fixed": 0.01299419642418849,
+      "gh-tantivy-2112-other_fix": 0.004774004194345898,
+      "gh-tantivy-2180-fixed": 0.0009000139647209849,
+      "gh-tantivy-2225-other_fix": 0.0019569052306252282,
+      "gh-tantivy-2251-fixed": 0.9223054116390451,
+      "gh-tantivy-2494-fixed": 0.9229390779013926,
+      "gh-tantivy-2607-fixed": 0.0036020143054464413,
+      "gh-tantivy-2607-mentioned_not_fix": 0.0009598221902971419,
+      "gh-tantivy-2607-other_fix": 0.0007941094714603654,
+      "gh-tantivy-2788-fixed": 0.329898812523998,
+      "gh-tantivy-3086-fixed": 0.007751396091253119,
+      "gh-tantivy-3086-other_fix": 0.000851712114612417,
+      "gh-tokio-6820-other_fix": 0.0005932813459728876,
+      "gh-tokio-6837-fixed": 0.1883715738382675,
+      "gh-tokio-7019-other_fix": 0.000632153810426865,
+      "gh-tokio-7036-fixed": 0.011033206185297116,
+      "gh-tokio-7133-fixed": 0.000270005331965905,
+      "gh-tokio-7133-other_fix": 0.0009183082486069975,
+      "gh-tokio-7368-fixed": 0.0003691881720843154,
+      "gh-tokio-7563-other_fix": 0.0003979112994893236,
+      "gh-tokio-7691-fixed": 0.0006831781210552757,
+      "gh-tokio-7691-mentioned_not_fix": 0.006132814021217913,
+      "gh-tokio-7751-downstream_workaround": 0.8764503701160109,
+      "gh-tokio-7751-fixed": 0.011527157254490801,
+      "gh-tokio-7751-other_fix": 0.0006068501388218183,
+      "gh-tokio-7979-other_fix": 0.006311069884271076,
+      "gh-tokio-8061-downstream_workaround": 0.00130590662260569,
+      "gh-tokio-8061-fixed": 0.0896579882754717,
+      "gh-tokio-8423-other_fix": 0.0004982314682044944,
+      "gh-tokio-8433-fixed": 0.0002893415833652387,
+      "gh-tokio-8433-other_fix": 0.0001227671015047656,
+      "gh-uv-18809-fixed": 0.0006146248498885393,
+      "gh-uv-18809-other_fix": 0.00032206056762645803,
+      "gh-uv-18916-fixed": 0.0746333937192001,
+      "gh-uv-18939-other_fix": 0.0005641978393786429,
+      "gh-uv-19080-downstream_workaround": 0.016708758738942484,
+      "gh-uv-19080-fixed": 0.0016634054128324618,
+      "gh-uv-19080-other_fix": 0.0009666290180883021,
+      "gh-uv-19258-downstream_workaround": 0.00019234522245862792,
+      "gh-uv-19258-other_fix": 0.001703584979086244,
+      "gh-uv-19326-fixed": 0.0015982416026824884,
+      "gh-uv-19326-other_fix": 0.0010723159284082428,
+      "gh-uv-19534-fixed": 0.0009675404512082474,
+      "gh-uv-19672-fixed": 0.001320146376514825,
+      "gh-uv-19811-fixed": 0.0031688147908166264,
+      "gh-uv-19811-other_fix": 0.005102723849338722,
+      "gh-uv-19832-fixed": 0.006649661200534463,
+      "gh-uv-19832-other_fix": 0.0007114294852717174,
+      "gh-uv-19972-mentioned_not_fix": 0.0009814512443397972,
+      "gh-uv-19972-other_fix": 0.0021275017110165325,
+      "gh-uv-20128-fixed": 0.0009096230680794915,
+      "gh-uv-20912-fixed": 0.0022353202692242296,
+      "gh-uv-20912-mentioned_not_fix": 0.002898305984842037,
+      "gh-uv-20949-fixed": 0.0014426321961729216,
+      "gh-uv-21846-other_fix": 0.014205874008952566
+    },
+    "v2-s13": {
+      "e1-03": 0.7880262302086187,
+      "e1-04": 0.7668664073530488,
+      "e1-06": 0.08540438890986538,
+      "e1-09": 0.5650955284844338,
+      "e1-10": 0.10838256295987239,
+      "e0-01": 0.9275843560478372,
+      "e0-02": 0.3354198223618083,
+      "e0-04": 0.24545196921988238,
+      "e0-06": 0.14941800551814954,
+      "e0-07": 0.17623105322314825,
+      "e0-10": 0.05247392887258728,
+      "e0-11": 0.045518360264181885,
+      "e0-12": 0.39499689726733334,
+      "e0-13": 0.3268675388287056,
+      "e0-14": 0.0865599943311405,
+      "gh-ort-609-downstream_workaround": 0.1757424849801015,
+      "gh-redb-1072-fixed": 0.5303326787729213,
+      "gh-redb-1072-other_fix": 0.6137789433271533,
+      "gh-redb-1331-fixed": 0.47331007743962716,
+      "gh-redb-1331-other_fix": 0.24013545147182605,
+      "gh-redb-364-fixed": 0.04337252190792107,
+      "gh-redb-405-fixed": 0.6993583613017963,
+      "gh-redb-450-other_fix": 0.007196150663886224,
+      "gh-redb-471-fixed": 0.23294348504226178,
+      "gh-redb-594-fixed": 0.9207148743395694,
+      "gh-redb-594-other_fix": 0.017419716582580357,
+      "gh-redb-629-other_fix": 0.6776455813564412,
+      "gh-redb-715-fixed": 0.9903167399063613,
+      "gh-redb-715-other_fix": 0.024519962475950063,
+      "gh-redb-798-fixed": 0.4245114350939068,
+      "gh-redb-798-other_fix": 0.4763955938500763,
+      "gh-ripgrep-2574-fixed": 0.8786999442588266,
+      "gh-ripgrep-2574-other_fix": 0.6995174213729936,
+      "gh-ripgrep-2767-fixed": 0.9504769034295015,
+      "gh-ripgrep-2884-other_fix": 0.20517875645470635,
+      "gh-ripgrep-2956-fixed": 0.9216549324841075,
+      "gh-ripgrep-3076-fixed": 0.5692648753812805,
+      "gh-ripgrep-3135-fixed": 0.8127337816647652,
+      "gh-ripgrep-3155-fixed": 0.6097751203728339,
+      "gh-ripgrep-3173-other_fix": 0.07588455400237012,
+      "gh-ripgrep-3180-fixed": 0.20518915235312626,
+      "gh-ripgrep-3184-fixed": 0.8920637776857507,
+      "gh-ripgrep-3184-mentioned_not_fix": 0.1657698443574473,
+      "gh-ripgrep-3419-downstream_workaround": 0.1662025717053492,
+      "gh-ripgrep-3419-fixed": 0.07681352173345102,
+      "gh-ripgrep-3419-other_fix": 0.7114760643981558,
+      "gh-ripgrep-3453-fixed": 0.6355297604492832,
+      "gh-tantivy-1291-fixed": 0.8097622204281104,
+      "gh-tantivy-1291-other_fix": 0.0557963543787785,
+      "gh-tantivy-1303-fixed": 0.9300226916632994,
+      "gh-tantivy-1303-other_fix": 0.29683707792268305,
+      "gh-tantivy-1366-other_fix": 0.16373539238061388,
+      "gh-tantivy-1757-fixed": 0.8570707594402651,
+      "gh-tantivy-1859-fixed": 0.9769787438548703,
+      "gh-tantivy-1863-fixed": 0.9078076072377758,
+      "gh-tantivy-1863-other_fix": 0.5505845839475119,
+      "gh-tantivy-1967-fixed": 0.3874049448218483,
+      "gh-tantivy-2112-other_fix": 0.026472255283757656,
+      "gh-tantivy-2180-fixed": 0.15016580583966668,
+      "gh-tantivy-2225-other_fix": 0.8090350782921797,
+      "gh-tantivy-2251-fixed": 0.8129835928024578,
+      "gh-tantivy-2494-fixed": 0.8800671598013596,
+      "gh-tantivy-2607-fixed": 0.37332440233901,
+      "gh-tantivy-2607-mentioned_not_fix": 0.4608633106022983,
+      "gh-tantivy-2607-other_fix": 0.24150868704576126,
+      "gh-tantivy-2788-fixed": 0.9775576586532649,
+      "gh-tantivy-3086-fixed": 0.9557604444576457,
+      "gh-tantivy-3086-other_fix": 0.0376901441237919,
+      "gh-tokio-6820-other_fix": 0.14090731644473026,
+      "gh-tokio-6837-fixed": 0.6487353148911732,
+      "gh-tokio-7019-other_fix": 0.11328090520074806,
+      "gh-tokio-7036-fixed": 0.050800429318273436,
+      "gh-tokio-7133-fixed": 0.7419469215315483,
+      "gh-tokio-7133-other_fix": 0.1319984268019068,
+      "gh-tokio-7368-fixed": 0.32762881010752,
+      "gh-tokio-7563-other_fix": 0.27075282291084185,
+      "gh-tokio-7691-fixed": 0.5841981719073063,
+      "gh-tokio-7691-mentioned_not_fix": 0.5020579698406037,
+      "gh-tokio-7751-downstream_workaround": 0.027076139249838458,
+      "gh-tokio-7751-fixed": 0.9147988701142881,
+      "gh-tokio-7751-other_fix": 0.051133235890884414,
+      "gh-tokio-7979-other_fix": 0.2075705102316929,
+      "gh-tokio-8061-downstream_workaround": 0.4135731668360601,
+      "gh-tokio-8061-fixed": 0.6458035868228665,
+      "gh-tokio-8423-other_fix": 0.07704505695949249,
+      "gh-tokio-8433-fixed": 0.39533889158298335,
+      "gh-tokio-8433-other_fix": 0.011462572438644661,
+      "gh-uv-18809-fixed": 0.6341186128877923,
+      "gh-uv-18809-other_fix": 0.31837040590924276,
+      "gh-uv-18916-fixed": 0.9847810933097463,
+      "gh-uv-18939-other_fix": 0.1587983145309136,
+      "gh-uv-19080-downstream_workaround": 0.027721432980220336,
+      "gh-uv-19080-fixed": 0.18629747956716128,
+      "gh-uv-19080-other_fix": 0.4996058750543844,
+      "gh-uv-19258-downstream_workaround": 0.4261101021954299,
+      "gh-uv-19258-other_fix": 0.464121828197289,
+      "gh-uv-19326-fixed": 0.09497939804347155,
+      "gh-uv-19326-other_fix": 0.18236099901946315,
+      "gh-uv-19534-fixed": 0.9524292101055659,
+      "gh-uv-19672-fixed": 0.5697893828963243,
+      "gh-uv-19811-fixed": 0.9211845831867549,
+      "gh-uv-19811-other_fix": 0.5231355137473526,
+      "gh-uv-19832-fixed": 0.4843871356256559,
+      "gh-uv-19832-other_fix": 0.027518362096742393,
+      "gh-uv-19972-mentioned_not_fix": 0.08490549597693559,
+      "gh-uv-19972-other_fix": 0.09214108446005692,
+      "gh-uv-20128-fixed": 0.9912764020271441,
+      "gh-uv-20912-fixed": 0.27862084987653674,
+      "gh-uv-20912-mentioned_not_fix": 0.4232411404432418,
+      "gh-uv-20949-fixed": 0.6456810366488867,
+      "gh-uv-21846-other_fix": 0.6193051192001909
+    },
+    "v2-s29": {
+      "e1-03": 0.7632376641877605,
+      "e1-04": 0.88516317882482,
+      "e1-06": 0.08340327182276716,
+      "e1-09": 0.635996666012635,
+      "e1-10": 0.07060120775563762,
+      "e0-01": 0.9652665837983878,
+      "e0-02": 0.3523464322178678,
+      "e0-04": 0.36779947633660376,
+      "e0-06": 0.20178776584132946,
+      "e0-07": 0.11182447290679332,
+      "e0-10": 0.1070594421991792,
+      "e0-11": 0.0157980587020651,
+      "e0-12": 0.48282643628778316,
+      "e0-13": 0.42562954389142793,
+      "e0-14": 0.05127707314663318,
+      "gh-ort-609-downstream_workaround": 0.13694619502508418,
+      "gh-redb-1072-fixed": 0.4582431668261996,
+      "gh-redb-1072-other_fix": 0.6710729117423531,
+      "gh-redb-1331-fixed": 0.4556391711746897,
+      "gh-redb-1331-other_fix": 0.13157375554670694,
+      "gh-redb-364-fixed": 0.0230923661074518,
+      "gh-redb-405-fixed": 0.5623766892541161,
+      "gh-redb-450-other_fix": 0.0028985422393495194,
+      "gh-redb-471-fixed": 0.1665519348972913,
+      "gh-redb-594-fixed": 0.9513481029167815,
+      "gh-redb-594-other_fix": 0.00873742846770243,
+      "gh-redb-629-other_fix": 0.6806854056944355,
+      "gh-redb-715-fixed": 0.989076313297734,
+      "gh-redb-715-other_fix": 0.034273618851735195,
+      "gh-redb-798-fixed": 0.32166797880615866,
+      "gh-redb-798-other_fix": 0.5229259484388065,
+      "gh-ripgrep-2574-fixed": 0.8581662170293419,
+      "gh-ripgrep-2574-other_fix": 0.30907905950603076,
+      "gh-ripgrep-2767-fixed": 0.956013864031622,
+      "gh-ripgrep-2884-other_fix": 0.07676158396389,
+      "gh-ripgrep-2956-fixed": 0.9029088482403791,
+      "gh-ripgrep-3076-fixed": 0.6483753007221772,
+      "gh-ripgrep-3135-fixed": 0.6314042602764866,
+      "gh-ripgrep-3155-fixed": 0.6082738809052843,
+      "gh-ripgrep-3173-other_fix": 0.0844276759217986,
+      "gh-ripgrep-3180-fixed": 0.17953138051844783,
+      "gh-ripgrep-3184-fixed": 0.9033590535026155,
+      "gh-ripgrep-3184-mentioned_not_fix": 0.16635825653825695,
+      "gh-ripgrep-3419-downstream_workaround": 0.3971903828533118,
+      "gh-ripgrep-3419-fixed": 0.08258999713643525,
+      "gh-ripgrep-3419-other_fix": 0.7728381235148664,
+      "gh-ripgrep-3453-fixed": 0.661972609071216,
+      "gh-tantivy-1291-fixed": 0.9098663148008711,
+      "gh-tantivy-1291-other_fix": 0.006894625389835869,
+      "gh-tantivy-1303-fixed": 0.9275592763659126,
+      "gh-tantivy-1303-other_fix": 0.5046749759481733,
+      "gh-tantivy-1366-other_fix": 0.02634325261189091,
+      "gh-tantivy-1757-fixed": 0.88132488690162,
+      "gh-tantivy-1859-fixed": 0.9772884109078023,
+      "gh-tantivy-1863-fixed": 0.9130154469555019,
+      "gh-tantivy-1863-other_fix": 0.7201162503976695,
+      "gh-tantivy-1967-fixed": 0.25268336343410086,
+      "gh-tantivy-2112-other_fix": 0.021350307631446713,
+      "gh-tantivy-2180-fixed": 0.17671978945718878,
+      "gh-tantivy-2225-other_fix": 0.7473507989513873,
+      "gh-tantivy-2251-fixed": 0.8002074689589828,
+      "gh-tantivy-2494-fixed": 0.865238778682632,
+      "gh-tantivy-2607-fixed": 0.42456442390019494,
+      "gh-tantivy-2607-mentioned_not_fix": 0.36008040882691944,
+      "gh-tantivy-2607-other_fix": 0.21041753152543224,
+      "gh-tantivy-2788-fixed": 0.9728755026739945,
+      "gh-tantivy-3086-fixed": 0.9537902454153311,
+      "gh-tantivy-3086-other_fix": 0.07634942210716564,
+      "gh-tokio-6820-other_fix": 0.09054406868532888,
+      "gh-tokio-6837-fixed": 0.8130652605634135,
+      "gh-tokio-7019-other_fix": 0.04804656521433613,
+      "gh-tokio-7036-fixed": 0.03181452726485259,
+      "gh-tokio-7133-fixed": 0.6145352163439289,
+      "gh-tokio-7133-other_fix": 0.09373877256682153,
+      "gh-tokio-7368-fixed": 0.33687511148523674,
+      "gh-tokio-7563-other_fix": 0.1459221810949584,
+      "gh-tokio-7691-fixed": 0.4675110155348472,
+      "gh-tokio-7691-mentioned_not_fix": 0.424711647838675,
+      "gh-tokio-7751-downstream_workaround": 0.026199948460048417,
+      "gh-tokio-7751-fixed": 0.9032636363428721,
+      "gh-tokio-7751-other_fix": 0.040165683711857324,
+      "gh-tokio-7979-other_fix": 0.2738550562836268,
+      "gh-tokio-8061-downstream_workaround": 0.47880881807533904,
+      "gh-tokio-8061-fixed": 0.8332609532180556,
+      "gh-tokio-8423-other_fix": 0.053607539656187794,
+      "gh-tokio-8433-fixed": 0.2555346237461811,
+      "gh-tokio-8433-other_fix": 0.010538945193220468,
+      "gh-uv-18809-fixed": 0.6819292445836752,
+      "gh-uv-18809-other_fix": 0.21301495392481523,
+      "gh-uv-18916-fixed": 0.9859935300939527,
+      "gh-uv-18939-other_fix": 0.2538383003211068,
+      "gh-uv-19080-downstream_workaround": 0.018042580464501117,
+      "gh-uv-19080-fixed": 0.2824571063386169,
+      "gh-uv-19080-other_fix": 0.38838522198643777,
+      "gh-uv-19258-downstream_workaround": 0.2091808733704316,
+      "gh-uv-19258-other_fix": 0.4014885460191732,
+      "gh-uv-19326-fixed": 0.09807806994456096,
+      "gh-uv-19326-other_fix": 0.12185515445262822,
+      "gh-uv-19534-fixed": 0.9095914835699167,
+      "gh-uv-19672-fixed": 0.42645719238877144,
+      "gh-uv-19811-fixed": 0.839968310210553,
+      "gh-uv-19811-other_fix": 0.40468411076652117,
+      "gh-uv-19832-fixed": 0.5152154043741831,
+      "gh-uv-19832-other_fix": 0.017531744925178148,
+      "gh-uv-19972-mentioned_not_fix": 0.031190437410204566,
+      "gh-uv-19972-other_fix": 0.20124876530366523,
+      "gh-uv-20128-fixed": 0.9915256689444746,
+      "gh-uv-20912-fixed": 0.21888905153720745,
+      "gh-uv-20912-mentioned_not_fix": 0.45575900078067516,
+      "gh-uv-20949-fixed": 0.5395429784527824,
+      "gh-uv-21846-other_fix": 0.6332572301227202
+    },
+    "v2-s47": {
+      "e1-03": 0.8174075476693664,
+      "e1-04": 0.8816847057848194,
+      "e1-06": 0.04478447043146726,
+      "e1-09": 0.6004114843294296,
+      "e1-10": 0.22056632343280835,
+      "e0-01": 0.9344710770470697,
+      "e0-02": 0.4527941884537948,
+      "e0-04": 0.25201628290031464,
+      "e0-06": 0.16531123161481084,
+      "e0-07": 0.1266470726105166,
+      "e0-10": 0.11303258811604829,
+      "e0-11": 0.01452866396609709,
+      "e0-12": 0.5359093010691859,
+      "e0-13": 0.4003323056530082,
+      "e0-14": 0.05071159703783727,
+      "gh-ort-609-downstream_workaround": 0.2804052209026388,
+      "gh-redb-1072-fixed": 0.527692223087985,
+      "gh-redb-1072-other_fix": 0.5250939798370655,
+      "gh-redb-1331-fixed": 0.5516197366356824,
+      "gh-redb-1331-other_fix": 0.232352403523251,
+      "gh-redb-364-fixed": 0.0774242041511505,
+      "gh-redb-405-fixed": 0.580675639575975,
+      "gh-redb-450-other_fix": 0.002998812905578361,
+      "gh-redb-471-fixed": 0.3096433978214587,
+      "gh-redb-594-fixed": 0.8923170004539835,
+      "gh-redb-594-other_fix": 0.007544084231769179,
+      "gh-redb-629-other_fix": 0.7755129912668549,
+      "gh-redb-715-fixed": 0.9903083988957324,
+      "gh-redb-715-other_fix": 0.02964432895557716,
+      "gh-redb-798-fixed": 0.35622942402581576,
+      "gh-redb-798-other_fix": 0.43425367577039614,
+      "gh-ripgrep-2574-fixed": 0.8131143528781494,
+      "gh-ripgrep-2574-other_fix": 0.30872340137462206,
+      "gh-ripgrep-2767-fixed": 0.9641891136209899,
+      "gh-ripgrep-2884-other_fix": 0.16958832962259057,
+      "gh-ripgrep-2956-fixed": 0.8753134673717152,
+      "gh-ripgrep-3076-fixed": 0.41418825131130566,
+      "gh-ripgrep-3135-fixed": 0.6901798325007499,
+      "gh-ripgrep-3155-fixed": 0.5799651274981172,
+      "gh-ripgrep-3173-other_fix": 0.0983047151249856,
+      "gh-ripgrep-3180-fixed": 0.25034045320102905,
+      "gh-ripgrep-3184-fixed": 0.8642375065432739,
+      "gh-ripgrep-3184-mentioned_not_fix": 0.23562286969437995,
+      "gh-ripgrep-3419-downstream_workaround": 0.3619697941785803,
+      "gh-ripgrep-3419-fixed": 0.07722004116045682,
+      "gh-ripgrep-3419-other_fix": 0.7968052971599929,
+      "gh-ripgrep-3453-fixed": 0.539159153421506,
+      "gh-tantivy-1291-fixed": 0.9455555879298888,
+      "gh-tantivy-1291-other_fix": 0.014890395663489892,
+      "gh-tantivy-1303-fixed": 0.8787805596240469,
+      "gh-tantivy-1303-other_fix": 0.4362075419460959,
+      "gh-tantivy-1366-other_fix": 0.10333493670371019,
+      "gh-tantivy-1757-fixed": 0.9264431443594815,
+      "gh-tantivy-1859-fixed": 0.9811991587495211,
+      "gh-tantivy-1863-fixed": 0.9058912426838952,
+      "gh-tantivy-1863-other_fix": 0.7589126094234072,
+      "gh-tantivy-1967-fixed": 0.40069096448822733,
+      "gh-tantivy-2112-other_fix": 0.02477847456171796,
+      "gh-tantivy-2180-fixed": 0.21069797624527797,
+      "gh-tantivy-2225-other_fix": 0.7262549781927429,
+      "gh-tantivy-2251-fixed": 0.6693378334505306,
+      "gh-tantivy-2494-fixed": 0.9032296756453195,
+      "gh-tantivy-2607-fixed": 0.346408546246898,
+      "gh-tantivy-2607-mentioned_not_fix": 0.42388510277587244,
+      "gh-tantivy-2607-other_fix": 0.2509114481703666,
+      "gh-tantivy-2788-fixed": 0.9756945463750794,
+      "gh-tantivy-3086-fixed": 0.9595739706466334,
+      "gh-tantivy-3086-other_fix": 0.15134375997231791,
+      "gh-tokio-6820-other_fix": 0.12571407742846333,
+      "gh-tokio-6837-fixed": 0.6875589316521079,
+      "gh-tokio-7019-other_fix": 0.11854894609897494,
+      "gh-tokio-7036-fixed": 0.10168240524262856,
+      "gh-tokio-7133-fixed": 0.7860741283813564,
+      "gh-tokio-7133-other_fix": 0.06136209685351241,
+      "gh-tokio-7368-fixed": 0.5570384851345025,
+      "gh-tokio-7563-other_fix": 0.30437753561748687,
+      "gh-tokio-7691-fixed": 0.48263336701891124,
+      "gh-tokio-7691-mentioned_not_fix": 0.49984528441282816,
+      "gh-tokio-7751-downstream_workaround": 0.13092908280075707,
+      "gh-tokio-7751-fixed": 0.9229950683385568,
+      "gh-tokio-7751-other_fix": 0.11154827617191286,
+      "gh-tokio-7979-other_fix": 0.23538952152469644,
+      "gh-tokio-8061-downstream_workaround": 0.5025900068929249,
+      "gh-tokio-8061-fixed": 0.8260138689297919,
+      "gh-tokio-8423-other_fix": 0.05599739089669464,
+      "gh-tokio-8433-fixed": 0.31050407077249953,
+      "gh-tokio-8433-other_fix": 0.022891645100067116,
+      "gh-uv-18809-fixed": 0.6927022291611447,
+      "gh-uv-18809-other_fix": 0.29099340770731236,
+      "gh-uv-18916-fixed": 0.9853925009378953,
+      "gh-uv-18939-other_fix": 0.19255746194083762,
+      "gh-uv-19080-downstream_workaround": 0.03231922934070169,
+      "gh-uv-19080-fixed": 0.2059088535342397,
+      "gh-uv-19080-other_fix": 0.4548458585542363,
+      "gh-uv-19258-downstream_workaround": 0.47012121075532987,
+      "gh-uv-19258-other_fix": 0.2754835126055616,
+      "gh-uv-19326-fixed": 0.057957570870949035,
+      "gh-uv-19326-other_fix": 0.07300923586868657,
+      "gh-uv-19534-fixed": 0.884816219309507,
+      "gh-uv-19672-fixed": 0.5151786556803871,
+      "gh-uv-19811-fixed": 0.9082418126761116,
+      "gh-uv-19811-other_fix": 0.2828911698410583,
+      "gh-uv-19832-fixed": 0.5356787487446325,
+      "gh-uv-19832-other_fix": 0.02713790187035302,
+      "gh-uv-19972-mentioned_not_fix": 0.05503443918220164,
+      "gh-uv-19972-other_fix": 0.24556418391948193,
+      "gh-uv-20128-fixed": 0.991354200835699,
+      "gh-uv-20912-fixed": 0.17936168059555607,
+      "gh-uv-20912-mentioned_not_fix": 0.4471719688627785,
+      "gh-uv-20949-fixed": 0.6398149561483031,
+      "gh-uv-21846-other_fix": 0.3238303322239375
+    },
+    "v2-s13-nosib": {
+      "e1-03": 0.7515607663589258,
+      "e1-04": 0.7928209660366287,
+      "e1-06": 0.04732120471343807,
+      "e1-09": 0.5263721702096484,
+      "e1-10": 0.19244377461158257,
+      "e0-01": 0.9539646759299802,
+      "e0-02": 0.4040266780720687,
+      "e0-04": 0.48962300646683854,
+      "e0-06": 0.24017712269237293,
+      "e0-07": 0.23698753139211606,
+      "e0-10": 0.1514466462984753,
+      "e0-11": 0.03021964300238314,
+      "e0-12": 0.5142473347994525,
+      "e0-13": 0.40333569529820285,
+      "e0-14": 0.034693866672666204,
+      "gh-ort-609-downstream_workaround": 0.11547084005647798,
+      "gh-redb-1072-fixed": 0.5154195872292442,
+      "gh-redb-1072-other_fix": 0.5322442477068473,
+      "gh-redb-1331-fixed": 0.5231834502031244,
+      "gh-redb-1331-other_fix": 0.3630581196834132,
+      "gh-redb-364-fixed": 0.05782502200306972,
+      "gh-redb-405-fixed": 0.5319595378228622,
+      "gh-redb-450-other_fix": 0.011059688043417967,
+      "gh-redb-471-fixed": 0.2522631579073156,
+      "gh-redb-594-fixed": 0.9197442333412792,
+      "gh-redb-594-other_fix": 0.012012768721828443,
+      "gh-redb-629-other_fix": 0.6001244390506859,
+      "gh-redb-715-fixed": 0.98841430913212,
+      "gh-redb-715-other_fix": 0.04247877230302584,
+      "gh-redb-798-fixed": 0.4572973640441456,
+      "gh-redb-798-other_fix": 0.3753816861625763,
+      "gh-ripgrep-2574-fixed": 0.7765839757641372,
+      "gh-ripgrep-2574-other_fix": 0.5794919252243852,
+      "gh-ripgrep-2767-fixed": 0.9168522919248513,
+      "gh-ripgrep-2884-other_fix": 0.21745561711766948,
+      "gh-ripgrep-2956-fixed": 0.8890071255876353,
+      "gh-ripgrep-3076-fixed": 0.6092941871118602,
+      "gh-ripgrep-3135-fixed": 0.7133484882513501,
+      "gh-ripgrep-3155-fixed": 0.49958300305946957,
+      "gh-ripgrep-3173-other_fix": 0.0933067751964344,
+      "gh-ripgrep-3180-fixed": 0.2134469084455169,
+      "gh-ripgrep-3184-fixed": 0.8525837715915898,
+      "gh-ripgrep-3184-mentioned_not_fix": 0.17135510014556427,
+      "gh-ripgrep-3419-downstream_workaround": 0.23358115966333,
+      "gh-ripgrep-3419-fixed": 0.10069875911131428,
+      "gh-ripgrep-3419-other_fix": 0.7104236331897155,
+      "gh-ripgrep-3453-fixed": 0.496924600934506,
+      "gh-tantivy-1291-fixed": 0.8823247100359979,
+      "gh-tantivy-1291-other_fix": 0.01981103599030963,
+      "gh-tantivy-1303-fixed": 0.8640473835831457,
+      "gh-tantivy-1303-other_fix": 0.2248687672267413,
+      "gh-tantivy-1366-other_fix": 0.1288084464160778,
+      "gh-tantivy-1757-fixed": 0.8805376019657493,
+      "gh-tantivy-1859-fixed": 0.9764500367815322,
+      "gh-tantivy-1863-fixed": 0.8859237920991602,
+      "gh-tantivy-1863-other_fix": 0.7637216621405265,
+      "gh-tantivy-1967-fixed": 0.3126764261600247,
+      "gh-tantivy-2112-other_fix": 0.024176933547082814,
+      "gh-tantivy-2180-fixed": 0.18036516011662543,
+      "gh-tantivy-2225-other_fix": 0.7020481309235658,
+      "gh-tantivy-2251-fixed": 0.7523233342022677,
+      "gh-tantivy-2494-fixed": 0.857556956897723,
+      "gh-tantivy-2607-fixed": 0.3335433270012911,
+      "gh-tantivy-2607-mentioned_not_fix": 0.376176856393273,
+      "gh-tantivy-2607-other_fix": 0.2836480852475767,
+      "gh-tantivy-2788-fixed": 0.9654478455142206,
+      "gh-tantivy-3086-fixed": 0.9599054588869667,
+      "gh-tantivy-3086-other_fix": 0.0386713169308909,
+      "gh-tokio-6820-other_fix": 0.19248044658248745,
+      "gh-tokio-6837-fixed": 0.6047536821103388,
+      "gh-tokio-7019-other_fix": 0.11946102689548269,
+      "gh-tokio-7036-fixed": 0.14527275234676099,
+      "gh-tokio-7133-fixed": 0.6196221123462672,
+      "gh-tokio-7133-other_fix": 0.09842148617073634,
+      "gh-tokio-7368-fixed": 0.2663990194666146,
+      "gh-tokio-7563-other_fix": 0.2760560993894362,
+      "gh-tokio-7691-fixed": 0.4993327704195671,
+      "gh-tokio-7691-mentioned_not_fix": 0.3970011079209281,
+      "gh-tokio-7751-downstream_workaround": 0.031023694459636972,
+      "gh-tokio-7751-fixed": 0.8682726115638584,
+      "gh-tokio-7751-other_fix": 0.031047299864422603,
+      "gh-tokio-7979-other_fix": 0.3180902029421776,
+      "gh-tokio-8061-downstream_workaround": 0.465018649916798,
+      "gh-tokio-8061-fixed": 0.6953949447533166,
+      "gh-tokio-8423-other_fix": 0.16495422861582995,
+      "gh-tokio-8433-fixed": 0.4773653443132182,
+      "gh-tokio-8433-other_fix": 0.02030724989772504,
+      "gh-uv-18809-fixed": 0.7607943223779793,
+      "gh-uv-18809-other_fix": 0.2758513387760453,
+      "gh-uv-18916-fixed": 0.9809689315986071,
+      "gh-uv-18939-other_fix": 0.1985754942926352,
+      "gh-uv-19080-downstream_workaround": 0.06754682278661465,
+      "gh-uv-19080-fixed": 0.31394992904717994,
+      "gh-uv-19080-other_fix": 0.34217724861347115,
+      "gh-uv-19258-downstream_workaround": 0.3022139349937961,
+      "gh-uv-19258-other_fix": 0.3452337048436003,
+      "gh-uv-19326-fixed": 0.07081880045326452,
+      "gh-uv-19326-other_fix": 0.1110521673517665,
+      "gh-uv-19534-fixed": 0.8975670642421955,
+      "gh-uv-19672-fixed": 0.5092751290009742,
+      "gh-uv-19811-fixed": 0.8842862218477169,
+      "gh-uv-19811-other_fix": 0.4354463360677938,
+      "gh-uv-19832-fixed": 0.4225870409963485,
+      "gh-uv-19832-other_fix": 0.016516853211300843,
+      "gh-uv-19972-mentioned_not_fix": 0.09000506466784301,
+      "gh-uv-19972-other_fix": 0.10581747170026645,
+      "gh-uv-20128-fixed": 0.9902513664643031,
+      "gh-uv-20912-fixed": 0.3272836692239619,
+      "gh-uv-20912-mentioned_not_fix": 0.4777565127704296,
+      "gh-uv-20949-fixed": 0.6375334817658593,
+      "gh-uv-21846-other_fix": 0.5345833330716417
+    },
+    "convaiinnovations/laya/typed-decisions": {
+      "e1-03": 0.5145,
+      "e1-04": 0.4494,
+      "e1-06": 0.2294,
+      "e1-09": 0.576,
+      "e1-10": 0.6113,
+      "e0-01": 0.2242,
+      "e0-02": 0.1202,
+      "e0-04": 0.1827,
+      "e0-06": 0.1889,
+      "e0-07": 0.4585,
+      "e0-10": 0.465,
+      "e0-11": 0.554,
+      "e0-12": 0.3221,
+      "e0-13": 0.151,
+      "e0-14": 0.5907,
+      "gh-ort-609-downstream_workaround": 0.4504,
+      "gh-redb-1072-fixed": 0.2727,
+      "gh-redb-1072-other_fix": 0.2661,
+      "gh-redb-1331-fixed": 0.4596,
+      "gh-redb-1331-other_fix": 0.3334,
+      "gh-redb-364-fixed": 0.2565,
+      "gh-redb-405-fixed": 0.3761,
+      "gh-redb-450-other_fix": 0.5268,
+      "gh-redb-471-fixed": 0.4192,
+      "gh-redb-594-fixed": 0.404,
+      "gh-redb-594-other_fix": 0.25,
+      "gh-redb-629-other_fix": 0.3894,
+      "gh-redb-715-fixed": 0.567,
+      "gh-redb-715-other_fix": 0.2932,
+      "gh-redb-798-fixed": 0.464,
+      "gh-redb-798-other_fix": 0.2533,
+      "gh-ripgrep-2574-fixed": 0.3533,
+      "gh-ripgrep-2574-other_fix": 0.302,
+      "gh-ripgrep-2767-fixed": 0.5204,
+      "gh-ripgrep-2884-other_fix": 0.3388,
+      "gh-ripgrep-2956-fixed": 0.4122,
+      "gh-ripgrep-3076-fixed": 0.4123,
+      "gh-ripgrep-3135-fixed": 0.3989,
+      "gh-ripgrep-3155-fixed": 0.1767,
+      "gh-ripgrep-3173-other_fix": 0.5971,
+      "gh-ripgrep-3180-fixed": 0.4531,
+      "gh-ripgrep-3184-fixed": 0.4567,
+      "gh-ripgrep-3184-mentioned_not_fix": 0.2912,
+      "gh-ripgrep-3419-downstream_workaround": 0.4444,
+      "gh-ripgrep-3419-fixed": 0.1992,
+      "gh-ripgrep-3419-other_fix": 0.3149,
+      "gh-ripgrep-3453-fixed": 0.3328,
+      "gh-tantivy-1291-fixed": 0.5244,
+      "gh-tantivy-1291-other_fix": 0.2436,
+      "gh-tantivy-1303-fixed": 0.5047,
+      "gh-tantivy-1303-other_fix": 0.3804,
+      "gh-tantivy-1366-other_fix": 0.32,
+      "gh-tantivy-1757-fixed": 0.2304,
+      "gh-tantivy-1859-fixed": 0.5524,
+      "gh-tantivy-1863-fixed": 0.4159,
+      "gh-tantivy-1863-other_fix": 0.4982,
+      "gh-tantivy-1967-fixed": 0.3506,
+      "gh-tantivy-2112-other_fix": 0.3258,
+      "gh-tantivy-2180-fixed": 0.1581,
+      "gh-tantivy-2225-other_fix": 0.4438,
+      "gh-tantivy-2251-fixed": 0.6286,
+      "gh-tantivy-2494-fixed": 0.5319,
+      "gh-tantivy-2607-fixed": 0.3191,
+      "gh-tantivy-2607-mentioned_not_fix": 0.1688,
+      "gh-tantivy-2607-other_fix": 0.2549,
+      "gh-tantivy-2788-fixed": 0.6134,
+      "gh-tantivy-3086-fixed": 0.5874,
+      "gh-tantivy-3086-other_fix": 0.3132,
+      "gh-tokio-6820-other_fix": 0.2066,
+      "gh-tokio-6837-fixed": 0.5331,
+      "gh-tokio-7019-other_fix": 0.2023,
+      "gh-tokio-7036-fixed": 0.3934,
+      "gh-tokio-7133-fixed": 0.4486,
+      "gh-tokio-7133-other_fix": 0.2337,
+      "gh-tokio-7368-fixed": 0.3413,
+      "gh-tokio-7563-other_fix": 0.245,
+      "gh-tokio-7691-fixed": 0.355,
+      "gh-tokio-7691-mentioned_not_fix": 0.2857,
+      "gh-tokio-7751-downstream_workaround": 0.3902,
+      "gh-tokio-7751-fixed": 0.3906,
+      "gh-tokio-7751-other_fix": 0.2039,
+      "gh-tokio-7979-other_fix": 0.4167,
+      "gh-tokio-8061-downstream_workaround": 0.1752,
+      "gh-tokio-8061-fixed": 0.3605,
+      "gh-tokio-8423-other_fix": 0.165,
+      "gh-tokio-8433-fixed": 0.2352,
+      "gh-tokio-8433-other_fix": 0.1655,
+      "gh-uv-18809-fixed": 0.3183,
+      "gh-uv-18809-other_fix": 0.18,
+      "gh-uv-18916-fixed": 0.3185,
+      "gh-uv-18939-other_fix": 0.2753,
+      "gh-uv-19080-downstream_workaround": 0.4732,
+      "gh-uv-19080-fixed": 0.1776,
+      "gh-uv-19080-other_fix": 0.2384,
+      "gh-uv-19258-downstream_workaround": 0.2842,
+      "gh-uv-19258-other_fix": 0.4531,
+      "gh-uv-19326-fixed": 0.42,
+      "gh-uv-19326-other_fix": 0.2392,
+      "gh-uv-19534-fixed": 0.3836,
+      "gh-uv-19672-fixed": 0.2176,
+      "gh-uv-19811-fixed": 0.5015,
+      "gh-uv-19811-other_fix": 0.1516,
+      "gh-uv-19832-fixed": 0.3773,
+      "gh-uv-19832-other_fix": 0.2729,
+      "gh-uv-19972-mentioned_not_fix": 0.1947,
+      "gh-uv-19972-other_fix": 0.3149,
+      "gh-uv-20128-fixed": 0.3792,
+      "gh-uv-20912-fixed": 0.1942,
+      "gh-uv-20912-mentioned_not_fix": 0.1922,
+      "gh-uv-20949-fixed": 0.2741,
+      "gh-uv-21846-other_fix": 0.2031
+    }
+  }
+}
