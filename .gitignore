@@ -5,12 +5,14 @@ models/
 # Benchmark crate sources are tracked. Per-benchmark generated/heavy
 # artefacts are not — dataset downloads (data/), Cargo target dirs,
 # transient `out/` runs from gate scripts, raw `.out` console captures,
-# and Cargo.lock for the workspace-excluded harnesses.
+# and Cargo.lock for the workspace-excluded harnesses, except LongMemEval's,
+# which is pinned so every arm of a comparison builds the same harness.
 /benchmarks/**/data/
 /benchmarks/**/target/
 /benchmarks/**/out/
 /benchmarks/**/*.out
 /benchmarks/**/Cargo.lock
+!/benchmarks/longmemeval/Cargo.lock
 .axil/
 docs/book/
 .claude-octopus/

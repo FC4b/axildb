@@ -115,13 +115,15 @@ fetches.
 benchmarks/longmemeval/model-ab/run.sh build
 ```
 
-This copies `Cargo.lock.pinned` to `benchmarks/longmemeval/Cargo.lock`, where
-the build reads it. That path is gitignored, so the lockfile lives here under
-another name. The script then builds the harness with `cargo +1.92.0 build
---release --locked`, which fails rather than resolve other versions. The
-pinned lockfile is the one the Mac's s20 harness was built with
-(sha256 `2da16fc4…1bca6e0`). `ort` downloads the ONNX Runtime binaries
-during the build, so the build needs network access.
+The harness's lockfile is committed at `benchmarks/longmemeval/Cargo.lock`,
+where the build reads it, with the same content as `Cargo.lock.pinned` here
+(the name the A/B results record). `build` still copies `Cargo.lock.pinned`
+into place, which changes nothing unless the committed lockfile has moved on
+since; `check` then reports the tracked file as changed. The script then builds
+the harness with `cargo +1.92.0 build --release --locked`, which fails rather
+than resolve other versions. The pinned lockfile is the one the Mac's s20
+harness was built with (sha256 `2da16fc4…62bca6e0`). `ort` downloads the ONNX
+Runtime binaries during the build, so the build needs network access.
 
 ## 4. Check
 
