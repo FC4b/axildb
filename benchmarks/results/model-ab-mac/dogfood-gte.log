@@ -1,0 +1,5 @@
+[12:36:46] gte: swap (49.50 54.55 36.19)
+[axil-vector] CPU execution provider (no GPU feature compiled in)
+[12:40:48] gte: eval (58.45 64.60 45.87)
+[12:49:59] gte: done (47.17 41.33 40.98)
+EXIT 0

@@ -1,0 +1,776 @@
+{
+  "item": "Embedding-model A/B on Axil's own harnesses: bge-small-en-v1.5 (default) vs granite-embedding-small-english-r2 vs gte-modernbert-base, all unprompted",
+  "date": "2026-10-15",
+  "status": "partial: dogfood, CLI latency and LongMemEval s20 for bge-small and granite measured; gte s20 running; m5 and s60 run on a second machine",
+  "raw_outputs": {
+    "mac": "benchmarks/results/model-ab-mac/ (per-question dogfood reports, store rebuild reports, LongMemEval reports with .meta/.load/.err, CLI latency, parity oracle, and the scripts that made them)",
+    "second_machine": "benchmarks/results/model-ab-pc/ (written by benchmarks/longmemeval/model-ab/run.sh)"
+  },
+  "scope_note": "The spec's LongMemEval runs each cover one question type: s20 is the first 20 questions of LongMemEval-S, all single-session-user; m5 is the first 5 of LongMemEval-M, all single-session-assistant. s60 (10 questions per type, benchmarks/longmemeval/model-ab/s60-question-ids.json) was added for bge-small and granite so that a default-model recommendation does not rest on one type. Dogfood is 57 questions; one question moves a hit metric by 0.0175, and two plain runs an hour apart have differed by up to 0.03.",
+  "models": {
+    "bge-small": {
+      "name": "bge-small-en-v1.5",
+      "repo": "BAAI/bge-small-en-v1.5",
+      "revision": "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a",
+      "dimensions": 384,
+      "max_seq_len": 512,
+      "pooling": "cls",
+      "parameters": "33M",
+      "licence": "MIT",
+      "download_bytes": 133804886
+    },
+    "granite": {
+      "name": "granite-embedding-small-english-r2",
+      "repo": "onnx-community/granite-embedding-small-english-r2-ONNX (fp32 export of ibm-granite/granite-embedding-small-english-r2)",
+      "revision": "1dc7835ba0cb9c76a3618d0bf0c427c97671b3c8",
+      "upstream_revision": "ibm-granite/granite-embedding-small-english-r2@2ab6fa8ea2d674564defd37171ae19079b864b33",
+      "dimensions": 384,
+      "max_seq_len": 8192,
+      "pooling": "cls",
+      "parameters": "47M",
+      "licence": "Apache-2.0",
+      "download_bytes": 197155278,
+      "onnx_availability": "IBM ships no ONNX; onnx-community (Xenova) export used, pinned with sha256s in download.rs"
+    },
+    "gte": {
+      "name": "gte-modernbert-base",
+      "repo": "Alibaba-NLP/gte-modernbert-base",
+      "revision": "e7f32e3c00f91d699e8c43b53106206bcc72bb22",
+      "dimensions": 768,
+      "max_seq_len": 8192,
+      "pooling": "cls (was mean before 2dd7180)",
+      "parameters": "149M",
+      "licence": "Apache-2.0",
+      "download_bytes": 599975543
+    },
+    "prompts": "none for any model (28.10b result: every model stays unprompted)"
+  },
+  "parity": {
+    "what": "sentence-transformers 5.1.1 on the upstream PyTorch weights at the pinned revisions vs onnxruntime 1.23.2 on the exact pinned ONNX files, 4 texts (11 to 1,203 tokens); then the Rust embedder (examples/embed_probe) against the same texts",
+    "granite": {
+      "cosine_st_vs_onnx_cls_min": 1.0,
+      "cosine_st_vs_onnx_mean": [
+        0.9303,
+        0.9149,
+        0.9201,
+        0.8963
+      ]
+    },
+    "gte": {
+      "cosine_st_vs_onnx_cls_min": 0.999987,
+      "cosine_st_vs_onnx_mean": [
+        0.7465,
+        0.8575,
+        0.7488,
+        0.7166
+      ]
+    },
+    "rust": "first five dimensions of the Rust embedder's vectors equal the onnxruntime [CLS] ones to 5 decimals for both models (fixed build); the pre-fix build mean-pools gte and differs",
+    "finding": "gte-modernbert-base was registered with mean pooling; upstream pools on [CLS] (1_Pooling/config.json, model card). Fixed in 2dd7180; stores embedded with it need a re-embed."
+  },
+  "provenance": {
+    "machine": "Apple M1 Pro, 10 cores, 16 GiB, macOS 26.6, CPU execution provider (ort 2.0.0-rc.10)",
+    "load": "shared with other agents' builds and tests: 1-minute load average 30-110 during every timed run, recorded per run; every timing here comes from a loaded machine",
+    "toolchain": "rustc 1.92.0",
+    "branch": "feat/model-ab from dev 346d03e",
+    "build_commit": "2dd7180 (axil, LongMemEval harness); swap_model example from 86d18b3 (same tree plus the example)",
+    "binaries_sha256": {
+      "axil": "37e34475d259aa2effbce552ef73ed293da1f7e0e66070c840514836151ff877",
+      "swap_model": "75c004e9a770eb3dcffcdfbfbe69e2e432d60a9ce87acbab15e307ddfbafd9bd",
+      "longmemeval_bench_s20": "1c49e90115b8d8f7378b4cda8d4872d75d2db3f51d7e1d520053a5886f991b9d",
+      "prefix_axil_gte_mean_arm": "242dfa91317f538e582ae3644d0f962f8e4f6b3a107a729706387d35b8b41239 (git archive of 3970fde, sources touched so cargo rebuilt; checked to mean-pool gte)",
+      "prefix_swap_model_gte_mean_arm": "cf54a386d719d7c724e68fcfb1f4ffae4012e2d39a8b9540f8be811b5eb1439f"
+    },
+    "longmemeval_lockfile_sha256": "2da16fc49957042c908f999af4572e90be2ec2b87ae0bd1f86656ed662bca6e0 (one lockfile for every arm; committed as benchmarks/longmemeval/model-ab/Cargo.lock.pinned)",
+    "longmemeval_dataset": {
+      "source": "huggingface.co/datasets/xiaowu0162/longmemeval-cleaned@98d7416c24c778c2fee6e6f3006e7a073259d48f",
+      "longmemeval_s_cleaned.json": "d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442",
+      "longmemeval_m_cleaned.json": "9d79e5524794a2e6900a3aa9cb7d9152c5a3e8319c9a87c25494ba1eacee495f"
+    },
+    "dogfood_snapshot": {
+      "path": "benchmarks/dogfood-recall/data/snap-prefix (main checkout, created 2026-09-28)",
+      "memory.axil": "e2c43335570cd8996f8055d292acfabb65cd4085e5ea40f9e9175fe63b25f0b2",
+      "memory.axil.vec": "5a134b406f823b8b9152747a7b7ac50b419cb99ed3530f8e09c29b45c6af7289",
+      "questions.jsonl": "2305b38499ac69d1c6c046e71a9d24cb15bcc1d16f79bda8fe11a943a56392cf"
+    }
+  },
+  "method": {
+    "dogfood": "python3 benchmarks/dogfood-recall/run.py --axil <axil> --snapshot <per-model snapshot> --fetch 10. Each model's snapshot is snap-prefix with its .vec rebuilt by crates/engines/axil-vector/examples/swap_model.rs: the same 1,444 vector owners (232 memory records, 1,042 code proxies, 141 file summaries, 26 recall chunks, 3 checkpoints), each embedded with the new model from the text insert or its writer embeds; the 870 orphan vectors are dropped as heal --reindex drops them; axil.toml names the model. Rebuilt with bge-small it reproduces 1,443 of 1,444 stored vectors at cosine >= 0.99, and its eval differs from the untouched snapshot (control) on one question (q29, 3 -> 1), the orphans' effect seen on 2026-10-04.",
+    "longmemeval": "longmemeval-bench --variant s --limit 20 --strategy recall-qtc --top-k 5 --model <m> --jobs 1; exact vector scan (per-question stores are far below the 20k threshold), one binary and one lockfile for all arms",
+    "latency": "axil recall <q> --recall-format context-block --budget 2000 --top-k 5 (the prompt hook's call), one-shot process per question, the three snapshots interleaved question by question, one warm-up"
+  },
+  "dogfood": {
+    "bge-small": {
+      "overall": {
+        "hit@1": 0.7018,
+        "hit@5": 0.8947,
+        "hit@10": 0.9298,
+        "mrr@10": 0.8029,
+        "recall_all@10": 0.9123,
+        "ndcg@10": 0.8208,
+        "hook_hit": 0.8947,
+        "hook_tokens": 305.5658
+      },
+      "by_kind": {
+        "commit": {
+          "n": 4,
+          "mrr@10": 1.0,
+          "hit@5": 1.0,
+          "recall_all@10": 1.0,
+          "hook_hit": 1.0
+        },
+        "context": {
+          "n": 5,
+          "mrr@10": 0.8,
+          "hit@5": 1.0,
+          "recall_all@10": 1.0,
+          "hook_hit": 1.0
+        },
+        "decision": {
+          "n": 27,
+          "mrr@10": 0.7259,
+          "hit@5": 0.8519,
+          "recall_all@10": 0.8889,
+          "hook_hit": 0.8519
+        },
+        "error": {
+          "n": 19,
+          "mrr@10": 0.8509,
+          "hit@5": 0.8947,
+          "recall_all@10": 0.8947,
+          "hook_hit": 0.8947
+        },
+        "rule": {
+          "n": 2,
+          "mrr@10": 1.0,
+          "hit@5": 1.0,
+          "recall_all@10": 1.0,
+          "hook_hit": 1.0
+        }
+      },
+      "phase_load_1m": {
+        "swap": {
+          "time": "12:26:25",
+          "load1": 4.74
+        },
+        "eval": {
+          "time": "12:26:46",
+          "load1": 8.27
+        },
+        "done": {
+          "time": "12:30:44",
+          "load1": 58.01
+        }
+      },
+      "store_rebuild": {
+        "vectors": 1444,
+        "embed_seconds": 19.783,
+        "embed_ms_per_vector": 13.7,
+        "vec_file_bytes": 4919296,
+        "note": "timed under load; see phase_load_1m.swap"
+      }
+    },
+    "granite": {
+      "overall": {
+        "hit@1": 0.6842,
+        "hit@5": 0.9298,
+        "hit@10": 0.9298,
+        "mrr@10": 0.7959,
+        "recall_all@10": 0.9298,
+        "ndcg@10": 0.8198,
+        "hook_hit": 0.9298,
+        "hook_tokens": 311.2412
+      },
+      "by_kind": {
+        "commit": {
+          "n": 4,
+          "mrr@10": 1.0,
+          "hit@5": 1.0,
+          "recall_all@10": 1.0,
+          "hook_hit": 1.0
+        },
+        "context": {
+          "n": 5,
+          "mrr@10": 0.9,
+          "hit@5": 1.0,
+          "recall_all@10": 1.0,
+          "hook_hit": 1.0
+        },
+        "decision": {
+          "n": 27,
+          "mrr@10": 0.7049,
+          "hit@5": 0.8889,
+          "recall_all@10": 0.8889,
+          "hook_hit": 0.8889
+        },
+        "error": {
+          "n": 19,
+          "mrr@10": 0.8684,
+          "hit@5": 0.9474,
+          "recall_all@10": 0.9474,
+          "hook_hit": 0.9474
+        },
+        "rule": {
+          "n": 2,
+          "mrr@10": 0.6667,
+          "hit@5": 1.0,
+          "recall_all@10": 1.0,
+          "hook_hit": 1.0
+        }
+      },
+      "phase_load_1m": {
+        "swap": {
+          "time": "12:31:04",
+          "load1": 54.97
+        },
+        "eval": {
+          "time": "12:32:16",
+          "load1": 84.74
+        },
+        "done": {
+          "time": "12:36:38",
+          "load1": 52.59
+        }
+      },
+      "store_rebuild": {
+        "vectors": 1444,
+        "embed_seconds": 70.961,
+        "embed_ms_per_vector": 49.142,
+        "vec_file_bytes": 4919296,
+        "note": "timed under load; see phase_load_1m.swap"
+      }
+    },
+    "gte": {
+      "overall": {
+        "hit@1": 0.7018,
+        "hit@5": 0.9298,
+        "hit@10": 0.9298,
+        "mrr@10": 0.7921,
+        "recall_all@10": 0.9298,
+        "ndcg@10": 0.8136,
+        "hook_hit": 0.9298,
+        "hook_tokens": 331.3202
+      },
+      "by_kind": {
+        "commit": {
+          "n": 4,
+          "mrr@10": 0.875,
+          "hit@5": 1.0,
+          "recall_all@10": 1.0,
+          "hook_hit": 1.0
+        },
+        "context": {
+          "n": 5,
+          "mrr@10": 0.85,
+          "hit@5": 1.0,
+          "recall_all@10": 1.0,
+          "hook_hit": 1.0
+        },
+        "decision": {
+          "n": 27,
+          "mrr@10": 0.6926,
+          "hit@5": 0.8889,
+          "recall_all@10": 0.8889,
+          "hook_hit": 0.8889
+        },
+        "error": {
+          "n": 19,
+          "mrr@10": 0.8789,
+          "hit@5": 0.9474,
+          "recall_all@10": 0.9474,
+          "hook_hit": 0.9474
+        },
+        "rule": {
+          "n": 2,
+          "mrr@10": 1.0,
+          "hit@5": 1.0,
+          "recall_all@10": 1.0,
+          "hook_hit": 1.0
+        }
+      },
+      "phase_load_1m": {
+        "swap": {
+          "time": "12:36:46",
+          "load1": 49.5
+        },
+        "eval": {
+          "time": "12:40:48",
+          "load1": 58.45
+        },
+        "done": {
+          "time": "12:49:59",
+          "load1": 47.17
+        }
+      },
+      "store_rebuild": {
+        "vectors": 1444,
+        "embed_seconds": 241.014,
+        "embed_ms_per_vector": 166.907,
+        "vec_file_bytes": 10883072,
+        "note": "timed under load; see phase_load_1m.swap"
+      }
+    },
+    "granite_minus_bge": {
+      "hit@1": -0.0176,
+      "hit@5": 0.0351,
+      "hit@10": 0.0,
+      "mrr@10": -0.007,
+      "recall_all@10": 0.0175,
+      "ndcg@10": -0.001,
+      "hook_hit": 0.0351,
+      "hook_tokens": 5.6754
+    },
+    "gte_minus_bge": {
+      "hit@1": 0.0,
+      "hit@5": 0.0351,
+      "hit@10": 0.0,
+      "mrr@10": -0.0108,
+      "recall_all@10": 0.0175,
+      "ndcg@10": -0.0072,
+      "hook_hit": 0.0351,
+      "hook_tokens": 25.7544
+    },
+    "granite_vs_bge_questions": {
+      "first_rank_better": 6,
+      "first_rank_worse": 9,
+      "changed_first_rank": {
+        "q11": [
+          null,
+          2
+        ],
+        "q17": [
+          2,
+          1
+        ],
+        "q24": [
+          2,
+          1
+        ],
+        "q32": [
+          2,
+          1
+        ],
+        "q36": [
+          2,
+          1
+        ],
+        "q48": [
+          null,
+          2
+        ],
+        "q03": [
+          1,
+          2
+        ],
+        "q06": [
+          2,
+          5
+        ],
+        "q08": [
+          1,
+          2
+        ],
+        "q09": [
+          10,
+          null
+        ],
+        "q26": [
+          2,
+          3
+        ],
+        "q29": [
+          1,
+          3
+        ],
+        "q33": [
+          1,
+          2
+        ],
+        "q34": [
+          1,
+          2
+        ],
+        "q47": [
+          6,
+          null
+        ]
+      },
+      "hook_block_gained": [
+        "q11",
+        "q48"
+      ],
+      "hook_block_lost": []
+    },
+    "gte_vs_bge_questions": {
+      "first_rank_better": 8,
+      "first_rank_worse": 11,
+      "changed_first_rank": {
+        "q09": [
+          10,
+          5
+        ],
+        "q11": [
+          null,
+          1
+        ],
+        "q17": [
+          2,
+          1
+        ],
+        "q24": [
+          2,
+          1
+        ],
+        "q27": [
+          2,
+          1
+        ],
+        "q32": [
+          2,
+          1
+        ],
+        "q36": [
+          2,
+          1
+        ],
+        "q48": [
+          null,
+          2
+        ],
+        "q03": [
+          1,
+          2
+        ],
+        "q05": [
+          1,
+          2
+        ],
+        "q06": [
+          2,
+          null
+        ],
+        "q08": [
+          1,
+          2
+        ],
+        "q10": [
+          1,
+          3
+        ],
+        "q25": [
+          2,
+          3
+        ],
+        "q26": [
+          2,
+          3
+        ],
+        "q41": [
+          1,
+          5
+        ],
+        "q47": [
+          6,
+          null
+        ],
+        "q52": [
+          2,
+          4
+        ],
+        "q55": [
+          1,
+          2
+        ]
+      },
+      "hook_block_gained": [
+        "q09",
+        "q11",
+        "q48"
+      ],
+      "hook_block_lost": [
+        "q06"
+      ]
+    },
+    "control_untouched_snapshot_bge": {
+      "overall": {
+        "hit@1": 0.6842,
+        "hit@5": 0.8947,
+        "hit@10": 0.9298,
+        "mrr@10": 0.7912,
+        "recall_all@10": 0.9123,
+        "ndcg@10": 0.8117,
+        "hook_hit": 0.8947,
+        "hook_tokens": 302.8728
+      },
+      "by_kind": {
+        "commit": {
+          "n": 4,
+          "mrr@10": 1.0,
+          "hit@5": 1.0,
+          "recall_all@10": 1.0,
+          "hook_hit": 1.0
+        },
+        "context": {
+          "n": 5,
+          "mrr@10": 0.8,
+          "hit@5": 1.0,
+          "recall_all@10": 1.0,
+          "hook_hit": 1.0
+        },
+        "decision": {
+          "n": 27,
+          "mrr@10": 0.7259,
+          "hit@5": 0.8519,
+          "recall_all@10": 0.8889,
+          "hook_hit": 0.8519
+        },
+        "error": {
+          "n": 19,
+          "mrr@10": 0.8509,
+          "hit@5": 0.8947,
+          "recall_all@10": 0.8947,
+          "hook_hit": 0.8947
+        },
+        "rule": {
+          "n": 2,
+          "mrr@10": 0.6667,
+          "hit@5": 1.0,
+          "recall_all@10": 1.0,
+          "hook_hit": 1.0
+        }
+      },
+      "phase_load_1m": {
+        "eval": {
+          "time": "12:50:10",
+          "load1": 43.0
+        },
+        "done": {
+          "time": "12:53:59",
+          "load1": 52.3
+        }
+      }
+    },
+    "gte_as_shipped_mean_pooling": {
+      "overall": {
+        "hit@1": 0.7018,
+        "hit@5": 0.8947,
+        "hit@10": 0.9298,
+        "mrr@10": 0.7823,
+        "recall_all@10": 0.8772,
+        "ndcg@10": 0.7984,
+        "hook_hit": 0.8772,
+        "hook_tokens": 331.6184
+      },
+      "by_kind": {
+        "commit": {
+          "n": 4,
+          "mrr@10": 0.5774,
+          "hit@5": 0.5,
+          "recall_all@10": 1.0,
+          "hook_hit": 0.5
+        },
+        "context": {
+          "n": 5,
+          "mrr@10": 0.9,
+          "hit@5": 1.0,
+          "recall_all@10": 1.0,
+          "hook_hit": 1.0
+        },
+        "decision": {
+          "n": 27,
+          "mrr@10": 0.7019,
+          "hit@5": 0.8889,
+          "recall_all@10": 0.8889,
+          "hook_hit": 0.8519
+        },
+        "error": {
+          "n": 19,
+          "mrr@10": 0.886,
+          "hit@5": 0.9474,
+          "recall_all@10": 0.7895,
+          "hook_hit": 0.9474
+        },
+        "rule": {
+          "n": 2,
+          "mrr@10": 1.0,
+          "hit@5": 1.0,
+          "recall_all@10": 1.0,
+          "hook_hit": 1.0
+        }
+      },
+      "phase_load_1m": {
+        "swap": {
+          "time": "14:13:05",
+          "load1": 69.26
+        },
+        "eval": {
+          "time": "14:18:28",
+          "load1": 225.65
+        },
+        "done": {
+          "time": "14:33:19",
+          "load1": 33.15
+        }
+      },
+      "store_rebuild": {
+        "vectors": 1444,
+        "embed_seconds": 315.008,
+        "embed_ms_per_vector": 218.149,
+        "vec_file_bytes": 10883072,
+        "note": "timed under load; see phase_load_1m.swap"
+      },
+      "note": "pre-fix build (git archive of 3970fde); the fixed [CLS] arm above"
+    }
+  },
+  "same_table_memory_pair_cosines": {
+    "why": "supersede (0.92) and the conflict-candidate floor (0.65) are absolute cosines tuned on bge-small",
+    "bge-small": {
+      "max": 1.0,
+      "p50": 0.659,
+      "p90": 0.7361,
+      "p99": 0.8426,
+      "pairs": 8035,
+      "share_at_least_0.65": 0.563,
+      "share_at_least_0.92": 0.0046
+    },
+    "granite": {
+      "max": 1.0,
+      "p50": 0.7972,
+      "p90": 0.8452,
+      "p99": 0.9144,
+      "pairs": 8035,
+      "share_at_least_0.65": 1.0,
+      "share_at_least_0.92": 0.0082
+    },
+    "gte": {
+      "max": 1.0,
+      "p50": 0.5659,
+      "p90": 0.6712,
+      "p99": 0.8124,
+      "pairs": 8035,
+      "share_at_least_0.65": 0.1471,
+      "share_at_least_0.92": 0.0044
+    }
+  },
+  "cli_latency": {
+    "command": "axil recall <q> --recall-format context-block --budget 2000 --top-k 5 (one-shot)",
+    "questions": 57,
+    "load_1m": {
+      "min": 30.1,
+      "max": 109.5,
+      "mean": 68.3
+    },
+    "ms": {
+      "bge": {
+        "p50": 2521.0,
+        "p90": 3244.0,
+        "mean": 2570.0,
+        "min": 1193.0,
+        "max": 5137.0
+      },
+      "granite": {
+        "p50": 3387.0,
+        "p90": 4483.0,
+        "mean": 3528.0,
+        "min": 1470.0,
+        "max": 9086.0
+      },
+      "gte": {
+        "p50": 8946.0,
+        "p90": 12633.0,
+        "mean": 9569.0,
+        "min": 5032.0,
+        "max": 23898.0
+      }
+    },
+    "note": "loaded machine; compare the models with each other, not with quiet-machine hook figures (daemon-hook-latency.json: prompt recall p50 1,466 ms at load ~7). The prompt hook's recall deadline is 1,800 ms."
+  },
+  "longmemeval": {
+    "s20": {
+      "machine": "the Mac above, all three arms",
+      "questions": "first 20 of LongMemEval-S, all single-session-user",
+      "bge-small": {
+        "overall": {
+          "hit_rate": 0.9,
+          "avg_recall": 0.9,
+          "recall_all": 0.9,
+          "ndcg_at_10": 0.8565,
+          "turn_recall_full": 0.9,
+          "tokens_full": 15626.025
+        },
+        "misses": [
+          "5d3d2817",
+          "726462e0"
+        ],
+        "timing": {
+          "ingest_s_per_question_mean": 47.7,
+          "ingest_ms_per_session": 974.0,
+          "sessions": 980,
+          "query_s_per_question_median": 0.0,
+          "query_s_per_question_max": 0.1,
+          "wall_s": 960.0,
+          "max_rss_gib": 1.05,
+          "load_average_1m": {
+            "samples": 32,
+            "min": 8.09,
+            "median": 61.475,
+            "max": 87.13
+          },
+          "window": [
+            "start 2026-10-15T05:26:49Z",
+            "end 2026-10-15T05:42:50Z"
+          ]
+        }
+      },
+      "granite": {
+        "overall": {
+          "hit_rate": 0.9,
+          "avg_recall": 0.9,
+          "recall_all": 0.9,
+          "ndcg_at_10": 0.9118,
+          "turn_recall_full": 0.9,
+          "tokens_full": 15746.725
+        },
+        "misses": [
+          "5d3d2817",
+          "726462e0"
+        ],
+        "timing": {
+          "ingest_s_per_question_mean": 208.8,
+          "ingest_ms_per_session": 4262.0,
+          "sessions": 980,
+          "query_s_per_question_median": 0.1,
+          "query_s_per_question_max": 0.4,
+          "wall_s": 4186.0,
+          "max_rss_gib": 3.57,
+          "load_average_1m": {
+            "samples": 140,
+            "min": 21.29,
+            "median": 52.04,
+            "max": 90.17
+          },
+          "window": [
+            "start 2026-10-15T05:47:13Z",
+            "end 2026-10-15T06:57:23Z"
+          ]
+        }
+      },
+      "gte": {
+        "status": "running"
+      },
+      "bge_reproduces_committed_baseline": "same hit_rate, recall_all, ndcg_at_10 (0.8565) and misses as benchmarks/longmemeval/baselines/s-recall-qtc-k5-n20.json"
+    },
+    "m5": {
+      "status": "to run on a second machine with benchmarks/longmemeval/model-ab/run.sh (all arms on one machine)",
+      "questions": "first 5 of LongMemEval-M, all single-session-assistant"
+    },
+    "s60": {
+      "status": "to run on a second machine with benchmarks/longmemeval/model-ab/run.sh, bge-small and granite",
+      "questions": "60 ids in benchmarks/longmemeval/model-ab/s60-question-ids.json, 10 per type"
+    },
+    "gte_m5_gate": {
+      "rule": "run gte m5 only if gte's s20 NDCG@10 beats both bge-small's and granite's s20 NDCG@10 by more than 0.02 (bar set before gte's s20 finished)",
+      "verdict": "pending: gte s20 still running"
+    }
+  }
+}

@@ -1,0 +1,77 @@
+╔══════════════════════════════════════════════════╗
+║  LongMemEval Benchmark for Axil                 ║
+╠══════════════════════════════════════════════════╣
+║  Variant:  s                                     ║
+║  Strategy: recall-qtc                            ║
+║  Rerank:   off                                   ║
+║  Top-K:    5                                     ║
+║  Data:     benchmarks/longmemeval/data/longmemeval_s_cleaned.json║
+╚══════════════════════════════════════════════════╝
+
+[1/3] Loading dataset...
+       500 questions loaded, evaluating 20
+[2/3] Loading embedder (granite-small)...
+       1 worker thread(s)
+[3/4] Evaluating 20 questions...
+[axil-vector] CPU execution provider (no GPU feature compiled in)
+    [timing] db=0.1s prep=0.0s insert=162.1s fts=0.0s sessions=53
+    [timing] query=0.4s total=162.6s
+       1/20    [timing] db=0.1s prep=0.0s insert=121.0s fts=0.0s sessions=45
+    [timing] query=0.0s total=121.1s
+    [timing] db=0.1s prep=0.0s insert=132.1s fts=0.0s sessions=50
+    [timing] query=0.2s total=132.4s
+    [timing] db=0.1s prep=0.0s insert=218.5s fts=0.0s sessions=57
+    [timing] query=0.1s total=218.6s
+    [timing] db=0.1s prep=0.0s insert=231.4s fts=0.0s sessions=50
+    [timing] query=0.2s total=231.7s
+    [timing] db=0.3s prep=0.0s insert=205.9s fts=0.0s sessions=44
+    [timing] query=0.1s total=206.2s
+    [timing] db=0.1s prep=0.0s insert=250.8s fts=0.0s sessions=51
+    [timing] query=0.1s total=251.0s
+    [timing] db=0.2s prep=0.0s insert=238.3s fts=0.0s sessions=50
+    [timing] query=0.1s total=238.6s
+    [timing] db=0.1s prep=0.0s insert=207.9s fts=0.0s sessions=50
+    [timing] query=0.1s total=208.1s
+    [timing] db=0.3s prep=0.0s insert=215.0s fts=0.0s sessions=46
+    [timing] query=0.1s total=215.5s
+       10/20    [timing] db=0.1s prep=0.0s insert=192.8s fts=0.0s sessions=53
+    [timing] query=0.2s total=193.1s
+    [timing] db=0.1s prep=0.0s insert=219.5s fts=0.0s sessions=45
+    [timing] query=0.0s total=219.6s
+    [timing] db=0.1s prep=0.0s insert=222.1s fts=0.0s sessions=46
+    [timing] query=0.0s total=222.2s
+    [timing] db=0.1s prep=0.0s insert=170.0s fts=0.0s sessions=50
+    [timing] query=0.0s total=170.1s
+    [timing] db=0.1s prep=0.0s insert=208.5s fts=0.0s sessions=48
+    [timing] query=0.0s total=208.6s
+    [timing] db=0.1s prep=0.0s insert=220.0s fts=0.0s sessions=49
+    [timing] query=0.1s total=220.2s
+    [timing] db=0.1s prep=0.0s insert=188.5s fts=0.0s sessions=50
+    [timing] query=0.3s total=188.9s
+    [timing] db=0.3s prep=0.0s insert=283.6s fts=0.0s sessions=44
+    [timing] query=0.1s total=284.0s
+    [timing] db=0.1s prep=0.0s insert=242.2s fts=0.0s sessions=50
+    [timing] query=0.0s total=242.4s
+    [timing] db=0.1s prep=0.0s insert=246.1s fts=0.0s sessions=49
+    [timing] query=0.1s total=246.3s
+       20/20       20/20 done.          
+[4/4] Results:
+
+     4185.72 real     12262.85 user      1171.03 sys
+          3830300672  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+           110274397  page reclaims
+               76421  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+              343228  voluntary context switches
+            49499556  involuntary context switches
+     132358714775154  instructions retired
+      38922591086306  cycles elapsed
+         11674362928  peak memory footprint

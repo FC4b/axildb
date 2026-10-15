@@ -1,0 +1,104 @@
+{
+  "dimensions": 384,
+  "dropped_without_record": 870,
+  "embed_ms_per_owner": 13.7,
+  "embed_seconds": 19.783,
+  "from": "<scratch>/dogfood/from-bge/memory.axil",
+  "from_vectors": 2314,
+  "max_seq_len": 512,
+  "model": "bge-small-en-v1.5",
+  "owners": 1444,
+  "owners_by_table_and_text": {
+    "_checkpoint_records": {
+      "summary": 3
+    },
+    "_idx_code_proxies": {
+      "proxy_text": 1042
+    },
+    "_idx_files": {
+      "summary": 141
+    },
+    "_recall_chunks": {
+      "content": 26
+    },
+    "commits": {
+      "searchable_text": 100
+    },
+    "context": {
+      "searchable_text": 40
+    },
+    "decisions": {
+      "searchable_text": 63
+    },
+    "errors": {
+      "searchable_text": 27
+    },
+    "rules": {
+      "searchable_text": 2
+    }
+  },
+  "rebuilt_vectors": 1444,
+  "same_model_check": {
+    "by_table": {
+      "_checkpoint_records": {
+        "min_cosine": 1.0,
+        "n": 3,
+        "same": 3
+      },
+      "_idx_code_proxies": {
+        "min_cosine": 0.9999998211860657,
+        "n": 1042,
+        "same": 1042
+      },
+      "_idx_files": {
+        "min_cosine": 0.9999998211860657,
+        "n": 141,
+        "same": 141
+      },
+      "_recall_chunks": {
+        "min_cosine": 1.0,
+        "n": 26,
+        "same": 26
+      },
+      "commits": {
+        "min_cosine": 0.9797558784484863,
+        "n": 100,
+        "same": 99
+      },
+      "context": {
+        "min_cosine": 0.9999998807907104,
+        "n": 40,
+        "same": 40
+      },
+      "decisions": {
+        "min_cosine": 0.9999997615814209,
+        "n": 63,
+        "same": 63
+      },
+      "errors": {
+        "min_cosine": 0.9999997615814209,
+        "n": 27,
+        "same": 27
+      },
+      "rules": {
+        "min_cosine": 0.9999998807907104,
+        "n": 2,
+        "same": 2
+      }
+    },
+    "from_model": "bge-small-en-v1.5",
+    "threshold": 0.9900000095367432
+  },
+  "same_table_memory_pair_cosines": {
+    "max": 1.0000001192092896,
+    "p50": 0.6589584946632385,
+    "p90": 0.7361125946044922,
+    "p99": 0.8426445126533508,
+    "pairs": 8035,
+    "share_at_least_0.65": 0.5630367143746111,
+    "share_at_least_0.92": 0.0046048537647790915
+  },
+  "text_bytes": 467665,
+  "to": "<scratch>/dogfood/snap-bge/memory.axil",
+  "vec_file_bytes": 4919296
+}

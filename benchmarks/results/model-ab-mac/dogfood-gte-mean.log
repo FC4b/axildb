@@ -1,0 +1,4 @@
+[14:13:05] gte-mean: swap ({ 69.26 71.02 63.57 })
+[axil-vector] CPU execution provider (no GPU feature compiled in)
+[14:18:28] gte-mean: eval ({ 225.65 155.28 104.48 })
+[14:33:19] gte-mean: done ({ 33.15 48.20 67.26 })
