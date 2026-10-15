@@ -1729,6 +1729,103 @@ fn another_dependency_path_runs_only_deps_refresh_itself() {
     );
 }
 
+/// A session's writes served by the daemon leave the database as one-shot
+/// runs leave a copy of it, step by step: a store, a manifest edit and its
+/// `deps refresh`, `auto-link` (which finds the new dependency only with a
+/// gazetteer built after the edit), then `session-heal` and `worker run`
+/// under the project's `[healing]` config, the daemon's working directory
+/// (`/`) not the project's.
+#[test]
+fn a_served_session_leaves_what_one_shot_runs_leave() {
+    let fx = fixture();
+    std::fs::write(
+        fx.proj.join("axil.toml"),
+        "[healing]\nvector_rebuild_threshold = 0.5\n\n[lifecycle.tables.decisions]\nsupersede = false\n",
+    )
+    .unwrap();
+    let manifest =
+        "[package]\nname = \"p\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\n";
+    std::fs::write(fx.proj.join("Cargo.toml"), manifest).unwrap();
+    let stored = |data: Value| -> String {
+        let out = fx.axil(&["store", "decisions", &data.to_string()]);
+        assert!(out.status.success(), "{}", text(&out.stderr));
+        let record: Value = serde_json::from_slice(&out.stdout).unwrap();
+        record["id"].as_str().unwrap().to_string()
+    };
+    let id = stored(serde_json::json!({"summary": "we upgraded frobnicator for the parser"}));
+    for word in [
+        "alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel",
+    ] {
+        let summary = format!("{word} chose the {word} layout for module {word}");
+        stored(serde_json::json!({ "summary": summary }));
+    }
+    // Expired: session-heal purges them, leaving the vector store
+    // tombstones a worker run compacts only past the configured ratio.
+    for n in 1..=6 {
+        stored(serde_json::json!({
+            "summary": format!("temporary note {n} about zulu"),
+            "valid_until": "2020-01-01T00:00:00Z",
+        }));
+    }
+    let copy = fx.proj.parent().unwrap().join("q");
+    copy_dir(&fx.proj, &copy);
+    fx.start();
+    let json = |out: &Output, what: &str| -> Value {
+        assert_eq!(out.status.code(), Some(0), "{what}: {}", text(&out.stderr));
+        serde_json::from_slice(&out.stdout).unwrap_or_else(|e| panic!("{what}: {e}"))
+    };
+    // A step served here, and run one-shot on the copy in its own project.
+    let step = |args: &[&str], on_copy: &[&str]| -> (Value, Value) {
+        let served = json(&fx.send_settled(args), &format!("served {args:?}"));
+        let own = axil_env(BIN, &copy, on_copy, None, &[("AXIL_DAEMON", "off")]);
+        (served, json(&own, &format!("one-shot {on_copy:?}")))
+    };
+    let warm_up = [
+        "store",
+        "context",
+        r#"{"summary":"the first write builds the gazetteer"}"#,
+    ];
+    step(&warm_up, &warm_up);
+
+    if built_with(cfg!(feature = "deps"), "deps") {
+        for proj in [&fx.proj, &copy] {
+            std::fs::write(
+                proj.join("Cargo.toml"),
+                format!("{manifest}frobnicator = \"1.0\"\n"),
+            )
+            .unwrap();
+        }
+        let refresh = ["deps", "refresh", "--if-stale", "--quiet", "--path"];
+        let (here, there) = (fx.proj.to_str().unwrap(), copy.to_str().unwrap());
+        let (served, own) = step(
+            &[&refresh[..], &[here]].concat(),
+            &[&refresh[..], &[there]].concat(),
+        );
+        for field in ["deps_seen", "refreshed", "ingested", "chunks"] {
+            assert_eq!(served[field], own[field], "{field}: {served} / {own}");
+        }
+        if fx.vectors && built_with(cfg!(feature = "graph"), "graph") {
+            let (served, own) = step(&["auto-link", &id], &["auto-link", &id]);
+            assert_eq!(served, own);
+            assert_eq!(own["entities_found"], 1, "{own}");
+        }
+    }
+
+    let heal = ["session-heal", "--session", "s1", "--quiet"];
+    let (served, own) = step(&heal, &heal);
+    assert_eq!(served["actions"], own["actions"]);
+    let (mut served, mut own) = step(&["worker", "run"], &["worker", "run"]);
+    for report in [&mut served, &mut own] {
+        let report = report.as_object_mut().unwrap();
+        report.remove("duration_ms");
+        report.remove("started_at");
+    }
+    assert_eq!(served, own);
+    if !fx.vectors {
+        eprintln!("no vector store: worker run compacts nothing either way");
+    }
+}
+
 /// Hook writes queued while the daemon runs, a session's close among them:
 /// its drain thread runs every job once, in the order queued, none of them
 /// finding the database busy. The steps it does not run in-process run in
