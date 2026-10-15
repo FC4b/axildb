@@ -9,8 +9,12 @@ use serde_json::{json, Value};
 use std::sync::LazyLock;
 
 /// Classification of captured knowledge.
+///
+/// Non-exhaustive so a new captured kind is not a breaking change: a match
+/// outside this crate needs a wildcard arm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum CaptureType {
     /// An error or failure detected in output.
     Error,
