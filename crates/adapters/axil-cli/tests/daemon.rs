@@ -1636,6 +1636,99 @@ fn another_build_environment_or_database_is_not_sent() {
     );
 }
 
+/// A shell whose `GOPATH` differs from the daemon's (as one whose
+/// `CARGO_HOME` or `GOMODCACHE` does) is still served everything but `deps
+/// refresh`, which reads dependency sources where those say: that one runs
+/// in the shell's own process, under a lease. A queued `deps refresh` runs
+/// on the open handle when the hook's values are the daemon's, and in a
+/// process of its own, with the hook's, when they are not.
+#[test]
+fn another_dependency_path_runs_only_deps_refresh_itself() {
+    let fx = fixture();
+    fx.start();
+    let elsewhere = fx.proj.join("go-elsewhere");
+    let elsewhere = elsewhere.to_str().unwrap();
+    let other = [("GOPATH", elsewhere)];
+    let send = |args: &[&str]| {
+        let mut argv = vec!["daemon", "send", "--"];
+        argv.extend_from_slice(args);
+        axil_env(BIN, &fx.proj, &argv, None, &other)
+    };
+    let boot = send(&["boot"]);
+    assert_eq!(boot.status.code(), Some(0), "{}", text(&boot.stderr));
+    assert_eq!(fx.served("boot"), 1, "{}", fx.live());
+    if !built_with(cfg!(feature = "deps"), "deps") {
+        return;
+    }
+    let proj = fx.proj.to_str().unwrap();
+    let refresh = ["deps", "refresh", "--if-stale", "--quiet", "--path", proj];
+    let refused = send(&refresh);
+    assert_eq!(
+        refused.status.code(),
+        Some(125),
+        "{}",
+        text(&refused.stderr)
+    );
+    assert!(
+        text(&refused.stderr).contains("\"reason\":\"env\""),
+        "{}",
+        text(&refused.stderr)
+    );
+    let own = axil_env(BIN, &fx.proj, &refresh, None, &other);
+    assert!(own.status.success(), "{}", text(&own.stderr));
+    assert_eq!(fx.live()["leases_granted"], 1, "{}", fx.live());
+    fx.warm_again();
+    let same = fx.send(&refresh, None);
+    assert_eq!(same.status.code(), Some(0), "{}", text(&same.stderr));
+
+    // Queued, with the values a hook records.
+    let ours: Vec<(String, String)> = ["CARGO_HOME", "GOPATH", "GOMODCACHE"]
+        .iter()
+        .filter_map(|name| Some((name.to_string(), std::env::var(name).ok()?)))
+        .collect();
+    let mut theirs: Vec<(String, String)> = ours
+        .iter()
+        .filter(|(name, _)| name != "GOPATH")
+        .cloned()
+        .collect();
+    theirs.push(("GOPATH".into(), elsewhere.into()));
+    let job =
+        |env: &[(String, String)]| serde_json::json!({"op": "axil", "args": refresh, "env": env});
+    let poke = || {
+        let drain = fx.axil(&["hook", "drain"]);
+        assert!(drain.status.success(), "{}", text(&drain.stderr));
+    };
+    fx.queue_job(0, &job(&ours));
+    poke();
+    assert!(fx.drained(1), "{}", fx.live());
+    let queue = &fx.live()["queue"];
+    assert_eq!(
+        (&queue["warm_steps"], &queue["own_process_steps"]),
+        (&Value::from(1), &Value::from(0)),
+        "{queue}"
+    );
+    fx.queue_job(1, &job(&theirs));
+    poke();
+    assert!(fx.drained(2), "{}", fx.live());
+    let queue = &fx.live()["queue"];
+    assert_eq!(
+        (
+            &queue["warm_steps"],
+            &queue["own_process_steps"],
+            &queue["failed"]
+        ),
+        (&Value::from(1), &Value::from(1), &Value::from(0)),
+        "{queue}"
+    );
+    assert!(
+        fx.log().contains(
+            "running queued `axil deps` in a process of its own: the command reads CARGO_HOME"
+        ),
+        "{}",
+        fx.log()
+    );
+}
+
 /// Hook writes queued while the daemon runs, a session's close among them:
 /// its drain thread runs every job once, in the order queued, none of them
 /// finding the database busy. The steps it does not run in-process run in

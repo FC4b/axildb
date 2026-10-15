@@ -7210,6 +7210,15 @@ fn is_long_lived(command: &Command) -> bool {
     }
 }
 
+/// The variables `deps refresh` finds dependency sources by: Cargo's
+/// registry under `CARGO_HOME`, Go's module cache under `GOMODCACHE` or
+/// `GOPATH`. No other command the daemon serves reads them, so they are
+/// left out of its environment fingerprint: each request carries the
+/// client's values instead, and the daemon runs `deps refresh` only for a
+/// client whose values are its own. A queued `deps refresh` records the
+/// hook's values, for whichever process runs it.
+pub(crate) const DEPS_ENV: &[&str] = &["CARGO_HOME", "GOPATH", "GOMODCACHE"];
+
 /// What an open handle must already have for `command` to run on it: the
 /// stores and providers the command's own open would attach or create. Checked
 /// before the command writes anything (see [`cli_io::hot_db`]). `None` for a
@@ -7277,8 +7286,8 @@ fn hot_needs(command: &Command) -> Option<Vec<cli_io::Need>> {
             ..
         } => Some(Vec::new()),
         // A relative path is the client's to find. It reads dependency
-        // sources under CARGO_HOME, GOPATH and GOMODCACHE, which are in the
-        // environment a client must share with the daemon.
+        // sources where the `DEPS_ENV` variables say, so it is served only
+        // to a client whose values of those are the daemon's.
         #[cfg(feature = "deps")]
         Command::Deps(DepsCommand::Refresh { path, .. }) if path.is_absolute() => Some(Vec::new()),
         _ => None,

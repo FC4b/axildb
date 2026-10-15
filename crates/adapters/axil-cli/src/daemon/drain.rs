@@ -50,6 +50,7 @@
 //! still finds the lock held at that moment leaves its job to the thread,
 //! which runs it once no drainer took the queue.
 
+use std::ffi::OsString;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -340,7 +341,12 @@ impl WarmRunner<'_> {
 }
 
 impl JobRunner for WarmRunner<'_> {
-    fn write(&mut self, args: &[String], stdin: Option<&str>) -> Result<String, String> {
+    fn write(
+        &mut self,
+        args: &[String],
+        stdin: Option<&str>,
+        env: Option<&[(String, String)]>,
+    ) -> Result<String, String> {
         let args_ref: Vec<&str> = args.iter().map(String::as_str).collect();
         let argv = self.argv(&args_ref);
         if self.yielded.is_some() {
@@ -351,17 +357,21 @@ impl JobRunner for WarmRunner<'_> {
                         .queue()
                         .own_process_steps
                         .fetch_add(1, Ordering::AcqRel);
-                    return self.subprocess().write(args, stdin);
+                    return self.subprocess().write(args, stdin, env);
                 }
             }
         }
         let Some(argv) = argv else {
-            return self.own_process(args, stdin, "the database's path is not text");
+            return self.own_process(args, stdin, env, "the database's path is not text");
         };
+        let request_env = deps_env_of(env);
         loop {
             self.let_writers_go_first();
             let piped = stdin.unwrap_or_default().as_bytes();
-            match self.server.run_queued(&argv, &self.cwd, piped) {
+            match self
+                .server
+                .run_queued(&argv, &self.cwd, piped, &request_env)
+            {
                 Queued::Ran(response) => {
                     self.server
                         .queue()
@@ -377,14 +387,14 @@ impl JobRunner for WarmRunner<'_> {
                     };
                 }
                 Queued::NotServed(why) => {
-                    return self.own_process(args, stdin, &why.to_string());
+                    return self.own_process(args, stdin, env, &why.to_string());
                 }
                 Queued::Wait if !self.server.stopping() => {
                     self.keep_lock_fresh();
                     self.server.wait_for_wake(POLL);
                 }
                 Queued::Wait | Queued::Stopped => {
-                    return self.own_process(args, stdin, "the daemon is stopping");
+                    return self.own_process(args, stdin, env, "the daemon is stopping");
                 }
             }
         }
@@ -395,7 +405,8 @@ impl JobRunner for WarmRunner<'_> {
         // of its own runs it without the daemon letting go of anything.
         if self.yielded.is_none() {
             if let Some(argv) = self.argv(args) {
-                if let Queued::Ran(response) = self.server.run_queued(&argv, &self.cwd, stdin) {
+                if let Queued::Ran(response) = self.server.run_queued(&argv, &self.cwd, stdin, &[])
+                {
                     self.server
                         .queue()
                         .warm_steps
@@ -422,6 +433,7 @@ impl WarmRunner<'_> {
         &mut self,
         args: &[String],
         stdin: Option<&str>,
+        env: Option<&[(String, String)]>,
         why: &str,
     ) -> Result<String, String> {
         super::server::log(format!(
@@ -436,7 +448,23 @@ impl WarmRunner<'_> {
             .queue()
             .own_process_steps
             .fetch_add(1, Ordering::AcqRel);
-        self.subprocess().write(args, stdin)
+        self.subprocess().write(args, stdin, env)
+    }
+}
+
+/// The [`crate::DEPS_ENV`] values a queued step's request carries: the ones
+/// its job recorded, else the daemon's own, which a process of the
+/// daemon's would run the step with.
+fn deps_env_of(recorded: Option<&[(String, String)]>) -> Vec<(OsString, OsString)> {
+    match recorded {
+        Some(env) => env
+            .iter()
+            .map(|(name, value)| (OsString::from(name), OsString::from(value)))
+            .collect(),
+        None => crate::DEPS_ENV
+            .iter()
+            .filter_map(|name| Some((OsString::from(name), std::env::var_os(name)?)))
+            .collect(),
     }
 }
 

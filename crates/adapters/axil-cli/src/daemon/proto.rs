@@ -244,7 +244,8 @@ pub struct RunHeader {
     pub argv: Vec<String>,
     /// The client's working directory, absolute.
     pub cwd: String,
-    /// The client's values of the variables in [`exec::CLI_ENV`] it has set.
+    /// The client's values of the variables in [`exec::CLI_ENV`] and
+    /// [`crate::DEPS_ENV`] it has set.
     pub env: Vec<(String, String)>,
     /// A frame of stdin follows the header. Without one, the client's stdin
     /// is a terminal.
@@ -294,7 +295,7 @@ pub enum RunReply {
     /// Except `too_large`: the daemon ran it, and what it printed is over
     /// the frame limit; the client runs it unless it writes.
     NotServed {
-        /// `parse`, `wrong_db`, `command`, `lacks`, `terminal`,
+        /// `parse`, `wrong_db`, `command`, `lacks`, `terminal`, `env`,
         /// `unavailable` or `too_large`.
         reason: String,
         /// The reason in words.
@@ -376,6 +377,7 @@ impl RunReply {
             NotServed::Lacks(_) => "lacks",
             NotServed::Terminal => "terminal",
             NotServed::Unavailable => "unavailable",
+            NotServed::Env => "env",
         };
         RunReply::NotServed {
             reason: code.to_string(),
@@ -391,11 +393,14 @@ impl RunReply {
 /// modification time.
 ///
 /// A variable only commands the daemon does not serve read is left out, so
-/// a shell that sets it differently is still served: `CARGO_HOME`,
-/// `GOPATH` and `GOMODCACHE`, where `deps` finds the dependency sources it
-/// reads docs from, and `XDG_CONFIG_HOME`, where `workspace` keeps its
-/// registry. A daemon that serves `deps refresh` must cover the first three
-/// again.
+/// a shell that sets it differently is still served: `XDG_CONFIG_HOME`,
+/// where `workspace` keeps its registry. So are the [`crate::DEPS_ENV`]
+/// variables (`CARGO_HOME`, `GOPATH`, `GOMODCACHE`), which of the served
+/// commands only `deps refresh` reads: each request carries the client's
+/// values of them, and `deps refresh` alone is refused
+/// ([`exec::NotServed::Env`]) to a client whose values differ from the
+/// daemon's, so one variable set differently never stops a shell being
+/// served everything else.
 pub const FP_ENV: &[&str] = &[
     "AXIL_ENC_KEY",
     "AXIL_ENC_KEY_FILE",
@@ -407,10 +412,6 @@ pub const FP_ENV: &[&str] = &[
     "USERPROFILE",
     "APPDATA",
     "ORT_DYLIB_PATH",
-    // Where `deps refresh` reads dependency sources.
-    "CARGO_HOME",
-    "GOPATH",
-    "GOMODCACHE",
 ];
 
 /// The variables the daemon removes from its own environment before it
@@ -554,6 +555,7 @@ impl Identity {
             cwd: cwd.to_string_lossy().into_owned(),
             env: exec::CLI_ENV
                 .iter()
+                .chain(crate::DEPS_ENV)
                 .filter_map(|name| {
                     let value = std::env::var(name).ok()?;
                     Some((name.to_string(), value))
@@ -976,6 +978,18 @@ mod tests {
         ("AXIL_DB", "carried by each request (exec::CLI_ENV)"),
         ("AXIL_MCP_TOOLS", "carried by each request (exec::CLI_ENV)"),
         (
+            "CARGO_HOME",
+            "carried by each request (DEPS_ENV); `deps refresh` is served only where it matches",
+        ),
+        (
+            "GOPATH",
+            "carried by each request (DEPS_ENV); `deps refresh` is served only where it matches",
+        ),
+        (
+            "GOMODCACHE",
+            "carried by each request (DEPS_ENV); `deps refresh` is served only where it matches",
+        ),
+        (
             "AXIL_SLOW_QUERY_LOG",
             "per request: the run header's slow_query_log",
         ),
@@ -994,15 +1008,19 @@ mod tests {
     const INDIRECT: &[(&str, &str)] = &[
         (
             "crates/adapters/axil-cli/src/daemon/exec.rs",
-            "the exec::CLI_ENV values, carried by each request",
+            "the exec::CLI_ENV values, carried by each request, and the host's DEPS_ENV values",
+        ),
+        (
+            "crates/adapters/axil-cli/src/daemon/drain.rs",
+            "the DEPS_ENV values a queued step's request carries",
         ),
         (
             "crates/adapters/axil-cli/src/hook_brain.rs",
-            "a hook's project directory; hooks are never served",
+            "a hook's project directory, and the DEPS_ENV values a queued job records; hooks are never served",
         ),
         (
             "crates/adapters/axil-cli/src/daemon/proto.rs",
-            "the FP_ENV and CLI_ENV values themselves",
+            "the FP_ENV, CLI_ENV and DEPS_ENV values themselves",
         ),
     ];
 

@@ -1762,8 +1762,9 @@ impl Server {
         *woken = false;
     }
 
-    /// Run one step of a queued job, `argv` run in `cwd` with `stdin`, on
-    /// the open handle, as a client's request runs (see [`Server::run`]),
+    /// Run one step of a queued job, `argv` run in `cwd` with `stdin` and
+    /// the environment values `env` (see [`exec::Request::env`]), on the
+    /// open handle, as a client's request runs (see [`Server::run`]),
     /// for the queue's drain thread. It is not refused for the cap on
     /// requests, nor once shutting down has begun while the database is
     /// still open: the job it belongs to finishes first. It counts as use,
@@ -1773,6 +1774,7 @@ impl Server {
         argv: &[String],
         cwd: &Path,
         stdin: &[u8],
+        env: &[(std::ffi::OsString, std::ffi::OsString)],
     ) -> Queued {
         let Some(state) = self.state.get() else {
             return Queued::Wait;
@@ -1810,7 +1812,7 @@ impl Server {
         let request = exec::Request {
             argv: argv.iter().map(std::ffi::OsString::from).collect(),
             cwd: cwd.to_path_buf(),
-            env: Vec::new(),
+            env: env.to_vec(),
             stdin: Some(stdin.to_vec()),
             slow_query_log: true,
             queued: true,
@@ -2214,13 +2216,16 @@ mod tests {
         assert_eq!(finish, Finish::Exit(0));
     }
 
-    /// A client in `cwd` with no `AXIL_DB`, whose stdin is piped and holds
+    /// A client in `cwd` with no [`exec::CLI_ENV`] variable set and this
+    /// process's [`crate::DEPS_ENV`] values, whose stdin is piped and holds
     /// `stdin`, empty by default, like the one-shot children's.
     fn send(server: &Server, args: &[&str], cwd: &Path, stdin: Option<&[u8]>) -> RunOutcome {
         let mut header = Identity::current()
             .unwrap()
             .header(parity::argv(args), cwd, true);
-        header.env.clear();
+        header
+            .env
+            .retain(|(name, _)| crate::DEPS_ENV.contains(&name.as_str()));
         let stdin = stdin.unwrap_or_default();
         proto::run(
             server.run.socket(),

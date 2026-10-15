@@ -80,8 +80,11 @@ pub struct Request {
     /// `AXIL_DB` resolves against it, and with neither the database is the
     /// `.axil/memory.axil` found walking up from it.
     pub cwd: PathBuf,
-    /// The client's values of the [`CLI_ENV`] variables it has set; one
-    /// missing here is unset. The host's own are never consulted.
+    /// The client's values of the [`CLI_ENV`] and [`crate::DEPS_ENV`]
+    /// variables it has set; one missing here is unset. The host's own
+    /// [`CLI_ENV`] values are never consulted, and its [`crate::DEPS_ENV`]
+    /// values only to refuse a `deps refresh` whose client's differ
+    /// ([`NotServed::Env`]).
     pub env: Vec<(OsString, OsString)>,
     /// Piped stdin. `None` stands for a terminal: nothing was piped.
     pub stdin: Option<Vec<u8>>,
@@ -152,6 +155,9 @@ pub enum NotServed {
     /// a request panicked ([`WarmState::poisoned`]), the host's gate found
     /// the handle stale, or the request's thread couldn't start.
     Unavailable,
+    /// The command reads the [`crate::DEPS_ENV`] variables (`deps
+    /// refresh`), and the client's values of them are not the host's.
+    Env,
     /// The request's deadline passed before the command could start.
     Expired,
     /// The host let go of the database for a process that leased it.
@@ -167,6 +173,9 @@ impl fmt::Display for NotServed {
             NotServed::Lacks(need) => WarmLacks(*need).fmt(f),
             NotServed::Terminal => f.write_str("the command reads stdin from a terminal"),
             NotServed::Unavailable => f.write_str("the database is not open"),
+            NotServed::Env => f.write_str(
+                "the command reads CARGO_HOME, GOPATH or GOMODCACHE, and the client's differ",
+            ),
             NotServed::Expired => f.write_str("the request's deadline passed before it ran"),
             NotServed::Leased => f.write_str("the database is leased to another process"),
         }
@@ -533,6 +542,9 @@ fn execute(
     if req.stdin.is_none() && reads_stdin(&cli.command) {
         return Err(NotServed::Terminal);
     }
+    if reads_deps_env(&cli.command) && deps_env_differs(&req) {
+        return Err(NotServed::Env);
+    }
     let db_path = request_db(cli.db.as_deref(), &req.cwd).ok_or(NotServed::WrongDb)?;
     let writes = writes(&cli.command);
     // A write waits for the writes before it without holding the handle,
@@ -705,6 +717,26 @@ fn reads_stdin(command: &Command) -> bool {
     }
 }
 
+/// Whether `command` reads the [`crate::DEPS_ENV`] variables: `deps
+/// refresh`, which finds dependency sources by them.
+fn reads_deps_env(command: &Command) -> bool {
+    #[cfg(feature = "deps")]
+    if let Command::Deps(crate::DepsCommand::Refresh { .. }) = command {
+        return true;
+    }
+    #[cfg(not(feature = "deps"))]
+    let _ = command;
+    false
+}
+
+/// Whether `req`'s client has any [`crate::DEPS_ENV`] variable set
+/// otherwise than the host, unset where it is set included.
+fn deps_env_differs(req: &Request) -> bool {
+    crate::DEPS_ENV
+        .iter()
+        .any(|name| req.env(name) != std::env::var_os(name).as_deref())
+}
+
 /// The database a command line runs on in the client's process: its `--db`
 /// or `AXIL_DB` resolved against `cwd`, else the `.axil/memory.axil` found
 /// walking up from `cwd`. Never the host's own working directory.
@@ -834,15 +866,21 @@ mod tests {
     use std::sync::Arc;
     use std::time::Instant;
 
-    /// A request from a client working in `cwd`. Its stdin is piped and
-    /// holds `stdin`, empty by default, like the one-shot children's.
+    /// A request from a client working in `cwd`, with this process's
+    /// [`crate::DEPS_ENV`] values, as the one-shot children have them. Its
+    /// stdin is piped and holds `stdin`, empty by default, like theirs.
     fn request(args: &[&str], cwd: &Path, axil_db: Option<&str>, stdin: Option<&[u8]>) -> Request {
+        let deps_env = crate::DEPS_ENV
+            .iter()
+            .filter_map(|name| Some((OsString::from(name), std::env::var_os(name)?)));
         Request {
             argv: parity::argv(args).into_iter().map(OsString::from).collect(),
             cwd: cwd.to_path_buf(),
             env: axil_db
-                .map(|db| vec![("AXIL_DB".into(), db.into())])
-                .unwrap_or_default(),
+                .map(|db| ("AXIL_DB".into(), db.into()))
+                .into_iter()
+                .chain(deps_env)
+                .collect(),
             stdin: Some(stdin.unwrap_or_default().to_vec()),
             slow_query_log: true,
             queued: false,
@@ -1276,6 +1314,49 @@ mod tests {
         if cfg!(feature = "checkpoint") {
             assert!(execute_captured(at_terminal(&["checkpoint", "-"]), &state).is_ok());
         }
+    }
+
+    /// `deps refresh` reads dependency sources where the
+    /// [`crate::DEPS_ENV`] variables say, so it is served only to a client
+    /// whose values are the host's, set or unset alike. Any other command is
+    /// served whatever they are.
+    #[test]
+    fn deps_refresh_is_served_only_with_the_hosts_dependency_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = build_fixture(tmp.path());
+        let state = WarmState::open(&proj.join(".axil/memory.axil")).unwrap();
+        let with_gopath = |args: &[&str], gopath: Option<&str>| {
+            let mut req = request(args, &proj, None, None);
+            req.env.retain(|(name, _)| name != "GOPATH");
+            if let Some(value) = gopath {
+                req.env.push(("GOPATH".into(), value.into()));
+            }
+            req
+        };
+        let host = std::env::var("GOPATH").ok();
+        let elsewhere = tmp.path().join("elsewhere");
+        let elsewhere = elsewhere.to_str().unwrap();
+        let boot = with_gopath(&["boot"], Some(elsewhere));
+        assert_eq!(execute_captured(boot, &state).map(|r| r.exit), Ok(0));
+        if !cfg!(feature = "deps") {
+            return;
+        }
+        let project = proj.to_str().unwrap();
+        let refresh = [
+            "deps",
+            "refresh",
+            "--if-stale",
+            "--quiet",
+            "--path",
+            project,
+        ];
+        let other = with_gopath(&refresh, Some(elsewhere));
+        assert_eq!(execute_captured(other, &state), Err(NotServed::Env));
+        let flipped = if host.is_some() { None } else { Some("") };
+        let flipped = with_gopath(&refresh, flipped);
+        assert_eq!(execute_captured(flipped, &state), Err(NotServed::Env));
+        let same = with_gopath(&refresh, host.as_deref());
+        assert_eq!(execute_captured(same, &state).map(|r| r.exit), Ok(0));
     }
 
     /// The handle refusing from inside the command, as [`cli_io::hot_db`]

@@ -209,10 +209,15 @@ size and modification time), with the same compiled features and the same
 values of the environment variables that change what a command prints or
 reads: `AXIL_ENC_KEY`, `AXIL_ENC_KEY_FILE` (and the key file's size and
 modification time), `AXIL_LLM_API_KEY`, `AXIL_VERBOSE`, `AXIL_EMBED_SESSIONS`,
-`HOME`, `USERPROFILE`, `APPDATA`, `ORT_DYLIB_PATH`, and `CARGO_HOME`, `GOPATH`
-and `GOMODCACHE`, where `deps refresh` reads dependency sources. A variable only
+`HOME`, `USERPROFILE`, `APPDATA` and `ORT_DYLIB_PATH`. A variable only
 commands the daemon doesn't run read (`XDG_CONFIG_HOME`, for `workspace`)
-doesn't count. The daemon clears `AXIL_VERBOSE` and
+doesn't count. `CARGO_HOME`, `GOPATH` and `GOMODCACHE`, where `deps refresh`
+reads dependency sources, count for that command alone: each request carries
+the client's values, and `deps refresh` from a client whose values differ
+from the daemon's is handed back (reason `env`) while everything else is
+still served. A hook's queued `deps refresh` records the hook's values, and
+the daemon runs it in a process of its own, with them, when they differ from
+its own. The daemon clears `AXIL_VERBOSE` and
 `AXIL_EMBED_SESSIONS` from its own environment, so a client with either set
 runs the command itself. Anything else, or a command the daemon doesn't run,
 is handed back to the client unrun, and the client runs it and leases the

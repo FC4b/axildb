@@ -1980,7 +1980,7 @@ impl HookCtx {
             if let Some(dir) = dir.and_then(|dir| dir.to_str()) {
                 args.extend(["--path", dir]);
             }
-            self.enqueue(&Job::axil(&args, None));
+            self.enqueue(&Job::axil(&args, None).in_deps_env());
         }
         if is_skipped_path(file_path) {
             return Ok(());
@@ -2280,6 +2280,13 @@ enum Job {
         args: Vec<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         stdin: Option<String>,
+        /// For a command that reads the [`crate::DEPS_ENV`] variables
+        /// (`deps refresh`): the hook's values of those it had set, so the
+        /// command reads the dependency sources the hook's own run would
+        /// have. `None` (any other job, or one queued before these were
+        /// recorded) runs with the drainer's.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        env: Option<Vec<(String, String)>>,
     },
     /// A session's close: the `_sessions` row and its links, then worker,
     /// beliefs and session-heal.
@@ -2299,7 +2306,34 @@ impl Job {
         Self::Axil {
             args: args.iter().map(|a| a.to_string()).collect(),
             stdin: stdin.map(str::to_string),
+            env: None,
         }
+    }
+
+    /// The same job, with this process's [`crate::DEPS_ENV`] values
+    /// recorded for its command. A value that is not text records none, and
+    /// the job runs with the drainer's.
+    fn in_deps_env(mut self) -> Self {
+        if let Self::Axil { env, .. } = &mut self {
+            *env = crate::DEPS_ENV
+                .iter()
+                .filter_map(|name| Some((name, std::env::var_os(name)?)))
+                .map(|(name, value)| Some((name.to_string(), value.into_string().ok()?)))
+                .collect();
+        }
+        self
+    }
+}
+
+/// Give `cmd` the [`crate::DEPS_ENV`] values a job recorded (see
+/// [`Job::Axil`]), unsetting those it had unset; `None` leaves `cmd`'s.
+pub(crate) fn set_deps_env(cmd: &mut Command, env: Option<&[(String, String)]>) {
+    let Some(env) = env else { return };
+    for name in crate::DEPS_ENV {
+        match env.iter().find(|(n, _)| n == name) {
+            Some((_, value)) => cmd.env(name, value),
+            None => cmd.env_remove(name),
+        };
     }
 }
 
@@ -2789,12 +2823,14 @@ pub(crate) fn run_job_file(
 /// database's daemon.
 pub(crate) trait JobRunner {
     /// Run `axil --db <db> <args>` on the queue's database, with `stdin`
-    /// piped in (`None`: an empty stdin), and return what it printed on
-    /// stdout when it exited 0, or why it failed.
+    /// piped in (`None`: an empty stdin) and the [`crate::DEPS_ENV`] values
+    /// `env` (see [`Job::Axil`]), and return what it printed on stdout when
+    /// it exited 0, or why it failed.
     fn write(
         &mut self,
         args: &[String],
         stdin: Option<&str>,
+        env: Option<&[(String, String)]>,
     ) -> std::result::Result<String, String>;
 
     /// Run `axil <args>`, a command that opens no database, with `stdin`
@@ -2852,8 +2888,14 @@ impl JobRunner for SubprocessRunner<'_> {
         &mut self,
         args: &[String],
         stdin: Option<&str>,
+        env: Option<&[(String, String)]>,
     ) -> std::result::Result<String, String> {
-        run_write(|| self.command(), self.db, args, stdin)
+        let command = || {
+            let mut cmd = self.command();
+            set_deps_env(&mut cmd, env);
+            cmd
+        };
+        run_write(command, self.db, args, stdin)
     }
 
     fn read(&mut self, args: &[&str], stdin: &[u8]) -> Option<String> {
@@ -2868,7 +2910,9 @@ fn run_job(
     job: &Job,
 ) -> std::result::Result<(), String> {
     match job {
-        Job::Axil { args, stdin } => runner.write(args, stdin.as_deref()).map(drop),
+        Job::Axil { args, stdin, env } => runner
+            .write(args, stdin.as_deref(), env.as_deref())
+            .map(drop),
         Job::CloseSession {
             session,
             project_dir,
@@ -2895,16 +2939,17 @@ fn run_job(
                 let stored = runner.write(
                     &["store".into(), "_sessions".into(), record.to_string()],
                     None,
+                    None,
                 )?;
                 if let Some(id) = serde_json::from_str::<Value>(stored.trim())
                     .ok()
                     .and_then(|v| v.get("id").and_then(Value::as_str).map(str::to_string))
                 {
-                    let _ = runner.write(&["auto-link".into(), id], None);
+                    let _ = runner.write(&["auto-link".into(), id], None, None);
                 }
                 // Consolidation, connections, inference, decay — then beliefs.
-                let _ = runner.write(&["worker".into(), "run".into()], None);
-                let _ = runner.write(&["beliefs".into(), "--generate".into()], None);
+                let _ = runner.write(&["worker".into(), "run".into()], None, None);
+                let _ = runner.write(&["beliefs".into(), "--generate".into()], None, None);
             }
             session_heal(runner, exe, db, session, project_dir, problems.as_deref());
             Ok(())
@@ -2990,7 +3035,7 @@ fn session_heal(
         args.push("--problems-file".into());
         args.push(path.to_string_lossy().into_owned());
     }
-    let out = runner.write(&args, None);
+    let out = runner.write(&args, None, None);
     if let Some(path) = &problems_file {
         let _ = std::fs::remove_file(path);
     }
@@ -5448,6 +5493,7 @@ mod tests {
             &mut self,
             args: &[String],
             stdin: Option<&str>,
+            _env: Option<&[(String, String)]>,
         ) -> std::result::Result<String, String> {
             self.look();
             let mut step = args.join(" ");
@@ -5631,6 +5677,48 @@ mod tests {
         assert!(queue.join("interrupted/1-a.running").is_file());
         assert_eq!(next_job(&queue), Some(queue.join("2-b.job")));
         assert!(queue_files(&queue, "running").is_empty());
+    }
+
+    /// A queued `deps refresh` records the hook's dependency paths, and a
+    /// drainer's child runs with them, the hook's unset ones unset. A job
+    /// that records none, as one queued before they were, leaves the
+    /// child's.
+    #[test]
+    fn a_queued_deps_refresh_runs_with_the_hooks_dependency_paths() {
+        let job = Job::axil(&["deps", "refresh"], None).in_deps_env();
+        let Job::Axil { env: Some(env), .. } = &job else {
+            panic!("{job:?}");
+        };
+        let want: Vec<(String, String)> = crate::DEPS_ENV
+            .iter()
+            .filter_map(|name| Some((name.to_string(), std::env::var(name).ok()?)))
+            .collect();
+        assert_eq!(env, &want);
+        let back: Job = serde_json::from_str(&serde_json::to_string(&job).unwrap()).unwrap();
+        assert_eq!(back, job);
+        let old: Job = serde_json::from_str(r#"{"op":"axil","args":["deps","refresh"]}"#).unwrap();
+        assert_eq!(old, Job::axil(&["deps", "refresh"], None));
+
+        let envs = |cmd: &Command| -> Vec<(String, Option<String>)> {
+            let text = |s: &std::ffi::OsStr| s.to_str().unwrap().to_string();
+            cmd.get_envs()
+                .map(|(n, v)| (text(n), v.map(text)))
+                .collect()
+        };
+        let mut cmd = Command::new("axil");
+        cmd.env("GOPATH", "/drainer").env("CARGO_HOME", "/drainer");
+        set_deps_env(&mut cmd, Some(&[("CARGO_HOME".into(), "/hook".into())]));
+        let got = envs(&cmd);
+        assert!(
+            got.contains(&("CARGO_HOME".into(), Some("/hook".into()))),
+            "{got:?}"
+        );
+        assert!(got.contains(&("GOPATH".into(), None)), "{got:?}");
+        assert!(got.contains(&("GOMODCACHE".into(), None)), "{got:?}");
+        let mut cmd = Command::new("axil");
+        cmd.env("GOPATH", "/drainer");
+        set_deps_env(&mut cmd, None);
+        assert_eq!(envs(&cmd), [("GOPATH".into(), Some("/drainer".into()))]);
     }
 
     /// Each database file has a queue of its own; `memory.axil` keeps the
