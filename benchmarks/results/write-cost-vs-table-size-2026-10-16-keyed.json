@@ -1,0 +1,279 @@
+{
+  "baseline": "benchmarks/results/write-cost-vs-table-size-2026-10-15.json",
+  "benchmark": "write-cost-vs-table-size",
+  "command": "cargo run --release -p axil-core --example write_cost -- --sizes 0,1000,10000,30000,85000 --samples 200 --migration",
+  "commit": "e3e36fa8f38738ccf5285f0e68f35c6fcb254e5a",
+  "control_table_rows": 100,
+  "date": "2026-10-16",
+  "load_note": "two other agents were compiling (1-minute load 20.6 at the start, 20.4 at the end, against about 8-12 for the 2026-10-15 baseline); absolute times are higher than the baseline run for both tables, so compare big against control within a run, not across runs; big-table and control writes are interleaved, so load affects both sides of each comparison alike",
+  "machine": "AMD Ryzen 7 5800X (16 threads), WSL2 20 GiB, Ubuntu 24.04, ext4 on a VHDX",
+  "reading": "with the keyed table index, insert and delete into the big table cost what they cost into the 100-row control at every size, where the JSON id list made them grow linearly with the table; update never touched the list. migration: the database is handed back to JSON id lists (Storage::downgrade_table_index), then migrating_open_ms is the first writable Storage::open, which converts it, and second_open_ms the next one; at that point the big table lists table_rows + 10 ids and the control 110",
+  "results": [
+    {
+      "delete": {
+        "big": {
+          "mean_us": 3334.0,
+          "p50_us": 2811.0,
+          "p95_us": 7044.0
+        },
+        "control": {
+          "mean_us": 3393.0,
+          "p50_us": 2725.0,
+          "p95_us": 8133.0
+        }
+      },
+      "fill_seconds": 0.0,
+      "id_list_bytes_approx": 0,
+      "insert": {
+        "big": {
+          "mean_us": 4394.0,
+          "p50_us": 3029.0,
+          "p95_us": 9418.0
+        },
+        "control": {
+          "mean_us": 4230.0,
+          "p50_us": 3232.0,
+          "p95_us": 9631.0
+        }
+      },
+      "migration": {
+        "file_bytes_keyed": {
+          "allocated": 163840,
+          "length": 163840
+        },
+        "file_bytes_legacy": {
+          "allocated": 163840,
+          "length": 163840
+        },
+        "migrating_open_ms": 12.2,
+        "second_open_ms": 12.8
+      },
+      "table_rows": 0,
+      "update": {
+        "big": {
+          "mean_us": 2854.0,
+          "p50_us": 2417.0,
+          "p95_us": 6010.0
+        },
+        "control": {
+          "mean_us": 2930.0,
+          "p50_us": 2455.0,
+          "p95_us": 6296.0
+        }
+      }
+    },
+    {
+      "delete": {
+        "big": {
+          "mean_us": 4196.0,
+          "p50_us": 3513.0,
+          "p95_us": 8652.0
+        },
+        "control": {
+          "mean_us": 3850.0,
+          "p50_us": 3212.0,
+          "p95_us": 7939.0
+        }
+      },
+      "fill_seconds": 0.1,
+      "id_list_bytes_approx": 29000,
+      "insert": {
+        "big": {
+          "mean_us": 5945.0,
+          "p50_us": 4119.0,
+          "p95_us": 13786.0
+        },
+        "control": {
+          "mean_us": 5451.0,
+          "p50_us": 4415.0,
+          "p95_us": 12573.0
+        }
+      },
+      "migration": {
+        "file_bytes_keyed": {
+          "allocated": 786432,
+          "length": 1531904
+        },
+        "file_bytes_legacy": {
+          "allocated": 770048,
+          "length": 770048
+        },
+        "migrating_open_ms": 40.5,
+        "second_open_ms": 11.7
+      },
+      "table_rows": 1000,
+      "update": {
+        "big": {
+          "mean_us": 2982.0,
+          "p50_us": 2650.0,
+          "p95_us": 5608.0
+        },
+        "control": {
+          "mean_us": 3112.0,
+          "p50_us": 2594.0,
+          "p95_us": 6732.0
+        }
+      }
+    },
+    {
+      "delete": {
+        "big": {
+          "mean_us": 4327.0,
+          "p50_us": 3379.0,
+          "p95_us": 9040.0
+        },
+        "control": {
+          "mean_us": 4197.0,
+          "p50_us": 3275.0,
+          "p95_us": 8919.0
+        }
+      },
+      "fill_seconds": 0.5,
+      "id_list_bytes_approx": 290000,
+      "insert": {
+        "big": {
+          "mean_us": 6054.0,
+          "p50_us": 4100.0,
+          "p95_us": 15750.0
+        },
+        "control": {
+          "mean_us": 6018.0,
+          "p50_us": 3754.0,
+          "p95_us": 14004.0
+        }
+      },
+      "migration": {
+        "file_bytes_keyed": {
+          "allocated": 6852608,
+          "length": 8425472
+        },
+        "file_bytes_legacy": {
+          "allocated": 6852608,
+          "length": 8425472
+        },
+        "migrating_open_ms": 109.1,
+        "second_open_ms": 17.8
+      },
+      "table_rows": 10000,
+      "update": {
+        "big": {
+          "mean_us": 3389.0,
+          "p50_us": 2534.0,
+          "p95_us": 7348.0
+        },
+        "control": {
+          "mean_us": 3835.0,
+          "p50_us": 2793.0,
+          "p95_us": 8147.0
+        }
+      }
+    },
+    {
+      "delete": {
+        "big": {
+          "mean_us": 3287.0,
+          "p50_us": 2691.0,
+          "p95_us": 6991.0
+        },
+        "control": {
+          "mean_us": 3244.0,
+          "p50_us": 2630.0,
+          "p95_us": 7058.0
+        }
+      },
+      "fill_seconds": 0.9,
+      "id_list_bytes_approx": 870000,
+      "insert": {
+        "big": {
+          "mean_us": 5843.0,
+          "p50_us": 4075.0,
+          "p95_us": 15133.0
+        },
+        "control": {
+          "mean_us": 5562.0,
+          "p50_us": 3806.0,
+          "p95_us": 15028.0
+        }
+      },
+      "migration": {
+        "file_bytes_keyed": {
+          "allocated": 19521536,
+          "length": 33632256
+        },
+        "file_bytes_legacy": {
+          "allocated": 19349504,
+          "length": 33632256
+        },
+        "migrating_open_ms": 168.7,
+        "second_open_ms": 8.6
+      },
+      "table_rows": 30000,
+      "update": {
+        "big": {
+          "mean_us": 3257.0,
+          "p50_us": 2567.0,
+          "p95_us": 6901.0
+        },
+        "control": {
+          "mean_us": 3311.0,
+          "p50_us": 2599.0,
+          "p95_us": 7086.0
+        }
+      }
+    },
+    {
+      "delete": {
+        "big": {
+          "mean_us": 3746.0,
+          "p50_us": 2910.0,
+          "p95_us": 8868.0
+        },
+        "control": {
+          "mean_us": 3495.0,
+          "p50_us": 2793.0,
+          "p95_us": 7191.0
+        }
+      },
+      "fill_seconds": 2.9,
+      "id_list_bytes_approx": 2465000,
+      "insert": {
+        "big": {
+          "mean_us": 4567.0,
+          "p50_us": 3259.0,
+          "p95_us": 11185.0
+        },
+        "control": {
+          "mean_us": 4450.0,
+          "p50_us": 3238.0,
+          "p95_us": 11005.0
+        }
+      },
+      "migration": {
+        "file_bytes_keyed": {
+          "allocated": 56270848,
+          "length": 67375104
+        },
+        "file_bytes_legacy": {
+          "allocated": 55386112,
+          "length": 67375104
+        },
+        "migrating_open_ms": 697.3,
+        "second_open_ms": 10.0
+      },
+      "table_rows": 85000,
+      "update": {
+        "big": {
+          "mean_us": 2813.0,
+          "p50_us": 2139.0,
+          "p95_us": 7078.0
+        },
+        "control": {
+          "mean_us": 2632.0,
+          "p50_us": 2111.0,
+          "p95_us": 6289.0
+        }
+      }
+    }
+  ],
+  "samples_per_kind": 200
+}
