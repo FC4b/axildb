@@ -28,15 +28,23 @@ pub enum EmbeddingModel {
     /// multi-vector retrieval, and sparse retrieval from one checkpoint.
     /// Strongest general-purpose embedder in the BGE family; use it when
     /// retrieval quality matters more than insert throughput and disk.
-    /// XLM-RoBERTa backbone → uses mean pooling like Nomic.
+    /// XLM-RoBERTa backbone; its dense head pools on [CLS].
     BgeM3,
     /// Alibaba-NLP/gte-modernbert-base: 768 dimensions, ~569 MB ONNX, 8192-token context.
     ///
     /// ModernBERT backbone, Apache-2.0, MTEB 64.38 (vs bge-small 62.17).
-    /// 16× longer context than bge-small without truncation. Mean pooling.
+    /// 16× longer context than bge-small without truncation. [CLS] pooling.
     /// Registered as an additional option in — bge-small
     /// remains the default; switch via `axil.toml` `model = "gte-modernbert-base"`.
     GteModernbertBase,
+    /// ibm-granite/granite-embedding-small-english-r2: 384 dimensions, ~188 MB
+    /// ONNX, 8192-token context.
+    ///
+    /// ModernBERT backbone (47M parameters), Apache-2.0, [CLS] pooling, no
+    /// query or document prompt. Same width as bge-small, so a store embedded
+    /// with one opens under the other without a dimension error: switching
+    /// between them needs a re-embed all the same.
+    GraniteSmallR2,
     /// User-provided ONNX model.
     Custom {
         path: PathBuf,
@@ -55,6 +63,7 @@ impl EmbeddingModel {
             Self::Nomic => 768,
             Self::BgeM3 => 1024,
             Self::GteModernbertBase => 768,
+            Self::GraniteSmallR2 => 384,
             Self::Custom { dimensions, .. } => *dimensions,
         }
     }
@@ -86,6 +95,7 @@ impl EmbeddingModel {
             Self::Nomic => "nomic-embed-text-v1.5",
             Self::BgeM3 => "bge-m3",
             Self::GteModernbertBase => "gte-modernbert-base",
+            Self::GraniteSmallR2 => "granite-embedding-small-english-r2",
             Self::Custom { path, .. } => path
                 .file_stem()
                 .and_then(|s| s.to_str())
@@ -105,6 +115,10 @@ impl EmbeddingModel {
             "gte-modernbert" | "gte-modernbert-base" | "modernbert" => {
                 Some(Self::GteModernbertBase)
             }
+            "granite-small"
+            | "granite-small-r2"
+            | "granite-small-english-r2"
+            | "granite-embedding-small-english-r2" => Some(Self::GraniteSmallR2),
             _ => None,
         }
     }
@@ -121,6 +135,7 @@ impl EmbeddingModel {
             Self::Nomic => "~523 MB",
             Self::BgeM3 => "~2.1 GB",
             Self::GteModernbertBase => "~572 MB",
+            Self::GraniteSmallR2 => "~188 MB",
             Self::Custom { .. } => "unknown",
         }
     }
@@ -132,6 +147,7 @@ impl EmbeddingModel {
             Self::Nomic => 8192,
             Self::BgeM3 => 8192,
             Self::GteModernbertBase => 8192,
+            Self::GraniteSmallR2 => 8192,
             Self::Custom { max_seq_len, .. } => *max_seq_len,
         }
     }
@@ -145,10 +161,10 @@ impl EmbeddingModel {
             // FlagEmbedding's dense retrieval head.
             Self::BgeM3 => PoolingStrategy::Cls,
             Self::Nomic => PoolingStrategy::Mean,
-            // gte-modernbert-base uses mean pooling per the model card and
-            // upstream sentence-transformers config; CLS is unprojected and
-            // does not produce a useful sentence vector for this model.
-            Self::GteModernbertBase => PoolingStrategy::Mean,
+            // Both ModernBERT embedders pool on [CLS]: their
+            // sentence-transformers configs say so, as do the model cards'
+            // transformers examples (`last_hidden_state[:, 0]`).
+            Self::GteModernbertBase | Self::GraniteSmallR2 => PoolingStrategy::Cls,
             Self::Custom { pooling, .. } => *pooling,
         }
     }
@@ -202,6 +218,10 @@ impl std::str::FromStr for EmbeddingModel {
             "nomic" | "nomic-embed-text-v1.5" => Ok(Self::Nomic),
             "bge-m3" | "bgem3" => Ok(Self::BgeM3),
             "gte-modernbert" | "gte-modernbert-base" | "modernbert" => Ok(Self::GteModernbertBase),
+            "granite-small"
+            | "granite-small-r2"
+            | "granite-small-english-r2"
+            | "granite-embedding-small-english-r2" => Ok(Self::GraniteSmallR2),
             other => {
                 // Check the custom model registry.
                 if let Some(model) = load_custom_model(other) {
@@ -369,6 +389,7 @@ mod tests {
             EmbeddingModel::Nomic,
             EmbeddingModel::BgeM3,
             EmbeddingModel::GteModernbertBase,
+            EmbeddingModel::GraniteSmallR2,
         ] {
             let total = crate::download::pinned_model(&model).unwrap().total_size() as f64;
             let label = model.approx_size();
@@ -397,7 +418,7 @@ mod tests {
         assert_eq!(m.dimensions(), 768);
         assert_eq!(m.name(), "gte-modernbert-base");
         assert_eq!(m.max_seq_len(), 8192);
-        assert_eq!(m.pooling(), PoolingStrategy::Mean);
+        assert_eq!(m.pooling(), PoolingStrategy::Cls);
         assert!(!m.supports_mrl());
     }
 
@@ -410,6 +431,48 @@ mod tests {
         assert!(matches!(
             EmbeddingModel::from_name("MODERNBERT"),
             Some(EmbeddingModel::GteModernbertBase)
+        ));
+    }
+
+    #[test]
+    fn granite_small_r2_metadata() {
+        let m = EmbeddingModel::GraniteSmallR2;
+        assert_eq!(m.dimensions(), 384);
+        assert_eq!(m.name(), "granite-embedding-small-english-r2");
+        assert_eq!(m.max_seq_len(), 8192);
+        assert_eq!(m.pooling(), PoolingStrategy::Cls);
+        assert!(!m.supports_mrl());
+        assert_eq!(m.query_prefix(), "");
+        assert_eq!(m.document_prefix(), "");
+        assert!(m
+            .model_dir()
+            .is_some_and(|d| d.ends_with("models/granite-embedding-small-english-r2")));
+    }
+
+    #[test]
+    fn granite_small_r2_parses_from_every_alias() {
+        for name in [
+            "granite-small",
+            "granite-small-r2",
+            "granite-small-english-r2",
+            "granite-embedding-small-english-r2",
+            "Granite-Small",
+        ] {
+            assert!(
+                matches!(
+                    EmbeddingModel::from_name(name),
+                    Some(EmbeddingModel::GraniteSmallR2)
+                ),
+                "{name}"
+            );
+        }
+        let parsed: EmbeddingModel = "granite-embedding-small-english-r2".parse().unwrap();
+        assert!(matches!(parsed, EmbeddingModel::GraniteSmallR2));
+        // The name a store's config records reads back as the same model.
+        let named = EmbeddingModel::GraniteSmallR2;
+        assert!(matches!(
+            EmbeddingModel::from_name(named.name()),
+            Some(EmbeddingModel::GraniteSmallR2)
         ));
     }
 }

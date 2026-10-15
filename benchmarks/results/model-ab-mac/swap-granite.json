@@ -1,0 +1,54 @@
+{
+  "dimensions": 384,
+  "dropped_without_record": 870,
+  "embed_ms_per_owner": 49.142,
+  "embed_seconds": 70.961,
+  "from": "<scratch>/dogfood/from-granite/memory.axil",
+  "from_vectors": 2314,
+  "max_seq_len": 8192,
+  "model": "granite-embedding-small-english-r2",
+  "owners": 1444,
+  "owners_by_table_and_text": {
+    "_checkpoint_records": {
+      "summary": 3
+    },
+    "_idx_code_proxies": {
+      "proxy_text": 1042
+    },
+    "_idx_files": {
+      "summary": 141
+    },
+    "_recall_chunks": {
+      "content": 26
+    },
+    "commits": {
+      "searchable_text": 100
+    },
+    "context": {
+      "searchable_text": 40
+    },
+    "decisions": {
+      "searchable_text": 63
+    },
+    "errors": {
+      "searchable_text": 27
+    },
+    "rules": {
+      "searchable_text": 2
+    }
+  },
+  "rebuilt_vectors": 1444,
+  "same_model_check": null,
+  "same_table_memory_pair_cosines": {
+    "max": 1.0000001192092896,
+    "p50": 0.7971559762954712,
+    "p90": 0.8452316522598267,
+    "p99": 0.9144459962844849,
+    "pairs": 8035,
+    "share_at_least_0.65": 1.0,
+    "share_at_least_0.92": 0.00821406347230865
+  },
+  "text_bytes": 467665,
+  "to": "<scratch>/dogfood/snap-granite/memory.axil",
+  "vec_file_bytes": 4919296
+}

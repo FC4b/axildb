@@ -1,0 +1,58 @@
+{
+  "benchmark": "LongMemEval",
+  "variant": "s",
+  "strategy": "recall-qtc",
+  "model": "gte-modernbert-base",
+  "rerank": "off",
+  "top_k": 5,
+  "total_questions": 20,
+  "overall": {
+    "hit_rate": 0.95,
+    "avg_recall": 0.95,
+    "avg_precision": 0.19000000000000006,
+    "recall_all": 0.95,
+    "ndcg_at_10": 0.919342640361727,
+    "turn_recall_compact": 0.0,
+    "turn_recall_full": 0.95,
+    "tokens_compact": 250.0,
+    "tokens_full": 15133.3625,
+    "evidence_per_1k_tokens_compact": 0.0,
+    "evidence_per_1k_tokens_full": 0.06277520940901271
+  },
+  "by_category": {
+    "single-session-user": {
+      "total": 20,
+      "hits": 19,
+      "hit_rate": 0.95,
+      "avg_recall": 0.95,
+      "avg_precision": 0.19000000000000006,
+      "recall_all": 0.95,
+      "ndcg_at_10": 0.919342640361727,
+      "turn_recall_compact": 0.0,
+      "turn_recall_full": 0.95,
+      "tokens_compact": 250.0,
+      "tokens_full": 15133.3625,
+      "evidence_per_1k_tokens_compact": 0.0,
+      "evidence_per_1k_tokens_full": 0.06277520940901271
+    }
+  },
+  "misses": [
+    {
+      "question_id": "5d3d2817",
+      "question_type": "single-session-user",
+      "question_date": "2023/05/30 (Tue) 20:08",
+      "recall": 0.0,
+      "precision": 0.0,
+      "retrieved_sessions": [
+        "session_30",
+        "session_16",
+        "session_37",
+        "session_40",
+        "session_1"
+      ],
+      "answer_sessions": [
+        "session_26"
+      ]
+    }
+  ]
+}

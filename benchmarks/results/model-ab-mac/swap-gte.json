@@ -1,0 +1,54 @@
+{
+  "dimensions": 768,
+  "dropped_without_record": 870,
+  "embed_ms_per_owner": 166.907,
+  "embed_seconds": 241.014,
+  "from": "<scratch>/dogfood/from-gte/memory.axil",
+  "from_vectors": 2314,
+  "max_seq_len": 8192,
+  "model": "gte-modernbert-base",
+  "owners": 1444,
+  "owners_by_table_and_text": {
+    "_checkpoint_records": {
+      "summary": 3
+    },
+    "_idx_code_proxies": {
+      "proxy_text": 1042
+    },
+    "_idx_files": {
+      "summary": 141
+    },
+    "_recall_chunks": {
+      "content": 26
+    },
+    "commits": {
+      "searchable_text": 100
+    },
+    "context": {
+      "searchable_text": 40
+    },
+    "decisions": {
+      "searchable_text": 63
+    },
+    "errors": {
+      "searchable_text": 27
+    },
+    "rules": {
+      "searchable_text": 2
+    }
+  },
+  "rebuilt_vectors": 1444,
+  "same_model_check": null,
+  "same_table_memory_pair_cosines": {
+    "max": 1.0000001192092896,
+    "p50": 0.5658831000328064,
+    "p90": 0.6712116599082947,
+    "p99": 0.812438428401947,
+    "pairs": 8035,
+    "share_at_least_0.65": 0.14710640945861855,
+    "share_at_least_0.92": 0.0043559427504667085
+  },
+  "text_bytes": 467665,
+  "to": "<scratch>/dogfood/snap-gte/memory.axil",
+  "vec_file_bytes": 10883072
+}

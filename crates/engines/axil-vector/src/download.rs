@@ -176,6 +176,36 @@ const GTE_MODERNBERT_BASE: PinnedModel = PinnedModel {
     ],
 };
 
+/// IBM's repo ships only PyTorch and safetensors weights. The onnx-community
+/// export (Transformers.js, fp32) keeps its weights in an external
+/// `model.onnx_data`, as bge-m3's does. Its `tokenizer.json` is IBM's
+/// tokenizer re-serialized (merges written as pairs): the same vocabulary,
+/// merges, normalizer, pre-tokenizer and post-processor.
+const GRANITE_SMALL_R2: PinnedModel = PinnedModel {
+    repo: "onnx-community/granite-embedding-small-english-r2-ONNX",
+    revision: "1dc7835ba0cb9c76a3618d0bf0c427c97671b3c8",
+    files: &[
+        ModelFile {
+            remote: "onnx/model.onnx",
+            local: "model.onnx",
+            sha256: "cddb145cd1147ec24a3908b2ca2602b98b20a3d198365cff270b7cb26c98179e",
+            size: 182_504,
+        },
+        ModelFile {
+            remote: "onnx/model.onnx_data",
+            local: "model.onnx_data",
+            sha256: "86a3a705d4598615894d89540ea71a3d9bbdb17a315e79edcd5dfc737222834b",
+            size: 194_844_160,
+        },
+        ModelFile {
+            remote: "tokenizer.json",
+            local: "tokenizer.json",
+            sha256: "feeb83348dcb033bc6b9d2e1f7906ca9eb2d122845000c9416d894d7c2927149",
+            size: 2_128_614,
+        },
+    ],
+};
+
 /// The pinned files of a registered model; `None` for a custom model.
 pub fn pinned_model(model: &EmbeddingModel) -> Option<&'static PinnedModel> {
     match model {
@@ -185,6 +215,7 @@ pub fn pinned_model(model: &EmbeddingModel) -> Option<&'static PinnedModel> {
         EmbeddingModel::Nomic => Some(&NOMIC),
         EmbeddingModel::BgeM3 => Some(&BGE_M3),
         EmbeddingModel::GteModernbertBase => Some(&GTE_MODERNBERT_BASE),
+        EmbeddingModel::GraniteSmallR2 => Some(&GRANITE_SMALL_R2),
         EmbeddingModel::Custom { .. } => None,
     }
 }
@@ -545,6 +576,7 @@ pub fn list_models() -> Vec<(EmbeddingModel, PathBuf, u64)> {
         EmbeddingModel::Nomic,
         EmbeddingModel::BgeM3,
         EmbeddingModel::GteModernbertBase,
+        EmbeddingModel::GraniteSmallR2,
     ];
 
     let mut result = Vec::new();
@@ -576,13 +608,14 @@ fn dir_size(path: &Path) -> u64 {
 mod tests {
     use super::*;
 
-    const REGISTERED: [EmbeddingModel; 6] = [
+    const REGISTERED: [EmbeddingModel; 7] = [
         EmbeddingModel::BgeSmall,
         EmbeddingModel::BgeSmallInt8,
         EmbeddingModel::BgeBase,
         EmbeddingModel::Nomic,
         EmbeddingModel::BgeM3,
         EmbeddingModel::GteModernbertBase,
+        EmbeddingModel::GraniteSmallR2,
     ];
 
     /// A pinned file for `bytes`, as the tests' download payload.

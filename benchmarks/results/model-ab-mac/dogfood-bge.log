@@ -1,0 +1,5 @@
+[12:26:25] bge: swap (4.74 8.74 8.72)
+[axil-vector] CPU execution provider (no GPU feature compiled in)
+[12:26:46] bge: eval (8.27 9.30 8.92)
+[12:30:44] bge: done (58.01 35.27 20.36)
+EXIT 0
