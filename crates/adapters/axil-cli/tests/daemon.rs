@@ -1296,8 +1296,10 @@ fn another_build_environment_or_database_is_not_sent() {
         "{}",
         text(&sent.stderr)
     );
-    let stop = fx.axil(&["daemon", "stop"]);
-    assert!(stop.status.success(), "{}", text(&stop.stderr));
+    // Its executable touched, it is another build: it retires.
+    assert!(Command::new("touch").arg(&copy).status().unwrap().success());
+    assert!(wait_for(Duration::from_secs(10), || !fx.locked()));
+    assert_eq!(fx.info()["exit_reason"], "its executable changed");
 
     fx.start();
     let keyed = axil_env(BIN, &fx.proj, &["boot"], None, &[("AXIL_ENC_KEY", "x")]);
