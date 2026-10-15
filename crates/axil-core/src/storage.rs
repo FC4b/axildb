@@ -166,23 +166,25 @@ impl<'txn> Membership<'txn> {
         Ok(joined)
     }
 
-    /// [`Membership::join`] for each `(table, id)` in order, writing each
-    /// table's counters once rather than once per id. Meant for batches of
-    /// mostly new ids.
+    /// [`Membership::join`] for each `(table, id)` in order, writing the
+    /// counters of each table an id joined once rather than once per id.
+    /// Meant for batches of mostly new ids.
     fn join_all<'a>(&mut self, rows: impl IntoIterator<Item = (&'a str, &'a str)>) -> Result<()> {
-        let mut changed: std::collections::HashMap<&str, TableCounts> =
+        let mut tables: std::collections::HashMap<&str, (TableCounts, bool)> =
             std::collections::HashMap::new();
         for (table, id) in rows {
-            let counts = match changed.entry(table) {
+            let (counts, joined) = match tables.entry(table) {
                 std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
                 std::collections::hash_map::Entry::Vacant(entry) => {
-                    entry.insert(self.counts_of(table)?)
+                    entry.insert((self.counts_of(table)?, false))
                 }
             };
-            self.join_counted(counts, table, id)?;
+            *joined |= self.join_counted(counts, table, id)?;
         }
-        for (table, counts) in changed {
-            self.counts.insert(table, counts)?;
+        for (table, (counts, joined)) in tables {
+            if joined {
+                self.counts.insert(table, counts)?;
+            }
         }
         Ok(())
     }
@@ -557,7 +559,8 @@ fn legacy_entity_fingerprint(list: Option<&[u8]>) -> String {
 /// when the marker was stamped against `from`: the list it describes moved
 /// to another layout unchanged. A marker stamped against anything else (an
 /// older binary changed the list since) is left as it is, so it stays stale.
-fn restamp_entity_marker(txn: &WriteTransaction, from: &str, to: &str) -> Result<()> {
+/// Returns whether a marker was re-stamped.
+fn restamp_entity_marker(txn: &WriteTransaction, from: &str, to: &str) -> Result<bool> {
     let mut markers = txn.open_table(STORAGE_MARKERS)?;
     let restamped = match markers.get(ENTITY_KEY_INDEX_MARKER)? {
         Some(guard) => {
@@ -574,10 +577,11 @@ fn restamp_entity_marker(txn: &WriteTransaction, from: &str, to: &str) -> Result
         }
         None => None,
     };
-    if let Some(value) = restamped {
-        markers.insert(ENTITY_KEY_INDEX_MARKER, value.as_str())?;
-    }
-    Ok(())
+    let Some(value) = restamped else {
+        return Ok(false);
+    };
+    markers.insert(ENTITY_KEY_INDEX_MARKER, value.as_str())?;
+    Ok(true)
 }
 
 /// An `_entities` row whose body does not decode, which stops an index build.
@@ -877,7 +881,8 @@ impl Storage {
         }
         let keyed_fingerprint = membership.entity_fingerprint()?;
         drop(membership);
-        restamp_entity_marker(txn, &legacy_fingerprint, &keyed_fingerprint)
+        restamp_entity_marker(txn, &legacy_fingerprint, &keyed_fingerprint)?;
+        Ok(())
     }
 
     /// Convert this file's table index back to the legacy layout (one JSON
@@ -885,7 +890,8 @@ impl Storage {
     /// open, and close the handle.
     ///
     /// Lists keep their order. A current entity key index stays current for
-    /// those binaries; a stale one stays stale. This is the way back to an
+    /// those binaries; a stale one stays stale, and the marker of a failed
+    /// build the list has changed since is dropped, so the build is retried. This is the way back to an
     /// older binary: the next writable [`Storage::open`] by this version
     /// migrates the file again, so run it last. One write transaction, so a
     /// crash leaves the file as it was. Fails with [`AxilError::Busy`] on a
@@ -921,7 +927,18 @@ impl Storage {
                 );
                 fingerprint
             };
-            restamp_entity_marker(&txn, &keyed_fingerprint, &legacy_fingerprint)
+            // A marker stamped against anything but the keyed list is a
+            // failed build of a list that has changed since: keyed writes
+            // leave those in place, for the next use to retry. Carried into
+            // the legacy layout as it is, it could match the list again once
+            // the next migration numbers the positions afresh, and the index
+            // would never be retried. Dropped, it is retried as it would
+            // have been.
+            if !restamp_entity_marker(&txn, &keyed_fingerprint, &legacy_fingerprint)? {
+                txn.open_table(STORAGE_MARKERS)?
+                    .remove(ENTITY_KEY_INDEX_MARKER)?;
+            }
+            Ok(())
         })();
         match converted {
             Ok(()) => txn.commit()?,
@@ -4416,6 +4433,57 @@ mod tests {
             assert_eq!(found["redis"], copy);
             assert_ne!(found["redis"], redis);
             assert_index_matches_scan(&storage, "after a shared key");
+        }
+
+        /// A failed build's marker that later entity writes left behind, as
+        /// keyed writes do, does not survive a downgrade: the next migration
+        /// numbers the positions afresh, its stale fingerprint could match
+        /// the list again, and the build would never be retried.
+        #[test]
+        fn a_stale_failed_marker_does_not_survive_a_downgrade() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("failed.axil");
+            let storage = Storage::open(&path).unwrap();
+            let ids: Vec<RecordId> = ["a", "b", "c", "d"]
+                .iter()
+                .map(|name| {
+                    let entity = Record::new("_entities", json!({ "canonical_id": name }));
+                    storage.insert(&entity).unwrap()
+                })
+                .collect();
+            storage.delete(&ids[3]).unwrap();
+            drop(storage);
+            // Stamped when the list held three ids at positions 0 to 2; it
+            // now holds three ids of four positions.
+            let db = Database::open(&path).unwrap();
+            let txn = db.begin_write().unwrap();
+            txn.open_table(STORAGE_MARKERS)
+                .unwrap()
+                .insert(
+                    ENTITY_KEY_INDEX_MARKER,
+                    format!("{ENTITY_KEY_FAILED}m3.3:{}", ids[1].0).as_str(),
+                )
+                .unwrap();
+            txn.commit().unwrap();
+            drop(db);
+
+            let storage = Storage::open(&path).unwrap();
+            assert_eq!(
+                storage.entity_key_index_status().unwrap(),
+                EntityKeyIndexStatus::Absent
+            );
+            storage.downgrade_table_index().unwrap();
+            let storage = Storage::open(&path).unwrap();
+            assert_eq!(
+                storage.entity_key_index_status().unwrap(),
+                EntityKeyIndexStatus::Absent,
+                "migrated, the list is m3.3 again"
+            );
+            assert!(storage.ensure_entity_key_index().unwrap());
+            assert_eq!(
+                storage.entity_key_index_status().unwrap(),
+                EntityKeyIndexStatus::Current
+            );
         }
 
         /// An older binary that predates the index adds or deletes an entity
