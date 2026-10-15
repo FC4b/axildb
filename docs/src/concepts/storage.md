@@ -44,12 +44,29 @@ keeps it explicitly:
   same machine, both runs while other builds were loading it, the second run
   more heavily, so compare the two tables within a run rather than across
   runs).
+- **A small fixed cost.** An insert or delete touches three B-trees where the
+  array was one entry, so into a table of a few dozen rows the keyed index
+  costs a little more than the array did. A CPU-only measurement on tmpfs
+  during review, not a committed benchmark, put that at about 9-12 µs per
+  insert or delete into an empty table, with the keyed index cheaper from
+  about 55 rows; read it as an estimate. Against the 1.3-3.3 ms medians of a
+  whole committed write above, it doesn't show on disk.
 - **Converted on the first writable open.** The first writable open by a build
   with the keyed index converts the JSON arrays in one write transaction: a
   crash or an error leaves the file as it was, and the next open tries again.
-  It took 0.70 s for a file listing about 85,100 ids in the run above, and the
-  next open 10 ms. A read-only open converts nothing: it reads the arrays as
-  they are.
+  In the run above it converted a file listing about 85,100 ids in 0.70 s,
+  some 120,000 ids a second at a load average of 20, and the next open took
+  10 ms (the `migration` objects in
+  `benchmarks/results/write-cost-vs-table-size-2026-10-16-keyed.json`). A
+  read-only open converts nothing: it reads the arrays as they are.
+- **Not under a hook's time limit.** A hook kills its lookup when the hook's
+  time runs out (2.5 s for a prompt), so that it answers before the harness
+  kills the hook, and a conversion taking longer would be cut off at every
+  prompt. So a hook that finds the file
+  unconverted runs no lookup that time and starts its detached writer, which
+  no time limit bounds, to convert it; writes the hook queued run after the
+  conversion as usual. A database a daemon holds was converted when the
+  daemon opened it.
 - **Older builds refuse a converted file**, with an error saying to upgrade,
   rather than read arrays that no longer change. See
   [Mixing binary versions](../getting-started/installation.md#builds-from-before-the-keyed-table-index).

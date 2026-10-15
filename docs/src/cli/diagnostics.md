@@ -29,8 +29,12 @@ checkpoints; counted per table, a warning, fixed only by
 `heal --embed-internal`), SCIP freshness, indexer staleness, orphaned edges,
 orphaned vectors (vectors whose record is gone; an error once they are more
 than 10% of the index, since recall fetches them and then drops them), the
-state of the `_entities` key index, recent error/healing history. Exit code:
-0 all ok, 1 warnings, 2 errors.
+state of the `_entities` key index, recent error/healing history, and
+whether the `axil` the project's agent hooks run can open this database
+(`hook_binary`: a warning for a build too old to, since its hooks fail
+without a word; see
+[Builds from before the keyed table index](../getting-started/installation.md#builds-from-before-the-keyed-table-index)).
+Exit code: 0 all ok, 1 warnings, 2 errors.
 
 #### A damaged vector store
 

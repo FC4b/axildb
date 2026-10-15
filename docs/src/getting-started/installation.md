@@ -92,19 +92,34 @@ Newer builds keep the list of each table's record ids as one entry per id
 (see [Table membership](../concepts/storage.md#table-membership)); older
 builds kept one JSON array per table. The first time a newer build opens a
 database for writing, it converts the table index, in one transaction. A
-read-only open (a hot read command falls back to one while another process
-holds the database) reads the old layout as it is and converts nothing.
+newer build's read-only open (a hot read command falls back to one while
+another process holds the database) reads the old layout as it is and
+converts nothing.
 
-From then on, a build from before the change refuses the database instead of
-opening it:
+From then on, a build from before the change can't use the database. Its
+writable open, which nearly every command makes, fails:
 
 ```
 storage error: table_index is of type Table<&str, axil_core::TableCounts (written by a newer axil; upgrade axil to open this database)>
 ```
 
+Its read-only open succeeds and writes nothing, but only fetching a record by
+id works on it: anything that lists or counts a table's records, or names the
+tables, fails with the same error.
+
 It would otherwise read id lists that no longer change: it would miss every
 record written since, and its auto-linking would create duplicate entities.
 Nothing is lost. Install the newer build on your `PATH`, as above.
+
+**Agent hooks fail silently in this state.** `axil install` wires hooks as
+`axil hook run`, with the bare `axil` on your `PATH` when that one has the
+command. A hook exits 0 whatever happens, so that it never blocks the agent.
+If that `axil` is a build from before the change, every hook fails against a
+converted database and nothing says so: no memory is injected into the
+agent's context and nothing is auto-captured (the writes a hook queued fail
+in its drainer, which logs them to `hook-queue/drain.log` beside the database
+and drops them). `axil doctor` run by the newer build warns about it in its
+`hook_binary` check. The fix is the same: upgrade the `axil` on your `PATH`.
 
 To keep using an older build on a database, copy the database's files before
 a newer build first opens it (see
