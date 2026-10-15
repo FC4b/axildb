@@ -33,10 +33,10 @@
 //! the daemon checks (at most every 250 ms, and again for a write once it
 //! holds the writer lock) whether the files behind the open handle changed
 //! without it ([`FileFp`]) or the graph failed to load; either reopens the
-//! database once the requests on the old handle finish. Until a reopen
-//! succeeds, no request runs on the old handle: each is answered
-//! `unavailable`, so a write is never made to a file that is no longer the
-//! database. A store written in place by another process (a backup copied
+//! database, on a thread of its own, once the requests on the old handle
+//! finish. Until a reopen succeeds, no request runs on the old handle: each
+//! is answered `unavailable`, and the client asks again, so a write is never
+//! made to a file that is no longer the database. A store written in place by another process (a backup copied
 //! over it) can't be reopened: the daemon stops without closing it, since
 //! closing would write the handle's stale view over the copy. A tick each
 //! second does the same checks, and stops the daemon when it has been idle
@@ -1259,7 +1259,16 @@ impl Server {
         };
         let op = op_label(&header.argv);
         match self.check(FRESH_FOR, 0) {
-            Some(Change::Reload(why)) => self.reload(&why),
+            // Reopened on a thread of its own, which can take a while: the
+            // client asks again, as while the daemon opens the database at
+            // its start.
+            Some(Change::Reload(why)) => {
+                if self.phase.get() == Phase::Ready {
+                    self.spawn_background("axil-reload", move |server| server.reload(&why));
+                }
+                self.stats.not_served(op);
+                return (RunReply::not_served(NotServed::Unavailable), None);
+            }
             Some(Change::Overwritten(why)) => {
                 self.abandon(&why);
                 self.request_stop(StopReason::Overwritten(why));
@@ -1943,6 +1952,19 @@ mod tests {
         matches!(&outcome.reply, RunReply::NotServed { reason, .. } if reason == "unavailable")
     }
 
+    /// [`send`], again while the daemon reopens the database, as a client
+    /// does.
+    fn send_settled(server: &Server, args: &[&str], cwd: &Path) -> RunOutcome {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let outcome = send(server, args, cwd, None);
+            if !unavailable(&outcome) || Instant::now() >= deadline {
+                return outcome;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
+
     /// Until the warm-up and any reload are done, so they hold nothing.
     fn quiet(server: &Server) {
         let deadline = Instant::now() + Duration::from_secs(120);
@@ -2129,9 +2151,10 @@ mod tests {
         stop(server);
     }
 
-    /// A change the handle didn't make reloads it before the next request:
-    /// an engines edit in `axil.toml`, a backup renamed over the database,
-    /// a dropped store, and a graph that failed to load.
+    /// A change the handle didn't make reloads it, and the request that
+    /// found it is asked again: an engines edit in `axil.toml`, a backup
+    /// renamed over the database, a dropped store, and a graph that failed
+    /// to load.
     #[test]
     fn a_change_under_the_open_handle_reloads_it() {
         let tmp = tempfile::tempdir().unwrap();
@@ -2150,6 +2173,8 @@ mod tests {
         fs::write(proj.join("axil.toml"), "[engines]\ndisabled = [\"ts\"]\n").unwrap();
         after_change();
         let since = send(&server, &["since", "1h"], &cwd, None);
+        assert!(unavailable(&since), "{since:?}");
+        let since = send_settled(&server, &["since", "1h"], &cwd);
         assert_eq!(reloads(), 1);
         assert!(server
             .stats
@@ -2165,7 +2190,7 @@ mod tests {
 
         fs::rename(&backup, &db).unwrap();
         after_change();
-        served(send(&server, &["boot"], &cwd, None));
+        served(send_settled(&server, &["boot"], &cwd));
         assert_eq!(reloads(), 2);
         assert_eq!(
             server.stats.last_reload().as_deref(),
@@ -2177,7 +2202,7 @@ mod tests {
         if cfg!(feature = "fts") {
             axil_core::drop_engine_companion(&db, "fts").unwrap();
             after_change();
-            let fts = send(&server, &["fts", "cache"], &cwd, None);
+            let fts = send_settled(&server, &["fts", "cache"], &cwd);
             expected += 1;
             assert_eq!(reloads(), expected);
             assert!(
@@ -2187,7 +2212,7 @@ mod tests {
         }
         if cfg!(feature = "graph") {
             server.fail_graph.store(true, Ordering::Release);
-            served(send(&server, &["boot"], &cwd, None));
+            served(send_settled(&server, &["boot"], &cwd));
             expected += 1;
             assert_eq!(reloads(), expected);
             assert_eq!(
@@ -2202,9 +2227,9 @@ mod tests {
     /// A database replaced under a handle that requests still hold: the
     /// reload is put off, and until one succeeds nothing runs on the old
     /// handle, a write least of all, not even in the 250 ms a clean check
-    /// stands for. A request whose deadline passes while it waits is not
-    /// run. Once the old handle is let go, the write lands in the database
-    /// on disk.
+    /// stands for. A request is not held up while the reload waits for the
+    /// old handle. Once it is let go, the write lands in the database on
+    /// disk.
     #[test]
     fn nothing_runs_on_a_handle_known_to_be_stale() {
         let tmp = tempfile::tempdir().unwrap();
@@ -2239,12 +2264,12 @@ mod tests {
             .unwrap()
             .header(parity::argv(&store), &cwd, false);
         header.env.clear();
-        header.deadline_ms = Some(epoch_ms() + 100);
+        header.deadline_ms = Some(epoch_ms() + 10_000);
         let late = proto::run(server.run.socket(), &header, None, Duration::from_secs(30)).unwrap();
-        assert_eq!(late.reply, RunReply::Expired);
+        assert!(unavailable(&late), "{late:?}");
 
         drop(held);
-        let (out, err, exit) = served(send(&server, &store, &cwd, None));
+        let (out, err, exit) = served(send_settled(&server, &store, &cwd));
         assert_eq!(exit, 0, "{}", String::from_utf8_lossy(&err));
         assert_eq!(reloads(), 1);
         let record: Value = serde_json::from_slice(&out).unwrap();
