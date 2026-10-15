@@ -95,6 +95,15 @@ fn fixture() -> Fixture {
     }
 }
 
+/// Whether the binary was built with what a test needs (`has`, from
+/// `cfg!`), saying when it was not: CI also tests a core-only build.
+fn built_with(has: bool, what: &str) -> bool {
+    if !has {
+        eprintln!("skipped: this build lacks {what}");
+    }
+    has
+}
+
 fn text(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
@@ -521,6 +530,14 @@ fn replacing_the_executable_retires_the_daemon() {
 
 #[test]
 fn a_dropped_engine_and_a_failed_graph_reload_the_daemon() {
+    let engines = cfg!(all(
+        feature = "timeseries",
+        feature = "fts",
+        feature = "graph"
+    ));
+    if !built_with(engines, "the time-series, full-text or graph store") {
+        return;
+    }
     let fx = fixture();
     let socket = PathBuf::from(fx.start()["socket"].as_str().unwrap());
     let reloads = || fx.status()["live"]["reloads"].as_u64().unwrap();
@@ -572,35 +589,59 @@ fn the_hot_commands_print_nothing_into_the_log() {
     let fx = fixture();
     fx.start();
     let cp = r#"{"goal":"g","state":"s","next_steps":["n"]}"#;
-    let cases: Vec<(Vec<&str>, Option<&[u8]>)> = vec![
-        (vec!["boot"], None),
-        (vec!["boot", "--boot-format", "narrative"], None),
-        (vec!["boot", "--files", "src/auth.rs"], None),
-        (vec!["recall-for-file", "src/auth.rs"], None),
-        (vec!["recall", "auth timeout"], None),
+    // Each with whether this build serves it.
+    let recall = cfg!(feature = "embed");
+    let cases: Vec<(Vec<&str>, Option<&[u8]>, bool)> = vec![
+        (vec!["boot"], None, true),
+        (vec!["boot", "--boot-format", "narrative"], None, true),
+        (vec!["boot", "--files", "src/auth.rs"], None, true),
+        (vec!["recall-for-file", "src/auth.rs"], None, true),
+        (vec!["recall", "auth timeout"], None, recall),
         (
             vec!["recall", "auth timeout", "--recall-format", "context-block"],
             None,
+            recall,
         ),
-        (vec!["--format", "table", "recall", "auth timeout"], None),
-        (vec!["code-search", "validate token"], None),
-        (vec!["fts", "tokens"], None),
-        (vec!["fts", "tokens", "--jsonl"], None),
-        (vec!["since", "1h"], None),
-        (vec!["store", "decisions", r#"{"summary":"sent"}"#], None),
+        (
+            vec!["--format", "table", "recall", "auth timeout"],
+            None,
+            recall,
+        ),
+        (
+            vec!["code-search", "validate token"],
+            None,
+            cfg!(feature = "indexer"),
+        ),
+        (vec!["fts", "tokens"], None, cfg!(feature = "fts")),
+        (
+            vec!["fts", "tokens", "--jsonl"],
+            None,
+            cfg!(feature = "fts"),
+        ),
+        (vec!["since", "1h"], None, cfg!(feature = "timeseries")),
+        (
+            vec!["store", "decisions", r#"{"summary":"sent"}"#],
+            None,
+            true,
+        ),
         (
             vec!["store", "context", "-"],
             Some(br#"{"summary":"piped"}"#),
+            true,
         ),
-        (vec!["store", "decisions", "{nope"], None),
-        (vec!["checkpoint", cp], None),
-        (vec!["checkpoint", "-"], Some(cp.as_bytes())),
-        (vec!["--help"], None),
-        (vec!["store"], None),
-        (vec!["--version"], None),
+        (vec!["store", "decisions", "{nope"], None, true),
+        (vec!["checkpoint", cp], None, cfg!(feature = "checkpoint")),
+        (
+            vec!["checkpoint", "-"],
+            Some(cp.as_bytes()),
+            cfg!(feature = "checkpoint"),
+        ),
+        (vec!["--help"], None, true),
+        (vec!["store"], None, true),
+        (vec!["--version"], None, true),
     ];
     let mut served = 0;
-    for (args, stdin) in &cases {
+    for (args, stdin, _) in &cases {
         let out = fx.send(args, *stdin);
         if out.status.code() != Some(125) {
             served += 1;
@@ -617,7 +658,8 @@ fn the_hot_commands_print_nothing_into_the_log() {
             );
         }
     }
-    assert!(served >= cases.len() - 2, "only {served} served");
+    let servable = cases.iter().filter(|(_, _, served)| *served).count();
+    assert!(served >= servable - 2, "only {served} served");
     let live = fx.live();
     assert_eq!(
         (&live["state"], &live["panics"]),
@@ -645,6 +687,9 @@ fn the_hot_commands_print_nothing_into_the_log() {
 
     // A checkpoint given its JSON does not read stdin, so an open pipe
     // nobody writes to does not hold it up.
+    if !built_with(cfg!(feature = "checkpoint"), "checkpoint") {
+        return;
+    }
     let mut cmd = Command::new(BIN);
     cmd.args(["daemon", "send", "--", "checkpoint", cp])
         .current_dir(&fx.proj)
@@ -922,25 +967,36 @@ fn the_commands_it_does_not_serve_lease_the_database() {
     }
     fx.warm_again();
 
-    let index = fx.leasing(&["index"]);
-    if fx.vectors {
-        // The embedder announces itself once a process loads it.
-        assert!(
-            text(&index.stderr).contains("[axil-vector]"),
-            "indexed without the embedder: {}",
-            text(&index.stderr)
-        );
+    if built_with(cfg!(feature = "indexer"), "index") {
+        let index = fx.leasing(&["index"]);
+        if fx.vectors {
+            // The embedder announces itself once a process loads it.
+            assert!(
+                text(&index.stderr).contains("[axil-vector]"),
+                "indexed without the embedder: {}",
+                text(&index.stderr)
+            );
+        }
+        fx.warm_again();
     }
-    fx.warm_again();
     if fx.vectors {
         let reembed = fx.leasing(&["reembed", "--field", "summary"]);
         let report: Value = serde_json::from_slice(&reembed.stdout).unwrap();
         assert!(report["reembedded"].as_u64().unwrap() > 0, "{report}");
         fx.warm_again();
     }
-    fx.leasing(&["deps", "refresh"]);
-    fx.warm_again();
+    if built_with(cfg!(feature = "deps"), "deps") {
+        fx.leasing(&["deps", "refresh"]);
+        fx.warm_again();
+    }
 
+    if !built_with(
+        cfg!(all(feature = "mcp", feature = "embed")),
+        "mcp or recall",
+    ) {
+        assert_eq!(fx.live()["reloads"], 0, "{}", fx.live());
+        return;
+    }
     let mut mcp = fx.mcp();
     mcp.initialize();
     let pid = u64::from(mcp.child.id());
@@ -1035,6 +1091,10 @@ fn reembed_leases_before_it_moves_the_vector_store() {
 /// the daemon has opened the database again it serves the command.
 #[test]
 fn a_store_the_daemon_lacks_is_created_under_a_lease() {
+    let engines = cfg!(all(feature = "fts", feature = "timeseries"));
+    if !built_with(engines, "the full-text or time-series store") {
+        return;
+    }
     let fx = fixture();
     let mut engines = vec!["fts", "ts"];
     if fx.vectors {
@@ -1089,6 +1149,10 @@ fn a_store_the_daemon_lacks_is_created_under_a_lease() {
 /// held and returns no context, at once.
 #[test]
 fn a_hook_recall_under_a_lease_returns_nothing_at_once() {
+    let needs = cfg!(all(feature = "mcp", feature = "embed", feature = "fts"));
+    if !built_with(needs, "mcp or recall") {
+        return;
+    }
     let fx = fixture();
     fx.start();
     let hook = |session: &str| {
@@ -1132,6 +1196,9 @@ fn a_hook_recall_under_a_lease_returns_nothing_at_once() {
 /// the database again and serves.
 #[test]
 fn a_killed_lease_holder_lets_the_daemon_open_again() {
+    if !built_with(cfg!(feature = "mcp"), "mcp, the lease holder here") {
+        return;
+    }
     let fx = fixture();
     fx.start();
     let mut mcp = fx.mcp();
