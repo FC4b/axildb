@@ -1683,6 +1683,55 @@ mod tests {
         assert!(code == 0 && err.contains("axil heal --reindex"), "{err}");
     }
 
+    /// A database whose vector store holds another embedding model's vectors
+    /// is not served, so every command reports the refusal as the one-shot
+    /// binary does, and a model changed in axil.toml is never served from a
+    /// handle that loaded the old one.
+    #[cfg(feature = "embed")]
+    #[test]
+    fn a_database_whose_store_holds_another_models_vectors_is_not_served() {
+        use axil_core::plugin::VectorIndex;
+        use axil_vector::models::EmbeddingModel;
+        const GRANITE: &str = "granite-embedding-small-english-r2";
+
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = build_fixture(tmp.path());
+        let db = proj.join(".axil/memory.axil");
+        // granite's vectors are as wide as those of bge-small, the model the
+        // fixture configures by having no axil.toml.
+        match axil_vector::open_store_for_model(&db, &EmbeddingModel::GraniteSmallR2).unwrap() {
+            axil_vector::ModelStore::Open(engine) => {
+                let mut v = vec![0.0f32; 384];
+                v[0] = 1.0;
+                engine.add(axil_core::RecordId::new(), &v).unwrap();
+            }
+            axil_vector::ModelStore::Refused(m) => panic!("a new store is never refused: {m:?}"),
+            _ => unreachable!(),
+        }
+
+        // The open prints the refusal, so it is not served.
+        let err = WarmState::open(&db).err().expect("served");
+        let printed = &err
+            .downcast_ref::<OpenPrinted>()
+            .unwrap_or_else(|| panic!("{err:#}"))
+            .0;
+        assert!(
+            printed.contains(GRANITE) && printed.contains("reembed"),
+            "{printed}"
+        );
+        // It is printed once per thread, so a reopen on this one prints
+        // nothing. Its handle carries the refusal instead, as a detached
+        // engine, which the server refuses to serve (`unservable`).
+        let state = WarmState::open(&db).unwrap();
+        let degraded = state.handle().unwrap().db().degraded_engines().to_vec();
+        assert!(
+            degraded
+                .iter()
+                .any(|d| d.engine == "vector" && d.reason.contains(GRANITE)),
+            "{degraded:?}"
+        );
+    }
+
     /// A warning an engine prints during the command reaches the request's
     /// stderr, where the one-shot binary prints it, not the host's.
     #[cfg(feature = "graph")]

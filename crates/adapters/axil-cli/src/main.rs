@@ -503,6 +503,7 @@ When to use which:
     want a scored checkup           -> axil health-report
     DB grew / slow, reclaim space   -> axil compact
     index returns wrong/empty hits  -> axil heal --reindex
+    changed the embedding model     -> axil reembed
     (recurring upkeep is automatic via the brain hook -> axil maintain)
 ";
 
@@ -1787,9 +1788,12 @@ enum Command {
         id: String,
         /// Field name to embed.
         field: String,
-        /// Model name: bge-small, bge-base, nomic.
-        #[arg(long, default_value = "bge-small")]
-        model: String,
+        /// Model name (default: the one axil.toml `[database] embedding_model`
+        /// names, bge-small when unset). Another model is refused unless the
+        /// vector store already holds its vectors, since its vectors cannot
+        /// be compared with the configured model's.
+        #[arg(long)]
+        model: Option<String>,
     },
 
     // ── Advanced vector commands ────────────────────────────────────
@@ -1970,23 +1974,39 @@ enum Command {
         model: String,
     },
 
-    /// Re-embed all records with a different model.
+    /// Rebuild the vector store under an embedding model.
     ///
-    /// Deletes the existing vector store, creates a new one with the target model's
-    /// dimensions, and embeds the specified field from every record that has it.
-    /// This embeds ALL matching records, not just those that previously had vectors.
+    /// Without `--field`, re-embeds every vector owner into a new store that
+    /// records the model: every memory record, and every other row that had
+    /// a vector (code index, dependency docs, recall chunks, checkpoints),
+    /// each from the text its writer embeds. This is the fix when the store
+    /// holds another model's vectors than axil.toml configures. With
+    /// `--field`, embeds that field of every record that has it instead, and
+    /// drops every other vector unless `--table` scopes it.
+    ///
+    /// The new store is built beside the old one, which it replaces only once
+    /// it is complete: a failure or an interruption leaves the old store as
+    /// it was. The database is held for the whole rebuild, so other commands
+    /// on it wait and then fail as busy until it ends: run it with no agent
+    /// session or MCP server open on the database. A second reembed of the
+    /// same database stops at once.
     #[cfg(feature = "embed")]
     Reembed {
         /// Model name: bge-small, bge-small-int8, bge-base, nomic, bge-m3,
         /// gte-modernbert-base, granite-small (experimental), or a registered
-        /// custom model.
-        #[arg(long, default_value = "bge-small")]
-        model: String,
-        /// Record field to embed (must be a string field present on all records).
+        /// custom model. Default: the one axil.toml `[database]
+        /// embedding_model` names, bge-small when unset.
         #[arg(long)]
-        field: String,
-        /// Only re-embed records in this table (default: all tables).
+        model: Option<String>,
+        /// Record field to embed (must be a string field present on all
+        /// records). Without it, every vector owner is re-embedded.
         #[arg(long)]
+        field: Option<String>,
+        /// Only re-embed records in this table (default: all tables). The
+        /// other tables keep their vectors, so the model must be the one
+        /// that built them: the one the store records, or, for a store from
+        /// before model records, the configured one.
+        #[arg(long, requires = "field")]
         table: Option<String>,
     },
 
@@ -6210,13 +6230,13 @@ fn ql_apply_flags(input: &str, explain: bool, profile: bool) -> String {
     }
 }
 
-/// Attach all auto-detected plugins to a builder.
-/// Resolve embedding model from config or default to BgeSmall.
+/// Resolve embedding model from config or default to BgeSmall. A model
+/// registered with `axil model-add` is found by its registered name.
 #[cfg(feature = "embed")]
 fn resolve_embedding_model(db_path: &Path) -> axil_vector::models::EmbeddingModel {
     if let Ok(config) = load_config(db_path) {
         if let Some(name) = &config.database.embedding_model {
-            if let Some(model) = axil_vector::models::EmbeddingModel::from_name(name) {
+            if let Some(model) = axil_vector::models::EmbeddingModel::from_config_name(name) {
                 return model;
             }
             errln!("warning: unknown embedding model '{name}' in axil.toml, using bge-small");
@@ -6237,17 +6257,21 @@ fn note_vector_store_repaired(db_path: &Path) {
 
 /// Check the default vector store before `heal` opens the database, since
 /// heal re-embeds records missing from a store and can neither create one nor
-/// resize one.
+/// rebuild one under another model.
 ///
-/// A store sized for another model fails every open, so that is an error
-/// naming the commands that rebuild it at the configured model's size. A
-/// missing store (with the engine enabled) returns a note: `--reindex` would
-/// otherwise report zero embeddings restored as if nothing were wrong. A store
-/// that cannot be probed is left to the open, which reports busy or degraded.
+/// A store that holds another model's vectors (another size, or the same size
+/// from a different model) is refused by every open. When the heal would
+/// write vectors (`writes_vectors`) that is an error naming `axil reembed`,
+/// which rebuilds it under the configured model; any other heal runs without
+/// the vector engine and lists it under `degraded`. A missing store (with the
+/// engine enabled) returns a note: `--reindex` would otherwise report zero
+/// embeddings restored as if nothing were wrong. A store that cannot be
+/// probed is left to the open, which reports busy or degraded.
 #[cfg(feature = "embed")]
 fn heal_vector_store_check(
     db_path: &Path,
     config: &axil_core::AxilConfig,
+    writes_vectors: bool,
 ) -> Result<Option<String>> {
     if config.is_engine_disabled("vec") {
         return Ok(None);
@@ -6262,36 +6286,27 @@ fn heal_vector_store_check(
     }
     let model = resolve_embedding_model(db_path);
     let vec_path = axil_vector::vector_db_path(db_path);
-    match probe {
-        axil_vector::VectorStoreProbe::Missing => Ok(Some(format!(
+    if probe == axil_vector::VectorStoreProbe::Missing {
+        return Ok(Some(format!(
             "no vector store at {}, so heal cannot restore embeddings. Run `axil init {}` \
              to create one sized for {} ({} dimensions), then `axil heal --reindex` again",
             vec_path.display(),
             db_path.display(),
             model.name(),
             model.dimensions(),
-        ))),
-        axil_vector::VectorStoreProbe::Ready { dimensions, .. }
-            if dimensions != model.dimensions() =>
-        {
-            anyhow::bail!(
-                "{} holds {dimensions}-dimension vectors, but the embedding model {} \
-                 (axil.toml `[database] embedding_model`, bge-small when unset) makes \
-                 {}-dimension ones, and heal cannot resize a store. \
-                 Rebuild it with `axil --db {} reembed --model {} --field <field>`, or \
-                 move {} to another directory and run `axil init {}` then \
-                 `axil heal --reindex`",
-                vec_path.display(),
-                model.name(),
-                model.dimensions(),
-                db_path.display(),
-                model.name(),
-                vec_path.display(),
-                db_path.display(),
-            )
-        }
-        axil_vector::VectorStoreProbe::Ready { .. } => Ok(None),
+        )));
     }
+    if !writes_vectors {
+        return Ok(None);
+    }
+    if let Ok(Some(mismatch)) = axil_vector::store_model_mismatch(db_path, &model) {
+        anyhow::bail!(
+            "{}; heal can neither embed into it nor rebuild it. Fix: {}",
+            mismatch.reason(db_path),
+            mismatch.fix(db_path),
+        );
+    }
+    Ok(None)
 }
 
 /// Reject a raw vector bound for the *default* vector space unless it has the
@@ -6299,6 +6314,10 @@ fn heal_vector_store_check(
 /// open attaches it at the model's dimension, so a store created (or written)
 /// at any other length makes the whole database refuse to open. Call before
 /// opening, since the open itself may create that store.
+///
+/// A store that holds another model's vectors is refused too: a vector added
+/// to it would be compared with vectors it can't be compared with, by
+/// whichever model the store ends up rebuilt under.
 #[cfg(feature = "embed")]
 fn ensure_default_space_dims(db_path: &Path, len: usize) -> Result<()> {
     let model = resolve_embedding_model(db_path);
@@ -6311,7 +6330,532 @@ fn ensure_default_space_dims(db_path: &Path, len: usize) -> Result<()> {
             model.name()
         );
     }
+    // A store whose model can't be read is not written to: the vector could
+    // land beside another model's.
+    match axil_vector::store_model_mismatch(db_path, &model) {
+        Ok(None) => Ok(()),
+        Ok(Some(mismatch)) => anyhow::bail!(
+            "{}. Fix: {}",
+            mismatch.reason(db_path),
+            mismatch.fix(db_path)
+        ),
+        Err(e) if e.is_busy() => Err(anyhow::Error::new(e).context("vector store is busy")),
+        Err(e) => Err(anyhow::Error::new(e).context(
+            "failed to read which embedding model the vector store holds, so the vector \
+             was not added",
+        )),
+    }
+}
+
+/// Refuse an embedding model a command names (`--model`) when it is not the
+/// configured one, unless the default vector store already records it: its
+/// vectors would land beside the configured model's, or start a store that
+/// every open under the configured model refuses. The configured model
+/// passes, and is checked by the open as always.
+#[cfg(feature = "embed")]
+fn check_named_model(
+    db_path: &Path,
+    named: &axil_vector::models::EmbeddingModel,
+    configured: &axil_vector::models::EmbeddingModel,
+) -> Result<()> {
+    use axil_vector::identity::{check_store_model_for, ModelCheck};
+    if named.store_identity() == configured.store_identity() {
+        return Ok(());
+    }
+    let stored = axil_vector::read_stored_model(db_path)
+        .context("failed to read which embedding model the vector store holds")?;
+    let holds_vectors = stored.as_ref().is_some_and(|stored| stored.vectors > 0);
+    match stored.map(|stored| check_store_model_for(&stored, named, configured)) {
+        Some(ModelCheck::Recorded) if holds_vectors => Ok(()),
+        Some(ModelCheck::Refused(mismatch)) => anyhow::bail!(
+            "{}. Fix: {}",
+            mismatch.reason(db_path),
+            mismatch.fix(db_path)
+        ),
+        // No store, or an empty one, even one that already records the named
+        // model: the named model's vectors would make it a store of that
+        // model's.
+        _ => anyhow::bail!(
+            "--model {} would start the vector store with its vectors, but axil.toml \
+             configures {} (`[database] embedding_model`, bge-small when unset), so every \
+             open would refuse the store. Fix: drop --model, or set `[database] \
+             embedding_model = \"{}\"` in axil.toml first",
+            named.name(),
+            configured.name(),
+            named.name(),
+        ),
+    }
+}
+
+/// Why the open left the default vector store detached, as an error naming
+/// the fix: it holds another embedding model's vectors, or it could not be
+/// read. `None` when the vector engine is attached, or no store was found.
+#[cfg(feature = "vector")]
+fn vector_refusal(db: &Axil) -> Option<anyhow::Error> {
+    db.degraded_engines()
+        .iter()
+        .find(|d| d.engine == "vector")
+        .map(|d| anyhow::anyhow!("{}. Fix: {}", d.summary(), d.fix))
+}
+
+/// Attach the default vector store at `dims` without loading an embedder,
+/// for a command that sets the store up or writes raw vectors into it. A
+/// store this creates at the configured model's size records that model, so
+/// the first open that loads the model finds the store its own; one that
+/// exists is checked against the model the way every model open checks it.
+#[cfg(feature = "vector")]
+fn with_default_store(
+    builder: axil_core::AxilBuilder,
+    dims: usize,
+) -> Result<axil_core::AxilBuilder> {
+    #[cfg(feature = "embed")]
+    {
+        let model = resolve_embedding_model(builder.path());
+        if model.dimensions() == dims {
+            return axil_vector::with_model_store(builder, &model)
+                .context("failed to open vector store");
+        }
+    }
+    builder
+        .with_vector(dims)
+        .context("failed to open vector store")
+}
+
+/// Rows `reembed` re-embeds between two progress lines.
+#[cfg(feature = "embed")]
+const REEMBED_PROGRESS_EVERY: usize = 500;
+
+/// Where `reembed` builds the replacement for the default vector store of
+/// the database at `db_path`: beside it, under a name no open reads. (A
+/// `<db>.vec.<name>` file would be read as a named vector space.)
+#[cfg(feature = "embed")]
+fn rebuild_store_path(db_path: &Path) -> PathBuf {
+    axil_core::companion_path(db_path, ".vec-rebuild")
+}
+
+/// Held for the whole of one `axil reembed`, so that a second one of the
+/// same database stops at once: it would otherwise delete the first one's
+/// replacement store as one an interrupted run left, or move its own over
+/// the live store. Every deletion and move of the replacement happens while
+/// this is held ([`rebuild_vector_store`], [`clear_interrupted_rebuild`]), so
+/// the replacement a run moves into place is the one it built.
+///
+/// An OS lock on `<db>.reembed-lock`, which a crashed run's process releases
+/// as it dies. Where the filesystem refuses OS locks, the file's existence is
+/// the lock instead, and one a crashed run left has to be removed by hand: a
+/// rebuild runs for as long as the database is large, so no age tells a
+/// crashed run from a live one.
+#[cfg(feature = "embed")]
+struct ReembedLock {
+    db_path: PathBuf,
+    path: PathBuf,
+    /// The OS-locked handle, or `None` when the file's existence is the lock.
+    file: Option<std::fs::File>,
+}
+
+#[cfg(feature = "embed")]
+impl ReembedLock {
+    fn acquire(db_path: &Path) -> Result<Self> {
+        Self::acquire_with(db_path, std::fs::File::try_lock)
+    }
+
+    /// [`ReembedLock::acquire`], with the OS lock call passed in so tests can
+    /// stand in for a filesystem that refuses it.
+    fn acquire_with(
+        db_path: &Path,
+        try_lock: impl Fn(&std::fs::File) -> std::result::Result<(), std::fs::TryLockError>,
+    ) -> Result<Self> {
+        let path = axil_core::companion_path(db_path, ".reembed-lock");
+        let busy = || {
+            anyhow::anyhow!(
+                "another `axil reembed` of {} is running (it holds {}); wait for it to \
+                 finish",
+                db_path.display(),
+                path.display()
+            )
+        };
+        let open_err = |e: std::io::Error| {
+            anyhow::Error::new(e).context(format!(
+                "failed to open {}, the re-embed lock of {}",
+                path.display(),
+                db_path.display()
+            ))
+        };
+        // A holder unlinks the path before its lock goes, so a run that
+        // locked the old file in that gap finds the path moved on and tries
+        // again.
+        for _ in 0..4 {
+            let (file, created) = match hook_brain::open_lock_file(&path, true) {
+                Ok(file) => (file, true),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    match hook_brain::open_lock_file(&path, false) {
+                        Ok(file) => (file, false),
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                        Err(e) => return Err(open_err(e)),
+                    }
+                }
+                Err(e) => return Err(open_err(e)),
+            };
+            match try_lock(&file) {
+                Ok(()) => {}
+                Err(std::fs::TryLockError::WouldBlock) => return Err(busy()),
+                // No OS locks here: the run that created the file holds it.
+                Err(std::fs::TryLockError::Error(_)) if created => {
+                    drop(file);
+                    let _ = std::fs::write(&path, std::process::id().to_string());
+                    return Ok(Self {
+                        db_path: db_path.to_path_buf(),
+                        path,
+                        file: None,
+                    });
+                }
+                Err(std::fs::TryLockError::Error(e)) => {
+                    anyhow::bail!(
+                        "{} exists and this filesystem refuses file locks ({e}), so another \
+                         `axil reembed` of {} may be running. If none is, one that did not \
+                         finish left it: remove it and run reembed again",
+                        path.display(),
+                        db_path.display()
+                    );
+                }
+            }
+            if !hook_brain::same_file(&file, &path) {
+                continue;
+            }
+            return Ok(Self {
+                db_path: db_path.to_path_buf(),
+                path,
+                file: Some(file),
+            });
+        }
+        Err(busy())
+    }
+
+    /// The database the lock is held for.
+    fn db_path(&self) -> &Path {
+        &self.db_path
+    }
+}
+
+#[cfg(feature = "embed")]
+impl Drop for ReembedLock {
+    fn drop(&mut self) {
+        match self.file.take() {
+            // Unlink while still locked, so nobody can lock this file after
+            // the path stops naming it and believe they hold the lock.
+            #[cfg(unix)]
+            Some(file) => {
+                if hook_brain::same_file(&file, &self.path) {
+                    let _ = std::fs::remove_file(&self.path);
+                }
+                drop(file);
+            }
+            // The handle withholds delete sharing, so the path cannot be
+            // removed while it is open: close it, then remove the path, which
+            // fails harmlessly when another run opened it in between.
+            #[cfg(not(unix))]
+            Some(file) => {
+                drop(file);
+                let _ = std::fs::remove_file(&self.path);
+            }
+            None => {
+                let ours = std::process::id().to_string();
+                if std::fs::read_to_string(&self.path).is_ok_and(|body| body.trim() == ours) {
+                    let _ = std::fs::remove_file(&self.path);
+                }
+            }
+        }
+    }
+}
+
+/// Build a replacement for the default vector store of the database `lock`
+/// is held for, for `model`'s vectors, and move it into the live store's
+/// place once `build` has filled it.
+///
+/// `build` gets the new store, empty and recording `model`, at
+/// [`rebuild_store_path`], and returns the database handle it filled the
+/// store through. The live store is not opened, let alone written, and stays
+/// in place throughout, so a failure or a crash at any point leaves it as it
+/// was; the one other outcome is the finished replacement in its place. The
+/// move happens while `build`'s handle still holds the database, so no other
+/// process opens it in between, and a rename replaces the live store in one
+/// step. Should the rename fail (the replacement removed by hand, a
+/// directory this process may not write to, or, on Windows, a live store
+/// another program holds open without sharing deletion), the replacement is
+/// deleted and the live store left as it was.
+///
+/// What an interrupted run left is dealt with first
+/// ([`clear_interrupted_rebuild`]).
+#[cfg(feature = "embed")]
+fn rebuild_vector_store<T>(
+    lock: &ReembedLock,
+    model: &axil_vector::models::EmbeddingModel,
+    build: impl FnOnce(axil_vector::VectorEngine) -> Result<(Axil, T)>,
+) -> Result<T> {
+    clear_interrupted_rebuild(lock)?;
+    let db_path = lock.db_path();
+    let vec_path = axil_vector::vector_db_path(db_path);
+    let new_path = rebuild_store_path(db_path);
+    let store = axil_vector::create_store_for_model_at(&new_path, model)
+        .context("failed to create the replacement vector store")?;
+    let (db, value) = match build(store) {
+        Ok(built) => built,
+        Err(e) => {
+            discard_rebuild(&new_path);
+            return Err(e);
+        }
+    };
+    if let Err(e) = std::fs::rename(&new_path, &vec_path) {
+        drop(db);
+        discard_rebuild(&new_path);
+        return Err(anyhow::Error::new(e).context(format!(
+            "failed to move the rebuilt vector store {} into the place of {}, which was left \
+             as it was",
+            new_path.display(),
+            vec_path.display()
+        )));
+    }
+    sync_parent_dir(&vec_path);
+    drop(db);
+    Ok(value)
+}
+
+/// Deal with what an interrupted re-embed left beside the database `lock` is
+/// held for, before a re-embed reads or replaces its vector store. With the
+/// lock held, no re-embed is running that the leftovers could belong to.
+///
+/// A replacement store ([`rebuild_store_path`]) is deleted: it may be
+/// incomplete, and it was never live. A `<db>.reembed-bak` is refused: earlier
+/// versions set the live store aside there while they rebuilt it in place, so
+/// after an interrupted run of theirs it holds the vectors from before while
+/// the live store may be half rebuilt, and only the user knows what was
+/// written since.
+#[cfg(feature = "embed")]
+fn clear_interrupted_rebuild(lock: &ReembedLock) -> Result<()> {
+    let db_path = lock.db_path();
+    let vec_path = axil_vector::vector_db_path(db_path);
+    let old_backup = vec_path.with_extension("reembed-bak");
+    if old_backup.exists() {
+        anyhow::bail!(
+            "{backup} was left by a re-embed an earlier version of axil did not finish: \
+             it holds the vectors from before that re-embed, and {live} may be only partly \
+             rebuilt. Fix: if nothing was stored since, move {backup} back to {live}; \
+             otherwise delete {backup}. Then run reembed again",
+            backup = old_backup.display(),
+            live = vec_path.display(),
+        );
+    }
+    let new_path = rebuild_store_path(db_path);
+    if new_path.exists() {
+        std::fs::remove_file(&new_path).with_context(|| {
+            format!(
+                "failed to remove {}, left unfinished by an interrupted re-embed",
+                new_path.display()
+            )
+        })?;
+        errln!(
+            "axil: removed {}, a replacement vector store an interrupted re-embed left \
+             unfinished",
+            new_path.display()
+        );
+    }
     Ok(())
+}
+
+/// Delete a replacement vector store that will not be used. One left behind
+/// is deleted by the next re-embed, so failing here is only worth a line.
+#[cfg(feature = "embed")]
+fn discard_rebuild(new_path: &Path) {
+    if let Err(e) = std::fs::remove_file(new_path) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            errln!(
+                "axil: warning: could not remove {} ({e}); the next reembed removes it",
+                new_path.display()
+            );
+        }
+    }
+}
+
+/// Make a rename in `path`'s directory durable, where the platform lets a
+/// directory be synced: until then a power loss may undo it.
+#[cfg(feature = "embed")]
+fn sync_parent_dir(path: &Path) {
+    #[cfg(unix)]
+    if let Some(dir) = path.parent() {
+        if let Ok(dir) = std::fs::File::open(dir) {
+            let _ = dir.sync_all();
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+}
+
+/// A database handle over a replacement vector store (see
+/// [`rebuild_vector_store`]), with `model` loaded to fill it.
+#[cfg(feature = "embed")]
+fn open_rebuild(
+    db_path: &Path,
+    store: axil_vector::VectorEngine,
+    model: &axil_vector::models::EmbeddingModel,
+) -> Result<Axil> {
+    let store = store
+        .with_model(model.clone())
+        .map_err(anyhow::Error::msg)
+        .context("failed to initialize embedder")?;
+    // Notes of deletes made while the store was detached are left for the
+    // live store: applied to this one, they would be cleared, and lost to
+    // the live store should the rebuild fail.
+    let db = Axil::open(db_path)
+        .defer_vector_delete_notes(true)
+        .with_vector_and_embedder(store)
+        .build()
+        .context("failed to open database with the replacement vector store")?;
+    match vector_refusal(&db) {
+        Some(refusal) => Err(refusal),
+        None => Ok(db),
+    }
+}
+
+/// How long a rebuild waits for another reader of the live vector store to
+/// let go of it (an open of the database elsewhere, say) before it gives up.
+#[cfg(feature = "embed")]
+const LIVE_STORE_BUSY_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Run `read` until it is not refused as busy, for up to `wait`; the last
+/// result is returned either way.
+#[cfg(feature = "embed")]
+fn retry_while_busy<T>(
+    wait: std::time::Duration,
+    mut read: impl FnMut() -> axil_core::Result<T>,
+) -> axil_core::Result<T> {
+    let deadline = std::time::Instant::now() + wait;
+    loop {
+        match read() {
+            Err(e) if e.is_busy() && std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            result => return result,
+        }
+    }
+}
+
+/// What `axil reembed --field` re-embeds ([`scoped_reembed_work`]).
+#[cfg(feature = "embed")]
+struct ScopedReembedWork {
+    /// Each record with a non-empty string in the field, with that text.
+    texts: Vec<(RecordId, String)>,
+    /// Every record of the re-embedded tables, text or not: their vectors
+    /// are rebuilt from scratch, so none of them carry over.
+    rebuilt: std::collections::HashSet<RecordId>,
+}
+
+/// What `axil reembed --field <field>` re-embeds in `table`, or in every
+/// table when `None`.
+#[cfg(feature = "embed")]
+fn scoped_reembed_work(db: &Axil, table: Option<&str>, field: &str) -> Result<ScopedReembedWork> {
+    let tables: Vec<String> = match table {
+        Some(t) => vec![t.to_string()],
+        None => db.tables().context("failed to list tables")?,
+    };
+    let mut work = ScopedReembedWork {
+        texts: Vec::new(),
+        rebuilt: std::collections::HashSet::new(),
+    };
+    for tbl in &tables {
+        for record in db.list(tbl).unwrap_or_default() {
+            if let Some(text) = record.data.get(field).and_then(|v| v.as_str()) {
+                if !text.is_empty() {
+                    work.texts.push((record.id.clone(), text.to_string()));
+                }
+            }
+            work.rebuilt.insert(record.id);
+        }
+    }
+    Ok(work)
+}
+
+/// The model the live default vector store of the database at `db_path`
+/// records, and the records it holds vectors for, read without loading them.
+/// A store that can't be read is ridden over, since a full re-embed replaces
+/// it: memory records are found without it, other rows are not.
+#[cfg(feature = "embed")]
+fn live_vector_owners(
+    db_path: &Path,
+) -> Result<(Option<String>, std::collections::HashSet<RecordId>)> {
+    let read = retry_while_busy(LIVE_STORE_BUSY_WAIT, || {
+        axil_vector::read_stored_model(db_path)
+            .and_then(|stored| axil_vector::stored_vector_ids(db_path).map(|ids| (stored, ids)))
+    });
+    match read {
+        Ok((stored, ids)) => Ok((stored.and_then(|s| s.model), ids.into_iter().collect())),
+        Err(e) if e.is_busy() => Err(anyhow::Error::new(e).context("vector store is busy")),
+        Err(e) => {
+            errln!(
+                "axil: warning: the existing vector store could not be read ({e}), so only \
+                 memory records are re-embedded; other rows that had a vector get none"
+            );
+            Ok((None, std::collections::HashSet::new()))
+        }
+    }
+}
+
+/// `axil reembed` without `--field`: rebuild the default vector store of the
+/// database `lock` is held for under `model`, re-embedding every memory
+/// record and every other row that had a vector in the old store, each from
+/// the text its writer embeds (see [`Axil::embed_vector_owners`]). The new
+/// store records `model`, and takes the old one's place only when every row
+/// embedded (see [`rebuild_vector_store`]).
+#[cfg(feature = "embed")]
+fn reembed_every_owner(
+    out: &Output,
+    lock: &ReembedLock,
+    model: &axil_vector::models::EmbeddingModel,
+) -> Result<i32> {
+    let db_path = lock.db_path();
+    out.status(&format!(
+        "Re-embedding every vector owner with {} ({} dims)...",
+        model.name(),
+        model.dimensions(),
+    ));
+    let (report, previous_model) = rebuild_vector_store(lock, model, |store| {
+        let db = open_rebuild(db_path, store, model)?;
+        // Whose vectors to rebuild, and whose they were, read once the
+        // rebuild holds the database, so no vector is added to the live
+        // store between this read and the move.
+        let (previous_model, owners) = live_vector_owners(db_path)?;
+        let mut next = REEMBED_PROGRESS_EVERY;
+        let report = db
+            .embed_vector_owners(&owners, &mut |done, total| {
+                if done >= next || done == total {
+                    errln!("  [{done}/{total}] re-embedded...");
+                    next = done + REEMBED_PROGRESS_EVERY;
+                }
+            })
+            .context("re-embed failed")?;
+        if report.failed > 0 {
+            anyhow::bail!(
+                "re-embed failed for {}/{} row(s) (first error: {}); the vector store was \
+                 left as it was",
+                report.failed,
+                report.failed + report.embedded(),
+                report.first_error.as_deref().unwrap_or_default()
+            );
+        }
+        Ok((db, (report, previous_model)))
+    })?;
+
+    out.print(&json!({
+        "reembedded": report.embedded(),
+        "memory_records": report.memory,
+        "internal_rows": report.internal,
+        "other_rows": report.other,
+        "dropped": report.dropped,
+        "errors": 0,
+        "model": model.name(),
+        "dimensions": model.dimensions(),
+        "previous_model": previous_model,
+    }));
+    Ok(EXIT_OK)
 }
 
 // NOTE: `axil_mcp::attach_detected_engines` is the parallel implementation for
@@ -6678,18 +7222,34 @@ fn open_for_scip_ingest(path: &Path) -> Result<Axil> {
 }
 
 /// Open a database with vector support (auto-detecting dimensions).
+///
+/// A store at the configured model's size is opened for that model (see
+/// [`with_default_store`]): one that holds another model's vectors is
+/// refused, so raw vector reads and writes fail with the reason, and one that
+/// records no model yet records it with the next vector written.
 #[cfg(feature = "vector")]
 fn open_with_vector(path: &Path, dimensions: Option<usize>) -> Result<Axil> {
+    const AUTO_DETECT: &str = "failed to auto-detect vector dimensions — use --dimensions";
     let builder = axil_vector::with_vector_spaces(Axil::open(path));
-    let db = match dimensions {
-        Some(dims) => builder
-            .with_vector(dims)
-            .context("failed to open vector store")?,
-        None => builder
-            .with_vector_auto()
-            .context("failed to auto-detect vector dimensions — use --dimensions")?,
+    let dims = match dimensions {
+        Some(dims) => dims,
+        None => axil_vector::read_stored_dimensions(path)
+            .context(AUTO_DETECT)?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "no vector store found — create one first with with_vector(dims) or \
+                     `axil create --vector <dims>`"
+                )
+                .context(AUTO_DETECT)
+            })?,
     };
-    db.build().context("failed to open database")
+    let db = with_default_store(builder, dims)?
+        .build()
+        .context("failed to open database")?;
+    match vector_refusal(&db) {
+        Some(refusal) if !db.has_vector_index() => Err(refusal),
+        _ => Ok(db),
+    }
 }
 
 /// Open for a `store --vector` in the *default* space: attach all detected
@@ -6708,9 +7268,7 @@ fn open_with_vector_creating(path: &Path, dims: usize) -> Result<Axil> {
             .and_then(|dir| axil_core::load_config_from(dir).ok())
             .unwrap_or_default();
         if !config.is_engine_disabled("vec") {
-            builder = builder
-                .with_vector(dims)
-                .context("failed to create vector store")?;
+            builder = with_default_store(builder, dims).context("failed to create vector store")?;
             errln!(
                 "axil: created vector store at {}",
                 axil_vector::vector_db_path(path).display()
@@ -6719,6 +7277,9 @@ fn open_with_vector_creating(path: &Path, dims: usize) -> Result<Axil> {
     }
     let db = builder.build().context("failed to open database")?;
     if !db.has_vector_index() {
+        if let Some(refusal) = vector_refusal(&db) {
+            return Err(refusal);
+        }
         anyhow::bail!(
             "the vector engine is disabled in axil.toml ([engines] disabled) — \
              re-enable it to attach raw vectors"
@@ -6844,7 +7405,9 @@ fn open_with_embedder(path: &Path) -> Result<Axil> {
         .build()
         .context("failed to open database")?;
     if !db.has_embedder() {
-        anyhow::bail!(VECTOR_ENGINE_DISABLED);
+        // The store holds another model's vectors (or can't be read), or
+        // the operator turned the engine off.
+        return Err(vector_refusal(&db).unwrap_or_else(|| anyhow::anyhow!(VECTOR_ENGINE_DISABLED)));
     }
     Ok(db)
 }
@@ -6903,10 +7466,8 @@ fn open_with_embedder_creating(path: &Path) -> Result<Axil> {
     }
     let db = builder.build().context("failed to open database")?;
     if !db.has_embedder() {
-        anyhow::bail!(
-            "the vector engine is disabled in axil.toml ([engines] disabled) — \
-             re-enable it to run embedding commands"
-        );
+        // A store holding another model's vectors takes none of this one's.
+        return Err(vector_refusal(&db).unwrap_or_else(|| anyhow::anyhow!(VECTOR_ENGINE_DISABLED)));
     }
     Ok(db)
 }
@@ -7010,12 +7571,11 @@ fn init_vector_dims(db_path: &Path, explicit: Option<usize>) -> usize {
     }
 }
 
-/// Open with all features enabled (for init).
+/// Open with all features enabled (for init). A vector store this creates at
+/// the configured model's size records that model.
 #[cfg(feature = "vector")]
 fn open_with_all_features(path: &Path, vector_dims: usize) -> Result<Axil> {
-    let mut builder = Axil::open(path);
-    builder = builder
-        .with_vector(vector_dims)
+    let builder = with_default_store(Axil::open(path), vector_dims)
         .context("failed to create vector store")?;
     open_with_all_features_inner(builder)
 }
@@ -8217,14 +8777,16 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
                 .map(|(name, count)| json!({"name": name, "count": count}))
                 .collect();
 
-            out.print(&json!({
+            let mut output = json!({
                 "path": info.path.display().to_string(),
                 "size_bytes": info.total_size,
                 "record_count": info.total_records,
                 "tables": tables,
                 "features": features,
                 "plugins": info.plugins,
-            }));
+            });
+            insert_degraded(&mut output, &db);
+            out.print(&output);
             Ok(EXIT_OK)
         }
 
@@ -10994,7 +11556,11 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
             let db_path = require_db(&db_opt)?;
             let config = load_config(&db_path)?;
             #[cfg(feature = "embed")]
-            let missing_vector_store = heal_vector_store_check(&db_path, &config)?;
+            let missing_vector_store = heal_vector_store_check(
+                &db_path,
+                &config,
+                !dry_run && (reindex || embed_internal || rechunk),
+            )?;
             #[cfg(not(feature = "embed"))]
             let missing_vector_store: Option<String> = None;
             let db = if dry_run {
@@ -11341,12 +11907,23 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
         #[cfg(feature = "embed")]
         Command::Embed { id, field, model } => {
             let db_path = require_db(&db_opt)?;
-            let embedding_model = parse_model(&model)?;
+            let configured = resolve_embedding_model(&db_path);
+            let embedding_model = match model {
+                Some(name) => {
+                    let named = parse_model(&name)?;
+                    check_named_model(&db_path, &named, &configured)?;
+                    named
+                }
+                None => configured,
+            };
             let db = Axil::open(&db_path)
                 .with_embedder_model(embedding_model)
                 .context("failed to open vector store with embedder")?
                 .build()
                 .context("failed to open database")?;
+            if let Some(refusal) = vector_refusal(&db) {
+                return Err(refusal);
+            }
 
             let rid = RecordId::from_string(&id).context("invalid record ID")?;
             db.embed_field(&rid, &field).context("embed failed")?;
@@ -11626,59 +12203,59 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
             table,
         } => {
             let db_path = require_db(&db_opt)?;
-            // The vector store is moved about below before anything opens it.
+            // A re-embed rebuilds an existing database's vectors: one that
+            // isn't there is named, rather than created or failed on by the
+            // lock file beside it.
+            if !db_path.is_file() {
+                anyhow::bail!(
+                    "no database at {}: reembed rebuilds the vector store of an existing \
+                     database",
+                    db_path.display()
+                );
+            }
+            // Before anything is read or deleted: a second reembed of this
+            // database stops here.
+            let lock = ReembedLock::acquire(&db_path)?;
+            // The vector store is replaced below: the daemon lets go of the
+            // database before anything here reads it.
             #[cfg(unix)]
             daemon::lease::hold(&db_path);
 
-            let embedding_model = parse_model(&model)?;
-            let new_dims = embedding_model.dimensions();
-
-            // The old store sits at `backup_path` while the new one is built.
-            // A backup that already exists was left by a run that died
-            // mid-rebuild: it is the only intact copy of the original vectors
-            // (the live store is the half-built one), so it is restored before
-            // anything reads or moves the store — never deleted.
-            let vec_path = axil_vector::vector_db_path(&db_path);
-            let backup_path = vec_path.with_extension("reembed-bak");
-            if backup_path.exists() {
-                std::fs::rename(&backup_path, &vec_path).context(
-                    "failed to restore the vector store backup left by an interrupted re-embed",
-                )?;
+            let configured = resolve_embedding_model(&db_path);
+            let embedding_model = match model {
+                Some(name) => parse_model(&name)?,
+                None => configured.clone(),
+            };
+            // The new store records its model, and every open checks it
+            // against the configured one.
+            if embedding_model.store_identity() != configured.store_identity() {
                 errln!(
-                    "axil: restored {} from an interrupted re-embed",
-                    vec_path.display()
+                    "axil: warning: axil.toml configures {} (`[database] embedding_model`, \
+                     bge-small when unset), so every open refuses a store rebuilt with {} \
+                     until it names that model",
+                    configured.name(),
+                    embedding_model.name()
                 );
             }
+            let new_dims = embedding_model.dimensions();
+            clear_interrupted_rebuild(&lock)?;
 
-            // Step 1: Open DB without vector to collect record IDs + text.
-            let db = Axil::open(&db_path)
-                .build()
-                .context("failed to open database")?;
-
-            // Gather records that need re-embedding.
-            let tables: Vec<String> = if let Some(ref t) = table {
-                vec![t.clone()]
-            } else {
-                db.tables().context("failed to list tables")?
+            let Some(field) = field else {
+                return reembed_every_owner(out, &lock, &embedding_model);
             };
 
-            let mut work: Vec<(RecordId, String)> = Vec::new();
-            // Every record of the re-embedded tables, text or not: their
-            // vectors are rebuilt from scratch, so none of them carry over.
-            let mut rebuilt_ids: std::collections::HashSet<RecordId> =
-                std::collections::HashSet::new();
-            for tbl in &tables {
-                for record in db.list(tbl).unwrap_or_default() {
-                    if let Some(text) = record.data.get(&field).and_then(|v| v.as_str()) {
-                        if !text.is_empty() {
-                            work.push((record.id.clone(), text.to_string()));
-                        }
-                    }
-                    rebuilt_ids.insert(record.id);
-                }
-            }
-
-            if work.is_empty() {
+            // Whether there is anything to re-embed, read before the model
+            // loads. The rebuild reads the records again once it holds the
+            // database.
+            let pending = {
+                let db = Axil::open(&db_path)
+                    .build()
+                    .context("failed to open database")?;
+                scoped_reembed_work(&db, table.as_deref(), &field)?
+                    .texts
+                    .len()
+            };
+            if pending == 0 {
                 out.print(&json!({
                     "reembedded": 0,
                     "model": embedding_model.name(),
@@ -11689,87 +12266,90 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
             }
 
             out.status(&format!(
-                "Re-embedding {} records with {} ({} dims)...",
-                work.len(),
+                "Re-embedding {pending} records with {} ({new_dims} dims)...",
                 embedding_model.name(),
-                new_dims,
             ));
 
             // A table-scoped re-embed must not silently destroy every other
-            // table's vectors. With unchanged dimensions they are carried over
-            // from the old store; with a dimension change only a full re-embed
-            // can rebuild them, so scoping is refused outright. The old vectors
-            // are read through an engine opened on the store itself: `db` has
-            // no vector index attached, so `db.get_vector` sees none.
-            let mut preserve: Vec<(RecordId, Vec<f32>)> = Vec::new();
+            // table's vectors. When they are the new model's own they are
+            // carried over from the old store; when they are another model's
+            // (of any size) only a full re-embed can rebuild them, so scoping
+            // is refused outright, before the model loads.
+            let mut kept_dimensions: Option<usize> = None;
             if table.is_some() {
                 // A full re-embed rebuilds everything, so it can ride over an
                 // unreadable store; a scoped one would silently discard it.
-                let stored_dims = axil_vector::read_stored_dimensions(&db_path).context(
+                let stored = axil_vector::read_stored_model(&db_path).context(
                     "failed to read the existing vector store; a --table re-embed \
                      would discard every other table's vectors, so it was not started",
                 )?;
-                match stored_dims {
-                    Some(old) if old == new_dims => {
-                        use axil_core::plugin::VectorIndex;
-                        let old_store = axil_vector::VectorEngine::open(&db_path, old)
-                            .context("failed to open the existing vector store")?;
-                        for id in old_store
-                            .all_ids()
-                            .context("failed to list stored vectors")?
-                        {
-                            if rebuilt_ids.contains(&id) {
-                                continue;
-                            }
-                            if let Some(v) = old_store
-                                .get_vector(&id)
-                                .context("failed to read a stored vector")?
-                            {
-                                preserve.push((id, v));
-                            }
-                        }
+                if let Some(stored) = stored {
+                    // Only vectors of the model the new store records carry
+                    // over: the ones a store records for it, or, in a store
+                    // from before model records, the configured model's.
+                    if let axil_vector::identity::ModelCheck::Refused(mismatch) =
+                        axil_vector::identity::check_store_model_for(
+                            &stored,
+                            &embedding_model,
+                            &configured,
+                        )
+                    {
+                        anyhow::bail!(
+                            "cannot re-embed only one table with {}: {}, so the other \
+                             tables' vectors cannot be kept. Fix: {}",
+                            embedding_model.name(),
+                            mismatch.reason(&db_path),
+                            mismatch.fix(&db_path),
+                        );
                     }
-                    Some(old) => anyhow::bail!(
-                        "cannot re-embed only one table when dimensions change \
-                         ({old} -> {new_dims}): the other tables' vectors cannot be \
-                         preserved. Run without --table to re-embed every table."
-                    ),
-                    None => {}
+                    kept_dimensions = Some(stored.dimensions);
                 }
             }
 
-            // Step 2: Move the old vector store aside and rebuild from scratch.
-            // The backup is deleted only after every record embeds cleanly —
-            // any failure restores it, so the command is atomic.
-            drop(db);
-            let had_old_store = vec_path.exists();
-            if had_old_store {
-                std::fs::rename(&vec_path, &backup_path).map_err(|e| {
-                    anyhow::anyhow!(e).context("failed to back up old vector store")
-                })?;
-            }
+            // Build the new store beside the old one, which stays in place,
+            // untouched, until the new one is complete.
+            let (success, preserved) = rebuild_vector_store(&lock, &embedding_model, |store| {
+                let db = open_rebuild(&db_path, store, &embedding_model)?;
 
-            let rebuilt = (|| -> Result<(usize, usize)> {
-                // Seed the fresh store with the untouched tables' vectors in
-                // one batch, before the embedder attaches to it.
-                if !preserve.is_empty() {
+                // Read once the rebuild holds the database, so no write lands
+                // between these reads and the move: the records to re-embed,
+                // and the other tables' vectors to keep. `db` holds the new
+                // store, so the old vectors are read through an engine opened
+                // on the live store itself.
+                let ScopedReembedWork {
+                    texts: work,
+                    rebuilt: rebuilt_ids,
+                } = scoped_reembed_work(&db, table.as_deref(), &field)?;
+                let mut preserve: Vec<(RecordId, Vec<f32>)> = Vec::new();
+                if let Some(dimensions) = kept_dimensions {
                     use axil_core::plugin::VectorIndex;
-                    let store = axil_vector::VectorEngine::open(&db_path, new_dims)
-                        .context("failed to create the new vector store")?;
+                    let old_store = retry_while_busy(LIVE_STORE_BUSY_WAIT, || {
+                        axil_vector::VectorEngine::open(&db_path, dimensions)
+                    })
+                    .context("failed to open the existing vector store")?;
+                    for id in old_store
+                        .all_ids()
+                        .context("failed to list stored vectors")?
+                    {
+                        if rebuilt_ids.contains(&id) {
+                            continue;
+                        }
+                        if let Some(v) = old_store
+                            .get_vector(&id)
+                            .context("failed to read a stored vector")?
+                        {
+                            preserve.push((id, v));
+                        }
+                    }
+                }
+                if !preserve.is_empty() {
                     let items: Vec<(RecordId, &[f32])> = preserve
                         .iter()
                         .map(|(id, v)| (id.clone(), v.as_slice()))
                         .collect();
-                    store
-                        .add_batch(&items)
+                    db.add_vectors(&items)
                         .context("failed to carry over the other tables' vectors")?;
                 }
-
-                let db = Axil::open(&db_path)
-                    .with_embedder_model(embedding_model.clone())
-                    .context("failed to initialize embedder")?
-                    .build()
-                    .context("failed to open database with new vector store")?;
 
                 // Verify through the handle doing the rebuild: a short count
                 // would commit as vectors silently lost from other tables.
@@ -11780,12 +12360,12 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
                 if preserved != preserve.len() {
                     anyhow::bail!(
                         "only {preserved}/{} of the other tables' vectors carried over; \
-                         the previous vector store was restored unchanged",
+                         the vector store was left as it was",
                         preserve.len()
                     );
                 }
 
-                // Step 3: Re-embed all collected records.
+                // Re-embed all collected records.
                 let mut success = 0usize;
                 let mut errors = 0usize;
                 let mut first_error: Option<String> = None;
@@ -11807,45 +12387,12 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
                 if errors > 0 {
                     anyhow::bail!(
                         "re-embed failed for {errors}/{total} record(s) (first error: {}); \
-                         the previous vector store was restored unchanged",
+                         the vector store was left as it was",
                         first_error.unwrap_or_default()
                     );
                 }
-                Ok((success, preserved))
-            })();
-
-            let (success, preserved) = match rebuilt {
-                Ok(counts) => counts,
-                Err(e) => {
-                    // Atomic semantics: restore the previous store instead of
-                    // leaving a partially-populated index behind. The rename
-                    // replaces the partial store in one step; if it fails, the
-                    // backup stays put and the next run restores it.
-                    if had_old_store {
-                        std::fs::rename(&backup_path, &vec_path).map_err(|restore_err| {
-                            anyhow::anyhow!(restore_err).context(format!(
-                                "re-embed failed ({e:#}) AND restoring the old vector store \
-                                 failed; the original is kept at {}",
-                                backup_path.display()
-                            ))
-                        })?;
-                    }
-                    return Err(e);
-                }
-            };
-
-            // A backup left behind would be restored over this finished
-            // rebuild by the next re-embed, so failing to remove it is an
-            // error, not a shrug.
-            if had_old_store {
-                std::fs::remove_file(&backup_path).with_context(|| {
-                    format!(
-                        "re-embed succeeded but its backup {} could not be removed; \
-                         delete it before the next re-embed",
-                        backup_path.display()
-                    )
-                })?;
-            }
+                Ok((db, (success, preserved)))
+            })?;
 
             out.print(&json!({
                 "reembedded": success,
@@ -23107,5 +23654,196 @@ mod rerank_pool_tests {
             assert_eq!(rerank_pool_size(10, &mode), 40);
             assert_eq!(rerank_pool_size(usize::MAX, &mode), usize::MAX);
         }
+    }
+}
+
+/// `reembed` builds the replacement store beside the live one and moves it
+/// into place only when it is complete: whatever happens before that leaves
+/// the live store as it was.
+#[cfg(all(test, feature = "embed"))]
+mod rebuild_vector_store_tests {
+    use super::*;
+    use axil_core::plugin::VectorIndex;
+    use axil_vector::models::EmbeddingModel;
+
+    /// A read refused as busy is tried again until it goes through, and
+    /// given up on, with the refusal, once the wait runs out; other errors are
+    /// not retried.
+    #[test]
+    fn a_busy_read_is_retried_for_a_while() {
+        use std::time::Duration;
+        let mut calls = 0;
+        let read = super::retry_while_busy(Duration::from_secs(5), || {
+            calls += 1;
+            if calls < 3 {
+                Err(axil_core::AxilError::Busy)
+            } else {
+                Ok(calls)
+            }
+        });
+        assert_eq!(read.unwrap(), 3);
+
+        let mut calls = 0;
+        let read: axil_core::Result<()> = super::retry_while_busy(Duration::ZERO, || {
+            calls += 1;
+            Err(axil_core::AxilError::Busy)
+        });
+        assert!(read.unwrap_err().is_busy());
+        assert_eq!(calls, 1);
+
+        let mut calls = 0;
+        let read: axil_core::Result<()> = super::retry_while_busy(Duration::from_secs(5), || {
+            calls += 1;
+            Err(axil_core::AxilError::NotFound("x".into()))
+        });
+        assert!(!read.unwrap_err().is_busy());
+        assert_eq!(calls, 1);
+    }
+
+    const BGE: &str = "bge-small-en-v1.5";
+    const GRANITE: &str = "granite-embedding-small-english-r2";
+
+    fn unit(i: usize) -> Vec<f32> {
+        let mut v = vec![0.0f32; 384];
+        v[i] = 1.0;
+        v
+    }
+
+    /// A database with one record whose bge-small vector is `unit(0)`.
+    fn live(dir: &Path) -> (PathBuf, RecordId) {
+        let db = dir.join("memory.axil");
+        let id = Axil::open(&db)
+            .build()
+            .unwrap()
+            .insert("decisions", json!({"summary": "use redb"}))
+            .unwrap()
+            .id;
+        let axil_vector::ModelStore::Open(store) =
+            axil_vector::open_store_for_model(&db, &EmbeddingModel::BgeSmall).unwrap()
+        else {
+            panic!("a new store is never refused");
+        };
+        store.add(id.clone(), &unit(0)).unwrap();
+        (db, id)
+    }
+
+    /// The live store's model and `id`'s vector in it.
+    fn live_state(db: &Path, id: &RecordId) -> (Option<String>, Option<Vec<f32>>) {
+        let model = axil_vector::read_stored_model(db).unwrap().unwrap().model;
+        let vector = axil_vector::VectorEngine::open(db, 384)
+            .unwrap()
+            .get_vector(id)
+            .unwrap();
+        (model, vector)
+    }
+
+    #[test]
+    fn a_failed_rebuild_leaves_the_live_store_as_it_was() {
+        let dir = tempfile::tempdir().unwrap();
+        let (db, id) = live(dir.path());
+        let lock = ReembedLock::acquire(&db).unwrap();
+        let err = rebuild_vector_store(&lock, &EmbeddingModel::GraniteSmallR2, |store| {
+            store.add(id.clone(), &unit(1)).unwrap();
+            Err::<(Axil, ()), _>(anyhow::anyhow!("a row failed to embed"))
+        })
+        .unwrap_err();
+        assert!(err.to_string().contains("a row failed"), "{err:#}");
+        assert_eq!(live_state(&db, &id), (Some(BGE.into()), Some(unit(0))));
+        assert!(!rebuild_store_path(&db).exists());
+    }
+
+    #[test]
+    fn a_finished_rebuild_takes_the_live_stores_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let (db, id) = live(dir.path());
+        let lock = ReembedLock::acquire(&db).unwrap();
+        let value = rebuild_vector_store(&lock, &EmbeddingModel::GraniteSmallR2, |store| {
+            store.add(id.clone(), &unit(1)).unwrap();
+            let handle = Axil::open(&db).with_vector_and_embedder(store).build()?;
+            Ok((handle, 7))
+        })
+        .unwrap();
+        assert_eq!(value, 7);
+        assert_eq!(live_state(&db, &id), (Some(GRANITE.into()), Some(unit(1))));
+        assert!(!rebuild_store_path(&db).exists());
+    }
+
+    #[test]
+    fn what_an_interrupted_run_left_is_dealt_with_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let (db, id) = live(dir.path());
+
+        // An unfinished replacement is deleted, never used.
+        let stale = axil_vector::create_store_for_model_at(
+            &rebuild_store_path(&db),
+            &EmbeddingModel::GraniteSmallR2,
+        )
+        .unwrap();
+        stale.add(id.clone(), &unit(2)).unwrap();
+        drop(stale);
+        let lock = ReembedLock::acquire(&db).unwrap();
+        rebuild_vector_store(&lock, &EmbeddingModel::GraniteSmallR2, |store| {
+            assert_eq!(store.count(), 0, "a fresh store, not the stale one");
+            store.add(id.clone(), &unit(1)).unwrap();
+            let handle = Axil::open(&db).with_vector_and_embedder(store).build()?;
+            Ok((handle, ()))
+        })
+        .unwrap();
+        assert_eq!(live_state(&db, &id), (Some(GRANITE.into()), Some(unit(1))));
+
+        // A copy an earlier version set aside stops the rebuild before it
+        // starts.
+        let vec_path = axil_vector::vector_db_path(&db);
+        std::fs::copy(&vec_path, vec_path.with_extension("reembed-bak")).unwrap();
+        let err = rebuild_vector_store(&lock, &EmbeddingModel::BgeSmall, |_| {
+            panic!("must not start")
+        })
+        .map(|()| ())
+        .unwrap_err();
+        assert!(err.to_string().contains("earlier version"), "{err:#}");
+        assert_eq!(live_state(&db, &id), (Some(GRANITE.into()), Some(unit(1))));
+        assert!(!rebuild_store_path(&db).exists());
+    }
+
+    #[test]
+    fn one_reembed_at_a_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("memory.axil");
+        let lock_path = axil_core::companion_path(&db, ".reembed-lock");
+
+        let first = ReembedLock::acquire(&db).unwrap();
+        let err = ReembedLock::acquire(&db).map(|_| ()).unwrap_err();
+        assert!(
+            err.to_string().contains("another `axil reembed`"),
+            "{err:#}"
+        );
+        drop(first);
+        assert!(!lock_path.exists(), "released with the lock");
+
+        // A run that crashed leaves the file, but not its OS lock.
+        std::fs::write(&lock_path, "4242").unwrap();
+        drop(ReembedLock::acquire(&db).expect("a crashed run's file is free"));
+        assert!(!lock_path.exists());
+    }
+
+    #[test]
+    fn without_os_locks_the_file_is_the_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("memory.axil");
+        let lock_path = axil_core::companion_path(&db, ".reembed-lock");
+        let refuse = |_: &std::fs::File| {
+            Err(std::fs::TryLockError::Error(std::io::Error::other(
+                "locks unsupported",
+            )))
+        };
+
+        let first = ReembedLock::acquire_with(&db, refuse).unwrap();
+        let err = ReembedLock::acquire_with(&db, refuse)
+            .map(|_| ())
+            .unwrap_err();
+        assert!(err.to_string().contains("remove it"), "{err:#}");
+        drop(first);
+        assert!(!lock_path.exists(), "released with the lock");
+        drop(ReembedLock::acquire_with(&db, refuse).unwrap());
     }
 }

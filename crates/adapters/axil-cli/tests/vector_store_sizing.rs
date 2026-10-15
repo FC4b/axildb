@@ -71,6 +71,24 @@ fn init_uses_bge_small_dimensions_without_a_configured_model() {
     assert_eq!(stored_dims(&db), Some(384));
 }
 
+/// granite's store is as wide as bge-small's, so only the model the store
+/// records tells the two apart; init records it without loading it.
+#[test]
+fn init_records_the_configured_model_in_the_store() {
+    let dir = tempfile::tempdir().unwrap();
+    configure_model(dir.path(), "granite-small");
+    let db = dir.path().join("memory.axil");
+
+    let output = axil_in(dir.path(), &["init", db.to_str().unwrap()]);
+    assert!(output.status.success(), "init failed: {}", stderr(&output));
+    let stored = axil_vector::read_stored_model(&db).unwrap().unwrap();
+    assert_eq!(
+        stored.model.as_deref(),
+        Some("granite-embedding-small-english-r2")
+    );
+    assert_eq!((stored.dimensions, stored.vectors), (384, 0));
+}
+
 #[test]
 fn init_vector_dims_flag_overrides_the_configured_model() {
     let dir = tempfile::tempdir().unwrap();
@@ -169,22 +187,31 @@ fn heal_refuses_a_vector_store_sized_for_another_model() {
     assert!(output.status.success(), "init failed: {}", stderr(&output));
     configure_model(dir.path(), "bge-base");
 
-    for args in [&["heal", "--reindex"][..], &["heal"][..]] {
-        let mut full = vec!["--db", db_arg];
-        full.extend_from_slice(args);
-        let output = axil_in(dir.path(), &full);
-        assert!(
-            !output.status.success(),
-            "{args:?} must fail on a 384-dim store"
-        );
-        let err = stderr(&output);
-        assert!(err.contains("384-dimension"), "{args:?}: {err}");
-        assert!(err.contains("768-dimension"), "{args:?}: {err}");
-        assert!(
-            err.contains("reembed --model bge-base-en-v1.5 --field"),
-            "{args:?} should name the reembed command: {err}"
-        );
-    }
+    // A heal that embeds stops.
+    let output = axil_in(dir.path(), &["--db", db_arg, "heal", "--reindex"]);
+    assert!(
+        !output.status.success(),
+        "heal --reindex must fail on a 384-dim store"
+    );
+    let err = stderr(&output);
+    assert!(err.contains("384-dimension"), "{err}");
+    assert!(err.contains("768-dimension"), "{err}");
+    // `reembed` rebuilds under the configured model by default.
+    assert!(
+        err.contains(&format!("axil --db {db_arg} reembed`")),
+        "heal should name the reembed command: {err}"
+    );
+
+    // A full heal runs without the vector engine, and lists it as degraded.
+    let output = axil_in(dir.path(), &["--db", db_arg, "heal"]);
+    assert!(output.status.success(), "heal failed: {}", stderr(&output));
+    let report = stdout_json(&output);
+    let degraded = report["degraded"][0].as_str().unwrap_or_default();
+    assert!(
+        degraded.contains("768-dimension")
+            && degraded.contains(&format!("axil --db {db_arg} reembed`")),
+        "{report}"
+    );
     assert_eq!(
         stored_dims(&db),
         Some(384),
@@ -199,8 +226,9 @@ fn heal_reports_repairing_a_vector_store_that_was_not_closed_cleanly() {
     let db = dir.path().join("memory.axil");
     // A store as a killed writer leaves it: copied while its engine still
     // holds it open, so it has committed data but was never closed. Sized
-    // for bge-base while the config is bge-small, so heal stops before the
-    // open (which would load a model) and after the probe that repairs it.
+    // for bge-base while the config is bge-small, so `heal --reindex` stops
+    // before the open (which would load a model) and after the probe that
+    // repairs it.
     let engine = axil_vector::VectorEngine::open(&live, 768).unwrap();
     engine.add(axil_core::RecordId::new(), &[0.5; 768]).unwrap();
     std::fs::copy(
@@ -210,7 +238,10 @@ fn heal_reports_repairing_a_vector_store_that_was_not_closed_cleanly() {
     .unwrap();
     drop(engine);
 
-    let output = axil_in(dir.path(), &["--db", db.to_str().unwrap(), "heal"]);
+    let output = axil_in(
+        dir.path(),
+        &["--db", db.to_str().unwrap(), "heal", "--reindex"],
+    );
     assert!(!output.status.success(), "a 768-dim store must stop heal");
     let err = stderr(&output);
     assert!(

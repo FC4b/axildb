@@ -479,7 +479,7 @@ pub fn handle_recall_across(
             None => (String::new(), Vec::new()),
         };
 
-    let local_dims = read_vector_dims(&db_path);
+    let local_vectors = read_vector_profile(&db_path);
     let members_owned: Vec<(String, &Member)> = members
         .iter()
         .map(|(label, member)| ((*label).to_string(), *member))
@@ -502,7 +502,7 @@ pub fn handle_recall_across(
             &path,
             query,
             top_k,
-            local_dims,
+            local_vectors.as_ref(),
             label,
             member,
             &workspace_id,
@@ -745,15 +745,14 @@ fn sibling_recall(
     path: &Path,
     query: &str,
     top_k: usize,
-    local_dims: Option<usize>,
+    local_vectors: Option<&VectorProfile>,
     label: &str,
     member: &Member,
     workspace_id: &str,
     warnings: &mut Vec<String>,
 ) -> std::result::Result<MemberRecallBatch, String> {
-    let sibling_dims = read_vector_dims(path);
-    let vector_compatible = match (local_dims, sibling_dims) {
-        (Some(a), Some(b)) => a == b,
+    let vector_compatible = match (local_vectors, read_vector_profile(path)) {
+        (Some(local), Some(sibling)) => local.compatible_with(&sibling),
         _ => false,
     };
 
@@ -868,10 +867,42 @@ fn scip_canonical_id(record: &axil_core::Record) -> Option<String> {
     Some(cid.to_string())
 }
 
-fn read_vector_dims(_db_path: &Path) -> Option<usize> {
+/// What a database's default vector store says about the vectors it holds.
+#[cfg(feature = "embed")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct VectorProfile {
+    dimensions: usize,
+    /// The model the store records, or `None` for one from before model
+    /// records.
+    model: Option<String>,
+}
+
+#[cfg(feature = "embed")]
+impl VectorProfile {
+    /// Whether the two stores' vectors can be compared: as wide, and from
+    /// one model where both name theirs. Two models of one width make
+    /// vectors that can't be compared; a store from before model records
+    /// names none, so its width is all there is to go on.
+    fn compatible_with(&self, other: &VectorProfile) -> bool {
+        self.dimensions == other.dimensions
+            && match (&self.model, &other.model) {
+                (Some(a), Some(b)) => a == b,
+                _ => true,
+            }
+    }
+}
+
+#[cfg(feature = "embed")]
+fn read_vector_profile(_db_path: &Path) -> Option<VectorProfile> {
     #[cfg(feature = "vector")]
     {
-        return axil_vector::read_stored_dimensions(_db_path).ok().flatten();
+        return axil_vector::read_stored_model(_db_path)
+            .ok()
+            .flatten()
+            .map(|stored| VectorProfile {
+                dimensions: stored.dimensions,
+                model: stored.model,
+            });
     }
     #[cfg(not(feature = "vector"))]
     {
@@ -1401,6 +1432,29 @@ fn relative_to_base(target: &Path, base: &Path) -> PathBuf {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// Two members' vectors compare when the stores are as wide and, where
+    /// both name their model, of one model: bge-small and granite are both
+    /// 384 wide.
+    #[cfg(feature = "embed")]
+    #[test]
+    fn members_on_another_model_of_the_same_width_do_not_compare_vectors() {
+        let profile = |model: Option<&str>| VectorProfile {
+            dimensions: 384,
+            model: model.map(str::to_string),
+        };
+        let bge = profile(Some("bge-small-en-v1.5"));
+        let granite = profile(Some("granite-embedding-small-english-r2"));
+        assert!(bge.compatible_with(&bge));
+        assert!(!bge.compatible_with(&granite));
+        // A store from before model records: its width is all there is.
+        assert!(bge.compatible_with(&profile(None)));
+        let wider = VectorProfile {
+            dimensions: 768,
+            model: None,
+        };
+        assert!(!profile(None).compatible_with(&wider));
+    }
 
     fn entity(canonical: &str) -> axil_core::Record {
         axil_core::Record::new("_entities", json!({ "canonical_id": canonical }))
