@@ -55,9 +55,14 @@ rustup toolchain install 1.92.0     # the toolchain the Mac arms were built with
 ```bash
 cd ~/axildb
 git fetch origin feat/model-ab
-git checkout <commit named in the hand-off message>
+git checkout 5bf1cfd8338c4c5d0c5750d2ac3daf854222a02f
 git status        # must be clean: `check` refuses tracked-file changes
 ```
+
+`5bf1cfd` is the commit that added this runner. Run from it even when the
+branch has moved on: it is the code `check` records in every `.meta`. Read
+this README from the branch tip, which can carry corrections; this line was
+added after the runner itself.
 
 ## 2. Fetch the data and the models
 
