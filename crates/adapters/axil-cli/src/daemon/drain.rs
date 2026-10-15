@@ -14,6 +14,10 @@
 //!   fresh, since the thread touches it at least once a minute.
 //! - Each time it takes the lock it sets aside, into `interrupted/`, any
 //!   `.running` job a drainer that died left behind, never running it again.
+//! - It runs only the jobs for its database: one that names another
+//!   database file, or one an older build queued, naming none, in a
+//!   `hook-queue/` with other databases beside `memory.axil`, is set aside
+//!   into `interrupted/` (see [`hook_brain::run_job_file`]).
 //! - It claims a job by renaming it from `.job` to `.running` as the job's
 //!   first write starts, not before ([`JobClaim`]), runs it, and removes it,
 //!   whether or not its steps succeeded; jobs run in the order their names

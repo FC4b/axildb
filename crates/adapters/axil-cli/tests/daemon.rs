@@ -1072,12 +1072,17 @@ fn a_daemon_drains_only_its_own_databases_queue() {
         "{}",
         other_live()
     );
-    let store = |summary: &str| {
+    // Each names its database, as a hook's job does.
+    let store = |summary: &str, db_file: &str| {
         let data = serde_json::json!({ "summary": summary });
-        serde_json::json!({"op": "axil", "args": ["store", "decisions", data.to_string()]})
+        serde_json::json!({
+            "op": "axil",
+            "args": ["store", "decisions", data.to_string()],
+            "db_file": db_file,
+        })
     };
 
-    fx.queue_job(0, &store("a hook write for memory.axil"));
+    fx.queue_job(0, &store("a hook write for memory.axil", "memory.axil"));
     // Past the thread's poll, so a daemon draining the wrong queue had
     // taken the job.
     std::thread::sleep(Duration::from_secs(3));
@@ -1101,7 +1106,7 @@ fn a_daemon_drains_only_its_own_databases_queue() {
 
     std::fs::write(
         other_queue.join("20260101T000000.000000001Z-1-1.job"),
-        store("a hook write for the branch").to_string(),
+        store("a hook write for the branch", "memory.axil.branch.exp").to_string(),
     )
     .unwrap();
     assert!(
@@ -1118,6 +1123,45 @@ fn a_daemon_drains_only_its_own_databases_queue() {
     );
     let mine = text(&fx.axil(&["list", "decisions"]).stdout);
     assert!(!mine.contains("a hook write for the branch"), "{mine}");
+}
+
+/// A job an older axil queued in `hook-queue/` names no database, and may
+/// be any of those in `.axil/`, since they all queued there: beside a
+/// branch, the daemon of `memory.axil` sets it aside, logged and never run,
+/// and runs the job beside it that names `memory.axil`.
+#[test]
+fn a_job_naming_no_database_beside_another_database_is_set_aside() {
+    let fx = fixture();
+    let branch = fx.proj.join(".axil/memory.axil.branch.exp");
+    let init = fx.axil(&["init", branch.to_str().unwrap()]);
+    assert!(init.status.success(), "{}", text(&init.stderr));
+    let store = |summary: &str| {
+        let data = serde_json::json!({ "summary": summary });
+        serde_json::json!({"op": "axil", "args": ["store", "decisions", data.to_string()]})
+    };
+    fx.queue_job(0, &store("an older hook's write"));
+    let mut named = store("a write for memory.axil");
+    named["db_file"] = "memory.axil".into();
+    fx.queue_job(1, &named);
+    fx.start();
+    assert!(fx.drained(2), "{}", fx.live());
+    assert_eq!(fx.live()["queue"]["failed"], 1, "{}", fx.live());
+    assert!(fx
+        .queue()
+        .join("interrupted/20260101T000000.000000000Z-1-0.job")
+        .is_file());
+    let log = std::fs::read_to_string(fx.queue().join("drain.log")).unwrap_or_default();
+    assert!(
+        log.contains("set aside, not run: an older axil queued it without naming its database, which may be any of memory.axil, memory.axil.branch.exp"),
+        "{log}"
+    );
+    let decisions = text(&fx.axil(&["list", "decisions"]).stdout);
+    assert!(!decisions.contains("an older hook's write"), "{decisions}");
+    assert_eq!(
+        decisions.matches("a write for memory.axil").count(),
+        1,
+        "{decisions}"
+    );
 }
 
 /// A daemon slow to shut down (here holding the database 7 s, as a long

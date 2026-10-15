@@ -114,6 +114,15 @@ resumes it at the step that gave up, never running one of those again. A job
 given up that way by three drainers in turn is moved to `interrupted/` and
 logged instead. No job is deleted unrun.
 
+Each job also names the database file it was queued for, and a drainer moves
+one queued for another to `interrupted/`, with a line in `drain.log`, and does
+not run it. Jobs an older axil queued name no database. Every database in a
+directory queued in `hook-queue/` then, so such a job there runs on
+`memory.axil` only while no other database sits beside it in `.axil/` (a
+branch such as `memory.axil.branch.<name>`, another `*.axil`, or any other
+file redb wrote); otherwise it is moved to `interrupted/` and logged, since it
+may be any of theirs.
+
 A hook asks the daemon, before it queues, whether it serves the hook's
 process. When it does, the hook pokes it and starts no drainer. When it
 doesn't (another build or environment), isn't asked (`AXIL_DAEMON=off`) or

@@ -2351,6 +2351,11 @@ impl Job {
 /// that doesn't know a field ignores it.
 #[derive(Debug, Default, Serialize, Deserialize, PartialEq)]
 struct JobMeta {
+    /// The file name of the database the job was queued for, such as
+    /// `memory.axil`: a drainer of another database's never runs it. A job
+    /// an older build queued names none (see [`not_this_databases`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    db_file: Option<String>,
     /// The hook that queued the job was not told the database's daemon
     /// serves it (the daemon is another build or environment's, was not
     /// asked with `AXIL_DAEMON=off`, did not answer in time, or there is
@@ -2413,17 +2418,106 @@ pub(crate) fn set_deps_env(cmd: &mut Command, env: Option<&[(String, String)]>) 
 
 /// Hook jobs wait next to the database they change, in a queue of its own:
 /// `<db dir>/hook-queue/` for `memory.axil`, `<db dir>/hook-queue.<file>/`
-/// for any other database file. A job file does not name its database, so
-/// databases sharing a directory (a branch, an `AXIL_DB` sibling) must not
-/// share a queue: a drainer or daemon for one would run the other's jobs on
-/// its own handle. `memory.axil` keeps the queue's old name, so the jobs a
-/// hook of an earlier build left there still go to it.
+/// for any other database file, so databases sharing a directory (a
+/// branch, an `AXIL_DB` sibling) never wait behind each other's jobs. Each
+/// job also names its database file, and runs on no other (see
+/// [`not_this_databases`]). `memory.axil` keeps the queue's old name, which
+/// every database in the directory used before: the jobs an earlier build
+/// left there name no database.
 pub(crate) fn queue_dir(db: &Path) -> PathBuf {
     let dir = db.parent().unwrap_or_else(|| Path::new("."));
-    match db.file_name().and_then(|name| name.to_str()) {
-        None | Some("memory.axil") => dir.join("hook-queue"),
-        Some(name) => dir.join(format!("hook-queue.{name}")),
+    match db.file_name() {
+        None => dir.join("hook-queue"),
+        Some(name) if name == "memory.axil" => dir.join("hook-queue"),
+        Some(name) => dir.join(format!("hook-queue.{}", name.to_string_lossy())),
     }
+}
+
+/// The name a job gives the database at `db` (see [`JobMeta::db_file`]).
+fn db_file_name(db: &Path) -> Option<String> {
+    db.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+}
+
+/// Why the job `meta` describes, in `dir`, the queue of the database `db`,
+/// must not run on that database: `None` when it may.
+///
+/// A job runs only on the database file it names. One an older build
+/// queued names none. In `hook-queue/` it may be any database's in the
+/// directory, since before each database file had a queue of its own they
+/// all queued there: it runs on `memory.axil` only while no other database
+/// sits beside it ([`other_databases`]). In any other queue it was queued by
+/// a build that gave each database its own, so it is that database's.
+fn not_this_databases(db: &Path, dir: &Path, meta: &JobMeta) -> Option<String> {
+    let own = db_file_name(db).unwrap_or_default();
+    match &meta.db_file {
+        Some(file) if *file == own => None,
+        Some(file) => Some(format!("it was queued for {file}, not {own}")),
+        None if dir.file_name().is_some_and(|name| name == "hook-queue") => {
+            let others = other_databases(db);
+            (!others.is_empty()).then(|| {
+                format!(
+                    "an older axil queued it without naming its database, which may be any of {own}, {}",
+                    others.join(", ")
+                )
+            })
+        }
+        None => None,
+    }
+}
+
+/// The first bytes of every file redb writes.
+const REDB_MAGIC: [u8; 9] = [b'r', b'e', b'd', b'b', 0x1A, 0x0A, 0xA9, 0x0D, 0x0A];
+
+/// The databases beside the one at `db` in its directory, by file name: a
+/// branch of it (`<db>.branch.<name>`), and any other database, named
+/// `*.axil` or, since `AXIL_DB` may name any file, written by redb. The
+/// files Axil derives from a database's path (its engine companions
+/// `.vec`, `.graph`, `.fts` and `.ts`, a branch's, a branch being made) are
+/// not databases of their own; another database's companions only ever
+/// sit beside that database.
+fn other_databases(db: &Path) -> Vec<String> {
+    let Some(own) = db_file_name(db) else {
+        return Vec::new();
+    };
+    let dir = match db.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir,
+        _ => Path::new("."),
+    };
+    let branch = format!("{own}.branch.");
+    let is_redb = |path: &Path| {
+        let mut head = [0u8; REDB_MAGIC.len()];
+        std::fs::File::open(path)
+            .and_then(|mut file| std::io::Read::read_exact(&mut file, &mut head))
+            .is_ok_and(|()| head == REDB_MAGIC)
+    };
+    let mut others: Vec<String> = std::fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter(|entry| entry.path().is_file())
+                .map(|entry| {
+                    (
+                        entry.file_name().to_string_lossy().into_owned(),
+                        entry.path(),
+                    )
+                })
+                .filter(|(name, path)| {
+                    if *name == own {
+                        false
+                    } else if axil_core::is_database_file_name(&own, name) {
+                        name.strip_prefix(&branch)
+                            .is_some_and(|rest| !rest.is_empty() && !rest.contains('.'))
+                    } else {
+                        name.ends_with(".axil") || is_redb(path)
+                    }
+                })
+                .map(|(name, _)| name)
+                .collect()
+        })
+        .unwrap_or_default();
+    others.sort();
+    others
 }
 
 /// The project the database at `db` belongs to: the directory holding its
@@ -2447,6 +2541,7 @@ fn write_job(db: &Path, job: &Job, own_drainer: bool) -> bool {
     static SEQ: AtomicU32 = AtomicU32::new(0);
     let dir = queue_dir(db);
     let meta = JobMeta {
+        db_file: db_file_name(db),
         own_drainer,
         ..JobMeta::default()
     };
@@ -2965,10 +3060,12 @@ pub(crate) const WITHHELD: &str = "its drainer stopped before it started";
 /// Run the queued job `claim` is for, from the first step an earlier run
 /// did not (see [`JobMeta::done`]), claiming it as its first write starts
 /// (see [`JobClaim`]), and remove it. A failed job is logged and dropped,
-/// not retried. One whose step gave up waiting for the database goes back
-/// to the queue instead ([`requeue_busy`]). Returns whether it ran and
-/// succeeded, or `None` when it did not run, or not in full: withheld,
-/// left queued for the next drainer, or taken by another.
+/// not retried. One that is not for `db` (see [`not_this_databases`]) is
+/// set aside in `interrupted/`, logged, and not run. One whose step gave
+/// up waiting for the database goes back to the queue instead
+/// ([`requeue_busy`]). Returns whether it ran and succeeded, or `None` when
+/// it did not run, or not in full: withheld, left queued for the next
+/// drainer, or taken by another.
 pub(crate) fn run_job_file(
     runner: &mut impl JobRunner,
     exe: &Path,
@@ -2994,6 +3091,11 @@ pub(crate) fn run_job_file(
         );
         return Some(false);
     };
+    if let Some(why) = not_this_databases(db, dir, &meta) {
+        set_aside(dir, &claim.job);
+        drain_log(dir, &format!("job {name} set aside, not run: {why}"));
+        return Some(false);
+    }
     let result = run_job(runner, claim, exe, db, &job, &mut meta);
     match claim.state() {
         Claim::Lost => return None,
@@ -6181,6 +6283,16 @@ mod tests {
             queue_dir(&dir.join("other.axil")),
             dir.join("hook-queue.other.axil")
         );
+        // A name that is not text is not `memory.axil` either.
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            let odd = std::ffi::OsStr::from_bytes(b"odd\xff.axil");
+            assert_eq!(
+                queue_dir(&dir.join(odd)),
+                dir.join("hook-queue.odd\u{fffd}.axil")
+            );
+        }
     }
 
     /// A job queued by a hook the database's daemon does not serve says so
@@ -6291,6 +6403,7 @@ mod tests {
         assert_eq!(
             meta,
             JobMeta {
+                db_file: Some("memory.axil".into()),
                 own_drainer: false,
                 done,
                 session_row: Some("01M4Z06PE0FK6QVKK92X7R6JPE".into()),
@@ -6413,5 +6526,163 @@ mod tests {
         assert_eq!(queued, job);
         assert_eq!(meta.busy_give_ups, 1);
         assert!(!meta.own_drainer);
+    }
+
+    /// A job names the database file it was queued for, and a drainer of
+    /// another database's sets it aside, logged and never run; one for its
+    /// own database runs whatever sits beside it.
+    #[test]
+    fn a_job_runs_only_on_the_database_it_names() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("memory.axil");
+        std::fs::write(tmp.path().join("other.axil"), b"").unwrap();
+        let exe = Path::new("/nonexistent/axil");
+        let queue = queue_dir(&db);
+        let job = Job::axil(&["store", "decisions", "{}"], None);
+        assert!(write_job(&db, &job, false));
+        let mine = next_job(&queue).unwrap();
+        assert_eq!(read_job(&mine).1.db_file.as_deref(), Some("memory.axil"));
+        let theirs = queue.join("0-theirs.job");
+        let meta = JobMeta {
+            db_file: Some("other.axil".into()),
+            ..JobMeta::default()
+        };
+        std::fs::write(&theirs, job_body(&job, &meta).unwrap()).unwrap();
+
+        let mut runner = Recorder::new(&queue);
+        let claim = JobClaim::new(&theirs);
+        assert_eq!(
+            run_job_file(&mut runner, exe, &db, &queue, &claim),
+            Some(false)
+        );
+        assert!(runner.steps.is_empty());
+        assert!(queue.join("interrupted/0-theirs.job").is_file());
+        let log = std::fs::read_to_string(queue.join("drain.log")).unwrap();
+        assert!(
+            log.contains(
+                "job 0-theirs set aside, not run: it was queued for other.axil, not memory.axil"
+            ),
+            "{log}"
+        );
+
+        let claim = JobClaim::new(&mine);
+        assert_eq!(
+            run_job_file(&mut runner, exe, &db, &queue, &claim),
+            Some(true)
+        );
+        assert_eq!(runner.steps, ["store decisions {}"]);
+        assert!(next_job(&queue).is_none());
+    }
+
+    /// The databases beside `memory.axil` are its branches and any other
+    /// database, by name or by redb's header; its own companions, a
+    /// branch's, a branch being made and the other files in `.axil/` are
+    /// not.
+    #[test]
+    fn the_databases_beside_one_are_its_branches_and_other_databases() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let db = dir.join("memory.axil");
+        let redb = |name: &str| {
+            let mut bytes = REDB_MAGIC.to_vec();
+            bytes.extend_from_slice(b"rest of the file");
+            std::fs::write(dir.join(name), bytes).unwrap();
+        };
+        redb("memory.axil");
+        for companion in [
+            "memory.axil.vec",
+            "memory.axil.graph",
+            "memory.axil.ts",
+            "memory.axil.vec.code",
+            "memory.axil.reembed-bak",
+            "memory.axil.branch.exp.vec",
+            "memory.axil.branch.exp.staging-4242-1f3a0",
+        ] {
+            redb(companion);
+        }
+        std::fs::create_dir_all(dir.join("memory.axil.fts")).unwrap();
+        std::fs::create_dir_all(dir.join("hook-queue")).unwrap();
+        std::fs::create_dir_all(dir.join("run/memory.axil")).unwrap();
+        std::fs::create_dir_all(dir.join("backup/other.axil")).unwrap();
+        for other in [
+            "axil.toml",
+            "index-rust.scip",
+            "index-refresh.lock",
+            "memory.axil.helpers.ts",
+            "version",
+        ] {
+            std::fs::write(dir.join(other), b"not a database").unwrap();
+        }
+        assert_eq!(other_databases(&db), Vec::<String>::new());
+
+        redb("memory.axil.branch.exp");
+        std::fs::write(dir.join("notes.axil"), b"").unwrap();
+        redb("scratch.db");
+        assert_eq!(
+            other_databases(&db),
+            ["memory.axil.branch.exp", "notes.axil", "scratch.db"]
+        );
+    }
+
+    /// A job an older build queued names no database. In `hook-queue/` it
+    /// runs on `memory.axil` only while no other database sits beside it,
+    /// and is otherwise set aside, logged and never run, since every
+    /// database in the directory queued there; in another database's own
+    /// queue it is that database's, and runs.
+    #[test]
+    fn a_job_naming_no_database_runs_where_it_can_only_be_for_this_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("memory.axil");
+        std::fs::write(&db, REDB_MAGIC).unwrap();
+        std::fs::write(tmp.path().join("memory.axil.vec"), REDB_MAGIC).unwrap();
+        let exe = Path::new("/nonexistent/axil");
+        let queue = queue_dir(&db);
+        std::fs::create_dir_all(&queue).unwrap();
+        let legacy = |name: &str| {
+            let path = queue.join(format!("{name}.job"));
+            let job = Job::axil(&["store", "decisions", name], None);
+            std::fs::write(&path, serde_json::to_vec(&job).unwrap()).unwrap();
+            assert_eq!(read_job(&path).1.db_file, None);
+            path
+        };
+        let mut runner = Recorder::new(&queue);
+        let job = legacy("1-alone");
+        let claim = JobClaim::new(&job);
+        assert_eq!(
+            run_job_file(&mut runner, exe, &db, &queue, &claim),
+            Some(true)
+        );
+        assert_eq!(runner.steps, ["store decisions 1-alone"]);
+
+        let branch = tmp.path().join("memory.axil.branch.exp");
+        std::fs::write(&branch, REDB_MAGIC).unwrap();
+        let job = legacy("2-beside-a-branch");
+        let claim = JobClaim::new(&job);
+        assert_eq!(
+            run_job_file(&mut runner, exe, &db, &queue, &claim),
+            Some(false)
+        );
+        assert_eq!(runner.steps.len(), 1, "{:?}", runner.steps);
+        assert!(queue.join("interrupted/2-beside-a-branch.job").is_file());
+        let log = std::fs::read_to_string(queue.join("drain.log")).unwrap();
+        assert!(
+            log.contains("job 2-beside-a-branch set aside, not run: an older axil queued it without naming its database, which may be any of memory.axil, memory.axil.branch.exp"),
+            "{log}"
+        );
+
+        // The branch's own queue: a job there naming no database is the
+        // branch's, whatever sits beside it.
+        let queue = queue_dir(&branch);
+        std::fs::create_dir_all(&queue).unwrap();
+        let path = queue.join("3-the-branchs.job");
+        let job = Job::axil(&["store", "decisions", "branch"], None);
+        std::fs::write(&path, serde_json::to_vec(&job).unwrap()).unwrap();
+        let mut runner = Recorder::new(&queue);
+        let claim = JobClaim::new(&path);
+        assert_eq!(
+            run_job_file(&mut runner, exe, &branch, &queue, &claim),
+            Some(true)
+        );
+        assert_eq!(runner.steps, ["store decisions branch"]);
     }
 }
