@@ -172,7 +172,10 @@ That comes to about 2.5 to 3 hours without gte, two runs sharing the cores.
 
 ## 6. Outputs and sending them back
 
-Everything lands in `benchmarks/results/model-ab-pc/`:
+Everything lands in `benchmarks/results/model-ab-pc/`. The script runs from
+the repo root and passes repo-relative paths, so no home directory shows up
+in these files. If you override `LME_DATA` or `MODEL_AB_OUT`, keep them
+relative to the repo root too.
 
 | File | What |
 |---|---|

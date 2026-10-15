@@ -10,12 +10,16 @@
 # to benchmarks/results/model-ab-pc/.
 set -euo pipefail
 
-HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-REPO=$(cd "$HERE/../../.." && pwd)
-LME_DIR=$REPO/benchmarks/longmemeval
+# Everything runs from the repo root with repo-relative paths, so no home
+# directory ends up in a result file. LME_DATA and MODEL_AB_OUT, when set,
+# should be repo-relative too.
+REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
+cd "$REPO"
+HERE=benchmarks/longmemeval/model-ab
+LME_DIR=benchmarks/longmemeval
 BIN=$LME_DIR/target/release/longmemeval-bench
 DATA=${LME_DATA:-$LME_DIR/data}
-OUT=${MODEL_AB_OUT:-$REPO/benchmarks/results/model-ab-pc}
+OUT=${MODEL_AB_OUT:-benchmarks/results/model-ab-pc}
 MODELS=${HOME}/.axil/models
 TOOLCHAIN=${MODEL_AB_TOOLCHAIN:-1.92.0}
 
@@ -121,9 +125,9 @@ cmd_build() {
 
 cmd_check() {
   local bad=0 line name size sum dir repo rev remote local_name
-  echo "commit: $(git -C "$REPO" rev-parse HEAD)"
-  if [ -n "$(git -C "$REPO" status --porcelain --untracked-files=no)" ]; then
-    echo "tracked files differ from the commit:"; git -C "$REPO" status --short --untracked-files=no; bad=1
+  echo "commit: $(git rev-parse HEAD)"
+  if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
+    echo "tracked files differ from the commit:"; git status --short --untracked-files=no; bad=1
   fi
   for line in "${DATA_FILES[@]}"; do
     read -r name size sum <<< "$line"
@@ -132,7 +136,7 @@ cmd_check() {
   for line in "${MODEL_FILES[@]}"; do
     read -r dir repo rev remote local_name size sum <<< "$line"
     verify "$MODELS/$dir/$local_name" "$size" "$sum" && echo "  [ok] model $dir/$local_name" || bad=1
-    grep -q "$sum" "$REPO/crates/engines/axil-vector/src/download.rs" \
+    grep -q "$sum" crates/engines/axil-vector/src/download.rs \
       || { echo "pin drift: $sum is not in download.rs"; bad=1; }
   done
   cmp -s "$HERE/Cargo.lock.pinned" "$LME_DIR/Cargo.lock" \
@@ -157,7 +161,7 @@ run_arm() {
               --model "$model" --data-dir "$DATA" --jobs 1 $extra)
   {
     echo "label: $label"
-    echo "commit: $(git -C "$REPO" rev-parse HEAD)"
+    echo "commit: $(git rev-parse HEAD)"
     echo "harness_sha256: $(sha256 "$BIN")"
     echo "lockfile_sha256: $(sha256 "$LME_DIR/Cargo.lock")"
     echo "rustc: $(rustc "+$TOOLCHAIN" --version 2>/dev/null || rustc --version)"
@@ -206,5 +210,5 @@ case "${1:-}" in
   build) cmd_build ;;
   check) cmd_check ;;
   run) shift; cmd_run "$@" ;;
-  *) sed -n '2,10p' "$0"; exit 2 ;;
+  *) sed -n '2,10p' "$HERE/run.sh"; exit 2 ;;
 esac
