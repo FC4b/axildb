@@ -14,6 +14,7 @@
 //!   process as it would with no daemon, and its open asks the daemon to
 //!   let go of the database ([`super::lease`]). A write whose connection
 //!   broke after it was sent is not run again: the daemon may have run it.
+//!   Nor is one whose output was too large to send back, which it ran.
 //! - A hook's lookup ([`forward_lookup`]) is sent with the slow-query log
 //!   off and a deadline. A daemon that ran it answers it; one that is not
 //!   free to (the database leased or opening, the daemon shutting down)
@@ -296,9 +297,11 @@ pub fn forward_cli(cli: &Cli) -> Option<i32> {
         }
         // The daemon may have run it: running it again could write twice.
         Forwarded::Lost { sent: true } if exec::writes(&cli.command) => {
-            let lost = anyhow::anyhow!("daemon connection lost; write status unknown");
-            errln!("{}", crate::format_cli_error(&lost));
-            Some(crate::EXIT_ERROR)
+            write_unknown("daemon connection lost; write status unknown")
+        }
+        // The daemon ran it, and could not send back what it printed.
+        Forwarded::NotServed(reason) if reason == "too_large" && exec::writes(&cli.command) => {
+            write_unknown("daemon output over the 32 MiB frame limit; write status unknown")
         }
         _ => {
             if let Some(bytes) = stdin {
@@ -307,6 +310,12 @@ pub fn forward_cli(cli: &Cli) -> Option<i32> {
             None
         }
     }
+}
+
+/// Say that a write sent to the daemon may have run, and fail.
+fn write_unknown(why: &'static str) -> Option<i32> {
+    errln!("{}", crate::format_cli_error(&anyhow::anyhow!(why)));
+    Some(crate::EXIT_ERROR)
 }
 
 /// A hook's lookup `args` (`recall …`, `boot …`), on the database at `db`:

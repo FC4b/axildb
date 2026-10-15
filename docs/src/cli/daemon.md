@@ -51,7 +51,11 @@ change, or with every request slot taken is waited for, up to 10 s.
 If the connection breaks after the command was sent, a write is not run
 again, since the daemon may have run it:
 `{"error":"daemon connection lost; write status unknown"}` is printed and the
-command exits 1. A read runs in the process instead.
+command exits 1. A read runs in the process instead. The same goes for a
+command whose output is over the 32 MiB a reply can carry, which the daemon
+ran: a write prints
+`{"error":"daemon output over the 32 MiB frame limit; write status unknown"}`
+and exits 1, and a read runs in the process.
 
 A hook's lookup (the prompt's recall, the session's boot, a file's memories,
 a search) goes to the daemon first, with the slow-query log off and a

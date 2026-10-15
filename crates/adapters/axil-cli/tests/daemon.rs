@@ -1229,12 +1229,9 @@ fn the_hot_commands_go_to_the_daemon_and_print_as_without_one() {
     }
 }
 
-/// A connection that breaks once the command went out: a write is not run
-/// again, since the daemon may have run it, and says so; a read runs here.
-#[test]
-fn a_lost_connection_fails_a_write_and_runs_a_read_here() {
-    let fx = fixture();
-    // A daemon that reads each request and hangs up.
+/// A daemon on `fx`'s socket that reads each request and answers a run
+/// with `answer`, a JSON reply, or hangs up.
+fn fake_daemon(fx: &Fixture, answer: Option<&'static str>) {
     let dir = fx.run_dir();
     std::fs::create_dir_all(&dir).unwrap();
     for d in [dir.parent().unwrap(), &dir] {
@@ -1245,12 +1242,30 @@ fn a_lost_connection_fails_a_write_and_runs_a_read_here() {
         for stream in listener.incoming() {
             let Ok(mut stream) = stream else { break };
             let mut len = [0u8; 4];
-            if stream.read_exact(&mut len).is_ok() {
-                let mut body = vec![0u8; u32::from_be_bytes(len) as usize];
-                let _ = stream.read_exact(&mut body);
+            if stream.read_exact(&mut len).is_err() {
+                continue;
+            }
+            let mut body = vec![0u8; u32::from_be_bytes(len) as usize];
+            if stream.read_exact(&mut body).is_err() {
+                continue;
+            }
+            let request: Value = serde_json::from_slice(&body).unwrap_or_default();
+            if let (Some(answer), "run") = (answer, request["op"].as_str().unwrap_or("")) {
+                let len = u32::try_from(answer.len()).unwrap().to_be_bytes();
+                let _ = stream
+                    .write_all(&len)
+                    .and_then(|()| stream.write_all(answer.as_bytes()));
             }
         }
     });
+}
+
+/// A connection that breaks once the command went out: a write is not run
+/// again, since the daemon may have run it, and says so; a read runs here.
+#[test]
+fn a_lost_connection_fails_a_write_and_runs_a_read_here() {
+    let fx = fixture();
+    fake_daemon(&fx, None);
 
     let store = fx.axil(&["store", "decisions", r#"{"summary":"lost on the way"}"#]);
     assert_eq!(store.status.code(), Some(1));
@@ -1273,6 +1288,34 @@ fn a_lost_connection_fails_a_write_and_runs_a_read_here() {
         &[("AXIL_DAEMON", "off")],
     );
     assert!(!text(&off.stdout).contains("lost on the way"));
+}
+
+/// Output too large to send back: the daemon ran the command, so a write is
+/// not run again, and says so; a read runs here.
+#[test]
+fn output_too_large_to_send_fails_a_write_and_runs_a_read_here() {
+    let fx = fixture();
+    fake_daemon(
+        &fx,
+        Some(r#"{"reply":"not_served","reason":"too_large","detail":"over the limit"}"#),
+    );
+    let store = fx.axil(&["store", "decisions", r#"{"summary":"too large"}"#]);
+    assert_eq!(store.status.code(), Some(1));
+    assert_eq!(
+        text(&store.stderr),
+        "{\"error\":\"daemon output over the 32 MiB frame limit; write status unknown\"}\n"
+    );
+    let boot = fx.axil(&["boot"]);
+    assert!(boot.status.success(), "{}", text(&boot.stderr));
+    assert!(text(&boot.stdout).contains("512 bytes"));
+    let off = axil_env(
+        BIN,
+        &fx.proj,
+        &["list", "decisions"],
+        None,
+        &[("AXIL_DAEMON", "off")],
+    );
+    assert!(!text(&off.stdout).contains("too large"));
 }
 
 /// A client of another build, or with another environment, runs the

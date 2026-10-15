@@ -269,6 +269,8 @@ pub enum RunReply {
         exit: i32,
     },
     /// The daemon did not run it and wrote nothing; the client runs it.
+    /// Except `too_large`: the daemon ran it, and what it printed is over
+    /// the frame limit; the client runs it unless it writes.
     NotServed {
         /// `parse`, `wrong_db`, `command`, `lacks`, `terminal`,
         /// `unavailable` or `too_large`.
