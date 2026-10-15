@@ -1,0 +1,15 @@
+# finetune_u2.py. Install torch first, from the CUDA wheel index for an NVIDIA
+# GPU (it bundles the CUDA runtime and cuDNN; WSL2 uses the Windows driver) or
+# the CPU index otherwise:
+#   pip install --index-url https://download.pytorch.org/whl/cu124 torch==2.5.1
+#   pip install --index-url https://download.pytorch.org/whl/cpu torch==2.5.1
+#   pip install -r requirements-finetune.txt
+torch==2.5.1
+transformers==4.46.3
+onnx==1.17.0
+onnxruntime==1.20.1
+tokenizers==0.20.3
+huggingface_hub==0.26.2
+numpy==2.1.3
+sentencepiece==0.2.0
+protobuf==5.28.3

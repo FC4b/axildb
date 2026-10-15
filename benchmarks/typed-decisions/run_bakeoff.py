@@ -25,6 +25,7 @@ import json
 import math
 import os
 import platform
+import random
 import statistics
 import time
 from datetime import datetime, timezone
@@ -60,8 +61,12 @@ def load_set(name):
 class PairClassifier:
     def __init__(self, repo, onnx_path, labels, threads):
         t0 = time.perf_counter()
-        model_file = hf_hub_download(repo, onnx_path)
-        tok_file = hf_hub_download(repo, "tokenizer.json")
+        local = Path(repo)
+        if local.is_dir():
+            model_file, tok_file = str(local / onnx_path), str(local / "tokenizer.json")
+        else:
+            model_file = hf_hub_download(repo, onnx_path)
+            tok_file = hf_hub_download(repo, "tokenizer.json")
         self.tok = Tokenizer.from_file(tok_file)
         self.tok.enable_truncation(max_length=MAX_LEN)
         self.tok.no_padding()
@@ -95,6 +100,23 @@ def auroc(scores, labels):
         return None
     wins = sum((p > n) + 0.5 * (p == n) for p in pos for n in neg)
     return wins / (len(pos) * len(neg))
+
+
+def auroc_ci95(scores, labels, n=2000, seed=0):
+    """Percentile bootstrap interval for AUROC, resampling pairs. With about a
+    hundred test pairs one AUROC moves by several points between resamples, so
+    a comparison between arms reads the intervals, not the point values."""
+    rng = random.Random(seed)
+    vals = []
+    for _ in range(n):
+        pick = [rng.randrange(len(scores)) for _ in scores]
+        a = auroc([scores[i] for i in pick], [labels[i] for i in pick])
+        if a is not None:
+            vals.append(a)
+    if not vals:
+        return None
+    vals.sort()
+    return [vals[int(0.025 * len(vals))], vals[int(0.975 * len(vals)) - 1]]
 
 
 def rates(scores, labels, thr):
@@ -193,6 +215,7 @@ def evaluate(scores, rows, argmax_hits):
     return {
         "n_train": len(train), "n_test": len(test),
         "auroc_test": auroc(te_s, te_y),
+        "auroc_test_ci95": auroc_ci95(te_s, te_y),
         "auroc_all": auroc(scores, y),
         "threshold_from_train": thr,
         "at_threshold_test": rates(te_s, te_y, thr),
@@ -209,7 +232,13 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--threads", type=int, default=4)
     ap.add_argument("--only", nargs="*")
+    ap.add_argument("--local", action="append", default=[], metavar="NAME=DIR",
+                    help="also score a local model dir holding model.onnx + tokenizer.json "
+                         "with the NLI label order (e.g. a finetune_u2.py output)")
     args = ap.parse_args()
+    for spec in args.local:
+        name, _, path = spec.partition("=")
+        CANDIDATES[name] = dict(repo=str(Path(path).resolve()), onnx="model.onnx", labels=NLI3)
 
     sets = {
         "U1": load_set("u1_lme.jsonl") + load_set("u1_repo.jsonl"),
