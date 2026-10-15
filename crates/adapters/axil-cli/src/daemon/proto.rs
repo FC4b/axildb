@@ -407,6 +407,10 @@ pub const FP_ENV: &[&str] = &[
     "USERPROFILE",
     "APPDATA",
     "ORT_DYLIB_PATH",
+    // Where `deps refresh` reads dependency sources.
+    "CARGO_HOME",
+    "GOPATH",
+    "GOMODCACHE",
 ];
 
 /// The variables the daemon removes from its own environment before it
@@ -1142,18 +1146,6 @@ mod tests {
         ),
         ("USER", "the scheduled maintenance's log directory"),
         ("SystemRoot", "Windows only, where there is no daemon"),
-        (
-            "CARGO_HOME",
-            "`deps`, reading a crate's docs from its source",
-        ),
-        (
-            "GOPATH",
-            "`deps`, reading a Go module's docs from its source",
-        ),
-        (
-            "GOMODCACHE",
-            "`deps`, reading a Go module's docs from its source",
-        ),
         ("XDG_CONFIG_HOME", "`workspace`, finding its registry"),
     ];
 

@@ -166,9 +166,10 @@ size and modification time), with the same compiled features and the same
 values of the environment variables that change what a command prints or
 reads: `AXIL_ENC_KEY`, `AXIL_ENC_KEY_FILE` (and the key file's size and
 modification time), `AXIL_LLM_API_KEY`, `AXIL_VERBOSE`, `AXIL_EMBED_SESSIONS`,
-`HOME`, `USERPROFILE`, `APPDATA` and `ORT_DYLIB_PATH`. Variables only commands
-the daemon doesn't run read (`CARGO_HOME`, `GOPATH`, `GOMODCACHE` for `deps`,
-`XDG_CONFIG_HOME` for `workspace`) don't count. The daemon clears `AXIL_VERBOSE` and
+`HOME`, `USERPROFILE`, `APPDATA`, `ORT_DYLIB_PATH`, and `CARGO_HOME`, `GOPATH`
+and `GOMODCACHE`, where `deps refresh` reads dependency sources. A variable only
+commands the daemon doesn't run read (`XDG_CONFIG_HOME`, for `workspace`)
+doesn't count. The daemon clears `AXIL_VERBOSE` and
 `AXIL_EMBED_SESSIONS` from its own environment, so a client with either set
 runs the command itself. Anything else, or a command the daemon doesn't run,
 is handed back to the client unrun, and the client runs it and leases the

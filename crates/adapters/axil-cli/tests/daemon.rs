@@ -759,6 +759,7 @@ fn the_hot_commands_print_nothing_into_the_log() {
     let fx = fixture();
     fx.start();
     let cp = r#"{"goal":"g","state":"s","next_steps":["n"]}"#;
+    let proj = fx.proj.to_str().unwrap();
     // Each with whether this build serves it.
     let recall = cfg!(feature = "embed");
     let cases: Vec<(Vec<&str>, Option<&[u8]>, bool)> = vec![
@@ -819,6 +820,11 @@ fn the_hot_commands_print_nothing_into_the_log() {
         (vec!["beliefs", "--generate"], None, true),
         (vec!["session-heal", "--session", "s1"], None, true),
         (vec!["maintain", "--if-stale"], None, true),
+        (
+            vec!["deps", "refresh", "--if-stale", "--path", proj],
+            None,
+            cfg!(feature = "deps"),
+        ),
         (vec!["checkpoint", cp], None, cfg!(feature = "checkpoint")),
         (
             vec!["checkpoint", "-"],

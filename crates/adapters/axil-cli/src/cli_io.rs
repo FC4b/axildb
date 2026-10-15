@@ -1644,6 +1644,8 @@ pub(crate) mod tests {
         /// errors and help text around them. `db` is the work copy's
         /// database and `auth_rs` a file in its project.
         pub(crate) fn matrix(db: &str, auth_rs: &str) -> Vec<Case> {
+            let proj = Path::new(auth_rs).parent().unwrap().parent().unwrap();
+            let proj = proj.to_str().unwrap();
             let cp = r#"{"goal":"parity","state":"fixture built","next_steps":["diff"],"references":[{"kind":"file","ref":"src/auth.rs"}]}"#;
 
             let mut cases = vec![
@@ -1801,6 +1803,12 @@ pub(crate) mod tests {
             }
             if cfg!(feature = "timeseries") {
                 cases.push(case("since 1h", &["--db", db, "since", "1h"]));
+            }
+            if cfg!(feature = "deps") {
+                cases.push(case(
+                    "deps refresh",
+                    &["--db", db, "deps", "refresh", "--if-stale", "--path", proj],
+                ));
             }
             if cfg!(feature = "checkpoint") {
                 cases.push(case("checkpoint arg", &["--db", db, "checkpoint", cp]).volatile());

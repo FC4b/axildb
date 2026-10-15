@@ -684,6 +684,8 @@ pub fn writes(command: &Command) -> bool {
         Command::Beliefs { generate, .. } => *generate,
         Command::SessionHeal { dry_run, .. } => !dry_run,
         Command::Maintain { dry_run, .. } => !dry_run,
+        #[cfg(feature = "deps")]
+        Command::Deps(crate::DepsCommand::Refresh { .. }) => true,
         #[cfg(feature = "checkpoint")]
         Command::Checkpoint { arg, .. } => arg.as_deref() != Some("show"),
         #[cfg(feature = "embed")]

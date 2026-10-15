@@ -1972,10 +1972,14 @@ impl HookCtx {
         // re-ingest the docs of whatever changed (a no-op when nothing did).
         // Checked before the skip below, which drops lockfiles.
         if is_dependency_manifest(file_path) {
-            self.enqueue(&Job::axil(
-                &["deps", "refresh", "--if-stale", "--quiet"],
-                None,
-            ));
+            // The project named, not the drainer's working directory, which
+            // is the daemon's when the daemon runs the job.
+            let mut args = vec!["deps", "refresh", "--if-stale", "--quiet"];
+            let dir = Some(&self.project_dir).filter(|dir| dir.is_absolute());
+            if let Some(dir) = dir.and_then(|dir| dir.to_str()) {
+                args.extend(["--path", dir]);
+            }
+            self.enqueue(&Job::axil(&args, None));
         }
         if is_skipped_path(file_path) {
             return Ok(());

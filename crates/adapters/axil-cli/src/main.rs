@@ -7275,6 +7275,11 @@ fn hot_needs(command: &Command) -> Option<Vec<cli_io::Need>> {
             in_background: false,
             ..
         } => Some(Vec::new()),
+        // A relative path is the client's to find. It reads dependency
+        // sources under CARGO_HOME, GOPATH and GOMODCACHE, which are in the
+        // environment a client must share with the daemon.
+        #[cfg(feature = "deps")]
+        Command::Deps(DepsCommand::Refresh { path, .. }) if path.is_absolute() => Some(Vec::new()),
         _ => None,
     }
 }
@@ -16731,7 +16736,7 @@ fn try_deps_extension_dispatch(
         (None, DepsCommand::List { .. }) => return Ok(None),
         (None, _) => require_db(db_opt)?,
     };
-    let db = open_with_all_detected(&db_path)?;
+    let db = cli_io::hot_db(&db_path, &[], || open_with_all_detected(&db_path))?;
     let consumed_stdin = invocation.stdin.is_some();
     match axil_core::dispatch_cli(&db, &db.extensions(), &invocation)? {
         axil_core::Dispatch::Handled(output) => {
@@ -16981,7 +16986,7 @@ fn run_deps(cmd: DepsCommand, db_opt: &Option<PathBuf>, out: &Output) -> Result<
             transitive,
         } => {
             let db_path = require_db(db_opt)?;
-            let db = open_with_all_detected(&db_path)?;
+            let db = cli_io::hot_db(&db_path, &[], || open_with_all_detected(&db_path))?;
             let all = axil_docs::detect_manifests(&path);
 
             let mut drift_report: Vec<Value> = Vec::new();
