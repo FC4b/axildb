@@ -1632,4 +1632,61 @@ mod tests {
         let err = String::from_utf8_lossy(&results[0].1 .1);
         assert!(err.contains("warning: removing corrupt edge zzzz"), "{err}");
     }
+
+    /// The forms of the commands a queued job runs that a host leaves to
+    /// the client: one that spawns a process, inspects without applying,
+    /// names a path relative to the client's directory, or is another
+    /// subcommand than the queue's.
+    #[test]
+    fn only_some_forms_of_the_queued_commands_are_served() {
+        let mut cases: Vec<(Vec<&str>, bool)> = vec![
+            (vec!["auto-capture", "-"], true),
+            (vec!["auto-capture", "text", "--dry-run"], true),
+            (vec!["extract-entities", "-"], true),
+            (vec!["worker", "run"], !cfg!(feature = "decide")),
+            (vec!["worker", "status"], false),
+            (vec!["beliefs", "--generate"], true),
+            (vec!["beliefs"], false),
+            (vec!["session-heal", "--session", "s"], true),
+            (
+                vec!["session-heal", "--problems-file", "/abs/p.jsonl"],
+                true,
+            ),
+            (vec!["session-heal", "--problems-file", "p.jsonl"], false),
+            (vec!["session-heal", "--dry-run"], false),
+            (vec!["maintain", "--if-stale"], true),
+            (vec!["maintain", "--if-stale", "--in-background"], false),
+        ];
+        if cfg!(all(feature = "embed", feature = "graph")) {
+            cases.push((vec!["auto-link", "01ZZZZZZZZZZZZZZZZZZZZZZZZ"], true));
+        }
+        if cfg!(feature = "deps") {
+            cases.push((
+                vec!["deps", "refresh", "--if-stale", "--path", "/abs"],
+                true,
+            ));
+            cases.push((vec!["deps", "refresh", "--if-stale"], false));
+            cases.push((vec!["deps", "sync", "--path", "/abs"], false));
+        }
+        let got = std::thread::Builder::new()
+            .stack_size(REQUEST_STACK)
+            .spawn(move || {
+                cases
+                    .into_iter()
+                    .map(|(args, want)| {
+                        let argv: Vec<String> = std::iter::once("axil")
+                            .chain(args.iter().copied())
+                            .map(str::to_string)
+                            .collect();
+                        (args, routes(&argv), want)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+        for (args, routed, want) in got {
+            assert_eq!(routed, want, "{args:?}");
+        }
+    }
 }

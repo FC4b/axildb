@@ -1591,6 +1591,9 @@ fn queued_hook_writes_run_once_in_order_in_the_daemon() {
     let yields = queue["yields"].as_u64().unwrap();
     assert!(yields >= 1, "{live}");
     assert_eq!(live["leases_granted"], yields, "{live}");
+    if every_queued_step_is_served(&fx) {
+        assert_eq!(queue["own_process_steps"], 10, "{live}");
+    }
 
     // Every one once, and in order: ids rise with the time they were made.
     let mut rows: Vec<(String, i64)> = Vec::new();
@@ -1616,6 +1619,94 @@ fn queued_hook_writes_run_once_in_order_in_the_daemon() {
         .filter(|row| row["data"]["session"] == "s-queued")
         .count();
     assert_eq!(closed, 1, "{sessions}");
+}
+
+/// Whether this build's daemon runs every step a hook queues on its open
+/// handle, given `fx`'s database: `auto-link` needs a vector store.
+fn every_queued_step_is_served(fx: &Fixture) -> bool {
+    fx.vectors
+        && cfg!(all(feature = "embed", feature = "graph", feature = "deps"))
+        && !cfg!(feature = "decide")
+}
+
+/// A session's hooks with the daemon running, as Claude Code sends them:
+/// the lookups, the writes they queue and the session start's maintenance
+/// all run on the daemon's handle, so the daemon never lets go of the
+/// database.
+#[test]
+fn a_sessions_hooks_need_no_lease() {
+    let fx = fixture();
+    fx.start();
+    let proj = fx.proj.to_str().unwrap();
+    // No code indexer on the path: the session start's code-graph refresh
+    // stays a no-op.
+    let hook = |event: Value| {
+        let out = axil_env(
+            BIN,
+            &fx.proj,
+            &["hook", "run", "--dialect", "claude"],
+            Some(event.to_string().as_bytes()),
+            &[("PATH", "/usr/bin:/bin")],
+        );
+        assert!(out.status.success(), "{}", text(&out.stderr));
+    };
+    let session = "s-no-lease";
+    let event = |name: &str| serde_json::json!({"hook_event_name": name, "session_id": session, "cwd": proj});
+    hook(event("SessionStart"));
+    let mut prompt = event("UserPromptSubmit");
+    prompt["prompt"] = "auth timeout during uploads".into();
+    hook(prompt);
+    for file in ["src/auth.rs", "Cargo.toml"] {
+        for name in ["PreToolUse", "PostToolUse"] {
+            let mut edit = event(name);
+            edit["tool_name"] = "Edit".into();
+            edit["tool_input"] = serde_json::json!({
+                "file_path": fx.proj.join(file),
+                "old_string": "a",
+                "new_string": "fn refresh_session_heartbeat() {}",
+            });
+            edit["tool_response"] = serde_json::json!({});
+            hook(edit);
+        }
+    }
+    let mut failed = event("PostToolUse");
+    failed["tool_name"] = "Bash".into();
+    failed["tool_input"] = serde_json::json!({"command": "cargo test"});
+    failed["tool_response"] = serde_json::json!({
+        "exit_code": 101,
+        "stdout": "error[E0425]: cannot find value `timeout_ms` in this scope",
+        "stderr": "",
+    });
+    hook(failed);
+    let mut stop = event("Stop");
+    stop["stop_hook_active"] = false.into();
+    hook(stop);
+    hook(event("SessionEnd"));
+
+    // The manifest's deps refresh, the failure's auto-capture and the
+    // session's close.
+    let lock = fx.proj.join(".axil/maintain.lock");
+    assert!(
+        wait_for(Duration::from_secs(120), || !lock.exists()
+            && fx.queued().is_empty()
+            && fx.live()["queue"]["jobs"].as_u64() >= Some(3)),
+        "{}",
+        fx.live()
+    );
+    let live = fx.live();
+    let queue = &live["queue"];
+    assert_eq!(queue["failed"], 0, "{live}");
+    assert_eq!(live["leases_granted"], queue["yields"], "{live}");
+    if every_queued_step_is_served(&fx) {
+        assert_eq!(live["leases_granted"], 0, "{live}");
+        assert_eq!(queue["own_process_steps"], 0, "{live}");
+    }
+    let sessions = fx.axil(&["list", "_sessions"]);
+    assert!(
+        text(&sessions.stdout).contains(session),
+        "{}",
+        text(&sessions.stdout)
+    );
 }
 
 /// The daemon killed in the middle of a job: the job, left `.running`, is
