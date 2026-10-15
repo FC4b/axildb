@@ -811,10 +811,11 @@ fn the_hot_commands_print_nothing_into_the_log() {
             None,
             true,
         ),
+        // Served without a vector store too: it fails on the open handle.
         (
             vec!["auto-link", fx.ids[0].as_str()],
             None,
-            fx.vectors && cfg!(feature = "graph"),
+            cfg!(all(feature = "embed", feature = "graph")),
         ),
         (vec!["worker", "run"], None, !cfg!(feature = "decide")),
         (vec!["beliefs", "--generate"], None, true),
@@ -835,11 +836,17 @@ fn the_hot_commands_print_nothing_into_the_log() {
         (vec!["store"], None, true),
         (vec!["--version"], None, true),
     ];
-    let mut served = 0;
-    for (args, stdin, _) in &cases {
+    let mut wrong = Vec::new();
+    for (args, stdin, expected) in &cases {
         let out = fx.send(args, *stdin);
-        if out.status.code() != Some(125) {
-            served += 1;
+        let served = out.status.code() != Some(125);
+        if served != *expected {
+            wrong.push(format!(
+                "{args:?}: served {served}, expected {expected}: {}",
+                text(&out.stderr).trim()
+            ));
+        }
+        if served {
             assert!(
                 !out.stdout.is_empty() || !out.stderr.is_empty(),
                 "{args:?} printed nothing"
@@ -853,8 +860,7 @@ fn the_hot_commands_print_nothing_into_the_log() {
             );
         }
     }
-    let servable = cases.iter().filter(|(_, _, served)| *served).count();
-    assert!(served >= servable - 2, "only {served} served");
+    assert!(wrong.is_empty(), "{wrong:#?}");
     let live = fx.live();
     assert_eq!(
         (&live["state"], &live["panics"]),
