@@ -103,7 +103,7 @@
     "status": "preliminary: m5 and s60 are still to run on the second machine; switching the default is the user's decision",
     "default": "keep bge-small-en-v1.5 for now",
     "reasons": [
-      "Dogfood (57 coding-memory questions, the CLI path agents use): the three models are within one or two questions of each other. NDCG@10 is 0.821 for bge-small, 0.820 for granite and 0.814 for gte. granite and gte each answer 2 more questions in the prompt hook's block (0.895 -> 0.930).",
+      "Dogfood (57 coding-memory questions, the CLI path agents use): the three models are within one or two questions of each other. NDCG@10 is 0.821 for bge-small, 0.820 for granite and 0.814 for gte. granite and gte each answer a net 2 more questions in the prompt hook's block (0.895 -> 0.930).",
       "LongMemEval s20 (single-session-user only): granite finds the same sessions as bge-small and ranks them better (NDCG@10 0.857 -> 0.912). gte finds one more (recall_all 0.90 -> 0.95, NDCG@10 0.919). That is one question type of six, 20 questions.",
       "Cost on this machine, every figure taken under load: granite takes about 4x bge-small's embedding time per stored session on LongMemEval and 3.6x per vector on dogfood; gte takes about 9x and 12x. The prompt hook's recall p50 is 1.2-1.3x bge-small's for granite and 3.5-3.8x for gte across two passes (load 10-27: 1,098 / 1,350 / 4,153 ms). gte's p50 is far past the hook's 1.8 s deadline, and granite's p90 (2,113 ms) crosses it where bge-small's (1,481 ms) does not.",
       "granite places unrelated text much closer than bge-small: the median same-table cosine is 0.80 vs 0.66, every pair clears the 0.65 conflict-candidate floor, and 1.8x as many pairs clear the 0.92 supersede threshold. Switching to it needs those thresholds re-tuned first, plus a re-embed, which no dimension check forces since both are 384-d."
@@ -635,7 +635,7 @@
     }
   },
   "same_table_memory_pair_cosines": {
-    "why": "supersede (0.92) and the conflict-candidate floor (0.65) are absolute cosines tuned on bge-small",
+    "why": "supersede (0.92) and the conflict-candidate floor (0.65) are absolute cosines, set with bge-small",
     "bge-small": {
       "max": 1.0,
       "p50": 0.659,
