@@ -305,6 +305,15 @@ impl<'a> AxilWorker<'a> {
         0
     }
 
+    /// The database's configuration: the nearest `axil.toml` above its file,
+    /// as the CLI finds it for the database's other commands. Not the one
+    /// above the process's working directory, which is not the project's
+    /// for a `--db` run from elsewhere, nor for the warm daemon (`/`).
+    fn config(&self) -> Option<crate::config::AxilConfig> {
+        let dir = self.db.path().parent()?;
+        crate::config::load_config_from(dir).ok()
+    }
+
     /// Compact the vector index when tombstones have piled up past the
     /// configured ratio. Off the write path: deletes only tombstone the graph,
     /// and this background sweep reclaims them once they outweigh the live set.
@@ -315,9 +324,8 @@ impl<'a> AxilWorker<'a> {
         }
         // Config is best-effort — fall back to the default threshold when no
         // axil.toml is present.
-        let threshold = std::env::current_dir()
-            .ok()
-            .and_then(|cwd| crate::config::load_config_from(&cwd).ok())
+        let threshold = self
+            .config()
             .map(|c| c.healing.vector_rebuild_threshold)
             .unwrap_or_else(|| crate::config::HealingConfig::default().vector_rebuild_threshold);
 
@@ -334,9 +342,8 @@ impl<'a> AxilWorker<'a> {
     /// must do a full re-pull from the oldest retained cursor.
     #[cfg(feature = "event-log")]
     fn trim_event_log(&self) {
-        let max = std::env::current_dir()
-            .ok()
-            .and_then(|cwd| crate::config::load_config_from(&cwd).ok())
+        let max = self
+            .config()
             .map(|c| c.healing.metrics.max_audit_log_entries)
             .unwrap_or_else(|| {
                 crate::config::MetricsHealingConfig::default().max_audit_log_entries
@@ -875,6 +882,28 @@ mod tests {
 
         assert!(report.duration_ms < 10_000);
         assert_eq!(report.stale_detected, 0); // Fresh records.
+    }
+
+    /// The worker's configuration is the database's, found above its file,
+    /// whatever the process's working directory.
+    #[test]
+    fn worker_reads_the_databases_config_not_the_working_directorys() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("axil.toml"),
+            "[healing]\nvector_rebuild_threshold = 0.42\n",
+        )
+        .unwrap();
+        std::fs::create_dir(dir.path().join(".axil")).unwrap();
+        let db = Axil::open(dir.path().join(".axil/memory.axil"))
+            .build()
+            .unwrap();
+        assert_ne!(
+            std::env::current_dir().unwrap().canonicalize().unwrap(),
+            dir.path().canonicalize().unwrap()
+        );
+        let config = AxilWorker::new(&db).config().unwrap();
+        assert_eq!(config.healing.vector_rebuild_threshold, 0.42);
     }
 
     #[test]
