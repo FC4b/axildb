@@ -1007,9 +1007,19 @@ impl Server {
     /// opened again, after [`UNLEASE_DELAY`], unless another lease is asked
     /// for by then.
     fn end_lease(self: &Arc<Self>, id: u64) {
+        self.leases
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .holders
+            .retain(|h| h.id != id);
+        self.unlease_if_unheld();
+    }
+
+    /// With the database closed for leases none holds any more, open it
+    /// again (see [`Server::unlease`]).
+    fn unlease_if_unheld(self: &Arc<Self>) {
         let generation = {
-            let mut leases = self.leases.lock().unwrap_or_else(PoisonError::into_inner);
-            leases.holders.retain(|h| h.id != id);
+            let leases = self.leases.lock().unwrap_or_else(PoisonError::into_inner);
             if !leases.holders.is_empty() {
                 return;
             }
@@ -1083,11 +1093,13 @@ impl Server {
     /// were the last.
     fn unlease(self: &Arc<Self>, generation: u64) {
         thread::sleep(UNLEASE_DELAY);
-        let last = || {
+        // A lease asked for during the wait was granted at once, the
+        // database being closed, and its end opens it again.
+        let last = {
             let leases = self.leases.lock().unwrap_or_else(PoisonError::into_inner);
             leases.generation == generation && leases.holders.is_empty()
         };
-        if !last() || !self.phase.advance(Phase::Leased, Phase::Reloading) {
+        if !last || !self.phase.advance(Phase::Leased, Phase::Reloading) {
             return;
         }
         let Some(state) = self.state.get() else {
@@ -1099,9 +1111,12 @@ impl Server {
             if self.phase.get() == Phase::Stopping {
                 return;
             }
-            if !last() {
-                // Closed it stays, for the lease just asked for.
+            if self.lease_asked() {
+                // Closed it stays, for the lease just asked for. One whose
+                // wait ran out meanwhile was refused, and its end found the
+                // database still opening: open it again for that one.
                 self.phase.advance(Phase::Reloading, Phase::Leased);
+                self.unlease_if_unheld();
                 return;
             }
             let before = FileFp::read(&self.key);
@@ -2571,6 +2586,35 @@ mod tests {
         let (out, _, exit) = served(send(&server, &["boot"], &proj, None));
         assert_eq!(exit, 0);
         assert!(String::from_utf8_lossy(&out).contains("written under the lease"));
+        stop(server);
+    }
+
+    /// A lease refused while the database opens again after another (its
+    /// wait ran out) does not leave the database closed for nobody.
+    #[test]
+    fn a_lease_refused_during_the_reopen_leaves_it_to_finish() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = build_fixture(tmp.path());
+        let db = proj.join(".axil/memory.axil");
+        let server = start(&db);
+        quiet(&server);
+        let (reply, held) = ask(&server, &server.key, 10_000);
+        assert_eq!(reply, LeaseReply::granted());
+        // The reopen waits for the holder, which keeps the database open.
+        let holder = axil_core::Axil::open(&db).build().unwrap();
+        drop(held);
+        wait_for_phase(&server, Phase::Reloading);
+        let (reply, other) = ask(&server, &server.key, 0);
+        assert!(
+            reply == LeaseReply::refused("lease_timeout") || reply == LeaseReply::granted(),
+            "{reply:?}"
+        );
+        drop(other);
+        thread::sleep(UNLEASE_DELAY * 2);
+        drop(holder);
+        wait_for_phase(&server, Phase::Ready);
+        assert_eq!(holders(&server), 0);
+        served(send(&server, &["boot"], &proj, None));
         stop(server);
     }
 
