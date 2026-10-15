@@ -791,6 +791,19 @@ impl Storage {
         })
     }
 
+    /// Whether the database at `path` still keeps table membership in the
+    /// legacy layout, which the next writable [`Storage::open`] converts.
+    ///
+    /// Asked through a read-only open, so it writes nothing, and with the
+    /// open guard skipped, so it never asks a process holding the database
+    /// to let go of it. It fails where that open fails: a missing file, one
+    /// a writer holds ([`AxilError::Busy`](crate::AxilError::Busy)), one not
+    /// closed cleanly.
+    pub fn table_index_conversion_pending(path: impl AsRef<Path>) -> Result<bool> {
+        let storage = crate::without_open_guard(|| Self::open_read_only(path))?;
+        Ok(storage.layout == IndexLayout::Legacy)
+    }
+
     /// Move a legacy table index (one JSON id list per table) to the keyed
     /// layout inside `txn`, which the caller commits only if this succeeds.
     ///
@@ -4129,6 +4142,7 @@ mod tests {
                 Err(AxilError::Busy)
             ));
             drop(ro);
+            assert!(Storage::table_index_conversion_pending(&path).unwrap());
 
             assert_eq!(std::fs::read(&path).unwrap(), before, "nothing written");
             assert!(legacy_lists(&path).is_some(), "still legacy");
@@ -4146,7 +4160,15 @@ mod tests {
 
             drop(Storage::open(&path).unwrap());
             assert!(legacy_lists(&path).is_none(), "migrated");
+            assert!(!Storage::table_index_conversion_pending(&path).unwrap());
             let storage = Storage::open(&path).unwrap();
+            assert!(
+                matches!(
+                    Storage::table_index_conversion_pending(&path),
+                    Err(AxilError::Busy)
+                ),
+                "a file a writer holds is not read"
+            );
             assert_eq!(
                 ids_of(&storage.list("notes", usize::MAX, 0).unwrap()),
                 ["zzzz-first", "0000-second", "mmmm-third", "aaaa-fourth"]
