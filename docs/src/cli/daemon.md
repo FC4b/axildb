@@ -5,10 +5,14 @@ open, with the embedding model and the graph loaded, and runs the hot commands
 (`recall`, `boot`, `recall-for-file`, `code-search`, `fts`, `since`, `store`,
 `checkpoint`) sent to it over a local socket, so a command neither opens the
 database nor loads a model on each call. It also runs the hooks' queued
-writes on the same handle. Unix only.
+writes on the same handle, and serves the commands those are made of when
+typed too: `auto-capture`, `extract-entities`, `auto-link`, `worker run`,
+`beliefs --generate`, `session-heal`, `maintain` and `deps refresh`, in the
+forms listed [below](#the-hooks-queued-writes). Unix only.
 
-> **Started by hand only.** Once one runs, the hot commands you type, the
-> hooks' lookups and the hooks' queued writes go to it
+> **Started by hand only.** Once one runs, the hot commands and the queued
+> writes' commands you type, the hooks' lookups and the hooks' queued writes
+> go to it
 > ([below](#how-commands-reach-it)). Every other command still runs in its own
 > process and leases the database from the daemon
 > ([below](#leasing-the-database)), which opens it again afterwards.
@@ -117,7 +121,8 @@ runs it itself. A job it can't read (one a newer build queued) is moved to
 `interrupted/` and logged, never deleted.
 
 These steps run on the open handle, as these forms do when typed: `store`,
-`auto-capture`, `extract-entities`, `auto-link` (with a vector store), `worker
+`auto-capture`, `extract-entities`, `auto-link` (which, without a vector
+store, fails on the open handle as the one-shot command does), `worker
 run` (not in a build with the `decide` feature, whose review loads a model),
 `beliefs --generate`, `session-heal` (not `--dry-run`, and with an absolute
 `--problems-file` if any), `deps refresh` with an absolute `--path`, and
@@ -240,9 +245,24 @@ is handed back to the client unrun, and the client runs it and leases the
 database. A command typed into a development build beside an installed
 build's daemon so runs on the code it was typed into.
 
-Vector search ranks as the one-shot command does: up to the same store size it
-scans every vector instead of building the approximate graph a long-lived
-process could build once.
+A vector search the daemon runs ranks as the one-shot command does: up to
+100,000 live vectors it scans every vector, as a one-shot command does,
+instead of building the approximate graph a long-lived process builds once.
+`worker run` is the exception. Run in its own process it counts as
+long-lived, and scans only up to 20,000 vectors, above which it builds the
+graph. So on a store of 20,000 to 100,000 vectors, a `worker run --brain`
+the daemon serves finds near-duplicates by an exact scan where its own
+process would search the approximate graph, and the clusters it reports can
+differ. (The hooks' queued `worker run`, without `--brain`, searches no
+vectors.) Neither threshold changes for the daemon: the one-shot ceiling is
+what keeps the other served commands ranking as their one-shot runs.
+
+A served `worker run` can also report `vectors_compacted` above 0 where the
+same run in its own process would report 0. The vector index counts the
+vectors removed or re-added since it was loaded, and compacts once those
+are more than `[healing]`'s `vector_rebuild_threshold` share of it. A process of its own
+loads the index fresh, with none counted; the daemon's handle has counted
+those of every write it served since it opened the database.
 
 ## When it reloads, and when it stops
 

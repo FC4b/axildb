@@ -7213,7 +7213,11 @@ impl axil_core::Adapter for CliAdapter {
 /// command it runs must rank as the one-shot command the client would
 /// otherwise run, and the one-shot ceiling scans exactly where the graph
 /// would answer approximately. Up to that ceiling the daemon pays the exact
-/// scan on each search instead of building the graph once.
+/// scan on each search instead of building the graph once. `worker run` is
+/// the exception: served, it scans up to the one-shot ceiling where its own
+/// process, long-lived, builds the graph above
+/// `axil_vector::hnsw::EXACT_SCAN_MAX`, so `worker run --brain` can cluster
+/// differently on a store between the two.
 #[cfg(feature = "vector")]
 fn is_long_lived(command: &Command) -> bool {
     match command {

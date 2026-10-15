@@ -79,7 +79,8 @@ boosting. Phase 4 added fuzzy matching, snippets, and field scoping.
 
 **Vector** searches the embedding index (`*.axil.vec`): an exact scan up to
 20k vectors (100k in a one-shot CLI call, which would otherwise rebuild the
-graph on every search), and the HNSW graph above that.
+graph on every search, and in a command the [warm daemon](../cli/daemon.md)
+serves, which ranks as that call would), and the HNSW graph above that.
 The query is either a pre-embedded `&[f32]` or text that the configured
 embedder converts. Default embedder is BGE-small-en-v1.5 (int8); BGE-base,
 nomic, and gte-modernbert are also registered. Query text is embedded on the
