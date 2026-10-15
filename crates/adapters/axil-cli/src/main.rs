@@ -2501,7 +2501,8 @@ enum Command {
         /// Minimum confidence to auto-store (default: 0.7).
         #[arg(long, default_value = "0.7")]
         min_confidence: f32,
-        /// Source label for the capture (e.g., "bash", "agent").
+        /// Source label for the capture (e.g., "bash", "agent"). "bash"
+        /// marks command output, which is read for failures only.
         #[arg(long, default_value = "auto")]
         source: String,
     },

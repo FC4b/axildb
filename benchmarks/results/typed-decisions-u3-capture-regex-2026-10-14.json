@@ -1,0 +1,1693 @@
+{
+ "benchmark": "typed-decisions U3: auto-capture classification (decision / error / context / rule / none) on sets/u3_repo.jsonl, production regex only",
+ "date": "2026-10-14",
+ "branch": "review/auto-capture-regex (from feat/entity-recall 5dbafa7); for the user's review, not merged",
+ "scorer": "benchmarks/typed-decisions/run_regex_arm.py u3, which scores with run_u3_bakeoff.py's own code (production_view, class_metrics, fit_cuts, importance_metrics, per_source); importance cut points are refit on train for every build",
+ "protocol": "Patterns developed on the 75-text train split only (run_regex_arm.py --errors). Test (125 texts, 87 gold none) scored once per finished family at 0.8 (the hook's bar) and 0.7 (the CLI default). One family was reverted after its test score (see families); the final build was scored once more for the per-source breakdown and the every-text-as-bash view.",
+ "source_protocol": {
+  "default": "each text is analyzed with the source it arrives with: shell output (bash_failure, bash_output) as the hook sends it (`bash`); agent prose, briefs and commit subjects as `axil auto-capture` labels them by default (`auto`)",
+  "all_bash": "every text analyzed as `bash`, the call the bake-off's heuristic crate makes (run_regex_arm.py --all-bash)",
+  "note": "the control analyzer ignores the source, so the control numbers are the same under both"
+ },
+ "control_before": {
+  "what": "production arm of the U3 bake-off (typed-decisions-u3-bakeoff-2026-10-14.json), dev 2681031",
+  "test": {
+   "0.8": {
+    "accuracy": 0.728,
+    "macro_f1": 0.2411,
+    "false_capture_rate": 0.0115,
+    "false_captures": 1,
+    "gold_none": 87,
+    "stored": 6,
+    "missed": 33,
+    "wrong_table": 0,
+    "per_class": {
+     "decision": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "tp": 0,
+      "pred": 1,
+      "gold": 3
+     },
+     "error": {
+      "precision": 1.0,
+      "recall": 0.2273,
+      "f1": 0.3704,
+      "tp": 5,
+      "pred": 5,
+      "gold": 22
+     },
+     "context": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "tp": 0,
+      "pred": 0,
+      "gold": 10
+     },
+     "rule": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "tp": 0,
+      "pred": 0,
+      "gold": 3
+     },
+     "none": {
+      "precision": 0.7227,
+      "recall": 0.9885,
+      "f1": 0.835,
+      "tp": 86,
+      "pred": 119,
+      "gold": 87
+     }
+    },
+    "importance_accuracy": 0.4737
+   },
+   "0.7": {
+    "accuracy": 0.632,
+    "macro_f1": 0.2106,
+    "false_capture_rate": 0.1609,
+    "false_captures": 14,
+    "gold_none": 87,
+    "stored": 20,
+    "missed": 32,
+    "wrong_table": 0,
+    "per_class": {
+     "decision": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "tp": 0,
+      "pred": 1,
+      "gold": 3
+     },
+     "error": {
+      "precision": 0.3158,
+      "recall": 0.2727,
+      "f1": 0.2927,
+      "tp": 6,
+      "pred": 19,
+      "gold": 22
+     },
+     "context": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "tp": 0,
+      "pred": 0,
+      "gold": 10
+     },
+     "rule": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "tp": 0,
+      "pred": 0,
+      "gold": 3
+     },
+     "none": {
+      "precision": 0.6952,
+      "recall": 0.8391,
+      "f1": 0.7604,
+      "tp": 73,
+      "pred": 105,
+      "gold": 87
+     }
+    },
+    "importance_accuracy": 0.4737
+   }
+  },
+  "train": {
+   "0.8": {
+    "accuracy": 0.76,
+    "macro_f1": 0.2009,
+    "false_capture_rate": 0.0
+   },
+   "0.7": {
+    "accuracy": 0.7067,
+    "macro_f1": 0.1873,
+    "false_capture_rate": 0.0714
+   }
+  },
+  "note": "the regex arm reproduces these exactly at d4bced1. On feat/entity-recall the extractor change alone moved test importance accuracy 0.4737 -> 0.5000 (compute_importance counts entities), with the same 6 captures"
+ },
+ "after": {
+  "per_source_view": {
+   "commit": "a7ca535 (code as of e038d1d)",
+   "test": {
+    "0.8": {
+     "accuracy": 0.8,
+     "macro_f1": 0.42,
+     "false_capture_rate": 0.0115,
+     "false_captures": 1,
+     "gold_none": 87,
+     "stored": 16,
+     "missed": 23,
+     "wrong_table": 1,
+     "per_class": {
+      "decision": {
+       "precision": 0.0,
+       "recall": 0.0,
+       "f1": 0.0,
+       "tp": 0,
+       "pred": 1,
+       "gold": 3
+      },
+      "error": {
+       "precision": 0.9286,
+       "recall": 0.5909,
+       "f1": 0.7222,
+       "tp": 13,
+       "pred": 14,
+       "gold": 22
+      },
+      "context": {
+       "precision": 0.0,
+       "recall": 0.0,
+       "f1": 0.0,
+       "tp": 0,
+       "pred": 0,
+       "gold": 10
+      },
+      "rule": {
+       "precision": 1.0,
+       "recall": 0.3333,
+       "f1": 0.5,
+       "tp": 1,
+       "pred": 1,
+       "gold": 3
+      },
+      "none": {
+       "precision": 0.789,
+       "recall": 0.9885,
+       "f1": 0.8776,
+       "tp": 86,
+       "pred": 109,
+       "gold": 87
+      }
+     },
+     "importance_accuracy": 0.5526
+    },
+    "0.7": {
+     "accuracy": 0.792,
+     "macro_f1": 0.4149,
+     "false_capture_rate": 0.023,
+     "false_captures": 2,
+     "gold_none": 87,
+     "stored": 17,
+     "missed": 23,
+     "wrong_table": 1,
+     "per_class": {
+      "decision": {
+       "precision": 0.0,
+       "recall": 0.0,
+       "f1": 0.0,
+       "tp": 0,
+       "pred": 1,
+       "gold": 3
+      },
+      "error": {
+       "precision": 0.8667,
+       "recall": 0.5909,
+       "f1": 0.7027,
+       "tp": 13,
+       "pred": 15,
+       "gold": 22
+      },
+      "context": {
+       "precision": 0.0,
+       "recall": 0.0,
+       "f1": 0.0,
+       "tp": 0,
+       "pred": 0,
+       "gold": 10
+      },
+      "rule": {
+       "precision": 1.0,
+       "recall": 0.3333,
+       "f1": 0.5,
+       "tp": 1,
+       "pred": 1,
+       "gold": 3
+      },
+      "none": {
+       "precision": 0.787,
+       "recall": 0.977,
+       "f1": 0.8718,
+       "tp": 85,
+       "pred": 108,
+       "gold": 87
+      }
+     },
+     "importance_accuracy": 0.5526
+    }
+   },
+   "test_per_source_0.8": {
+    "bash_failure": {
+     "items": 36,
+     "accuracy": 1.0,
+     "false_capture_rate": 0.0,
+     "false_captures": 0,
+     "gold_none": 30,
+     "miss_rate": 0.0,
+     "missed": 0,
+     "wrong_table": 0
+    },
+    "bash_output": {
+     "items": 18,
+     "accuracy": 0.9444,
+     "false_capture_rate": 0.0,
+     "false_captures": 0,
+     "gold_none": 17,
+     "miss_rate": 1.0,
+     "missed": 1,
+     "wrong_table": 0
+    },
+    "agent_text": {
+     "items": 36,
+     "accuracy": 0.5556,
+     "false_capture_rate": 0.0526,
+     "false_captures": 1,
+     "gold_none": 19,
+     "miss_rate": 0.8235,
+     "missed": 14,
+     "wrong_table": 1
+    },
+    "agent_brief": {
+     "items": 12,
+     "accuracy": 0.5833,
+     "false_capture_rate": 0.0,
+     "false_captures": 0,
+     "gold_none": 6,
+     "miss_rate": 0.8333,
+     "missed": 5,
+     "wrong_table": 0
+    },
+    "commit_subject": {
+     "items": 23,
+     "accuracy": 0.8696,
+     "false_capture_rate": 0.0,
+     "false_captures": 0,
+     "gold_none": 15,
+     "miss_rate": 0.375,
+     "missed": 3,
+     "wrong_table": 0
+    }
+   },
+   "importance_0.8": {
+    "items": 38,
+    "accuracy": 0.5526,
+    "within_one": 0.9211,
+    "mean_abs_bucket_error": 0.5263,
+    "confusion": {
+     "low": {
+      "high": 3,
+      "low": 5
+     },
+     "medium": {
+      "high": 12,
+      "medium": 7
+     },
+     "high": {
+      "high": 9,
+      "medium": 2
+     }
+    },
+    "cuts": [
+     0.35,
+     0.6
+    ],
+    "majority_baseline": {
+     "bucket": "medium",
+     "accuracy": 0.5,
+     "items": 38
+    }
+   },
+   "train": {
+    "0.8": {
+     "accuracy": 0.9333,
+     "macro_f1": 0.5835,
+     "false_capture_rate": 0.0,
+     "false_captures": 0,
+     "gold_none": 56,
+     "stored": 14,
+     "missed": 5,
+     "wrong_table": 0,
+     "per_class": {
+      "decision": {
+       "precision": 0.0,
+       "recall": 0.0,
+       "f1": 0.0,
+       "tp": 0,
+       "pred": 0,
+       "gold": 3
+      },
+      "error": {
+       "precision": 1.0,
+       "recall": 0.9231,
+       "f1": 0.96,
+       "tp": 12,
+       "pred": 12,
+       "gold": 13
+      },
+      "context": {
+       "precision": 0.0,
+       "recall": 0.0,
+       "f1": 0.0,
+       "tp": 0,
+       "pred": 0,
+       "gold": 1
+      },
+      "rule": {
+       "precision": 1.0,
+       "recall": 1.0,
+       "f1": 1.0,
+       "tp": 2,
+       "pred": 2,
+       "gold": 2
+      },
+      "none": {
+       "precision": 0.918,
+       "recall": 1.0,
+       "f1": 0.9573,
+       "tp": 56,
+       "pred": 61,
+       "gold": 56
+      }
+     },
+     "importance_accuracy": 0.7895
+    },
+    "0.7": {
+     "accuracy": 0.9333,
+     "macro_f1": 0.5835,
+     "false_capture_rate": 0.0,
+     "false_captures": 0,
+     "gold_none": 56,
+     "stored": 14,
+     "missed": 5,
+     "wrong_table": 0,
+     "per_class": {
+      "decision": {
+       "precision": 0.0,
+       "recall": 0.0,
+       "f1": 0.0,
+       "tp": 0,
+       "pred": 0,
+       "gold": 3
+      },
+      "error": {
+       "precision": 1.0,
+       "recall": 0.9231,
+       "f1": 0.96,
+       "tp": 12,
+       "pred": 12,
+       "gold": 13
+      },
+      "context": {
+       "precision": 0.0,
+       "recall": 0.0,
+       "f1": 0.0,
+       "tp": 0,
+       "pred": 0,
+       "gold": 1
+      },
+      "rule": {
+       "precision": 1.0,
+       "recall": 1.0,
+       "f1": 1.0,
+       "tp": 2,
+       "pred": 2,
+       "gold": 2
+      },
+      "none": {
+       "precision": 0.918,
+       "recall": 1.0,
+       "f1": 0.9573,
+       "tp": 56,
+       "pred": 61,
+       "gold": 56
+      }
+     },
+     "importance_accuracy": 0.7895
+    }
+   }
+  },
+  "all_bash_view": {
+   "test": {
+    "0.8": {
+     "accuracy": 0.744,
+     "macro_f1": 0.2547,
+     "false_capture_rate": 0.0,
+     "false_captures": 0,
+     "gold_none": 87,
+     "stored": 6,
+     "missed": 32,
+     "wrong_table": 0,
+     "per_class": {
+      "decision": {
+       "precision": 0.0,
+       "recall": 0.0,
+       "f1": 0.0,
+       "tp": 0,
+       "pred": 0,
+       "gold": 3
+      },
+      "error": {
+       "precision": 1.0,
+       "recall": 0.2727,
+       "f1": 0.4286,
+       "tp": 6,
+       "pred": 6,
+       "gold": 22
+      },
+      "context": {
+       "precision": 0.0,
+       "recall": 0.0,
+       "f1": 0.0,
+       "tp": 0,
+       "pred": 0,
+       "gold": 10
+      },
+      "rule": {
+       "precision": 0.0,
+       "recall": 0.0,
+       "f1": 0.0,
+       "tp": 0,
+       "pred": 0,
+       "gold": 3
+      },
+      "none": {
+       "precision": 0.7311,
+       "recall": 1.0,
+       "f1": 0.8447,
+       "tp": 87,
+       "pred": 119,
+       "gold": 87
+      }
+     },
+     "importance_accuracy": 0.6316
+    }
+   },
+   "train": {
+    "0.8": {
+     "accuracy": 0.7733,
+     "macro_f1": 0.227,
+     "false_capture_rate": 0.0,
+     "false_captures": 0,
+     "gold_none": 56,
+     "stored": 2,
+     "missed": 17,
+     "wrong_table": 0,
+     "per_class": {
+      "decision": {
+       "precision": 0.0,
+       "recall": 0.0,
+       "f1": 0.0,
+       "tp": 0,
+       "pred": 0,
+       "gold": 3
+      },
+      "error": {
+       "precision": 1.0,
+       "recall": 0.1538,
+       "f1": 0.2667,
+       "tp": 2,
+       "pred": 2,
+       "gold": 13
+      },
+      "context": {
+       "precision": 0.0,
+       "recall": 0.0,
+       "f1": 0.0,
+       "tp": 0,
+       "pred": 0,
+       "gold": 1
+      },
+      "rule": {
+       "precision": 0.0,
+       "recall": 0.0,
+       "f1": 0.0,
+       "tp": 0,
+       "pred": 0,
+       "gold": 2
+      },
+      "none": {
+       "precision": 0.7671,
+       "recall": 1.0,
+       "f1": 0.8682,
+       "tp": 56,
+       "pred": 73,
+       "gold": 56
+      }
+     },
+     "importance_accuracy": 0.7368
+    }
+   },
+   "note": "what the hook sees: only failure patterns run on `bash`, so the prose families do not fire"
+  }
+ },
+ "done_when": {
+  "required": "test macro-F1 above 0.241 at false capture <= 0.011",
+  "per_source_view_0.8": {
+   "macro_f1": 0.42,
+   "false_capture_rate": 0.0115,
+   "met": true
+  },
+  "all_bash_view_0.8": {
+   "macro_f1": 0.2547,
+   "false_capture_rate": 0.0
+  },
+  "note": "0.011 is the control's 1/87 (0.0115); the per-source view keeps exactly that one false capture, an agent_text item (the control's `decision:` header capture is the likely one; it was never looked at)"
+ },
+ "importance_decision": {
+  "decision": "store captures at a class prior (0.3 transient failure output / 0.5 ordinary / 0.8 severe failure or rule) instead of compute_importance",
+  "evidence": {
+   "test_importance_accuracy_compute_importance": 0.3684,
+   "test_importance_accuracy_prior": 0.5526,
+   "always_medium": 0.5,
+   "items": 38,
+   "train": {
+    "compute_importance": 0.5789,
+    "prior": 0.7895,
+    "always_medium": 0.5263,
+    "items": 19
+   }
+  },
+  "caveat": "on test the prior beats always-medium by 2 of 38 items: an improvement over compute_importance (0.3684, same captures), not a strong importance model. Missed items are still scored by compute_importance on the whole text, as the bake-off does."
+ },
+ "families": [
+  {
+   "family": "guards",
+   "commit": "f5ce0df",
+   "subject": "fix(core): no auto-captured error from a mistyped command or printed text",
+   "train": {
+    "0.8": {
+     "macro_f1": [
+      0.2009,
+      0.2009
+     ],
+     "false_captures": [
+      "0/56",
+      "0/56"
+     ]
+    },
+    "0.7": {
+     "macro_f1": [
+      0.1873,
+      0.2009
+     ],
+     "false_captures": [
+      "4/56",
+      "0/56"
+     ]
+    },
+    "gold_none_with_any_capture": [
+     6,
+     0
+    ]
+   },
+   "test": {
+    "0.8": {
+     "accuracy": 0.728,
+     "macro_f1": 0.2411,
+     "false_capture_rate": 0.0115,
+     "false_captures": 1,
+     "gold_none": 87,
+     "stored": 6,
+     "missed": 33,
+     "wrong_table": 0,
+     "per_class": {
+      "decision": {
+       "precision": 0.0,
+       "recall": 0.0,
+       "f1": 0.0,
+       "tp": 0,
+       "pred": 1,
+       "gold": 3
+      },
+      "error": {
+       "precision": 1.0,
+       "recall": 0.2273,
+       "f1": 0.3704,
+       "tp": 5,
+       "pred": 5,
+       "gold": 22
+      },
+      "context": {
+       "precision": 0.0,
+       "recall": 0.0,
+       "f1": 0.0,
+       "tp": 0,
+       "pred": 0,
+       "gold": 10
+      },
+      "rule": {
+       "precision": 0.0,
+       "recall": 0.0,
+       "f1": 0.0,
+       "tp": 0,
+       "pred": 0,
+       "gold": 3
+      },
+      "none": {
+       "precision": 0.7227,
+       "recall": 0.9885,
+       "f1": 0.835,
+       "tp": 86,
+       "pred": 119,
+       "gold": 87
+      }
+     },
+     "importance_accuracy": 0.5
+    },
+    "0.7": {
+     "accuracy": 0.728,
+     "macro_f1": 0.2494,
+     "false_capture_rate": 0.023,
+     "false_captures": 2,
+     "gold_none": 87,
+     "stored": 8,
+     "missed": 32,
+     "wrong_table": 0,
+     "per_class": {
+      "decision": {
+       "precision": 0.0,
+       "recall": 0.0,
+       "f1": 0.0,
+       "tp": 0,
+       "pred": 1,
+       "gold": 3
+      },
+      "error": {
+       "precision": 0.8571,
+       "recall": 0.2727,
+       "f1": 0.4138,
+       "tp": 6,
+       "pred": 7,
+       "gold": 22
+      },
+      "context": {
+       "precision": 0.0,
+       "recall": 0.0,
+       "f1": 0.0,
+       "tp": 0,
+       "pred": 0,
+       "gold": 10
+      },
+      "rule": {
+       "precision": 0.0,
+       "recall": 0.0,
+       "f1": 0.0,
+       "tp": 0,
+       "pred": 0,
+       "gold": 3
+      },
+      "none": {
+       "precision": 0.7265,
+       "recall": 0.977,
+       "f1": 0.8333,
+       "tp": 85,
+       "pred": 117,
+       "gold": 87
+      }
+     },
+     "importance_accuracy": 0.5
+    }
+   }
+  },
+  {
+   "family": "command_output_failures_only",
+   "commit": "ea58871",
+   "subject": "fix(core): read a failed command's output for failures only",
+   "train": {
+    "0.8": {
+     "macro_f1": [
+      0.2009,
+      0.2009
+     ],
+     "false_captures": [
+      "0/56",
+      "0/56"
+     ]
+    },
+    "0.7": {
+     "macro_f1": [
+      0.2009,
+      0.2009
+     ],
+     "false_captures": [
+      "0/56",
+      "0/56"
+     ]
+    }
+   },
+   "test": {
+    "0.8": {
+     "accuracy": 0.728,
+     "macro_f1": 0.2411,
+     "false_capture_rate": 0.0115,
+     "false_captures": 1,
+     "gold_none": 87,
+     "stored": 6,
+     "missed": 33,
+     "wrong_table": 0,
+     "per_class": {
+      "decision": {
+       "precision": 0.0,
+       "recall": 0.0,
+       "f1": 0.0,
+       "tp": 0,
+       "pred": 1,
+       "gold": 3
+      },
+      "error": {
+       "precision": 1.0,
+       "recall": 0.2273,
+       "f1": 0.3704,
+       "tp": 5,
+       "pred": 5,
+       "gold": 22
+      },
+      "context": {
+       "precision": 0.0,
+       "recall": 0.0,
+       "f1": 0.0,
+       "tp": 0,
+       "pred": 0,
+       "gold": 10
+      },
+      "rule": {
+       "precision": 0.0,
+       "recall": 0.0,
+       "f1": 0.0,
+       "tp": 0,
+       "pred": 0,
+       "gold": 3
+      },
+      "none": {
+       "precision": 0.7227,
+       "recall": 0.9885,
+       "f1": 0.835,
+       "tp": 86,
+       "pred": 119,
+       "gold": 87
+      }
+     },
+     "importance_accuracy": 0.5
+    },
+    "0.7": {
+     "accuracy": 0.728,
+     "macro_f1": 0.2494,
+     "false_capture_rate": 0.023,
+     "false_captures": 2,
+     "gold_none": 87,
+     "stored": 8,
+     "missed": 32,
+     "wrong_table": 0,
+     "per_class": {
+      "decision": {
+       "precision": 0.0,
+       "recall": 0.0,
+       "f1": 0.0,
+       "tp": 0,
+       "pred": 1,
+       "gold": 3
+      },
+      "error": {
+       "precision": 0.8571,
+       "recall": 0.2727,
+       "f1": 0.4138,
+       "tp": 6,
+       "pred": 7,
+       "gold": 22
+      },
+      "context": {
+       "precision": 0.0,
+       "recall": 0.0,
+       "f1": 0.0,
+       "tp": 0,
+       "pred": 0,
+       "gold": 10
+      },
+      "rule": {
+       "precision": 0.0,
+       "recall": 0.0,
+       "f1": 0.0,
+       "tp": 0,
+       "pred": 0,
+       "gold": 3
+      },
+      "none": {
+       "precision": 0.7265,
+       "recall": 0.977,
+       "f1": 0.8333,
+       "tp": 85,
+       "pred": 117,
+       "gold": 87
+      }
+     },
+     "importance_accuracy": 0.5
+    }
+   }
+  },
+  {
+   "family": "context",
+   "commit": "5e0f601",
+   "subject": "feat(core): auto-capture a labeled finding as context",
+   "train": {
+    "0.8": {
+     "macro_f1": [
+      0.2009,
+      0.2009
+     ],
+     "false_captures": [
+      "0/56",
+      "0/56"
+     ]
+    },
+    "0.7": {
+     "macro_f1": [
+      0.2009,
+      0.2009
+     ],
+     "false_captures": [
+      "0/56",
+      "0/56"
+     ]
+    },
+    "note": "spec-based (labeling guidelines C1); no train text uses the patterns, and none fired on test"
+   },
+   "test": {
+    "0.8": {
+     "accuracy": 0.728,
+     "macro_f1": 0.2411,
+     "false_capture_rate": 0.0115,
+     "false_captures": 1,
+     "gold_none": 87,
+     "stored": 6,
+     "missed": 33,
+     "wrong_table": 0,
+     "per_class": {
+      "decision": {
+       "precision": 0.0,
+       "recall": 0.0,
+       "f1": 0.0,
+       "tp": 0,
+       "pred": 1,
+       "gold": 3
+      },
+      "error": {
+       "precision": 1.0,
+       "recall": 0.2273,
+       "f1": 0.3704,
+       "tp": 5,
+       "pred": 5,
+       "gold": 22
+      },
+      "context": {
+       "precision": 0.0,
+       "recall": 0.0,
+       "f1": 0.0,
+       "tp": 0,
+       "pred": 0,
+       "gold": 10
+      },
+      "rule": {
+       "precision": 0.0,
+       "recall": 0.0,
+       "f1": 0.0,
+       "tp": 0,
+       "pred": 0,
+       "gold": 3
+      },
+      "none": {
+       "precision": 0.7227,
+       "recall": 0.9885,
+       "f1": 0.835,
+       "tp": 86,
+       "pred": 119,
+       "gold": 87
+      }
+     },
+     "importance_accuracy": 0.5
+    },
+    "0.7": {
+     "accuracy": 0.728,
+     "macro_f1": 0.2494,
+     "false_capture_rate": 0.023,
+     "false_captures": 2,
+     "gold_none": 87,
+     "stored": 8,
+     "missed": 32,
+     "wrong_table": 0,
+     "per_class": {
+      "decision": {
+       "precision": 0.0,
+       "recall": 0.0,
+       "f1": 0.0,
+       "tp": 0,
+       "pred": 1,
+       "gold": 3
+      },
+      "error": {
+       "precision": 0.8571,
+       "recall": 0.2727,
+       "f1": 0.4138,
+       "tp": 6,
+       "pred": 7,
+       "gold": 22
+      },
+      "context": {
+       "precision": 0.0,
+       "recall": 0.0,
+       "f1": 0.0,
+       "tp": 0,
+       "pred": 0,
+       "gold": 10
+      },
+      "rule": {
+       "precision": 0.0,
+       "recall": 0.0,
+       "f1": 0.0,
+       "tp": 0,
+       "pred": 0,
+       "gold": 3
+      },
+      "none": {
+       "precision": 0.7265,
+       "recall": 0.977,
+       "f1": 0.8333,
+       "tp": 85,
+       "pred": 117,
+       "gold": 87
+      }
+     },
+     "importance_accuracy": 0.5
+    }
+   }
+  },
+  {
+   "family": "rule",
+   "commit": "3147cf7",
+   "subject": "feat(core): auto-capture a standing rule into the rules table",
+   "train": {
+    "0.8": {
+     "macro_f1": [
+      0.2009,
+      0.4036
+     ],
+     "false_captures": [
+      "0/56",
+      "0/56"
+     ]
+    },
+    "0.7": {
+     "macro_f1": [
+      0.2009,
+      0.4036
+     ],
+     "false_captures": [
+      "0/56",
+      "0/56"
+     ]
+    }
+   },
+   "test": {
+    "0.8": {
+     "accuracy": 0.736,
+     "macro_f1": 0.3419,
+     "false_capture_rate": 0.0115,
+     "false_captures": 1,
+     "gold_none": 87,
+     "stored": 7,
+     "missed": 32,
+     "wrong_table": 0,
+     "per_class": {
+      "decision": {
+       "precision": 0.0,
+       "recall": 0.0,
+       "f1": 0.0,
+       "tp": 0,
+       "pred": 1,
+       "gold": 3
+      },
+      "error": {
+       "precision": 1.0,
+       "recall": 0.2273,
+       "f1": 0.3704,
+       "tp": 5,
+       "pred": 5,
+       "gold": 22
+      },
+      "context": {
+       "precision": 0.0,
+       "recall": 0.0,
+       "f1": 0.0,
+       "tp": 0,
+       "pred": 0,
+       "gold": 10
+      },
+      "rule": {
+       "precision": 1.0,
+       "recall": 0.3333,
+       "f1": 0.5,
+       "tp": 1,
+       "pred": 1,
+       "gold": 3
+      },
+      "none": {
+       "precision": 0.7288,
+       "recall": 0.9885,
+       "f1": 0.839,
+       "tp": 86,
+       "pred": 118,
+       "gold": 87
+      }
+     },
+     "importance_accuracy": 0.5
+    },
+    "0.7": {
+     "accuracy": 0.736,
+     "macro_f1": 0.3502,
+     "false_capture_rate": 0.023,
+     "false_captures": 2,
+     "gold_none": 87,
+     "stored": 9,
+     "missed": 31,
+     "wrong_table": 0,
+     "per_class": {
+      "decision": {
+       "precision": 0.0,
+       "recall": 0.0,
+       "f1": 0.0,
+       "tp": 0,
+       "pred": 1,
+       "gold": 3
+      },
+      "error": {
+       "precision": 0.8571,
+       "recall": 0.2727,
+       "f1": 0.4138,
+       "tp": 6,
+       "pred": 7,
+       "gold": 22
+      },
+      "context": {
+       "precision": 0.0,
+       "recall": 0.0,
+       "f1": 0.0,
+       "tp": 0,
+       "pred": 0,
+       "gold": 10
+      },
+      "rule": {
+       "precision": 1.0,
+       "recall": 0.3333,
+       "f1": 0.5,
+       "tp": 1,
+       "pred": 1,
+       "gold": 3
+      },
+      "none": {
+       "precision": 0.7328,
+       "recall": 0.977,
+       "f1": 0.8374,
+       "tp": 85,
+       "pred": 116,
+       "gold": 87
+      }
+     },
+     "importance_accuracy": 0.5
+    }
+   }
+  },
+  {
+   "family": "prose_errors",
+   "commit": "bb805d0",
+   "subject": "feat(core): auto-capture a failure the agent reports in prose",
+   "train": {
+    "0.8": {
+     "macro_f1": [
+      0.4036,
+      0.5732
+     ],
+     "false_captures": [
+      "0/56",
+      "0/56"
+     ],
+     "error_recall": [
+      0.0769,
+      0.8462
+     ]
+    },
+    "0.7": {
+     "macro_f1": [
+      0.4036,
+      0.5732
+     ],
+     "false_captures": [
+      "0/56",
+      "0/56"
+     ]
+    }
+   },
+   "test": {
+    "0.8": {
+     "accuracy": 0.792,
+     "macro_f1": 0.4118,
+     "false_capture_rate": 0.0115,
+     "false_captures": 1,
+     "gold_none": 87,
+     "stored": 15,
+     "missed": 24,
+     "wrong_table": 1,
+     "per_class": {
+      "decision": {
+       "precision": 0.0,
+       "recall": 0.0,
+       "f1": 0.0,
+       "tp": 0,
+       "pred": 1,
+       "gold": 3
+      },
+      "error": {
+       "precision": 0.9231,
+       "recall": 0.5455,
+       "f1": 0.6857,
+       "tp": 12,
+       "pred": 13,
+       "gold": 22
+      },
+      "context": {
+       "precision": 0.0,
+       "recall": 0.0,
+       "f1": 0.0,
+       "tp": 0,
+       "pred": 0,
+       "gold": 10
+      },
+      "rule": {
+       "precision": 1.0,
+       "recall": 0.3333,
+       "f1": 0.5,
+       "tp": 1,
+       "pred": 1,
+       "gold": 3
+      },
+      "none": {
+       "precision": 0.7818,
+       "recall": 0.9885,
+       "f1": 0.8731,
+       "tp": 86,
+       "pred": 110,
+       "gold": 87
+      }
+     },
+     "importance_accuracy": 0.3684
+    },
+    "0.7": {
+     "accuracy": 0.792,
+     "macro_f1": 0.4149,
+     "false_capture_rate": 0.023,
+     "false_captures": 2,
+     "gold_none": 87,
+     "stored": 17,
+     "missed": 23,
+     "wrong_table": 1,
+     "per_class": {
+      "decision": {
+       "precision": 0.0,
+       "recall": 0.0,
+       "f1": 0.0,
+       "tp": 0,
+       "pred": 1,
+       "gold": 3
+      },
+      "error": {
+       "precision": 0.8667,
+       "recall": 0.5909,
+       "f1": 0.7027,
+       "tp": 13,
+       "pred": 15,
+       "gold": 22
+      },
+      "context": {
+       "precision": 0.0,
+       "recall": 0.0,
+       "f1": 0.0,
+       "tp": 0,
+       "pred": 0,
+       "gold": 10
+      },
+      "rule": {
+       "precision": 1.0,
+       "recall": 0.3333,
+       "f1": 0.5,
+       "tp": 1,
+       "pred": 1,
+       "gold": 3
+      },
+      "none": {
+       "precision": 0.787,
+       "recall": 0.977,
+       "f1": 0.8718,
+       "tp": 85,
+       "pred": 108,
+       "gold": 87
+      }
+     },
+     "importance_accuracy": 0.3684
+    }
+   }
+  },
+  {
+   "family": "failing_tests",
+   "commit": "b830dc6",
+   "subject": "fix(core): auto-capture a failing test beside passing suites",
+   "train": {
+    "0.8": {
+     "macro_f1": [
+      0.5732,
+      0.5835
+     ],
+     "false_captures": [
+      "0/56",
+      "0/56"
+     ],
+     "error_recall": [
+      0.8462,
+      0.9231
+     ]
+    },
+    "0.7": {
+     "macro_f1": [
+      0.5732,
+      0.5835
+     ],
+     "false_captures": [
+      "0/56",
+      "0/56"
+     ]
+    }
+   },
+   "test": {
+    "0.8": {
+     "accuracy": 0.8,
+     "macro_f1": 0.42,
+     "false_capture_rate": 0.0115,
+     "false_captures": 1,
+     "gold_none": 87,
+     "stored": 16,
+     "missed": 23,
+     "wrong_table": 1,
+     "per_class": {
+      "decision": {
+       "precision": 0.0,
+       "recall": 0.0,
+       "f1": 0.0,
+       "tp": 0,
+       "pred": 1,
+       "gold": 3
+      },
+      "error": {
+       "precision": 0.9286,
+       "recall": 0.5909,
+       "f1": 0.7222,
+       "tp": 13,
+       "pred": 14,
+       "gold": 22
+      },
+      "context": {
+       "precision": 0.0,
+       "recall": 0.0,
+       "f1": 0.0,
+       "tp": 0,
+       "pred": 0,
+       "gold": 10
+      },
+      "rule": {
+       "precision": 1.0,
+       "recall": 0.3333,
+       "f1": 0.5,
+       "tp": 1,
+       "pred": 1,
+       "gold": 3
+      },
+      "none": {
+       "precision": 0.789,
+       "recall": 0.9885,
+       "f1": 0.8776,
+       "tp": 86,
+       "pred": 109,
+       "gold": 87
+      }
+     },
+     "importance_accuracy": 0.3684
+    },
+    "0.7": {
+     "accuracy": 0.792,
+     "macro_f1": 0.4149,
+     "false_capture_rate": 0.023,
+     "false_captures": 2,
+     "gold_none": 87,
+     "stored": 17,
+     "missed": 23,
+     "wrong_table": 1,
+     "per_class": {
+      "decision": {
+       "precision": 0.0,
+       "recall": 0.0,
+       "f1": 0.0,
+       "tp": 0,
+       "pred": 1,
+       "gold": 3
+      },
+      "error": {
+       "precision": 0.8667,
+       "recall": 0.5909,
+       "f1": 0.7027,
+       "tp": 13,
+       "pred": 15,
+       "gold": 22
+      },
+      "context": {
+       "precision": 0.0,
+       "recall": 0.0,
+       "f1": 0.0,
+       "tp": 0,
+       "pred": 0,
+       "gold": 10
+      },
+      "rule": {
+       "precision": 1.0,
+       "recall": 0.3333,
+       "f1": 0.5,
+       "tp": 1,
+       "pred": 1,
+       "gold": 3
+      },
+      "none": {
+       "precision": 0.787,
+       "recall": 0.977,
+       "f1": 0.8718,
+       "tp": 85,
+       "pred": 108,
+       "gold": 87
+      }
+     },
+     "importance_accuracy": 0.3684
+    }
+   }
+  },
+  {
+   "family": "decision_commit_subjects",
+   "commit": "3bb9f48 (reverted in 10efb24)",
+   "subject": "feat(core): auto-capture a commit subject that names its choice",
+   "train": {
+    "0.8": {
+     "macro_f1": [
+      0.5835,
+      0.7885
+     ],
+     "false_captures": [
+      "0/56",
+      "0/56"
+     ],
+     "decision_recall": [
+      0.0,
+      1.0
+     ]
+    },
+    "0.7": {
+     "macro_f1": [
+      0.5835,
+      0.7885
+     ],
+     "false_captures": [
+      "0/56",
+      "0/56"
+     ]
+    }
+   },
+   "test": {
+    "0.8": {
+     "accuracy": 0.784,
+     "macro_f1": 0.4176,
+     "false_capture_rate": 0.0345,
+     "false_captures": 3,
+     "gold_none": 87,
+     "stored": 18,
+     "missed": 23,
+     "wrong_table": 1,
+     "per_class": {
+      "decision": {
+       "precision": 0.0,
+       "recall": 0.0,
+       "f1": 0.0,
+       "tp": 0,
+       "pred": 3,
+       "gold": 3
+      },
+      "error": {
+       "precision": 0.9286,
+       "recall": 0.5909,
+       "f1": 0.7222,
+       "tp": 13,
+       "pred": 14,
+       "gold": 22
+      },
+      "context": {
+       "precision": 0.0,
+       "recall": 0.0,
+       "f1": 0.0,
+       "tp": 0,
+       "pred": 0,
+       "gold": 10
+      },
+      "rule": {
+       "precision": 1.0,
+       "recall": 0.3333,
+       "f1": 0.5,
+       "tp": 1,
+       "pred": 1,
+       "gold": 3
+      },
+      "none": {
+       "precision": 0.785,
+       "recall": 0.9655,
+       "f1": 0.866,
+       "tp": 84,
+       "pred": 107,
+       "gold": 87
+      }
+     },
+     "importance_accuracy": 0.3684
+    },
+    "0.7": {
+     "accuracy": 0.776,
+     "macro_f1": 0.4126,
+     "false_capture_rate": 0.046,
+     "false_captures": 4,
+     "gold_none": 87,
+     "stored": 19,
+     "missed": 23,
+     "wrong_table": 1,
+     "per_class": {
+      "decision": {
+       "precision": 0.0,
+       "recall": 0.0,
+       "f1": 0.0,
+       "tp": 0,
+       "pred": 3,
+       "gold": 3
+      },
+      "error": {
+       "precision": 0.8667,
+       "recall": 0.5909,
+       "f1": 0.7027,
+       "tp": 13,
+       "pred": 15,
+       "gold": 22
+      },
+      "context": {
+       "precision": 0.0,
+       "recall": 0.0,
+       "f1": 0.0,
+       "tp": 0,
+       "pred": 0,
+       "gold": 10
+      },
+      "rule": {
+       "precision": 1.0,
+       "recall": 0.3333,
+       "f1": 0.5,
+       "tp": 1,
+       "pred": 1,
+       "gold": 3
+      },
+      "none": {
+       "precision": 0.783,
+       "recall": 0.954,
+       "f1": 0.8601,
+       "tp": 83,
+       "pred": 106,
+       "gold": 87
+      }
+     },
+     "importance_accuracy": 0.3684
+    }
+   },
+   "status": "reverted: on test it stored 3 decisions at 0.8, none a gold decision (false capture 1/87 -> 3/87, past the 0.011 bound; macro-F1 0.4200 -> 0.4176). Dropped rather than tuned against test; no other decision pattern was tried."
+  },
+  {
+   "family": "importance",
+   "commit": "e038d1d",
+   "subject": "feat(core): store an auto-captured record at the importance of its kind",
+   "train": {
+    "importance_accuracy": [
+     0.5789,
+     0.7895
+    ],
+    "importance_majority_baseline": 0.5263,
+    "class_metrics": "unchanged"
+   },
+   "test": {
+    "0.8": {
+     "accuracy": 0.8,
+     "macro_f1": 0.42,
+     "false_capture_rate": 0.0115,
+     "false_captures": 1,
+     "gold_none": 87,
+     "stored": 16,
+     "missed": 23,
+     "wrong_table": 1,
+     "per_class": {
+      "decision": {
+       "precision": 0.0,
+       "recall": 0.0,
+       "f1": 0.0,
+       "tp": 0,
+       "pred": 1,
+       "gold": 3
+      },
+      "error": {
+       "precision": 0.9286,
+       "recall": 0.5909,
+       "f1": 0.7222,
+       "tp": 13,
+       "pred": 14,
+       "gold": 22
+      },
+      "context": {
+       "precision": 0.0,
+       "recall": 0.0,
+       "f1": 0.0,
+       "tp": 0,
+       "pred": 0,
+       "gold": 10
+      },
+      "rule": {
+       "precision": 1.0,
+       "recall": 0.3333,
+       "f1": 0.5,
+       "tp": 1,
+       "pred": 1,
+       "gold": 3
+      },
+      "none": {
+       "precision": 0.789,
+       "recall": 0.9885,
+       "f1": 0.8776,
+       "tp": 86,
+       "pred": 109,
+       "gold": 87
+      }
+     },
+     "importance_accuracy": 0.5526
+    },
+    "0.7": {
+     "accuracy": 0.792,
+     "macro_f1": 0.4149,
+     "false_capture_rate": 0.023,
+     "false_captures": 2,
+     "gold_none": 87,
+     "stored": 17,
+     "missed": 23,
+     "wrong_table": 1,
+     "per_class": {
+      "decision": {
+       "precision": 0.0,
+       "recall": 0.0,
+       "f1": 0.0,
+       "tp": 0,
+       "pred": 1,
+       "gold": 3
+      },
+      "error": {
+       "precision": 0.8667,
+       "recall": 0.5909,
+       "f1": 0.7027,
+       "tp": 13,
+       "pred": 15,
+       "gold": 22
+      },
+      "context": {
+       "precision": 0.0,
+       "recall": 0.0,
+       "f1": 0.0,
+       "tp": 0,
+       "pred": 0,
+       "gold": 10
+      },
+      "rule": {
+       "precision": 1.0,
+       "recall": 0.3333,
+       "f1": 0.5,
+       "tp": 1,
+       "pred": 1,
+       "gold": 3
+      },
+      "none": {
+       "precision": 0.787,
+       "recall": 0.977,
+       "f1": 0.8718,
+       "tp": 85,
+       "pred": 108,
+       "gold": 87
+      }
+     },
+     "importance_accuracy": 0.5526
+    }
+   }
+  }
+ ],
+ "gates": {
+  "needle_gate": {
+   "binary": "release build of e038d1d code",
+   "recall_at_5": "31/31",
+   "retention": "31/31"
+  },
+  "tests": {
+   "axil-core (cargo test -p axil-core)": {
+    "lib_passed": 524,
+    "lib_failed": 0,
+    "auto_capture_tests": 35,
+    "integration_passed": 19,
+    "failed": 0
+   }
+  },
+  "cli_smoke": "release axil: a cargo run with a passing suite and a FAILED test, sent as --source bash at 0.8, stored one error at _importance 0.3; a \"Never ...\" sentence (default source) stored one rules row at 0.8; `(eval):1: === not found` captured nothing. Boot lists the error as open; the rule is not in boot's rules block (that needs importance >= 0.9 or a pin)"
+ },
+ "harness_commits": [
+  "3098c1b bench(typed-decisions): score U3 at a chosen capture threshold",
+  "2dce091 bench(typed-decisions): analyze each U3 text with the source it arrives with",
+  "a7ca535 bench(typed-decisions): break U3 regex-arm metrics down by source"
+ ],
+ "machine": {
+  "platform": "macOS-26.6-arm64-arm-64bit-Mach-O",
+  "note": "heavily loaded shared machine; no latency is reported (analyze is a few regexes per line)"
+ },
+ "numbers_policy": "Internal development measurements on a 125-text test split; small per-class counts (3 decisions, 3 rules, 10 context, 22 errors). Not for README/docs."
+}

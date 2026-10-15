@@ -89,7 +89,7 @@ BUCKETS = ["low", "medium", "high"]
 SOURCES = ["bash_failure", "bash_output", "agent_text", "agent_brief", "commit_subject"]
 HOOK_MIN_CONFIDENCE = 0.8
 CLI_MIN_CONFIDENCE = 0.7
-CAPTURE_CLASS = {"error": "error", "decision": "decision", "context": "context"}
+CAPTURE_CLASS = {"error": "error", "decision": "decision", "context": "context", "rule": "rule"}
 
 WEAK_TABLES = {"decisions": "decision", "errors": "error", "context": "context", "rules": "rule"}
 BGE_SMALL = {"repo": "BAAI/bge-small-en-v1.5", "revision": "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a",

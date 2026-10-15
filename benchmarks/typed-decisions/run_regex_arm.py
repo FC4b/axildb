@@ -12,6 +12,12 @@ Develop on train; score test once per finished pattern family:
   python run_regex_arm.py u5 --errors                   # train misses and wrong mentions
   python run_regex_arm.py u5 --project-dir ../..        # with the project gazetteer
   python run_regex_arm.py --split test --out <file>     # the once-per-family test score
+  python run_regex_arm.py u3 --min-confidence 0.7       # U3 at the CLI default instead of the hook's 0.8
+  python run_regex_arm.py u3 --all-bash                 # every U3 text analyzed as the hook's `bash`
+
+U3 texts are analyzed with the source they would arrive with: shell output as
+the hook sends it (`bash`), agent prose, briefs and commit subjects as `axil
+auto-capture` labels them by default (`auto`).
 
 `--errors` is refused on test. Raw output goes to out/regex-arm/ (gitignored).
 """
@@ -45,10 +51,12 @@ def build():
     subprocess.run(["cargo", "build", "--manifest-path", str(ARM / "Cargo.toml")], check=True)
 
 
-def run_arm(mode, set_path, project_dir=None):
+def run_arm(mode, set_path, project_dir=None, all_bash=False):
     cmd = [str(ARM_BIN), mode, str(set_path)]
     if project_dir:
         cmd += ["--project-dir", str(project_dir)]
+    if all_bash:
+        cmd += ["--all-bash"]
     proc = subprocess.run(cmd, capture_output=True, text=True, check=True)
     return [json.loads(line) for line in proc.stdout.splitlines() if line.strip()]
 
@@ -104,24 +112,26 @@ def u3(args):
     gold_rows = {r["id"]: r for r in rows}
     train = m.split_ids(rows, "train")
     ids = m.split_ids(rows, args.split)
-    raw = {r["id"]: r for r in run_arm("--capture", m.SET)}
+    raw = {r["id"]: r for r in run_arm("--capture", m.SET, all_bash=args.all_bash)}
     OUT.mkdir(parents=True, exist_ok=True)
     (OUT / f"u3-{args.split}.jsonl").write_text("".join(json.dumps(r) + "\n" for r in raw.values()))
-    pred, score, _ = m.production_view(raw, m.HOOK_MIN_CONFIDENCE)
+    pred, score, _ = m.production_view(raw, args.min_confidence)
     cuts = m.fit_cuts(score, gold_rows, train)
     bucket = {i: m.bucket_of(score[i], cuts["cuts"]) for i in score}
     cm = m.class_metrics(pred, gold, ids)
     result = {
         "split": args.split,
-        "min_confidence": m.HOOK_MIN_CONFIDENCE,
+        "min_confidence": args.min_confidence,
+        "source": "bash for every text" if args.all_bash else "bash for shell output, auto for the rest",
         **{k: cm[k] for k in ("items", "accuracy", "macro_f1", "false_capture_rate", "false_captures",
                               "gold_none", "wrong_table", "missed", "stored")},
         "per_class": cm["per_class"],
+        "per_source": m.per_source(pred, gold, rows, ids),
         "importance": m.importance_metrics(bucket, gold_rows, ids),
         "importance_cuts": cuts,
         "importance_majority_baseline": m.importance_baseline(gold_rows, train, ids),
     }
-    print(f"u3 {args.split}: acc {cm['accuracy']} macro-F1 {cm['macro_f1']} FC {cm['false_capture_rate']} "
+    print(f"u3 {args.split} @{args.min_confidence}: acc {cm['accuracy']} macro-F1 {cm['macro_f1']} FC {cm['false_capture_rate']} "
           f"({cm['false_captures']}/{cm['gold_none']}) stored {cm['stored']} missed {cm['missed']} "
           f"wrong-table {cm['wrong_table']} importance acc {result['importance']['accuracy']}")
     for c in m.CLASSES:
@@ -145,6 +155,10 @@ def main():
     ap.add_argument("--build", action="store_true", help="cargo build regex-arm/ first")
     ap.add_argument("--errors", action="store_true", help="print train misses and wrong outputs")
     ap.add_argument("--project-dir", help="U5: extract with the gazetteer of this project directory")
+    ap.add_argument("--min-confidence", type=float, default=0.8,
+                    help="U3: store captures at or above this (0.8 is the hook's; the CLI default is 0.7)")
+    ap.add_argument("--all-bash", action="store_true",
+                    help="U3: analyze every text as `bash` (the bake-off's call) instead of by its source")
     ap.add_argument("--width", type=int, default=400, help="text characters shown by --errors")
     ap.add_argument("--out", help="write the metrics JSON here")
     args = ap.parse_args()
