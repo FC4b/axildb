@@ -829,6 +829,9 @@ fn handle_recall_across(
     };
 
     let (results, warnings) = fan_out(req, |label, member, path| {
+        // Opened for writing, since recall needs the member's engines: this
+        // converts a member's legacy table index, after which an older axil
+        // (that member's own hooks may run one) can't open it.
         let builder = axil_core::Axil::open(&path);
         let builder = crate::attach_detected_engines(builder)
             .map_err(|e| format!("attach plugins for {label}: {e}"))?;

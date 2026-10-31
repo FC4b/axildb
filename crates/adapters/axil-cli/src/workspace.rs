@@ -288,9 +288,16 @@ pub fn handle_bridge(op: crate::BridgeOp, db_opt: &Option<PathBuf>, out: &Output
                 if member.id == caller_id {
                     continue;
                 }
-                // Core-only open: the scan only reads `_entities` from the
-                // core store, so skip FTS/vector/ONNX attach.
-                let remote_db = match axil_core::Axil::open(manifest.member_db_abs(member)).build()
+                // Core-only and read-only: the scan only reads `_entities`
+                // from the core store, so it attaches no engine, and a
+                // read-only open converts nothing. A writable one would
+                // convert a member's legacy table index, after which an
+                // older axil, such as the one that member's own hooks may
+                // run, can't open it. A member another process holds, or one
+                // not closed cleanly, is skipped like one that won't open.
+                let remote_db = match axil_core::Axil::open(manifest.member_db_abs(member))
+                    .read_only(true)
+                    .build()
                 {
                     Ok(d) => d,
                     Err(_) => continue,
@@ -757,6 +764,9 @@ fn sibling_recall(
         _ => false,
     };
 
+    // Opened for writing, since recall needs the member's engines: this
+    // converts a member's legacy table index, after which an older axil
+    // (that member's own hooks may run one) can't open it.
     let db = match crate::open_with_all_detected(path) {
         Ok(db) => db,
         Err(e) => {
