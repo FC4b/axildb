@@ -96,30 +96,67 @@ newer build's read-only open (a hot read command falls back to one while
 another process holds the database) reads the old layout as it is and
 converts nothing.
 
-From then on, a build from before the change can't use the database. Its
-writable open, which nearly every command makes, fails:
+From then on, a build from before the change can't use the database. Nearly
+every command opens the database for writing, read commands such as `doctor`,
+`recall`, `list`, `info` and `get` included, and an older build's writable
+open fails:
 
 ```
 storage error: table_index is of type Table<&str, axil_core::TableCounts (written by a newer axil; upgrade axil to open this database)>
 ```
 
-Its read-only open succeeds and writes nothing, but only fetching a record by
-id works on it: anything that lists or counts a table's records, or names the
-tables, fails with the same error.
+An older CLI opens a database read-only only while another process holds it,
+so in practice every command of it fails. In the Rust API, an older build's
+read-only open (`Storage::open_read_only`) succeeds and writes nothing, but
+only fetching a record by id works on it: anything that lists or counts a
+table's records, or names the tables, fails with the same error.
 
 It would otherwise read id lists that no longer change: it would miss every
 record written since, and its auto-linking would create duplicate entities.
-Nothing is lost. Install the newer build on your `PATH`, as above.
+No stored record is lost: install the newer build on your `PATH`, as above,
+and it reads them all.
 
 **Agent hooks fail silently in this state.** `axil install` wires hooks as
 `axil hook run`, with the bare `axil` on your `PATH` when that one has the
 command. A hook exits 0 whatever happens, so that it never blocks the agent.
 If that `axil` is a build from before the change, every hook fails against a
 converted database and nothing says so: no memory is injected into the
-agent's context and nothing is auto-captured (the writes a hook queued fail
-in its drainer, which logs them to `hook-queue/drain.log` beside the database
-and drops them). `axil doctor` run by the newer build warns about it in its
-`hook_binary` check. The fix is the same: upgrade the `axil` on your `PATH`.
+agent's context and nothing is auto-captured. What the hooks queue in the
+meantime is lost: the writes fail in their drainer, which logs them to
+`hook-queue/drain.log` beside the database and drops them. The fix is the
+same: upgrade the `axil` on your `PATH`. A newer build looks for this:
+
+- A command that converts a database prints a warning on stderr when the
+  agent hooks run an axil too old to open it afterwards (a drainer or a daemon
+  writes it to its log).
+- `axil doctor` warns about it in its `hook_binary` check. It does not convert
+  a database itself while that check warns: it reports a `table_index`
+  warning instead, and runs no other check until the hooks' axil is upgraded.
+- Doctor reads the hook commands in the project's agent configs
+  (`.claude/settings.json` and the others `axil install` writes) and the same
+  files in your home directory. It asks only an executable named `axil` that
+  is bare (found on `PATH`) or an absolute path outside the project, with
+  `axil hook formats`, and kills it after 5 s, so a cloned repository's
+  config can't make doctor run the repository's code. A hook command that
+  looks like it starts axil but isn't one of those (a relative path, a path
+  inside the project, one that isn't found, a renamed binary such as
+  `axil-old`, a shim such as `axil.cmd`, a path with a space in it left
+  unquoted) is a warning, which also keeps doctor from converting the
+  database, since which axil the hooks run can't be verified. A wrapper such
+  as `bash -lc` or `npx` is listed as not checked.
+
+A hook never converts a database itself: see
+[Table membership](../concepts/storage.md#table-membership).
+
+**Workspace members are converted too.** A federated read opens each member's
+database for writing where it needs the member's engines (`recall --across`,
+the MCP `recall` tool's `across`, `recall-for-entity` following entity
+bridges into a member), so a newer build converts that member's table index.
+If that member's own hooks run an older axil, they then fail as above; the
+federated command warns about it on stderr, as any command that converts a
+database does, checking the member's own project. `axil bridge auto` reads
+only the members' `_entities` and opens them read-only, which converts
+nothing.
 
 To keep using an older build on a database, copy the database's files before
 a newer build first opens it (see

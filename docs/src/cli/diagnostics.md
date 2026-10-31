@@ -14,8 +14,11 @@ for a quick "when to use which".
 
 ### doctor
 
-Quick read-only health check — "is anything wrong right now?". For a scored
-report with fix recommendations, use `health-report`.
+Quick health check that changes no memories — "is anything wrong right
+now?". For a scored report with fix recommendations, use `health-report`. It
+opens the database for writing, as nearly every command does, which repairs a
+file not closed cleanly and converts a legacy table index; it does neither
+while its `hook_binary` check warns (see below).
 
 ```bash
 axil doctor
@@ -30,10 +33,16 @@ checkpoints; counted per table, a warning, fixed only by
 orphaned vectors (vectors whose record is gone; an error once they are more
 than 10% of the index, since recall fetches them and then drops them), the
 state of the `_entities` key index, recent error/healing history, and
-whether the `axil` the project's agent hooks run can open this database
-(`hook_binary`: a warning for a build too old to, since its hooks fail
-without a word; see
+whether the `axil` the agent hooks run can open this database (`hook_binary`:
+a warning for a build too old to, or one that doesn't answer within 5 s,
+since its hooks fail without a word, and for one that looks like axil but
+that doctor won't run or can't find, such as a path inside the project, a
+renamed binary (`axil-old`) or a shim, since which axil the hooks run can't
+be verified; a wrapper such as `bash -lc` is listed as not checked; see
 [Builds from before the keyed table index](../getting-started/installation.md#builds-from-before-the-keyed-table-index)).
+While `hook_binary` warns, doctor leaves a legacy (or not cleanly closed)
+database unconverted, reports a `table_index` warning, and runs no other
+check.
 Exit code: 0 all ok, 1 warnings, 2 errors.
 
 #### A damaged vector store

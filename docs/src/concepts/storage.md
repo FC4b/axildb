@@ -62,11 +62,19 @@ keeps it explicitly:
 - **Not under a hook's time limit.** A hook kills its lookup when the hook's
   time runs out (2.5 s for a prompt), so that it answers before the harness
   kills the hook, and a conversion taking longer would be cut off at every
-  prompt. So a hook that finds the file
-  unconverted runs no lookup that time and starts its detached writer, which
-  no time limit bounds, to convert it; writes the hook queued run after the
-  conversion as usual. A database a daemon holds was converted when the
-  daemon opened it.
+  prompt. So a hook asks first, through a read-only open that writes nothing.
+  When the table index is still in the legacy layout, or the file was not
+  closed cleanly (a writable open repairs it first, which can take as long),
+  the hook starts its detached writer, which no time limit bounds, to open
+  the file. A session-start or stop hook, which has time to spare, waits for
+  it, until 3 s before its own time runs out, and then looks up as usual. Any
+  other hook, and one whose wait ran out, runs no lookup that time and notes
+  it in the session's problems (`lookups_skipped`). Writes the hook queued
+  run after the conversion as usual. A lookup's own writable open never
+  converts a legacy table index or repairs a file either: it fails instead,
+  which covers a file the read-only check could not read because another
+  process held it, such as a daemon of an older build still running after an
+  upgrade. A daemon of a newer build converts the file when it opens it.
 - **Older builds refuse a converted file**, with an error saying to upgrade,
   rather than read arrays that no longer change. See
   [Mixing binary versions](../getting-started/installation.md#builds-from-before-the-keyed-table-index).

@@ -24,7 +24,7 @@ axil [OPTIONS] <COMMAND> [ARGS]
 | **Graph** | `link`, `neighbors`, `traverse`, `edges`, `lineage` | Graph operations, derivation chains |
 | **Memory** | `know`, `about`, `session`, `believe`, `checkpoint` | Agent memory |
 | **Rules** | `rule set/get/list/delete`, `rule extract`, `rule distill` | Agent directives & conventions. `extract` reads them *from* `CLAUDE.md` into memory; `distill` distills recurring failures *back out* into corrective directives (`rules` is an accepted alias) |
-| **Diagnostics** (read-only) | `doctor`, `health-report`, `snapshot`, `trends`, `detect`, `stats` | *Watch* the DB — never change memories |
+| **Diagnostics** | `doctor`, `health-report`, `snapshot`, `trends`, `detect`, `stats` | *Watch* the DB — never change memories (opening it may still repair the file or convert its table index; see [Builds from before the keyed table index](../getting-started/installation.md#builds-from-before-the-keyed-table-index)) |
 | **Memory lifecycle** | `compact`, `heal`, `worker`, `decay` | *Change or forget* memories (reclaim / consolidate / downsample) |
 | **Automation** | `maintain` | Run the additive diagnostics on a cadence |
 | **Branch** | `branch create/list/delete/diff/switch/merge` | Database branching |
