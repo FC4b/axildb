@@ -84,8 +84,12 @@ serves, which ranks as that call would), and the HNSW graph above that.
 The query is either a pre-embedded `&[f32]` or text that the configured
 embedder converts. Default embedder is BGE-small-en-v1.5; its int8 export,
 BGE-base, nomic, and gte-modernbert are also registered, and granite-small
-as an experiment. Granite is 384-d like the default, so a switch between them
-is not detected and needs every vector rebuilt, and the 0.65 and 0.92
+as an experiment. The vector store records the model that built it, and a
+store built by another model than the configured one is searched by no
+vector until `axil reembed` rebuilds it, granite and the default included,
+though both are 384-d (see
+[Switching embedding models](../getting-started/installation.md#switching-embedding-models)).
+The 0.65 and 0.92
 similarity thresholds were tuned on bge-small while granite's same-table
 cosines run higher (median 0.80 against 0.66,
 `benchmarks/results/embedding-model-ab-2026-10-15.json`); see

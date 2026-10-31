@@ -49,8 +49,11 @@ model = "gpt-4o-mini"
 The registered models are listed under
 [Embedding models](installation.md#embedding-models). `granite-small`
 (`granite-embedding-small-english-r2`) is experimental, and the default stays
-`bge-small-en-v1.5`. Granite is 384-d like bge-small, so a switch between the
-two is not detected: rebuild every vector after switching. The 0.65
+`bge-small-en-v1.5`. The vector store records the model that built it, so a
+switch is caught even between two 384-d models such as granite and
+bge-small: commands run without vectors until `axil reembed` rebuilds the
+store (see [Switching embedding models](installation.md#switching-embedding-models)).
+The 0.65
 conflict-candidate floor and the 0.92 `healing.supersede_similarity_threshold`
 were tuned on bge-small, and granite's same-table cosines run higher (median
 0.80 against 0.66 on Axil's own project memory,
@@ -152,7 +155,7 @@ key) prints a warning and turns review off until it is fixed.
 # View current config
 axil config show
 
-# Set a value
+# Set a value (a new embedding model then needs `axil reembed`)
 axil config set database.embedding_model bge-base-en-v1.5
 
 # Get a value

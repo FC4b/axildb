@@ -2831,9 +2831,9 @@ impl Drop for DrainLock {
     }
 }
 
-/// Open `drain.lock` for reading and writing, creating it exclusively when
-/// `create_new` is set.
-fn open_lock_file(path: &Path, create_new: bool) -> std::io::Result<std::fs::File> {
+/// Open a lock file (`drain.lock`, a reembed's lock) for reading and
+/// writing, creating it exclusively when `create_new` is set.
+pub(crate) fn open_lock_file(path: &Path, create_new: bool) -> std::io::Result<std::fs::File> {
     let mut options = std::fs::OpenOptions::new();
     options.read(true).write(true).create_new(create_new);
     #[cfg(windows)]
@@ -2841,7 +2841,7 @@ fn open_lock_file(path: &Path, create_new: bool) -> std::io::Result<std::fs::Fil
         use std::os::windows::fs::OpenOptionsExt as _;
         // FILE_SHARE_READ | FILE_SHARE_WRITE without FILE_SHARE_DELETE. The
         // std default shares delete, and Windows 10+ then unlinks the name at
-        // once while handles stay open, which would let a second drainer lock
+        // once while handles stay open, which would let a second holder lock
         // an orphaned file. Without it the path cannot move under a holder.
         options.share_mode(0x1 | 0x2);
     }
@@ -2850,7 +2850,7 @@ fn open_lock_file(path: &Path, create_new: bool) -> std::io::Result<std::fs::Fil
 
 /// Whether `path` still names the file open as `file`.
 #[cfg(unix)]
-fn same_file(file: &std::fs::File, path: &Path) -> bool {
+pub(crate) fn same_file(file: &std::fs::File, path: &Path) -> bool {
     use std::os::unix::fs::MetadataExt as _;
     match (file.metadata(), std::fs::metadata(path)) {
         (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino(),
@@ -2862,7 +2862,7 @@ fn same_file(file: &std::fs::File, path: &Path) -> bool {
 /// withholds delete sharing, so neither this axil nor an older one can
 /// remove or rename the path while `file` is open.
 #[cfg(not(unix))]
-fn same_file(_file: &std::fs::File, _path: &Path) -> bool {
+pub(crate) fn same_file(_file: &std::fs::File, _path: &Path) -> bool {
     true
 }
 

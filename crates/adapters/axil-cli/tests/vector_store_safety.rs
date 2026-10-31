@@ -53,8 +53,25 @@ fn vec_path(db: &Path) -> PathBuf {
     axil_vector::vector_db_path(db)
 }
 
+/// Where earlier versions set the live store aside while they rebuilt it.
 fn backup_path(db: &Path) -> PathBuf {
     vec_path(db).with_extension("reembed-bak")
+}
+
+/// Where a re-embed builds the store that replaces the live one.
+fn rebuild_path(db: &Path) -> PathBuf {
+    db.with_file_name(format!(
+        "{}.vec-rebuild",
+        db.file_name().unwrap().to_str().unwrap()
+    ))
+}
+
+/// The lock a re-embed holds for its whole run.
+fn lock_path(db: &Path) -> PathBuf {
+    db.with_file_name(format!(
+        "{}.reembed-lock",
+        db.file_name().unwrap().to_str().unwrap()
+    ))
 }
 
 /// Each id's vector in the default store, read straight from the file.
@@ -65,12 +82,29 @@ fn stored_vectors(db: &Path, ids: &[&RecordId]) -> Vec<Option<Vec<f32>>> {
         .collect()
 }
 
-fn model_available() -> bool {
-    let available = axil_vector::download::is_model_available(&EmbeddingModel::BgeSmall);
-    if !available {
-        eprintln!("skipping: bge-small model not downloaded");
+/// Whether `model` is on disk. Without it a test that embeds skips, and says
+/// so on stderr past the test harness's capture; when
+/// `AXIL_TEST_REQUIRE_MODELS` names the model (comma-separated, or `all`), it
+/// fails instead, so a CI job that provides the model can't pass by skipping.
+fn model_on_disk(model: &EmbeddingModel) -> bool {
+    if axil_vector::download::is_model_available(model) {
+        return true;
     }
-    available
+    let name = model.name();
+    let required = std::env::var("AXIL_TEST_REQUIRE_MODELS").unwrap_or_default();
+    assert!(
+        !required
+            .split(',')
+            .any(|m| m.trim() == name || m.trim() == "all"),
+        "{name} is not downloaded, and AXIL_TEST_REQUIRE_MODELS requires it"
+    );
+    use std::io::Write as _;
+    let _ = writeln!(std::io::stderr(), "skipping: {name} model not downloaded");
+    false
+}
+
+fn model_available() -> bool {
+    model_on_disk(&EmbeddingModel::BgeSmall)
 }
 
 /// Two `decisions` and two `notes` records, all embedded into the default
@@ -148,8 +182,8 @@ fn scoped_reembed_preserves_other_tables_vectors() {
         .iter()
         .all(Option::is_some));
     assert!(
-        !backup_path(&db).exists(),
-        "backup must be removed after success"
+        !rebuild_path(&db).exists(),
+        "the replacement is moved into place"
     );
 }
 
@@ -197,77 +231,172 @@ fn scoped_reembed_refuses_an_unreadable_vector_store() {
     assert!(!backup_path(&db).exists());
 }
 
-/// A run killed mid-rebuild leaves the original store in the backup slot and
-/// a partial store live. Seed that state: the partial holds a wrong vector
-/// for one note and nothing for the other.
-fn simulate_interrupted_reembed(db: &Path, original: &[(RecordId, Vec<f32>)]) {
-    {
-        let engine = VectorEngine::open(db, DIMS).unwrap();
-        for (id, v) in original {
-            engine.add(id.clone(), v).unwrap();
-        }
-    }
-    std::fs::rename(vec_path(db), backup_path(db)).unwrap();
-    let partial = VectorEngine::open(db, DIMS).unwrap();
-    let mut wrong = vec![0.0_f32; DIMS];
-    wrong[DIMS - 1] = 1.0;
-    partial.add(original[0].0.clone(), &wrong).unwrap();
-}
-
 fn unit(i: usize) -> Vec<f32> {
     let mut v = vec![0.0_f32; DIMS];
     v[i] = 1.0;
     v
 }
 
+/// A store with `vectors` in it, as the live store of `db`.
+fn live_store(db: &Path, vectors: &[(RecordId, Vec<f32>)]) {
+    let engine = VectorEngine::open(db, DIMS).unwrap();
+    for (id, v) in vectors {
+        engine.add(id.clone(), v).unwrap();
+    }
+}
+
+/// Earlier versions rebuilt the store in place, with the original set aside
+/// as `<db>.reembed-bak`. After one of them was interrupted, which copy is
+/// right depends on what was written since, so a re-embed stops and says so
+/// rather than guess, and touches neither.
 #[test]
-fn reembed_restores_the_backup_of_an_interrupted_run_before_anything_else() {
-    // Model-free: an empty work set returns before any embedding, which is
-    // exactly when a leftover backup used to be ignored.
+fn reembed_refuses_the_backup_an_earlier_version_left() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("memory.axil");
     let a = store(&db, "notes", r#"{"summary":"first note"}"#, &[]);
-    let b = store(&db, "notes", r#"{"summary":"second note"}"#, &[]);
-    simulate_interrupted_reembed(&db, &[(a.clone(), unit(0)), (b.clone(), unit(1))]);
+    live_store(&db, &[(a.clone(), unit(0))]);
+    std::fs::rename(vec_path(&db), backup_path(&db)).unwrap();
+    live_store(&db, &[(a.clone(), unit(1))]);
 
+    for args in [
+        &["reembed"][..],
+        &["reembed", "--field", "summary"][..],
+        &["reembed", "--field", "no_such_field", "--table", "notes"][..],
+    ] {
+        let (_, stderr, code) = axil(&db, args);
+        assert_ne!(code, 0, "{args:?} must stop");
+        assert!(
+            stderr.contains("earlier version") && stderr.contains("reembed-bak"),
+            "{args:?}: {stderr}"
+        );
+    }
+    assert_eq!(stored_vectors(&db, &[&a]), vec![Some(unit(1))]);
+    let backup = VectorEngine::open_space_at(&backup_path(&db), None).unwrap();
+    assert_eq!(backup.get_vector(&a).unwrap(), Some(unit(0)));
+}
+
+/// A re-embed of a database that isn't there names it, and creates nothing:
+/// neither a database nor the lock file beside it, whose directory may not
+/// exist either.
+#[test]
+fn reembed_of_a_missing_database_names_it() {
+    let dir = tempfile::tempdir().unwrap();
+    for db in [
+        dir.path().join("memory.axil"),
+        dir.path().join("no-such-dir").join("memory.axil"),
+    ] {
+        for args in [&["reembed"][..], &["reembed", "--field", "summary"][..]] {
+            let output = Command::new(env!("CARGO_BIN_EXE_axil"))
+                .arg("--db")
+                .arg(&db)
+                .args(args)
+                .env_remove("AXIL_DB")
+                .current_dir(dir.path())
+                .output()
+                .expect("failed to run axil");
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert_ne!(output.status.code(), Some(0), "{args:?} must stop");
+            assert!(
+                stderr.contains("no database at") && stderr.contains(&*db.to_string_lossy()),
+                "{args:?}: {stderr}"
+            );
+        }
+        assert!(!db.exists());
+        assert!(!lock_path(&db).exists());
+    }
+    assert!(!dir.path().join("no-such-dir").exists());
+}
+
+/// A run killed mid-rebuild leaves the live store as it was, and an
+/// unfinished replacement beside it, which no open reads and the next
+/// re-embed deletes.
+#[test]
+fn reembed_deletes_the_replacement_an_interrupted_run_left() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("memory.axil");
+    let a = store(&db, "notes", r#"{"summary":"first note"}"#, &[]);
+    live_store(&db, &[(a.clone(), unit(0))]);
+    {
+        let partial =
+            axil_vector::create_store_for_model_at(&rebuild_path(&db), &EmbeddingModel::BgeSmall)
+                .unwrap();
+        partial.add(a.clone(), &unit(1)).unwrap();
+    }
+
+    // Model-free: an empty work set returns before any embedding.
     let (_, stderr, code) = axil(
         &db,
-        &[
-            "reembed",
-            "--model",
-            "bge-small",
-            "--field",
-            "no_such_field",
-            "--table",
-            "notes",
-        ],
+        &["reembed", "--field", "no_such_field", "--table", "notes"],
     );
     assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(stderr.contains("interrupted re-embed"), "{stderr}");
+    assert!(!rebuild_path(&db).exists());
+    assert_eq!(stored_vectors(&db, &[&a]), vec![Some(unit(0))]);
+}
+
+/// While one re-embed runs, a second stops before it reads or deletes
+/// anything: it would otherwise take the running one's replacement for an
+/// interrupted run's and delete it, or move its own over the live store. The
+/// lock is held here the way the running one holds it.
+#[test]
+fn a_second_reembed_stops_while_one_runs() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("memory.axil");
+    let a = store(&db, "notes", r#"{"summary":"first note"}"#, &[]);
+    live_store(&db, &[(a.clone(), unit(0))]);
+    {
+        let partial =
+            axil_vector::create_store_for_model_at(&rebuild_path(&db), &EmbeddingModel::BgeSmall)
+                .unwrap();
+        partial.add(a.clone(), &unit(1)).unwrap();
+    }
+    let running = std::fs::File::create(lock_path(&db)).unwrap();
+    running.lock().unwrap();
+
+    for args in [
+        &["reembed"][..],
+        &["reembed", "--field", "no_such_field", "--table", "notes"][..],
+    ] {
+        let (_, stderr, code) = axil(&db, args);
+        assert_ne!(code, 0, "{args:?} must stop");
+        assert!(
+            stderr.contains("another `axil reembed`"),
+            "{args:?}: {stderr}"
+        );
+    }
     assert!(
-        !backup_path(&db).exists(),
-        "the backup must be moved back, not left behind"
+        rebuild_path(&db).exists(),
+        "the running one's replacement is left alone"
     );
-    assert_eq!(
-        stored_vectors(&db, &[&a, &b]),
-        vec![Some(unit(0)), Some(unit(1))],
-        "the original vectors must be live again"
+    assert_eq!(stored_vectors(&db, &[&a]), vec![Some(unit(0))]);
+
+    // Once it is gone, the next one goes ahead (model-free: an empty work
+    // set returns before any embedding), and releases the lock as it ends.
+    drop(running);
+    let (_, stderr, code) = axil(
+        &db,
+        &["reembed", "--field", "no_such_field", "--table", "notes"],
     );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(!rebuild_path(&db).exists());
+    assert!(!lock_path(&db).exists());
 }
 
 #[test]
-fn scoped_reembed_after_an_interrupted_run_carries_over_the_original_vectors() {
+fn scoped_reembed_after_an_interrupted_run_keeps_the_live_vectors() {
     if !model_available() {
         return;
     }
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("memory.axil");
     let (decisions, notes) = seed_embedded(&db);
-    let original: Vec<(RecordId, Vec<f32>)> = notes
-        .iter()
-        .zip(stored_vectors(&db, &[&notes[0], &notes[1]]))
-        .map(|(id, v)| (id.clone(), v.unwrap()))
-        .collect();
-    simulate_interrupted_reembed(&db, &original);
+    let original = stored_vectors(&db, &[&notes[0], &notes[1]]);
+    {
+        let partial =
+            axil_vector::create_store_for_model_at(&rebuild_path(&db), &EmbeddingModel::BgeSmall)
+                .unwrap();
+        partial.add(notes[0].clone(), &unit(DIMS - 1)).unwrap();
+    }
 
     let (stdout, stderr, code) = axil(
         &db,
@@ -283,14 +412,11 @@ fn scoped_reembed_after_an_interrupted_run_carries_over_the_original_vectors() {
     );
     assert_eq!(code, 0, "reembed failed: {stderr}");
     assert_eq!(parse_json(&stdout)["preserved_other_tables"], 2);
-    assert!(!backup_path(&db).exists());
+    assert!(!rebuild_path(&db).exists());
     assert_eq!(
         stored_vectors(&db, &[&notes[0], &notes[1]]),
-        original
-            .into_iter()
-            .map(|(_, v)| Some(v))
-            .collect::<Vec<_>>(),
-        "other tables must come from the backup, not the half-built store"
+        original,
+        "other tables come from the live store, not the unfinished one"
     );
     assert!(stored_vectors(&db, &[&decisions[0], &decisions[1]])
         .iter()

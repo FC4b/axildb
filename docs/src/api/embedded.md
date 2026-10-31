@@ -18,6 +18,19 @@ let db = Axil::open("./memory.axil")
     .with_fts_engine()?
     .build()?;
 
+// The vector store records the model that built it. A store that holds
+// another model's vectors is not attached: `db.degraded_engines()` says why,
+// and vector search fails with that reason. A store opened raw and given a
+// model (`VectorEngine::open(path, dims)?.with_model(model)`) is checked the
+// same way when it is attached. A store written before stores recorded their
+// model is taken for the model passed in when that model has the store's
+// width and the database's axil.toml names no model: any built-in but granite
+// (which came after model records), or a custom model. When axil.toml names a
+// model, only that one takes such a store over, and only a built-in other
+// than granite; any other model passed in is refused (see "Switching
+// embedding models" in the installation guide). The next vector written
+// records the model.
+
 // Insert
 let record = db.insert("sessions", json!({
     "summary": "Fixed auth timeout bug",

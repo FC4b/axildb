@@ -64,7 +64,8 @@ pub fn companion_path(base: &Path, suffix: &str) -> PathBuf {
 
 /// Suffixes of the other files Axil derives from a database path: the FTS
 /// rebuild's swap directories, the mmap vector file, the branch lock,
-/// snapshots, the prefetch cache, and the re-embed backup of the vector store.
+/// snapshots, the prefetch cache, the vector store a re-embed builds and the
+/// lock it holds, and the vector store backup earlier re-embeds left.
 const DERIVED_SUFFIXES: &[&str] = &[
     ".fts.old",
     ".fts.new",
@@ -72,6 +73,8 @@ const DERIVED_SUFFIXES: &[&str] = &[
     ".branch-lock",
     ".snapshots",
     ".prefetch-cache",
+    ".vec-rebuild",
+    ".reembed-lock",
     ".reembed-bak",
 ];
 
@@ -212,6 +215,34 @@ pub struct HealReport {
     pub weekly_summaries_created: usize,
     /// Daily summaries purged after weekly consolidation.
     pub daily_summaries_purged: usize,
+}
+
+/// What [`Axil::embed_vector_owners`] embedded, by kind of row.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+#[non_exhaustive]
+pub struct OwnerReembedReport {
+    /// Memory records: every one insert embeds, whether it had a vector or
+    /// not.
+    pub memory: usize,
+    /// Rows of the internal tables whose writers embed them (code index,
+    /// dependency docs, recall chunks, checkpoints) that had a vector.
+    pub internal: usize,
+    /// Other rows that had a vector, embedded from their searchable text.
+    pub other: usize,
+    /// Rows that had a vector but carry no text to embed (a vector the caller
+    /// supplied): they are left without one.
+    pub dropped: usize,
+    /// Rows whose embedding failed.
+    pub failed: usize,
+    /// The first embedding failure, when there was one.
+    pub first_error: Option<String>,
+}
+
+impl OwnerReembedReport {
+    /// Rows that got a vector.
+    pub fn embedded(&self) -> usize {
+        self.memory + self.internal + self.other
+    }
 }
 
 /// Builder for configuring and opening an Axil database.
@@ -360,7 +391,15 @@ impl AxilBuilder {
     }
 
     /// Register a vector index plugin for vector search.
+    ///
+    /// An index that refuses the embedding model given to it
+    /// ([`VectorIndex::refusal`]) is not attached; the refusal is recorded as
+    /// a degraded engine ([`Axil::degraded_engines`]) instead.
     pub fn with_vector_index(mut self, index: Box<dyn VectorIndex>) -> Self {
+        if let Some(refusal) = index.refusal() {
+            self.degraded_engines.push(refusal);
+            return self;
+        }
         self.vector_index = Some(Arc::from(index));
         self
     }
@@ -387,10 +426,16 @@ impl AxilBuilder {
     /// Register a plugin that provides both vector indexing and text embedding.
     ///
     /// Convenience for plugins like `VectorEngine` that implement both traits.
+    /// A plugin that refuses the embedding model given to it is recorded as a
+    /// degraded engine instead, as in [`AxilBuilder::with_vector_index`].
     pub fn with_vector_and_embedder<T>(mut self, plugin: T) -> Self
     where
         T: VectorIndex + TextEmbedder + 'static,
     {
+        if let Some(refusal) = plugin.refusal() {
+            self.degraded_engines.push(refusal);
+            return self;
+        }
         let arc = Arc::new(plugin);
         self.vector_index = Some(arc.clone());
         self.embedder = Some(arc);
@@ -793,26 +838,125 @@ fn prefix_overlaps(a: &str, b: &str) -> bool {
 /// `detect_problems` report an error rather than a warning.
 const EMBEDDING_GAP_ERROR_RATIO: f64 = 0.10;
 
-/// Internal tables whose writers embed one text field of every row into the
-/// default vector index, with that field.
+/// How the writer of an internal table builds the text it embeds for a row.
+#[derive(Debug, Clone, Copy)]
+enum EmbeddedText {
+    /// One field's text.
+    Field(&'static str),
+    /// `"{label}: {body}"`, from two fields.
+    Labeled {
+        label: &'static str,
+        body: &'static str,
+    },
+}
+
+/// An internal table whose writer embeds its rows into the default vector
+/// index (see [`EMBEDDED_TABLES`]).
+#[derive(Debug)]
+struct EmbeddedTable {
+    table: &'static str,
+    text: EmbeddedText,
+    /// Whether `doctor` counts the table's rows that have no vector and
+    /// `axil heal --embed-internal` gives them one. Every table's rows are
+    /// re-embedded by a rebuild under another model either way.
+    reconciled: bool,
+}
+
+/// Internal tables whose writers embed their rows into the default vector
+/// index, and the text each embeds: the one source of that text. Writers
+/// embed through [`Axil::embed_row`], which reads it from here, and so do
+/// a rebuild under another model ([`Axil::embed_vector_owners`]) and
+/// reconciliation, so a row is never re-embedded from other text than its
+/// writer's.
 ///
 /// `_` tables skip the insert-time auto-embed, so their writers embed rows
 /// themselves and ignore a failure. A row written while the vector store was
 /// unavailable therefore never gets a vector, unless reconciliation knows
-/// which text its writer embeds. Each entry must match its writer: the
-/// indexer (proxies, file / module / project summaries), dep-docs ingest,
-/// recall chunking in this file, and checkpoints.
-const EMBEDDED_INTERNAL_FIELDS: &[(&str, &str)] = &[
-    ("_idx_code_proxies", "proxy_text"),
-    ("_idx_files", "summary"),
-    ("_idx_modules", "summary"),
-    ("_idx_project", "summary"),
-    ("_dep_docs", "content"),
-    (RECALL_CHUNKS_TABLE, "content"),
-    ("_checkpoint_records", "summary"),
+/// which text its writer embeds. The writers: the indexer (proxies, file /
+/// module / project summaries), dep-docs ingest, recall chunking in this
+/// file, checkpoints, the answer cache, and the memory types (episodes,
+/// sessions, entity facts, procedures, preferences).
+const EMBEDDED_TABLES: &[EmbeddedTable] = &[
+    EmbeddedTable {
+        table: "_idx_code_proxies",
+        text: EmbeddedText::Field("proxy_text"),
+        reconciled: true,
+    },
+    EmbeddedTable {
+        table: "_idx_files",
+        text: EmbeddedText::Field("summary"),
+        reconciled: true,
+    },
+    EmbeddedTable {
+        table: "_idx_modules",
+        text: EmbeddedText::Field("summary"),
+        reconciled: true,
+    },
+    EmbeddedTable {
+        table: "_idx_project",
+        text: EmbeddedText::Field("summary"),
+        reconciled: true,
+    },
+    EmbeddedTable {
+        table: "_dep_docs",
+        text: EmbeddedText::Field("content"),
+        reconciled: true,
+    },
+    EmbeddedTable {
+        table: RECALL_CHUNKS_TABLE,
+        text: EmbeddedText::Field("content"),
+        reconciled: true,
+    },
+    EmbeddedTable {
+        table: "_checkpoint_records",
+        text: EmbeddedText::Field("summary"),
+        reconciled: true,
+    },
+    // The cache matches a question against the questions it has answered,
+    // so it embeds the question alone, never the answer.
+    EmbeddedTable {
+        table: "_cache_entries",
+        text: EmbeddedText::Field("question"),
+        reconciled: false,
+    },
+    EmbeddedTable {
+        table: "_episodes",
+        text: EmbeddedText::Field("summary"),
+        reconciled: false,
+    },
+    EmbeddedTable {
+        table: "_sessions",
+        text: EmbeddedText::Field("summary"),
+        reconciled: false,
+    },
+    // Entity facts; the rows entity extraction writes have no fact.
+    EmbeddedTable {
+        table: "_entities",
+        text: EmbeddedText::Labeled {
+            label: "entity",
+            body: "fact",
+        },
+        reconciled: false,
+    },
+    EmbeddedTable {
+        table: "_procedures",
+        text: EmbeddedText::Labeled {
+            label: "pattern_name",
+            body: "description",
+        },
+        reconciled: false,
+    },
+    EmbeddedTable {
+        table: "_preferences",
+        text: EmbeddedText::Labeled {
+            label: "key",
+            body: "value",
+        },
+        reconciled: false,
+    },
 ];
 
-/// What restoring the vectors of [`EMBEDDED_INTERNAL_FIELDS`] rows changes,
+/// What restoring the vectors of reconciled [`EMBEDDED_TABLES`] rows changes,
 /// said wherever `doctor` and `detect_problems` report rows without one, so
 /// nobody backfills them blindly. The dogfood figure is
 /// `benchmarks/results/dogfood-recall-2026-10-14-recall-skips-code-vectors-after.json`
@@ -822,8 +966,8 @@ const INTERNAL_EMBED_EFFECT: &str = "embedding them changes rankings: code-searc
      compete with memories in recall. Memory recall passes over code-index vectors: on the \
      dogfood eval (snap-prefix, 2026-10-14) restoring 2,962 of them left it unchanged";
 
-/// Rows of [`EMBEDDED_INTERNAL_FIELDS`] tables that
-/// [`Axil::reembed_missing_internal`] embeds and commits together.
+/// Rows of [`EMBEDDED_TABLES`] tables that [`Axil::reembed_missing_internal`]
+/// and [`Axil::embed_vector_owners`] embed and commit together.
 const REEMBED_BATCH: usize = 32;
 
 /// Rows missing from the default vector index, from one scan
@@ -837,7 +981,7 @@ struct EmbeddingGap {
     missing: usize,
     /// Memory records the insert gate embeds.
     embeddable: usize,
-    /// `(table, missing, rows)` for each [`EMBEDDED_INTERNAL_FIELDS`] table
+    /// `(table, missing, rows)` for each reconciled [`EMBEDDED_TABLES`] table
     /// with at least one row without a vector.
     internal: Vec<(&'static str, usize, usize)>,
 }
@@ -1201,15 +1345,57 @@ impl Axil {
         !record.table.starts_with('_')
     }
 
-    /// The [`EMBEDDED_INTERNAL_FIELDS`] entry for a row of an internal table
-    /// whose writer embeds it, as `(table, text)`: `None` for any other table,
-    /// or when the field is absent or empty (the writer embedded nothing).
-    fn embedded_internal_text(record: &Record) -> Option<(&'static str, &str)> {
-        let (table, field) = EMBEDDED_INTERNAL_FIELDS
-            .iter()
-            .find(|(table, _)| *table == record.table)?;
-        let text = record.data.get(*field)?.as_str()?;
-        (!text.is_empty()).then_some((*table, text))
+    /// The [`EMBEDDED_TABLES`] entry for a row of an internal table whose
+    /// writer embeds it and the text it embeds, as `(table, text)`: `None`
+    /// for any other table, or when the row lacks that text (the writer
+    /// embedded nothing).
+    fn writer_text(record: &Record) -> Option<(&'static EmbeddedTable, String)> {
+        let entry = EMBEDDED_TABLES.iter().find(|e| e.table == record.table)?;
+        let field = |name: &str| record.data.get(name).and_then(Value::as_str);
+        let text = match entry.text {
+            EmbeddedText::Field(name) => field(name)?.to_string(),
+            EmbeddedText::Labeled { label, body } => {
+                let (label, body) = (field(label)?, field(body)?);
+                if body.is_empty() {
+                    return None;
+                }
+                format!("{label}: {body}")
+            }
+        };
+        (!text.is_empty()).then_some((entry, text))
+    }
+
+    /// [`Axil::writer_text`] for the tables reconciliation covers (an entry
+    /// with `reconciled`), as `(table, text)`.
+    fn embedded_internal_text(record: &Record) -> Option<(&'static str, String)> {
+        Self::writer_text(record)
+            .filter(|(entry, _)| entry.reconciled)
+            .map(|(entry, text)| (entry.table, text))
+    }
+
+    /// The text `record` is embedded from: a memory record's searchable text
+    /// (what insert embeds), or for a row of an internal table whose writer
+    /// embeds it, the text that writer embeds ([`EMBEDDED_TABLES`]). `None`
+    /// for a record nothing embeds.
+    pub fn embedding_text(record: &Record) -> Option<String> {
+        if Self::is_embeddable(record) {
+            return Some(crate::util::searchable_text(&record.data));
+        }
+        Self::writer_text(record).map(|(_, text)| text)
+    }
+
+    /// Embed `record` into the default vector index from the text it is
+    /// embedded from ([`Axil::embedding_text`]). Writers of internal tables
+    /// embed their rows through this, so a rebuild under another model,
+    /// which reads the same text, cannot embed a row from other text than its
+    /// writer did. Returns `false`, embedding nothing, for a record nothing
+    /// embeds; errors as [`Axil::embed_text`] does.
+    pub fn embed_row(&self, record: &Record) -> Result<bool> {
+        let Some(text) = Self::embedding_text(record) else {
+            return Ok(false);
+        };
+        self.embed_text(&record.id, &text)?;
+        Ok(true)
     }
 
     /// Rows that should have a vector embedding but don't.
@@ -1367,7 +1553,7 @@ impl Axil {
 
     /// Embed the rows of internal tables whose writers embed them (code
     /// proxies, file / module / project summaries, dep docs, recall chunks,
-    /// checkpoints; see [`EMBEDDED_INTERNAL_FIELDS`]) that have no vector,
+    /// checkpoints; the reconciled [`EMBEDDED_TABLES`]) that have no vector,
     /// with the text their writer embeds. Returns `(embedded, failed)`: rows
     /// that got a vector, and rows that still have none because embedding
     /// them failed.
@@ -1393,14 +1579,18 @@ impl Axil {
         let records = self.storage.scan_all_records()?;
         let indexed: std::collections::HashSet<RecordId> =
             vi.all_ids().unwrap_or_default().into_iter().collect();
-        let missing: Vec<(&RecordId, &str)> = records
+        let missing: Vec<(&RecordId, String)> = records
             .iter()
             .filter(|r| !indexed.contains(&r.id))
             .filter_map(|r| Self::embedded_internal_text(r).map(|(_, text)| (&r.id, text)))
             .collect();
         let (mut embedded, mut failed) = (0usize, 0usize);
         for batch in missing.chunks(REEMBED_BATCH) {
-            if self.embed_fields_batch(batch).is_ok() {
+            let entries: Vec<(&RecordId, &str)> = batch
+                .iter()
+                .map(|(id, text)| (*id, text.as_str()))
+                .collect();
+            if self.embed_fields_batch(&entries).is_ok() {
                 embedded += batch.len();
                 continue;
             }
@@ -1421,6 +1611,105 @@ impl Axil {
             );
         }
         Ok((embedded, failed))
+    }
+
+    /// Embed every row that owns a vector into the default vector index with
+    /// the attached embedder, as rebuilding the store under another embedding
+    /// model needs: every memory record insert embeds (one stored while the
+    /// store was unusable included), and every other row in
+    /// `previous_owners`, the rows that had a vector in the store being
+    /// replaced.
+    ///
+    /// Each row is embedded from the text its writer embeds: a memory
+    /// record's searchable text, the text the writer of an internal table in
+    /// [`EMBEDDED_TABLES`] embeds, and the searchable text of any other row.
+    /// A row with a vector but no text (a vector its caller supplied) is left
+    /// without one and counted as dropped. Internal rows that had no vector
+    /// stay without one: giving them one moves rankings (see
+    /// [`Axil::reembed_missing_internal`]), and a rebuild should not.
+    ///
+    /// Rows are embedded in micro-batches with one `.vec` commit each; a batch
+    /// that fails is retried row by row, so only the rows that cannot be
+    /// embedded count as failed. `progress` gets `(done, total)` after each
+    /// batch. Errors when no vector index or embedder is attached.
+    pub fn embed_vector_owners(
+        &self,
+        previous_owners: &std::collections::HashSet<RecordId>,
+        progress: &mut dyn FnMut(usize, usize),
+    ) -> Result<OwnerReembedReport> {
+        #[derive(Clone, Copy)]
+        enum Kind {
+            Memory,
+            Internal,
+            Other,
+        }
+        self.require_vector_index()?;
+        self.require_embedder()?;
+        let records = self.storage.scan_all_records()?;
+        let mut report = OwnerReembedReport::default();
+        let mut work: Vec<(&RecordId, String, Kind)> = Vec::new();
+        for record in &records {
+            if Self::is_embeddable(record) {
+                let text = crate::util::searchable_text(&record.data);
+                work.push((&record.id, text, Kind::Memory));
+            } else if !previous_owners.contains(&record.id) {
+                continue;
+            } else if let Some((_, text)) = Self::writer_text(record) {
+                work.push((&record.id, text, Kind::Internal));
+            } else {
+                let text = crate::util::searchable_text(&record.data);
+                if text.is_empty() {
+                    report.dropped += 1;
+                } else {
+                    work.push((&record.id, text, Kind::Other));
+                }
+            }
+        }
+
+        let total = work.len();
+        let mut done = 0usize;
+        for batch in work.chunks(REEMBED_BATCH) {
+            let entries: Vec<(&RecordId, &str)> = batch
+                .iter()
+                .map(|(id, text, _)| (*id, text.as_str()))
+                .collect();
+            let embedded: Vec<Kind> = if self.embed_fields_batch(&entries).is_ok() {
+                batch.iter().map(|(_, _, kind)| *kind).collect()
+            } else {
+                let mut embedded = Vec::new();
+                for (id, text, kind) in batch {
+                    match self.embed_text(id, text) {
+                        Ok(()) => embedded.push(*kind),
+                        Err(e) => {
+                            report.failed += 1;
+                            report.first_error.get_or_insert_with(|| e.to_string());
+                        }
+                    }
+                }
+                embedded
+            };
+            for kind in embedded {
+                match kind {
+                    Kind::Memory => report.memory += 1,
+                    Kind::Internal => report.internal += 1,
+                    Kind::Other => report.other += 1,
+                }
+            }
+            done += batch.len();
+            progress(done, total);
+        }
+
+        if total > 0 {
+            self.audit_heal_action(
+                "embed_vector_owners",
+                &format!(
+                    "embedded {} memory records, {} internal-table rows and {} other rows; \
+                     {} failed, {} dropped for want of text",
+                    report.memory, report.internal, report.other, report.failed, report.dropped
+                ),
+            );
+        }
+        Ok(report)
     }
 
     /// Split every record's text into recall units again, with the current
@@ -2145,14 +2434,25 @@ impl Axil {
         self.vector_index
             .as_ref()
             .map(|arc| arc.as_ref())
-            .ok_or_else(|| AxilError::plugin("no vector index configured"))
+            .ok_or_else(|| self.vectors_unavailable("no vector index configured"))
     }
 
     fn require_embedder(&self) -> Result<&dyn TextEmbedder> {
         self.embedder
             .as_ref()
             .map(|arc| arc.as_ref())
-            .ok_or_else(|| AxilError::plugin("no embedder configured — use with_embedder()"))
+            .ok_or_else(|| self.vectors_unavailable("no embedder configured — use with_embedder()"))
+    }
+
+    /// The error for an operation that needs the default vector index or the
+    /// embedder when the handle has none: why the adapter left the vector
+    /// engine off, with its fix, when it recorded that (a store holding
+    /// another embedding model's vectors, an unreadable one), else `missing`.
+    fn vectors_unavailable(&self, missing: &str) -> AxilError {
+        match self.degraded_engines.iter().find(|d| d.engine == "vector") {
+            Some(d) => AxilError::plugin(format!("{}. Fix: {}", d.summary(), d.fix)),
+            None => AxilError::plugin(missing.to_string()),
+        }
     }
 
     /// Embed a record field and store the resulting vector.
@@ -2310,6 +2610,16 @@ impl Axil {
             return Err(AxilError::NotFound(format!("record {id}")));
         }
         self.require_vector_index()?.add(id.clone(), vector)
+    }
+
+    /// Add many pre-computed vectors in one call, which the vector index
+    /// commits together where it can ([`VectorIndex::add_batch`]).
+    ///
+    /// Unlike [`Axil::add_vector`], it does not look each record up first: it
+    /// is for carrying vectors over from another store for records the caller
+    /// has just read, as a rebuild of the vector store does.
+    pub fn add_vectors(&self, items: &[(RecordId, &[f32])]) -> Result<()> {
+        self.require_vector_index()?.add_batch(items)
     }
 
     /// Check whether a vector index is configured.
@@ -3602,7 +3912,7 @@ impl Axil {
             let text = if Self::is_embeddable(record) {
                 Some(crate::util::searchable_text(&record.data))
             } else if *had_vector {
-                Self::embedded_internal_text(record).map(|(_, text)| text.to_string())
+                Self::writer_text(record).map(|(_, text)| text)
             } else {
                 None
             };
@@ -4694,13 +5004,17 @@ impl Axil {
 
         let mut plugins = BTreeMap::new();
         if let Some(ref vi) = self.vector_index {
-            plugins.insert(
-                "vector".to_string(),
-                serde_json::json!({
-                    "count": vi.count(),
-                    "dimensions": vi.dimensions(),
-                }),
-            );
+            let mut vector = serde_json::json!({
+                "count": vi.count(),
+                "dimensions": vi.dimensions(),
+            });
+            if let Some(model) = vi.embedding_model() {
+                vector["model"] = serde_json::json!(model);
+                if vi.embedding_model_assumed() {
+                    vector["model_assumed"] = serde_json::json!(true);
+                }
+            }
+            plugins.insert("vector".to_string(), vector);
         }
         if self.graph_index.is_some() {
             plugins.insert(
@@ -4976,21 +5290,30 @@ impl Axil {
                 .as_ref()
                 .map(|recs| self.embedding_gap(recs))
                 .unwrap_or_default();
+            // Name the model whose vectors these are: two models of the same
+            // width write vectors that cannot be compared.
+            let mut indexed = format!(
+                "{vec_count} vectors indexed, dimensions={}",
+                vi.dimensions()
+            );
+            if let Some(model) = vi.embedding_model() {
+                indexed.push_str(&format!(", model={model}"));
+                if vi.embedding_model_assumed() {
+                    indexed.push_str(
+                        " (assumed: the store predates model records, and names none until \
+                         its next vector write)",
+                    );
+                }
+            }
             if gap.is_empty() {
                 checks.push(CheckResult {
                     name: "vector_index".to_string(),
                     status: Severity::Ok,
-                    detail: format!(
-                        "{vec_count} vectors indexed, dimensions={}",
-                        vi.dimensions()
-                    ),
+                    detail: indexed,
                     fix: None,
                 });
             } else {
-                let mut detail = format!(
-                    "{vec_count} vectors indexed, dimensions={}",
-                    vi.dimensions()
-                );
+                let mut detail = indexed;
                 if gap.missing > 0 {
                     detail.push_str(&format!(
                         "; {} of {} record(s) missing an embedding, so recall can find them \
@@ -8211,6 +8534,8 @@ mod database_file_name_tests {
             "memory.axil.branch-lock",
             "memory.axil.snapshots",
             "memory.axil.prefetch-cache",
+            "memory.axil.vec-rebuild",
+            "memory.axil.reembed-lock",
             "memory.axil.reembed-bak",
             "memory.axil.branch.try-1",
             "memory.axil.branch.try-1.ts",
@@ -8274,6 +8599,59 @@ mod tests {
         let path = dir.path().join("test.axil");
         let db = Axil::open(&path).build().unwrap();
         (db, dir)
+    }
+
+    /// The text each embedding writer embeds, spelled out, so a change to a
+    /// table's entry in `EMBEDDED_TABLES` that its writer would not make
+    /// fails here.
+    #[test]
+    fn rows_are_embedded_from_the_text_their_writers_embed() {
+        let text = |table: &str, data: Value| Axil::embedding_text(&Record::new(table, data));
+        assert_eq!(
+            text(
+                "_cache_entries",
+                json!({"question": "how do I rebuild", "answer": "reembed", "hit_count": 0})
+            )
+            .as_deref(),
+            Some("how do I rebuild")
+        );
+        assert_eq!(
+            text("_preferences", json!({"key": "editor", "value": "vim"})).as_deref(),
+            Some("editor: vim")
+        );
+        assert_eq!(
+            text(
+                "_procedures",
+                json!({"pattern_name": "release", "description": "tag and publish"})
+            )
+            .as_deref(),
+            Some("release: tag and publish")
+        );
+        assert_eq!(
+            text("_entities", json!({"entity": "redb", "fact": "embedded"})).as_deref(),
+            Some("redb: embedded")
+        );
+        // The rows entity extraction writes carry no fact, and get no vector.
+        assert_eq!(text("_entities", json!({"canonical_id": "k"})), None);
+        assert_eq!(
+            text("_sessions", json!({"summary": "fixed the timeout"})).as_deref(),
+            Some("fixed the timeout")
+        );
+        assert_eq!(text("_working", json!({"summary": "scratch"})), None);
+        // Memory records are embedded from their searchable text.
+        assert_eq!(
+            text("decisions", json!({"summary": "use redb everywhere"})).as_deref(),
+            Some("use redb everywhere")
+        );
+        // Reconciliation covers only the tables it covered before.
+        let reconciled = |table: &str, data: Value| {
+            Axil::embedded_internal_text(&Record::new(table, data)).is_some()
+        };
+        assert!(reconciled("_dep_docs", json!({"content": "docs"})));
+        assert!(!reconciled(
+            "_preferences",
+            json!({"key": "k", "value": "v"})
+        ));
     }
 
     /// Entity resolution must see what an older binary (one that does not

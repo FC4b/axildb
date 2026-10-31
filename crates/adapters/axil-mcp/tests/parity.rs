@@ -34,8 +34,15 @@ fn seed_db_with_all_engines(path: &Path) {
     use axil_graph::AxilBuilderGraphExt;
     use axil_vector::AxilBuilderVectorExt;
 
+    // With an embedder compiled in, the server checks the store against the
+    // configured model (bge-small, as no axil.toml names one) and refuses a
+    // store of another width, so the store is sized for it.
+    #[cfg(feature = "embed")]
+    let dims = axil_vector::models::EmbeddingModel::BgeSmall.dimensions();
+    #[cfg(not(feature = "embed"))]
+    let dims = 4;
     let db = Axil::open(path)
-        .with_vector(4)
+        .with_vector(dims)
         .expect("vector plugin")
         .with_graph_engine()
         .expect("graph plugin")

@@ -54,9 +54,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # Embedding / rerank integration tests download ONNX models at runtime;
-      # they run locally only (no CI job runs them). PR CI covers the
-      # model-free storage engines, extensions, and adapters for fast,
-      # deterministic signal.
+      # they run locally only, apart from the reembed tests, which the
+      # embed-smoke job runs. PR CI covers the model-free storage engines,
+      # extensions, and adapters for fast, deterministic signal.
       # axil-vector default features pull in no ONNX/model deps (the HNSW
       # correctness oracle is model-free and deterministic), so it runs here on
       # the per-PR gate alongside the other model-free crates.
@@ -85,6 +85,18 @@ jobs:
       # them here so a dialect field-mapping regression fails the per-PR gate.
       - name: cargo test (axildb model-free — hook dialects, fixtures, wizard)
         run: cargo test -p axildb --no-default-features --features core
+      # The vector store's model check, through the CLI and the MCP server.
+      # A store of another model is refused before any model loads, so these
+      # need the `embed` build (ONNX Runtime, which ort downloads at build
+      # time, as for the default check above) but no model files. The tests
+      # that do embed skip without bge-small, saying so in the log; the
+      # embed-smoke job runs them with it. Only axil-mcp's lib tests: its
+      # parity tests load bge-small.
+      - name: cargo test (vector model identity — CLI + MCP, model-free)
+        run: |
+          cargo test -p axildb --test vector_model_identity --test vector_store_safety --test vector_store_sizing
+          cargo test -p axildb --bin axil -- rebuild_vector_store_tests a_database_whose_store_holds_another_models_vectors_is_not_served
+          cargo test -p axil-mcp --features embed --lib
       # Model-free exact-output cross-surface oracle (API vs AxilQL vs MCP
       # parity). The rest of axil-tests stays out of the per-PR gate — some of
       # those tests need ONNX models.
@@ -260,6 +272,14 @@ jobs:
             echo "::error::store --embed did not create the .vec companion file"
             exit 1
           fi
+      # The tests that rebuild a vector store under bge-small, which the smoke
+      # above has just put on disk. AXIL_TEST_REQUIRE_MODELS turns their skip
+      # without the model into a failure, so a green run means they ran.
+      - name: reembed tests with bge-small
+        shell: bash
+        env:
+          AXIL_TEST_REQUIRE_MODELS: bge-small-en-v1.5
+        run: cargo test -p axildb --test vector_model_identity --test vector_store_safety
 
   semver-checks:
     name: semver gate (public API vs crates.io)

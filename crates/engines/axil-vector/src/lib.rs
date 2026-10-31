@@ -2,13 +2,14 @@ pub mod binary;
 pub mod download;
 pub mod embed;
 pub mod hnsw;
+pub mod identity;
 pub mod mmap;
 pub mod models;
 pub mod quantize;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use parking_lot::{Mutex, RwLock};
 use redb::{
@@ -24,6 +25,7 @@ use axil_core::db::AxilBuilder;
 
 use crate::embed::Embedder;
 use crate::hnsw::{check_vector, HnswIndex, VectorDefect};
+use crate::identity::{check_store_model_at, ModelCheck, ModelMismatch, StoredModel, MODEL_KEY};
 use crate::models::EmbeddingModel;
 
 /// redb table: record_id → raw f32 bytes.
@@ -65,6 +67,22 @@ pub struct VectorEngine {
     /// index at open (unparsable id, malformed bytes, wrong dimensions,
     /// non-finite or all-zero values). Cleared by a purge.
     skipped_at_load: AtomicUsize,
+    /// The embedding model whose vectors the store holds
+    /// ([`EmbeddingModel::store_identity`]), when it was opened for one by
+    /// [`open_store_for_model`]; `None` for a raw open.
+    model: Option<String>,
+    /// Whether the store's metadata names `model` yet. A store taken over at
+    /// open is named by its next vector write, inside that write's
+    /// transaction, so an open that only reads writes nothing.
+    model_recorded: AtomicBool,
+    /// The database whose default store this is, when it is one: a model
+    /// attached to it is checked against the model the store records. `None`
+    /// for a named space, whose vectors come from its caller.
+    default_of: Option<PathBuf>,
+    /// Why the store refuses the model attached to it (see
+    /// [`VectorEngine::with_model`]): it searches, adds and embeds nothing,
+    /// and a database builder records this instead of attaching it.
+    refusal: Option<axil_core::DegradedEngine>,
 }
 
 impl VectorEngine {
@@ -106,7 +124,10 @@ impl VectorEngine {
 
     /// Open (or create) a vector store alongside the given database path.
     ///
-    /// The vector data is stored at `<db_path>.vec`.
+    /// The vector data is stored at `<db_path>.vec`. The store is opened raw,
+    /// for vectors its caller supplies; a model given to it later
+    /// ([`VectorEngine::with_model`], [`VectorEngine::with_embedder`]) is
+    /// checked against the model the store records.
     pub fn open(db_path: impl AsRef<Path>, dimensions: usize) -> axil_core::Result<Self> {
         Self::open_with_config(
             db_path,
@@ -122,7 +143,16 @@ impl VectorEngine {
         db_path: impl AsRef<Path>,
         config: VectorConfig,
     ) -> axil_core::Result<Self> {
-        let vec_path = vector_db_path(db_path.as_ref());
+        let db_path = db_path.as_ref();
+        let mut engine = Self::open_raw(db_path, config)?;
+        engine.default_of = Some(db_path.to_path_buf());
+        Ok(engine)
+    }
+
+    /// [`VectorEngine::open_with_config`], short of naming the database the
+    /// store belongs to.
+    fn open_raw(db_path: &Path, config: VectorConfig) -> axil_core::Result<Self> {
+        let vec_path = vector_db_path(db_path);
         let vector_db = Database::create(&vec_path).map_err(open_err)?;
 
         // An existing store with matching dimensions needs no write: a read
@@ -188,6 +218,10 @@ impl VectorEngine {
             vector_db,
             embedder: None,
             skipped_at_load: AtomicUsize::new(skipped_at_load),
+            model: None,
+            model_recorded: AtomicBool::new(true),
+            default_of: None,
+            refusal: None,
         })
     }
 
@@ -237,7 +271,7 @@ impl VectorEngine {
                 // File exists but carries no dimension (e.g. an interrupted
                 // create): a write path may (re)initialize it, a read may not.
                 (Some(requested), None) => {
-                    Self::write_space_meta_txn(&vector_db, requested)?;
+                    write_meta_txn(&vector_db, requested, None)?;
                     requested
                 }
                 (None, None) => {
@@ -248,42 +282,30 @@ impl VectorEngine {
             }
         } else {
             let requested = dim.expect("checked above: fresh store requires a dimension");
-            Self::write_space_meta_txn(&vector_db, requested)?;
+            write_meta_txn(&vector_db, requested, None)?;
             requested
         };
 
-        let (vectors, skipped_at_load) = load_all_vectors(&vector_db, dimensions)?;
-        warn_unloadable(skipped_at_load, vec_path);
-        let index = HnswIndex::from_vectors(dimensions, vectors);
-        Ok(Self {
-            config: VectorConfig {
-                dimensions,
-                auto_embed_fields: Vec::new(),
-            },
-            index: RwLock::new(index),
-            mutation: Mutex::new(()),
-            vector_db,
-            embedder: None,
-            skipped_at_load: AtomicUsize::new(skipped_at_load),
-        })
-    }
-
-    /// One write txn that ensures a space's tables exist and persists its
-    /// dimension — the only durable write an `open_space_at` ever performs.
-    fn write_space_meta_txn(vector_db: &Database, dimensions: usize) -> axil_core::Result<()> {
-        let txn = vector_db.begin_write().map_err(plugin_err)?;
-        {
-            let _ = txn.open_table(VECTORS_TABLE).map_err(plugin_err)?;
-            let mut meta = txn.open_table(META_TABLE).map_err(plugin_err)?;
-            meta.insert("dimensions", dimensions.to_string().as_bytes())
-                .map_err(plugin_err)?;
-        }
-        txn.commit().map_err(plugin_err)
+        let config = VectorConfig {
+            dimensions,
+            auto_embed_fields: Vec::new(),
+        };
+        Self::load(vector_db, config, vec_path)
     }
 
     /// Attach an embedder for text-to-vector conversion.
+    ///
+    /// On a database's default store the embedder's model is checked against
+    /// the model the store records, as [`open_store_for_model`] checks it. A
+    /// store that holds another model's vectors refuses it: the embedder is
+    /// dropped, the refusal is printed once on stderr, every search, add and
+    /// embed fails with it, and a database builder records it
+    /// ([`axil_core::Axil::degraded_engines`]) instead of attaching the
+    /// engine.
     pub fn with_embedder(mut self, embedder: Embedder) -> Self {
-        self.embedder = Some(embedder);
+        if self.check_model(embedder.model()) {
+            self.embedder = Some(embedder);
+        }
         self
     }
 
@@ -292,7 +314,14 @@ impl VectorEngine {
     /// If the model files are not available locally (missing, or not at
     /// their pinned sizes), the pinned files are downloaded from HuggingFace
     /// on first use.
-    pub fn with_model(self, model: EmbeddingModel) -> Result<Self, String> {
+    ///
+    /// The model is checked against the store first, as in
+    /// [`VectorEngine::with_embedder`]; a store that refuses it comes back
+    /// refused, without the model loaded or downloaded.
+    pub fn with_model(mut self, model: EmbeddingModel) -> Result<Self, String> {
+        if !self.check_model(&model) {
+            return Ok(self);
+        }
         if !matches!(model, EmbeddingModel::Custom { .. })
             && !crate::download::is_model_available(&model)
         {
@@ -315,6 +344,89 @@ impl VectorEngine {
     /// Configured dimensions.
     pub fn dimensions(&self) -> usize {
         self.config.dimensions
+    }
+
+    /// The model name a vector write must record in the store's metadata:
+    /// `Some` until the store names the model it was opened for. Read under
+    /// the mutation lock, with [`VectorEngine::recorded`] after the commit.
+    fn model_to_record(&self) -> Option<&str> {
+        match &self.model {
+            Some(model) if !self.model_recorded.load(Ordering::Acquire) => Some(model.as_str()),
+            _ => None,
+        }
+    }
+
+    /// Note that a committed write recorded `model` (from
+    /// [`VectorEngine::model_to_record`]).
+    fn recorded(&self, model: Option<&str>) {
+        if model.is_some() {
+            self.model_recorded.store(true, Ordering::Release);
+        }
+    }
+
+    /// Check a database's default store against `model` before an embedder
+    /// for it attaches: `false` when the store holds another model's vectors,
+    /// which leaves the engine refused. Takes the store over for `model` the
+    /// way [`open_store_for_model`] does otherwise, so its next write records
+    /// the model.
+    ///
+    /// A store opened for this model already passed the check, and a named
+    /// space holds vectors its caller supplies, so neither is checked.
+    fn check_model(&mut self, model: &EmbeddingModel) -> bool {
+        let name = model.store_identity();
+        if self.model.as_deref() == Some(name.as_str()) {
+            return true;
+        }
+        let Some(db_path) = self.default_of.clone() else {
+            return true;
+        };
+        let stored = self
+            .vector_db
+            .begin_read()
+            .map_err(plugin_err)
+            .and_then(|txn| stored_model_in(&txn));
+        let recorded = match stored {
+            Ok(Some(stored)) => match check_store_model_at(&db_path, &stored, model) {
+                ModelCheck::Recorded => true,
+                ModelCheck::Empty => false,
+                ModelCheck::Legacy => {
+                    identity::note_adopted(&db_path, model);
+                    false
+                }
+                ModelCheck::Refused(mismatch) => {
+                    identity::warn_refused(&db_path, &mismatch);
+                    self.refuse(mismatch.degraded(&db_path));
+                    return false;
+                }
+            },
+            // The open just wrote its dimensions, so this does not happen.
+            Ok(None) => false,
+            Err(e) => {
+                self.refuse(vector_store_unavailable(&db_path, &e));
+                return false;
+            }
+        };
+        self.model = Some(name);
+        self.model_recorded = AtomicBool::new(recorded);
+        true
+    }
+
+    /// Leave the engine refused for `why`, with no embedder.
+    fn refuse(&mut self, why: axil_core::DegradedEngine) {
+        self.embedder = None;
+        self.refusal = Some(why);
+    }
+
+    /// The error every search, add and embed fails with on a refused engine.
+    fn ensure_usable(&self) -> axil_core::Result<()> {
+        match &self.refusal {
+            Some(why) => Err(AxilError::plugin(format!(
+                "{}. Fix: {}",
+                why.summary(),
+                why.fix
+            ))),
+            None => Ok(()),
+        }
     }
 }
 
@@ -359,7 +471,9 @@ impl Engine for VectorEngine {
         // Persist to disk first so a crash can't leave the in-memory index
         // ahead of storage.
         let _mutation = self.mutation.lock();
-        persist_vector(&self.vector_db, &record.id, &vector)?;
+        let model = self.model_to_record();
+        persist_vector(&self.vector_db, &record.id, &vector, model)?;
+        self.recorded(model);
         self.index
             .write()
             .add(record.id.clone(), vector.clone())
@@ -407,13 +521,16 @@ impl VectorIndex for VectorEngine {
     }
 
     fn add(&self, id: RecordId, vector: &[f32]) -> axil_core::Result<()> {
+        self.ensure_usable()?;
         // Validate before touching storage: a rejected write must leave any
         // previously stored vector for this id intact.
         self.validate_vector(&id, vector)?;
         // Persist to disk first so a crash can't leave the in-memory
         // index ahead of storage.
         let _mutation = self.mutation.lock();
-        persist_vector(&self.vector_db, &id, vector)?;
+        let model = self.model_to_record();
+        persist_vector(&self.vector_db, &id, vector, model)?;
+        self.recorded(model);
         self.index
             .write()
             .add(id, vector.to_vec())
@@ -422,6 +539,7 @@ impl VectorIndex for VectorEngine {
     }
 
     fn add_batch(&self, items: &[(RecordId, &[f32])]) -> axil_core::Result<()> {
+        self.ensure_usable()?;
         if items.is_empty() {
             return Ok(());
         }
@@ -433,7 +551,9 @@ impl VectorIndex for VectorEngine {
         // Persist the whole batch to disk first (one fsync) so a crash can't
         // leave the in-memory index ahead of storage, then add to the live index.
         let _mutation = self.mutation.lock();
-        persist_vectors_batch(&self.vector_db, items)?;
+        let model = self.model_to_record();
+        persist_vectors_batch(&self.vector_db, items, model)?;
+        self.recorded(model);
         let mut idx = self.index.write();
         for (id, vector) in items {
             idx.add(id.clone(), vector.to_vec())
@@ -470,6 +590,7 @@ impl VectorIndex for VectorEngine {
     }
 
     fn search(&self, query: &[f32], top_k: usize) -> axil_core::Result<Vec<(RecordId, f32)>> {
+        self.ensure_usable()?;
         // The graph is searchable immediately after an incremental `add` and
         // despite accumulated tombstones, and its one-time lazy build is
         // synchronized inside the index — so search never needs the write
@@ -508,10 +629,25 @@ impl VectorIndex for VectorEngine {
         idx.rebuild_if_needed();
         Ok(idx.len())
     }
+
+    fn embedding_model(&self) -> Option<String> {
+        self.model.clone()
+    }
+
+    fn embedding_model_assumed(&self) -> bool {
+        self.model.is_some()
+            && !self.model_recorded.load(Ordering::Acquire)
+            && self.vector_count() > 0
+    }
+
+    fn refusal(&self) -> Option<axil_core::DegradedEngine> {
+        self.refusal.clone()
+    }
 }
 
 impl TextEmbedder for VectorEngine {
     fn embed(&self, text: &str) -> axil_core::Result<Vec<f32>> {
+        self.ensure_usable()?;
         match &self.embedder {
             Some(e) => e.embed_document(text).map_err(AxilError::plugin),
             None => Err(AxilError::plugin(
@@ -521,6 +657,7 @@ impl TextEmbedder for VectorEngine {
     }
 
     fn embed_query(&self, text: &str) -> axil_core::Result<Vec<f32>> {
+        self.ensure_usable()?;
         match &self.embedder {
             Some(e) => e.embed_query(text).map_err(AxilError::plugin),
             None => Err(AxilError::plugin(
@@ -530,6 +667,7 @@ impl TextEmbedder for VectorEngine {
     }
 
     fn embed_batch(&self, texts: &[&str]) -> axil_core::Result<Vec<Vec<f32>>> {
+        self.ensure_usable()?;
         match &self.embedder {
             #[cfg(feature = "embed")]
             Some(e) => e.embed_documents_batch(texts).map_err(AxilError::plugin),
@@ -706,8 +844,47 @@ fn bytes_to_vector(b: &[u8]) -> Vec<f32> {
         .collect()
 }
 
-/// Persist a single vector to the vector database.
-fn persist_vector(db: &Database, id: &RecordId, vector: &[f32]) -> axil_core::Result<()> {
+/// One write txn that ensures a store's tables exist and persists its
+/// dimension, and the model whose vectors it is for when there is one: the
+/// only durable write opening a store ever performs.
+fn write_meta_txn(
+    vector_db: &Database,
+    dimensions: usize,
+    model: Option<&str>,
+) -> axil_core::Result<()> {
+    let txn = vector_db.begin_write().map_err(plugin_err)?;
+    {
+        let _ = txn.open_table(VECTORS_TABLE).map_err(plugin_err)?;
+        let mut meta = txn.open_table(META_TABLE).map_err(plugin_err)?;
+        meta.insert("dimensions", dimensions.to_string().as_bytes())
+            .map_err(plugin_err)?;
+        if let Some(model) = model {
+            meta.insert(MODEL_KEY, model.as_bytes())
+                .map_err(plugin_err)?;
+        }
+    }
+    txn.commit().map_err(plugin_err)
+}
+
+/// Record `model` in the store's metadata within the write transaction
+/// `txn`, when there is one to record.
+fn record_model_in(txn: &redb::WriteTransaction, model: Option<&str>) -> axil_core::Result<()> {
+    if let Some(model) = model {
+        let mut meta = txn.open_table(META_TABLE).map_err(plugin_err)?;
+        meta.insert(MODEL_KEY, model.as_bytes())
+            .map_err(plugin_err)?;
+    }
+    Ok(())
+}
+
+/// Persist a single vector to the vector database, recording `model` in the
+/// same transaction when it is `Some`.
+fn persist_vector(
+    db: &Database,
+    id: &RecordId,
+    vector: &[f32],
+    model: Option<&str>,
+) -> axil_core::Result<()> {
     let bytes = vector_to_bytes(vector);
     let txn = db.begin_write().map_err(plugin_err)?;
     {
@@ -716,17 +893,20 @@ fn persist_vector(db: &Database, id: &RecordId, vector: &[f32]) -> axil_core::Re
             .insert(id.as_str(), bytes.as_slice())
             .map_err(plugin_err)?;
     }
+    record_model_in(&txn, model)?;
     txn.commit().map_err(plugin_err)?;
     Ok(())
 }
 
-/// Persist many vectors to the vector database under a single write transaction.
+/// Persist many vectors to the vector database under a single write
+/// transaction, recording `model` in it when it is `Some`.
 ///
 /// One `begin_write`/`commit` for the whole batch amortizes the per-record
 /// fsync, which dominates the per-chunk ingest cost on boot/scip/deps-refresh.
 fn persist_vectors_batch(
     db: &Database,
     items: &[(RecordId, &[f32])],
+    model: Option<&str>,
 ) -> axil_core::Result<()> {
     let txn = db.begin_write().map_err(plugin_err)?;
     {
@@ -738,6 +918,7 @@ fn persist_vectors_batch(
                 .map_err(plugin_err)?;
         }
     }
+    record_model_in(&txn, model)?;
     txn.commit().map_err(plugin_err)?;
     Ok(())
 }
@@ -926,6 +1107,244 @@ fn stored_dimensions(txn: &redb::ReadTransaction) -> axil_core::Result<usize> {
     }
 }
 
+/// What a store's metadata says about its vectors, read within `txn`: `None`
+/// when it records no dimensions (a store whose creation never committed).
+fn stored_model_in(txn: &redb::ReadTransaction) -> axil_core::Result<Option<StoredModel>> {
+    let meta = match txn.open_table(META_TABLE) {
+        Ok(t) => t,
+        Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
+        Err(e) => return Err(plugin_err(e)),
+    };
+    let dimensions = match meta.get("dimensions").map_err(plugin_err)? {
+        Some(guard) => std::str::from_utf8(guard.value())
+            .map_err(plugin_err)?
+            .parse::<usize>()
+            .map_err(plugin_err)?,
+        None => return Ok(None),
+    };
+    let model = match meta.get(MODEL_KEY).map_err(plugin_err)? {
+        Some(guard) => Some(
+            std::str::from_utf8(guard.value())
+                .map_err(plugin_err)?
+                .to_string(),
+        ),
+        None => None,
+    };
+    let vectors = match txn.open_table(VECTORS_TABLE) {
+        Ok(t) => t.len().map_err(plugin_err)? as usize,
+        Err(redb::TableError::TableDoesNotExist(_)) => 0,
+        Err(e) => return Err(plugin_err(e)),
+    };
+    Ok(Some(StoredModel {
+        dimensions,
+        model,
+        vectors,
+    }))
+}
+
+/// What the default vector store of the database at `db_path` records about
+/// the model whose vectors it holds, read without loading them: `None` when
+/// there is no store.
+///
+/// Like [`probe_vector_store`], it runs the open guard first and repairs a
+/// store that was not closed cleanly. A store with no dimensions recorded is
+/// an error (corrupt), not missing.
+pub fn read_stored_model(db_path: impl AsRef<Path>) -> axil_core::Result<Option<StoredModel>> {
+    axil_core::open_guard(db_path.as_ref());
+    let vec_path = vector_db_path(db_path.as_ref());
+    if !vec_path.exists() {
+        return Ok(None);
+    }
+    let (stored, _repaired) = read_repairing(&vec_path, |txn| stored_model_in(&txn))?;
+    stored.map(Some).ok_or_else(|| {
+        AxilError::plugin(
+            "vector store exists but has no dimensions metadata — file may be corrupt",
+        )
+    })
+}
+
+/// Why `model` must not use the default vector store of the database at
+/// `db_path` (see [`identity`]), read without loading it: `None` when it may,
+/// or when there is no store.
+pub fn store_model_mismatch(
+    db_path: impl AsRef<Path>,
+    model: &EmbeddingModel,
+) -> axil_core::Result<Option<ModelMismatch>> {
+    let db_path = db_path.as_ref();
+    let Some(stored) = read_stored_model(db_path)? else {
+        return Ok(None);
+    };
+    Ok(match check_store_model_at(db_path, &stored, model) {
+        ModelCheck::Refused(mismatch) => Some(mismatch),
+        ModelCheck::Recorded | ModelCheck::Empty | ModelCheck::Legacy => None,
+    })
+}
+
+/// Ids of the records with a vector in the default vector store of the
+/// database at `db_path`, read without loading the vectors: empty when there
+/// is no store. Keys that are not record ids are skipped.
+pub fn stored_vector_ids(db_path: impl AsRef<Path>) -> axil_core::Result<Vec<RecordId>> {
+    axil_core::open_guard(db_path.as_ref());
+    let vec_path = vector_db_path(db_path.as_ref());
+    if !vec_path.exists() {
+        return Ok(Vec::new());
+    }
+    let (ids, _repaired) = read_repairing(&vec_path, |txn| {
+        let table = match txn.open_table(VECTORS_TABLE) {
+            Ok(t) => t,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
+            Err(e) => return Err(plugin_err(e)),
+        };
+        let mut ids = Vec::new();
+        for entry in table.iter().map_err(plugin_err)? {
+            let (key, _) = entry.map_err(plugin_err)?;
+            if let Ok(id) = RecordId::from_string(key.value()) {
+                ids.push(id);
+            }
+        }
+        Ok(ids)
+    })?;
+    Ok(ids)
+}
+
+/// What [`open_store_for_model`] found at a database's default vector store.
+// A refused store is the rare case, so the size difference is not worth a box.
+#[allow(clippy::large_enum_variant)]
+#[non_exhaustive]
+pub enum ModelStore {
+    /// The store holds the model's vectors, or is new or taken over for them
+    /// (see [`identity`]). Open, with no embedder attached yet.
+    Open(VectorEngine),
+    /// The store holds another model's vectors, so it was not loaded.
+    Refused(ModelMismatch),
+}
+
+/// Open (or create) the default vector store of the database at `db_path` for
+/// `model`'s vectors, without loading the model.
+///
+/// A new store records the model at once, and one taken over records it with
+/// its next vector write, so an open that only reads writes nothing. Taking
+/// over a store from before model records for any model but the default says
+/// so once on stderr ([`identity::adoption_notice`]). A store holding another
+/// model's vectors is left unloaded and comes back as [`ModelStore::Refused`],
+/// for [`refuse_vector_store`].
+pub fn open_store_for_model(
+    db_path: impl AsRef<Path>,
+    model: &EmbeddingModel,
+) -> axil_core::Result<ModelStore> {
+    let db_path = db_path.as_ref();
+    let vec_path = vector_db_path(db_path);
+    let name = model.store_identity();
+    let vector_db = Database::create(&vec_path).map_err(open_err)?;
+    let stored = {
+        let txn = vector_db.begin_read().map_err(plugin_err)?;
+        stored_model_in(&txn)?
+    };
+    let recorded = match stored {
+        // A new store, or one whose creation never committed. One that holds
+        // vectors without saying how wide they are or whose they are cannot
+        // be taken for this model's.
+        None => {
+            let rows = {
+                let txn = vector_db.begin_read().map_err(plugin_err)?;
+                match txn.open_table(VECTORS_TABLE) {
+                    Ok(t) => t.len().map_err(plugin_err)?,
+                    Err(redb::TableError::TableDoesNotExist(_)) => 0,
+                    Err(e) => return Err(plugin_err(e)),
+                }
+            };
+            if rows > 0 {
+                return Err(AxilError::plugin(format!(
+                    "{} holds {rows} vector{} but records neither their dimensions nor their \
+                     model, so the file may be corrupt; run `axil --db {} reembed` to rebuild it",
+                    vec_path.display(),
+                    if rows == 1 { "" } else { "s" },
+                    db_path.display()
+                )));
+            }
+            write_meta_txn(&vector_db, model.dimensions(), Some(name.as_str()))?;
+            true
+        }
+        Some(stored) => match check_store_model_at(db_path, &stored, model) {
+            ModelCheck::Recorded => true,
+            ModelCheck::Empty => false,
+            ModelCheck::Legacy => {
+                identity::note_adopted(db_path, model);
+                false
+            }
+            ModelCheck::Refused(mismatch) => return Ok(ModelStore::Refused(mismatch)),
+        },
+    };
+    let config = VectorConfig {
+        dimensions: model.dimensions(),
+        auto_embed_fields: Vec::new(),
+    };
+    let mut engine = VectorEngine::load(vector_db, config, &vec_path)?;
+    engine.model = Some(name);
+    engine.model_recorded = AtomicBool::new(recorded);
+    engine.default_of = Some(db_path.to_path_buf());
+    Ok(ModelStore::Open(engine))
+}
+
+/// Create an empty vector store at exactly `vec_path` for `model`'s vectors,
+/// recording the model at once, without loading the model: the replacement a
+/// rebuild fills beside a database's live default store and then moves into
+/// its place, so the live store serves on, untouched, until the replacement
+/// is complete.
+///
+/// Errors when `vec_path` exists. A path of the form `<db>.vec.<name>` would
+/// be read as a named vector space by every open, so a rebuild must not use
+/// one.
+pub fn create_store_for_model_at(
+    vec_path: &Path,
+    model: &EmbeddingModel,
+) -> axil_core::Result<VectorEngine> {
+    if vec_path.exists() {
+        return Err(AxilError::plugin(format!(
+            "{} already exists",
+            vec_path.display()
+        )));
+    }
+    let name = model.store_identity();
+    let vector_db = Database::create(vec_path).map_err(open_err)?;
+    write_meta_txn(&vector_db, model.dimensions(), Some(name.as_str()))?;
+    let config = VectorConfig {
+        dimensions: model.dimensions(),
+        auto_embed_fields: Vec::new(),
+    };
+    let mut engine = VectorEngine::load(vector_db, config, vec_path)?;
+    engine.model = Some(name);
+    Ok(engine)
+}
+
+/// Leave the default vector store of `builder`'s database detached because
+/// it holds another model's vectors: say so once on stderr, and record it on
+/// the handle ([`axil_core::Axil::degraded_engines`]), where `doctor`, `boot`
+/// and recall report it and where an operation that needs vectors finds the
+/// reason it fails.
+pub fn refuse_vector_store(builder: AxilBuilder, mismatch: &ModelMismatch) -> AxilBuilder {
+    let path = builder.path().to_path_buf();
+    identity::warn_refused(&path, mismatch);
+    builder.with_degraded_engine(mismatch.degraded(&path))
+}
+
+/// Attach the default vector store for `model`'s vectors without loading the
+/// model, creating the store when there is none: for a command that sets the
+/// store up (`init`) or writes raw vectors into it, which embeds nothing.
+///
+/// Checks the store's model as [`AxilBuilderVectorExt::with_embedder_model`]
+/// does, and refuses one that holds another model's vectors the same way.
+pub fn with_model_store(
+    builder: AxilBuilder,
+    model: &EmbeddingModel,
+) -> axil_core::Result<AxilBuilder> {
+    let path = builder.path().to_path_buf();
+    Ok(match open_store_for_model(&path, model)? {
+        ModelStore::Open(engine) => builder.with_vector_and_embedder(engine),
+        ModelStore::Refused(mismatch) => refuse_vector_store(builder, &mismatch),
+    })
+}
+
 // ── AxilBuilder extension ──────────────────────────────────────────
 
 /// Extension trait that adds vector plugin support to [`AxilBuilder`].
@@ -951,6 +1370,12 @@ pub trait AxilBuilderVectorExt {
     ///
     /// Creates a `VectorEngine` with the model's native dimensions and attaches
     /// the embedder for `embed_field()`, `embed_text()`, and `similar_to()`.
+    ///
+    /// A store that holds another model's vectors (see [`identity`]) is not
+    /// attached, and the model is not loaded: the database opens without
+    /// vectors, the refusal is printed once on stderr and recorded on the
+    /// handle ([`axil_core::Axil::degraded_engines`]), and nothing is
+    /// embedded into the store until it is rebuilt.
     fn with_embedder_model(self, model: EmbeddingModel) -> axil_core::Result<Self>
     where
         Self: Sized;
@@ -991,10 +1416,13 @@ impl AxilBuilderVectorExt for AxilBuilder {
 
     fn with_embedder_model(self, model: EmbeddingModel) -> axil_core::Result<Self> {
         let path = self.path().to_path_buf();
-        let dims = model.dimensions();
-        let plugin = VectorEngine::open(&path, dims)?;
-        let plugin = plugin.with_model(model).map_err(AxilError::plugin)?;
-        Ok(self.with_vector_and_embedder(plugin))
+        match open_store_for_model(&path, &model)? {
+            ModelStore::Open(engine) => {
+                let plugin = engine.with_model(model).map_err(AxilError::plugin)?;
+                Ok(self.with_vector_and_embedder(plugin))
+            }
+            ModelStore::Refused(mismatch) => Ok(refuse_vector_store(self, &mismatch)),
+        }
     }
 
 }
@@ -1649,5 +2077,324 @@ mod tests {
         assert!(result.is_err());
         let err = format!("{}", result.err().unwrap());
         assert!(err.contains("dimension mismatch"), "error was: {err}");
+    }
+
+    const BGE: &str = "bge-small-en-v1.5";
+    const GRANITE: &str = "granite-embedding-small-english-r2";
+
+    /// A 384-dimension unit vector along axis `i`.
+    fn unit384(i: usize) -> Vec<f32> {
+        let mut v = vec![0.0; 384];
+        v[i] = 1.0;
+        v
+    }
+
+    /// The model the store's metadata records, read straight from the file.
+    fn recorded_model(path: &Path) -> Option<String> {
+        read_stored_model(path).unwrap().unwrap().model
+    }
+
+    fn opened(store: ModelStore) -> VectorEngine {
+        match store {
+            ModelStore::Open(engine) => engine,
+            ModelStore::Refused(m) => panic!("the store was refused: {m:?}"),
+        }
+    }
+
+    fn refused(store: ModelStore) -> ModelMismatch {
+        match store {
+            ModelStore::Open(_) => panic!("the store must be refused"),
+            ModelStore::Refused(m) => m,
+        }
+    }
+
+    /// A store written before model records: dimensions and one vector.
+    fn legacy_store(path: &Path) {
+        let raw = VectorEngine::open(path, 384).unwrap();
+        raw.add(RecordId::new(), &unit384(1)).unwrap();
+    }
+
+    #[test]
+    fn a_new_store_records_its_model_at_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("new.axil");
+        let model = EmbeddingModel::GraniteSmallR2;
+        let engine = opened(open_store_for_model(&path, &model).unwrap());
+        assert_eq!(engine.embedding_model().as_deref(), Some(GRANITE));
+        drop(engine);
+        let stored = read_stored_model(&path).unwrap().unwrap();
+        assert_eq!(stored.model.as_deref(), Some(GRANITE));
+        assert_eq!((stored.dimensions, stored.vectors), (384, 0));
+    }
+
+    #[test]
+    fn a_store_of_another_model_is_refused_without_being_loaded() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bge.axil");
+        let id = RecordId::new();
+        {
+            let engine = opened(open_store_for_model(&path, &EmbeddingModel::BgeSmall).unwrap());
+            engine.add(id.clone(), &unit384(0)).unwrap();
+        }
+
+        let m = refused(open_store_for_model(&path, &EmbeddingModel::GraniteSmallR2).unwrap());
+        assert_eq!(m.stored.as_deref(), Some(BGE));
+        assert_eq!((m.model.as_str(), m.vectors), (GRANITE, 1));
+        assert_eq!(
+            store_model_mismatch(&path, &EmbeddingModel::GraniteSmallR2).unwrap(),
+            Some(m)
+        );
+
+        // Nothing changed: the store still records bge-small and serves it.
+        assert_eq!(recorded_model(&path).as_deref(), Some(BGE));
+        assert_eq!(
+            store_model_mismatch(&path, &EmbeddingModel::BgeSmall).unwrap(),
+            None
+        );
+        let engine = opened(open_store_for_model(&path, &EmbeddingModel::BgeSmall).unwrap());
+        assert_eq!(engine.get_vector(&id).unwrap(), Some(unit384(0)));
+    }
+
+    #[test]
+    fn a_store_of_another_width_is_refused_not_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("base.axil");
+        {
+            let engine = opened(open_store_for_model(&path, &EmbeddingModel::BgeBase).unwrap());
+            let mut v = vec![0.0; 768];
+            v[3] = 1.0;
+            engine.add(RecordId::new(), &v).unwrap();
+        }
+        let m = refused(open_store_for_model(&path, &EmbeddingModel::BgeSmall).unwrap());
+        assert_eq!((m.stored_dimensions, m.model_dimensions), (768, 384));
+    }
+
+    #[test]
+    fn a_legacy_store_is_recorded_by_its_first_write_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy.axil");
+        legacy_store(&path);
+        assert_eq!(recorded_model(&path), None);
+
+        // The default model takes it over, and an open that only reads
+        // writes nothing.
+        let engine = opened(open_store_for_model(&path, &EmbeddingModel::BgeSmall).unwrap());
+        assert_eq!(engine.vector_count(), 1);
+        assert_eq!(engine.embedding_model().as_deref(), Some(BGE));
+        drop(engine);
+        assert_eq!(recorded_model(&path), None);
+
+        // Its first vector write records the model.
+        let engine = opened(open_store_for_model(&path, &EmbeddingModel::BgeSmall).unwrap());
+        engine
+            .add_batch(&[(RecordId::new(), unit384(2).as_slice())])
+            .unwrap();
+        drop(engine);
+        assert_eq!(recorded_model(&path).as_deref(), Some(BGE));
+
+        // From then on it is bge-small's.
+        refused(open_store_for_model(&path, &EmbeddingModel::GraniteSmallR2).unwrap());
+    }
+
+    #[test]
+    fn a_legacy_store_is_refused_to_granite_but_not_to_a_custom_model_passed_in() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy.axil");
+        legacy_store(&path);
+        let m = refused(open_store_for_model(&path, &EmbeddingModel::GraniteSmallR2).unwrap());
+        assert_eq!(m.stored, None);
+        // No axil.toml names it, so a caller passed it in and embedded with it.
+        let custom = EmbeddingModel::Custom {
+            path: PathBuf::from("/models/mine/model.onnx"),
+            dimensions: 384,
+            pooling: models::PoolingStrategy::Cls,
+            max_seq_len: 512,
+        };
+        let engine = opened(open_store_for_model(&path, &custom).unwrap());
+        assert!(engine.embedding_model_assumed());
+        drop(engine);
+        // Opening only reads: still unrecorded.
+        assert_eq!(recorded_model(&path), None);
+    }
+
+    #[test]
+    fn a_legacy_store_is_taken_over_by_a_pre_identity_model_of_its_width() {
+        // A bge-base database written before model records.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("base.axil");
+        {
+            let raw = VectorEngine::open(&path, 768).unwrap();
+            let mut v = vec![0.0; 768];
+            v[0] = 1.0;
+            raw.add(RecordId::new(), &v).unwrap();
+        }
+        let engine = opened(open_store_for_model(&path, &EmbeddingModel::BgeBase).unwrap());
+        assert_eq!(engine.vector_count(), 1);
+        let mut v = vec![0.0; 768];
+        v[1] = 1.0;
+        engine.add(RecordId::new(), &v).unwrap();
+        drop(engine);
+        assert_eq!(recorded_model(&path).as_deref(), Some("bge-base-en-v1.5"));
+    }
+
+    #[test]
+    fn an_empty_store_goes_to_the_model_that_writes_first() {
+        // Created under the default model (say by `axil init`), then the
+        // config moved to granite before anything was embedded.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("empty.axil");
+        drop(opened(
+            open_store_for_model(&path, &EmbeddingModel::BgeSmall).unwrap(),
+        ));
+        assert_eq!(recorded_model(&path).as_deref(), Some(BGE));
+
+        let engine = opened(open_store_for_model(&path, &EmbeddingModel::GraniteSmallR2).unwrap());
+        engine.add(RecordId::new(), &unit384(4)).unwrap();
+        drop(engine);
+        assert_eq!(recorded_model(&path).as_deref(), Some(GRANITE));
+    }
+
+    #[test]
+    fn a_raw_open_keeps_the_recorded_model_and_names_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("raw.axil");
+        drop(opened(
+            open_store_for_model(&path, &EmbeddingModel::BgeSmall).unwrap(),
+        ));
+        {
+            let raw = VectorEngine::open(&path, 384).unwrap();
+            assert_eq!(raw.embedding_model(), None);
+            raw.add(RecordId::new(), &unit384(5)).unwrap();
+        }
+        assert_eq!(recorded_model(&path).as_deref(), Some(BGE));
+    }
+
+    #[test]
+    fn stored_vector_ids_lists_owners_without_loading_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ids.axil");
+        assert!(stored_vector_ids(&path).unwrap().is_empty());
+        assert_eq!(read_stored_model(&path).unwrap(), None);
+
+        let (a, b) = (RecordId::new(), RecordId::new());
+        {
+            let engine = VectorEngine::open(&path, 384).unwrap();
+            engine.add(a.clone(), &unit384(0)).unwrap();
+            engine.add(b.clone(), &unit384(1)).unwrap();
+        }
+        inject_rows(
+            &vector_db_path(&path),
+            &[("not-a-record-id", vector_to_bytes(&unit384(2)))],
+        );
+        let ids: std::collections::HashSet<RecordId> =
+            stored_vector_ids(&path).unwrap().into_iter().collect();
+        assert_eq!(ids, [a, b].into_iter().collect());
+    }
+
+    #[test]
+    fn a_store_with_vectors_but_no_dimensions_is_not_taken_for_any_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("headless.axil");
+        {
+            let db = redb::Database::create(vector_db_path(&path)).unwrap();
+            let txn = db.begin_write().unwrap();
+            {
+                let mut table = txn.open_table(VECTORS_TABLE).unwrap();
+                let id = RecordId::new();
+                table
+                    .insert(id.as_str(), vector_to_bytes(&unit384(0)).as_slice())
+                    .unwrap();
+            }
+            txn.commit().unwrap();
+        }
+        for model in [EmbeddingModel::BgeSmall, EmbeddingModel::GraniteSmallR2] {
+            let err = match open_store_for_model(&path, &model) {
+                Err(e) => e.to_string(),
+                Ok(_) => panic!("{model} must not take over vectors of unknown width"),
+            };
+            assert!(
+                err.contains("holds 1 vector but") && err.contains("reembed"),
+                "{err}"
+            );
+        }
+        // Nothing was written into it.
+        let db = redb::Database::open(vector_db_path(&path)).unwrap();
+        let txn = db.begin_read().unwrap();
+        assert!(txn.open_table(META_TABLE).is_err(), "no metadata written");
+    }
+
+    #[test]
+    fn a_replacement_store_records_its_model_and_never_overwrites() {
+        let dir = tempfile::tempdir().unwrap();
+        let at = dir.path().join("memory.axil.vec-rebuild");
+        let store = create_store_for_model_at(&at, &EmbeddingModel::GraniteSmallR2).unwrap();
+        assert_eq!(store.embedding_model().as_deref(), Some(GRANITE));
+        store.add(RecordId::new(), &unit384(0)).unwrap();
+        drop(store);
+        let db = Database::open(&at).unwrap();
+        let txn = db.begin_read().unwrap();
+        let stored = stored_model_in(&txn).unwrap().unwrap();
+        assert_eq!(
+            (stored.model.as_deref(), stored.vectors),
+            (Some(GRANITE), 1)
+        );
+        drop(txn);
+        drop(db);
+        assert!(create_store_for_model_at(&at, &EmbeddingModel::GraniteSmallR2).is_err());
+    }
+
+    #[test]
+    fn a_raw_open_given_another_model_refuses_it_without_loading_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("raw.axil");
+        let id = RecordId::new();
+        opened(open_store_for_model(&path, &EmbeddingModel::BgeSmall).unwrap())
+            .add(id.clone(), &unit384(0))
+            .unwrap();
+
+        // granite's files are not needed: the check comes first.
+        let engine = VectorEngine::open(&path, 384)
+            .unwrap()
+            .with_model(EmbeddingModel::GraniteSmallR2)
+            .unwrap();
+        let refusal = engine.refusal().expect("refused");
+        assert!(
+            refusal.reason.contains(BGE) && refusal.reason.contains(GRANITE),
+            "{}",
+            refusal.reason
+        );
+        assert!(refusal.fix.contains("reembed"), "{}", refusal.fix);
+        for err in [
+            engine.add(RecordId::new(), &unit384(1)).unwrap_err(),
+            engine.search(&unit384(0), 1).unwrap_err(),
+            engine.embed("redb").unwrap_err(),
+        ] {
+            assert!(err.to_string().contains(GRANITE), "{err}");
+        }
+        drop(engine);
+        assert_eq!(recorded_model(&path).as_deref(), Some(BGE));
+
+        // Nor is a named space checked: it holds its caller's vectors.
+        let space = VectorEngine::open_space_at(&vector_space_db_path(&path, "fp"), Some(384))
+            .unwrap()
+            .with_model(EmbeddingModel::Custom {
+                path: dir.path().join("missing.onnx"),
+                dimensions: 384,
+                pooling: crate::models::PoolingStrategy::Cls,
+                max_seq_len: 512,
+            });
+        // It goes on to load the model, which with `embed` fails on the
+        // missing file and without it attaches a stub: never a refusal.
+        if cfg!(feature = "embed") {
+            let err = space.err().expect("the model file is missing");
+            assert!(
+                err.contains("model file not found") && err.contains("missing.onnx"),
+                "{err}"
+            );
+        } else {
+            let space = space.expect("a stub embedder attaches");
+            assert!(space.refusal().is_none(), "a named space is never refused");
+            assert!(space.embedder.is_some());
+        }
     }
 }

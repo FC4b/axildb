@@ -203,6 +203,29 @@ pub trait VectorIndex: Engine {
     fn rebuild(&self) -> Result<usize> {
         Ok(self.count())
     }
+
+    /// The embedding model whose vectors the index holds, when it was opened
+    /// for one: two models of the same width make vectors that cannot be
+    /// compared, so `doctor` and `info` name it. Default `None` for indexes
+    /// that hold raw vectors or do not track their model.
+    fn embedding_model(&self) -> Option<String> {
+        None
+    }
+
+    /// Whether [`VectorIndex::embedding_model`] is assumed rather than
+    /// recorded: the index holds vectors from before stores recorded their
+    /// model, and was taken to hold that model's. Default `false`.
+    fn embedding_model_assumed(&self) -> bool {
+        false
+    }
+
+    /// Why the index must not be used, when it refuses the embedding model
+    /// given to it (its store holds another model's vectors): the
+    /// [`AxilBuilder`](crate::db::AxilBuilder) records this as a degraded
+    /// engine instead of attaching the index. Default `None`.
+    fn refusal(&self) -> Option<crate::diagnostics::DegradedEngine> {
+        None
+    }
 }
 
 /// Converts text into embedding vectors.

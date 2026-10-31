@@ -224,7 +224,7 @@ impl<'a> WorkingMemory<'a> {
         let updated_session = self.db.update(session_id, data)?;
 
         if summary.is_some() && self.db.has_vector_index() {
-            let _ = self.db.embed_field(session_id, "summary");
+            let _ = self.db.embed_row(&updated_session);
         }
 
         // Create episode from session.

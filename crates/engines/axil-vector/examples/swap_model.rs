@@ -13,7 +13,7 @@
 //!    record is gone is dropped, as `axil heal --reindex` drops it.
 //! 2. Each owner is embedded into `--to` with `--model`: a memory record's
 //!    `searchable_text`, which insert embeds, or for an internal row the
-//!    field its writer embeds (`EMBEDDED_INTERNAL_FIELDS` in axil-core).
+//!    field its writer embeds (the reconciled `EMBEDDED_TABLES` in axil-core).
 //!
 //! `--to` must be a copy of the same database without its `.vec` file. Put an
 //! `axil.toml` naming the model beside it, so `axil` embeds queries with the
@@ -38,8 +38,8 @@ use axil_vector::models::EmbeddingModel;
 use axil_vector::AxilBuilderVectorExt;
 use serde_json::json;
 
-/// The text each internal table's writer embeds; mirrors
-/// `EMBEDDED_INTERNAL_FIELDS` in axil-core's `db.rs`.
+/// The text each internal table's writer embeds; mirrors the reconciled
+/// entries of `EMBEDDED_TABLES` in axil-core's `db.rs`.
 const INTERNAL_FIELDS: &[(&str, &str)] = &[
     ("_idx_code_proxies", "proxy_text"),
     ("_idx_files", "summary"),

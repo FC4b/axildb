@@ -41,9 +41,9 @@ pub enum EmbeddingModel {
     /// ONNX, 8192-token context.
     ///
     /// ModernBERT backbone (47M parameters), Apache-2.0, [CLS] pooling, no
-    /// query or document prompt. Same width as bge-small, so a store embedded
-    /// with one opens under the other without a dimension error: switching
-    /// between them needs a re-embed all the same.
+    /// query or document prompt. Same width as bge-small, so only the model a
+    /// store records ([`crate::identity`]) tells their stores apart:
+    /// switching between them needs a re-embed all the same.
     ///
     /// Experimental; bge-small remains the default. The supersede (0.92) and
     /// conflict-candidate (0.65) cosine thresholds were tuned on bge-small, and
@@ -107,6 +107,23 @@ impl EmbeddingModel {
                 .and_then(|s| s.to_str())
                 .unwrap_or("custom"),
         }
+    }
+
+    /// The name a vector store records for the model whose vectors it holds
+    /// (see [`crate::identity`]). Two models share it only when they are the
+    /// same model: each built-in model has its own, bge-small-en-v1.5's int8
+    /// export included, and a custom model is named by its ONNX file's path.
+    pub fn store_identity(&self) -> String {
+        match self {
+            Self::Custom { path, .. } => format!("custom:{}", path.display()),
+            other => other.name().to_string(),
+        }
+    }
+
+    /// Resolve the model `axil.toml` names: a built-in model's name or alias,
+    /// in any case, or a model registered with `axil model-add`.
+    pub fn from_config_name(name: &str) -> Option<Self> {
+        Self::from_name(name).or_else(|| load_custom_model(name))
     }
 
     /// Parse a model name string into an EmbeddingModel variant.
@@ -480,5 +497,61 @@ mod tests {
             EmbeddingModel::from_name(named.name()),
             Some(EmbeddingModel::GraniteSmallR2)
         ));
+    }
+
+    /// Every built-in model has a store identity of its own, so a store built
+    /// by one is never taken for another's: the 384-dimension trio above all.
+    #[test]
+    fn store_identities_tell_every_model_apart() {
+        let models = [
+            EmbeddingModel::BgeSmall,
+            EmbeddingModel::BgeSmallInt8,
+            EmbeddingModel::BgeBase,
+            EmbeddingModel::Nomic,
+            EmbeddingModel::BgeM3,
+            EmbeddingModel::GteModernbertBase,
+            EmbeddingModel::GraniteSmallR2,
+        ];
+        let identities: std::collections::HashSet<String> =
+            models.iter().map(EmbeddingModel::store_identity).collect();
+        assert_eq!(identities.len(), models.len(), "{identities:?}");
+        for model in &models {
+            // An identity reads back as its model, so a store's record names
+            // a model the config can name too.
+            let back = EmbeddingModel::from_name(&model.store_identity()).unwrap();
+            assert_eq!(back.store_identity(), model.store_identity());
+        }
+    }
+
+    #[test]
+    fn custom_models_are_identified_by_their_file() {
+        let custom = |path: &str| EmbeddingModel::Custom {
+            path: PathBuf::from(path),
+            dimensions: 384,
+            pooling: PoolingStrategy::Cls,
+            max_seq_len: 512,
+        };
+        // Both files are named model.onnx, so `name()` can't tell them apart.
+        let a = custom("/models/a/model.onnx");
+        let b = custom("/models/b/model.onnx");
+        assert_eq!(a.name(), b.name());
+        assert_ne!(a.store_identity(), b.store_identity());
+        assert_ne!(
+            a.store_identity(),
+            EmbeddingModel::BgeSmall.store_identity()
+        );
+    }
+
+    #[test]
+    fn config_names_resolve_built_ins_in_any_case() {
+        assert!(matches!(
+            EmbeddingModel::from_config_name("Granite-Small"),
+            Some(EmbeddingModel::GraniteSmallR2)
+        ));
+        assert!(matches!(
+            EmbeddingModel::from_config_name("bge-small-en-v1.5"),
+            Some(EmbeddingModel::BgeSmall)
+        ));
+        assert!(EmbeddingModel::from_config_name("no-such-model-registered-anywhere").is_none());
     }
 }

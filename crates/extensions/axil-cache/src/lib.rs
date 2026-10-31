@@ -179,7 +179,9 @@ pub fn put(
     let record = db.insert(TABLE_CACHE_ENTRIES, data)?;
     // Best-effort search indexing: a DB opened without a vector/FTS engine
     // simply won't match this row semantically. The put still succeeds.
-    let _ = db.embed_field(&record.id, FIELD_QUESTION);
+    // Embedded from the text the database registers for this table (the
+    // question), which a rebuild under another model embeds again.
+    let _ = db.embed_row(&record);
     let _ = db.index_text(&record.id, FIELD_QUESTION, &req.question);
     enforce_capacity(db, &record.id)?;
     Ok(record)

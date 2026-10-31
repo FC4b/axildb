@@ -2641,9 +2641,9 @@ fn background_maintenance_runs_in_the_daemon() {
     assert_eq!(tasks, ["health_report", "snapshot"], "{runs}");
 }
 
-/// `reembed` has the database leased before it touches the vector store,
-/// even to put back the copy an interrupted run left: here one it cannot
-/// move into place.
+/// `reembed` has the database leased before it looks at the vector store,
+/// even to find what an interrupted run left: here a copy an earlier version
+/// set aside, which it refuses.
 #[test]
 fn reembed_leases_before_it_moves_the_vector_store() {
     let fx = fixture();
@@ -2655,7 +2655,7 @@ fn reembed_leases_before_it_moves_the_vector_store() {
     let out = fx.axil(&["reembed", "--field", "summary"]);
     assert!(!out.status.success());
     assert!(
-        text(&out.stderr).contains("failed to restore"),
+        text(&out.stderr).contains("earlier version"),
         "{}",
         text(&out.stderr)
     );
