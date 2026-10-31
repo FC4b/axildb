@@ -97,6 +97,79 @@ impl redb::Value for TableCounts {
     }
 }
 
+/// Set by [`defer_table_index_conversion`]: writable opens in this process
+/// refuse a legacy table index rather than convert it.
+static CONVERSION_DEFERRED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// From now on, a writable [`Storage::open`] in this process of a file whose
+/// table index is still in the legacy layout fails with
+/// [`AxilError::TableIndexConversionDeferred`](crate::AxilError::TableIndexConversionDeferred)
+/// and writes nothing, instead of converting it. One of a file not closed
+/// cleanly fails with [`AxilError::RepairDeferred`](crate::AxilError::RepairDeferred)
+/// the same way, instead of repairing it, whatever its layout.
+///
+/// For a process with a time limit it must not overrun, such as a hook's
+/// lookup, which is killed when the hook's time runs out: converting or
+/// repairing a large file takes seconds, and a kill would throw that work
+/// away every time. Another process does it (its next writable open). The
+/// decision is made under the writer lock, so a file that becomes legacy or
+/// unclean between a check and the open is refused too. It lasts for the
+/// rest of the process.
+pub fn defer_table_index_conversion() {
+    CONVERSION_DEFERRED.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether writable opens in this process defer a legacy table index's
+/// conversion ([`defer_table_index_conversion`]).
+fn conversion_deferred() -> bool {
+    #[cfg(test)]
+    if DEFERRED_IN_THIS_THREAD.with(std::cell::Cell::get) {
+        return true;
+    }
+    CONVERSION_DEFERRED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// [`CONVERSION_DEFERRED`] for one test thread, which other tests running
+    /// meanwhile don't see.
+    static DEFERRED_IN_THIS_THREAD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Runs with a database's path after a writable open converted its table
+/// index ([`set_table_index_conversion_observer`]).
+pub type TableIndexConversionObserver = fn(&Path);
+
+static CONVERSION_OBSERVER: std::sync::OnceLock<TableIndexConversionObserver> =
+    std::sync::OnceLock::new();
+
+/// Run `observer` with the database's path after every writable
+/// [`Storage::open`] in this process that converts a legacy table index,
+/// once the conversion is committed. A host sets it to tell its user what
+/// the conversion changes: builds from before it can no longer open the
+/// file. A process sets it once: this returns `false`, and changes nothing,
+/// when one is already set.
+pub fn set_table_index_conversion_observer(observer: TableIndexConversionObserver) -> bool {
+    CONVERSION_OBSERVER.set(observer).is_ok()
+}
+
+/// Where a database file's table index stands, as
+/// [`Storage::table_index_state`] reads it without opening it for writing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TableIndexState {
+    /// The keyed layout (or no table index yet): a writable open converts
+    /// nothing.
+    Keyed,
+    /// The legacy layout: the next writable open converts it.
+    Legacy,
+    /// Not closed cleanly, so it can't be read without a writable open,
+    /// which repairs it first and then converts it if it is in the legacy
+    /// layout. Repairing a large file can take as long as converting it.
+    Unclean,
+}
+
 /// Where a file keeps table membership.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum IndexLayout {
@@ -671,6 +744,11 @@ pub struct Storage {
     /// and nothing else can write the file while either kind of handle has
     /// it open.
     layout: IndexLayout,
+    /// This handle's open repaired the file, which was not closed cleanly.
+    repaired_on_open: bool,
+    /// This handle's open converted the file's table index from the legacy
+    /// layout.
+    converted_on_open: bool,
 }
 
 impl Storage {
@@ -688,9 +766,33 @@ impl Storage {
     /// is of type Table<&str, axil_core::TableCounts (written by a newer
     /// axil; …)>`), rather than reading id lists that no longer change. To
     /// hand a file back to one, see [`Storage::downgrade_table_index`].
+    ///
+    /// In a process that defers both ([`defer_table_index_conversion`]), the
+    /// open of a legacy file, or of one not closed cleanly, fails instead.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         crate::open_guard(path.as_ref());
-        let db = Database::create(path.as_ref())?;
+        let deferred = conversion_deferred();
+        let repaired = std::rc::Rc::new(std::cell::Cell::new(false));
+        let opened = {
+            let repaired = std::rc::Rc::clone(&repaired);
+            // Called before the repair starts, when one is needed: aborting
+            // then writes nothing.
+            redb::Builder::new()
+                .set_repair_callback(move |session| {
+                    repaired.set(true);
+                    if deferred {
+                        session.abort();
+                    }
+                })
+                .create(path.as_ref())
+        };
+        let db = match opened {
+            Ok(db) => db,
+            Err(redb::DatabaseError::RepairAborted) if deferred => {
+                return Err(AxilError::RepairDeferred);
+            }
+            Err(e) => return Err(e.into()),
+        };
 
         #[allow(unused_mut)]
         let mut tables = vec![RECORDS, SLOW_QUERIES, AUDIT_LOG, METRICS_HISTORY];
@@ -729,6 +831,9 @@ impl Storage {
             }
             (complete, layout)
         };
+        if layout == Some(IndexLayout::Legacy) && conversion_deferred() {
+            return Err(AxilError::TableIndexConversionDeferred);
+        }
         if !complete || layout != Some(IndexLayout::Keyed) {
             let txn = db.begin_write()?;
             let created = (|| -> Result<()> {
@@ -748,6 +853,11 @@ impl Storage {
                     return Err(e);
                 }
             }
+            if layout == Some(IndexLayout::Legacy) {
+                if let Some(observe) = CONVERSION_OBSERVER.get() {
+                    observe(path.as_ref());
+                }
+            }
         }
 
         Ok(Self {
@@ -760,7 +870,21 @@ impl Storage {
             cipher: None,
             entity_key_index_off: std::sync::atomic::AtomicBool::new(false),
             layout: IndexLayout::Keyed,
+            repaired_on_open: repaired.get(),
+            converted_on_open: layout == Some(IndexLayout::Legacy),
         })
+    }
+
+    /// Whether this handle's open repaired the file first, since it was not
+    /// closed cleanly. Never for a read-only handle.
+    pub fn repaired_on_open(&self) -> bool {
+        self.repaired_on_open
+    }
+
+    /// Whether this handle's open converted the file's table index from the
+    /// legacy layout ([`Storage::open`]). Never for a read-only handle.
+    pub fn converted_table_index_on_open(&self) -> bool {
+        self.converted_on_open
     }
 
     /// Open an existing database read-only, without taking the exclusive
@@ -792,20 +916,29 @@ impl Storage {
             cipher: None,
             entity_key_index_off: std::sync::atomic::AtomicBool::new(false),
             layout,
+            repaired_on_open: false,
+            converted_on_open: false,
         })
     }
 
-    /// Whether the database at `path` still keeps table membership in the
-    /// legacy layout, which the next writable [`Storage::open`] converts.
+    /// Where the table index of the database at `path` stands: whether the
+    /// next writable [`Storage::open`] converts it ([`TableIndexState`]).
     ///
-    /// Asked through a read-only open, so it writes nothing, and with the
-    /// open guard skipped, so it never asks a process holding the database
-    /// to let go of it. It fails where that open fails: a missing file, one
-    /// a writer holds ([`AxilError::Busy`](crate::AxilError::Busy)), one not
-    /// closed cleanly.
-    pub fn table_index_conversion_pending(path: impl AsRef<Path>) -> Result<bool> {
-        let storage = crate::without_open_guard(|| Self::open_read_only(path))?;
-        Ok(storage.layout == IndexLayout::Legacy)
+    /// Read through a read-only open, so it writes nothing, without the open
+    /// guard, so it never asks a process holding the database to let go of
+    /// it. A file not closed cleanly is [`TableIndexState::Unclean`]. It
+    /// fails where that open fails otherwise: a missing file, one a writer
+    /// holds ([`AxilError::Busy`](crate::AxilError::Busy)).
+    pub fn table_index_state(path: impl AsRef<Path>) -> Result<TableIndexState> {
+        let db = match ReadOnlyDatabase::open(path.as_ref()) {
+            Ok(db) => db,
+            Err(redb::DatabaseError::RepairAborted) => return Ok(TableIndexState::Unclean),
+            Err(e) => return Err(e.into()),
+        };
+        Ok(match detect_index_layout(&db.begin_read()?)? {
+            Some(IndexLayout::Legacy) => TableIndexState::Legacy,
+            Some(IndexLayout::Keyed) | None => TableIndexState::Keyed,
+        })
     }
 
     /// Move a legacy table index (one JSON id list per table) to the keyed
@@ -4159,7 +4292,10 @@ mod tests {
                 Err(AxilError::Busy)
             ));
             drop(ro);
-            assert!(Storage::table_index_conversion_pending(&path).unwrap());
+            assert_eq!(
+                Storage::table_index_state(&path).unwrap(),
+                TableIndexState::Legacy
+            );
 
             assert_eq!(std::fs::read(&path).unwrap(), before, "nothing written");
             assert!(legacy_lists(&path).is_some(), "still legacy");
@@ -4177,13 +4313,13 @@ mod tests {
 
             drop(Storage::open(&path).unwrap());
             assert!(legacy_lists(&path).is_none(), "migrated");
-            assert!(!Storage::table_index_conversion_pending(&path).unwrap());
+            assert_eq!(
+                Storage::table_index_state(&path).unwrap(),
+                TableIndexState::Keyed
+            );
             let storage = Storage::open(&path).unwrap();
             assert!(
-                matches!(
-                    Storage::table_index_conversion_pending(&path),
-                    Err(AxilError::Busy)
-                ),
+                matches!(Storage::table_index_state(&path), Err(AxilError::Busy)),
                 "a file a writer holds is not read"
             );
             assert_eq!(
@@ -4433,6 +4569,122 @@ mod tests {
             assert_eq!(found["redis"], copy);
             assert_ne!(found["redis"], redis);
             assert_index_matches_scan(&storage, "after a shared key");
+        }
+
+        /// A file a writer committed to and never closed (killed, or a
+        /// crash) is told apart from a busy or missing one: only a writable
+        /// open, which repairs it, can read it.
+        #[test]
+        fn a_file_left_open_by_a_killed_writer_reads_as_unclean() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("legacy.axil");
+            sample_legacy(&path);
+            // A writer of the legacy layout, as an older binary is, holds the
+            // file after a commit; a copy of it then is what a kill leaves.
+            let held = Database::create(&path).unwrap();
+            let txn = held.begin_write().unwrap();
+            {
+                let mut index = txn.open_table(LEGACY_TABLE_INDEX).unwrap();
+                let list = index.get("decisions").unwrap().unwrap().value().to_vec();
+                index.insert("decisions", list.as_slice()).unwrap();
+            }
+            txn.commit().unwrap();
+            let left = dir.path().join("left.axil");
+            std::fs::copy(&path, &left).unwrap();
+            drop(held);
+
+            assert_eq!(
+                Storage::table_index_state(&left).unwrap(),
+                TableIndexState::Unclean
+            );
+            assert!(Storage::table_index_state(dir.path().join("missing.axil")).is_err());
+            let storage = Storage::open(&left).unwrap();
+            assert_eq!(storage.count("notes").unwrap(), 5, "repaired and converted");
+            assert!(storage.repaired_on_open());
+            assert!(storage.converted_table_index_on_open());
+            drop(storage);
+            assert_eq!(
+                Storage::table_index_state(&left).unwrap(),
+                TableIndexState::Keyed
+            );
+            let storage = Storage::open(&left).unwrap();
+            assert!(!storage.repaired_on_open());
+            assert!(!storage.converted_table_index_on_open());
+        }
+
+        /// A process that defers the conversion leaves a file not closed
+        /// cleanly unrepaired too, keyed or legacy: the repair can take as
+        /// long. Nothing is written, and another process's open repairs it.
+        #[test]
+        fn a_process_that_defers_the_conversion_leaves_an_unclean_file_unrepaired() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("keyed.axil");
+            let storage = Storage::open(&path).unwrap();
+            storage
+                .insert(&Record::new("notes", json!({ "n": 1 })))
+                .unwrap();
+            drop(storage);
+            let held = Database::create(&path).unwrap();
+            let txn = held.begin_write().unwrap();
+            txn.open_table(TableDefinition::<&str, &str>::new("older_writer"))
+                .unwrap()
+                .insert("wrote", "this")
+                .unwrap();
+            txn.commit().unwrap();
+            let left = dir.path().join("left.axil");
+            std::fs::copy(&path, &left).unwrap();
+            drop(held);
+            assert_eq!(
+                Storage::table_index_state(&left).unwrap(),
+                TableIndexState::Unclean
+            );
+            let before = std::fs::read(&left).unwrap();
+
+            DEFERRED_IN_THIS_THREAD.with(|d| d.set(true));
+            let refused = Storage::open(&left);
+            DEFERRED_IN_THIS_THREAD.with(|d| d.set(false));
+
+            assert!(
+                matches!(refused, Err(AxilError::RepairDeferred)),
+                "{:?}",
+                refused.err()
+            );
+            assert_eq!(std::fs::read(&left).unwrap(), before, "nothing written");
+            assert_eq!(
+                Storage::table_index_state(&left).unwrap(),
+                TableIndexState::Unclean
+            );
+            let storage = Storage::open(&left).unwrap();
+            assert!(storage.repaired_on_open());
+            assert!(!storage.converted_table_index_on_open());
+            assert_eq!(storage.count("notes").unwrap(), 1);
+        }
+
+        /// A process that defers the conversion is refused a legacy file,
+        /// which stays as it was, and still opens a keyed one.
+        #[test]
+        fn a_process_that_defers_the_conversion_is_refused_a_legacy_file() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("legacy.axil");
+            sample_legacy(&path);
+            let before = legacy_lists(&path);
+            let keyed = dir.path().join("keyed.axil");
+            drop(Storage::open(&keyed).unwrap());
+
+            // This thread only: other tests open legacy files meanwhile.
+            DEFERRED_IN_THIS_THREAD.with(|d| d.set(true));
+            let refused = Storage::open(&path);
+            let opened = Storage::open(&keyed);
+            DEFERRED_IN_THIS_THREAD.with(|d| d.set(false));
+
+            assert!(matches!(
+                refused,
+                Err(AxilError::TableIndexConversionDeferred)
+            ));
+            assert!(opened.is_ok());
+            drop(opened);
+            assert!(before.is_some());
+            assert_eq!(legacy_lists(&path), before, "still the legacy lists");
         }
 
         /// A failed build's marker that later entity writes left behind, as

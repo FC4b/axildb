@@ -39,6 +39,26 @@ pub enum AxilError {
     #[error("database busy: already opened for writing by another process")]
     Busy,
 
+    /// A writable open found the table index in the legacy layout, which it
+    /// would convert, and this process leaves that to another one (see
+    /// [`crate::storage::defer_table_index_conversion`]). Nothing was
+    /// written.
+    #[error(
+        "the database's table index is in the legacy layout, and this process leaves \
+         converting it to another axil process"
+    )]
+    TableIndexConversionDeferred,
+
+    /// A writable open found the file not closed cleanly, which it would
+    /// repair first, and this process leaves that to another one (see
+    /// [`crate::storage::defer_table_index_conversion`]). Nothing was
+    /// written.
+    #[error(
+        "the database was not closed cleanly, and this process leaves repairing it to \
+         another axil process"
+    )]
+    RepairDeferred,
+
     /// An import stopped partway through, after the export header was accepted
     /// and one or more records or edges had already been committed.
     ///
