@@ -411,8 +411,12 @@ mod tests {
                         continue;
                     }
                     asks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    // Held from before the reply goes out: a test that has
+                    // its reply and drops the daemon's ends must find this
+                    // one among them, not have it pushed after the drop.
+                    let mut held = held.lock().unwrap();
                     proto::write_json(&mut stream, &reply).unwrap();
-                    held.lock().unwrap().push(stream);
+                    held.push(stream);
                 }
             });
             me
