@@ -8127,6 +8127,13 @@ fn run_cli(cli: Cli) -> i32 {
     }
 }
 
+/// [`run_cli`] short of printing a failure: the command's exit code, or the
+/// error it failed with.
+fn run_command(cli: Cli) -> Result<i32> {
+    let out = Output::for_cli(&cli);
+    process_setup(&cli).and_then(|()| dispatch_command(cli, &out))
+}
+
 /// The line the CLI prints on stderr when a command fails:
 /// `{"error":"<e:#>"}`, the whole context chain on one line.
 fn format_cli_error(e: &anyhow::Error) -> String {

@@ -1455,22 +1455,51 @@ pub(crate) mod tests {
             })
         }
 
-        /// [`in_process`] for a command line that parses, with what the
-        /// command returned in place of its exit code: an error is the one
-        /// `run_cli` would print.
-        fn in_process_result(args: &[&str]) -> (Vec<u8>, Vec<u8>, anyhow::Result<i32>) {
-            let ctx = ReqCtx {
-                stdin: Some(Vec::new()),
-                ..ReqCtx::default()
-            };
-            let args = argv(args);
-            on_cli_stack(move || {
-                capture(ctx, || {
-                    let cli = Cli::try_parse_from(&args).unwrap();
-                    let out = crate::Output::for_cli(&cli);
-                    crate::process_setup(&cli).and_then(|()| crate::dispatch_command(cli, &out))
-                })
-            })
+        /// [`in_process_with`] for a command line that parses, again while
+        /// the command fails on a lock a child of another test holds (see
+        /// [`crate::retry_while_contended`]), each time on a request `ctx`
+        /// makes. What the last run printed, and what it returned in place
+        /// of its exit code: an error is the one `run_cli` would print.
+        fn in_process_retried(
+            ctx: impl Fn() -> ReqCtx,
+            args: &[&str],
+        ) -> (Vec<u8>, Vec<u8>, anyhow::Result<i32>) {
+            let mut printed = (Vec::new(), Vec::new());
+            let result = crate::retry_while_contended(|| {
+                let (ctx, args) = (ctx(), argv(args));
+                let (out, err, result) = on_cli_stack(move || {
+                    capture(ctx, || {
+                        crate::run_command(Cli::try_parse_from(&args).unwrap())
+                    })
+                });
+                printed = (out, err);
+                result
+            });
+            (printed.0, printed.1, result)
+        }
+
+        /// [`in_process_retried`] for a command that must succeed: what it
+        /// printed on stdout.
+        #[track_caller]
+        fn succeeds(ctx: impl Fn() -> ReqCtx, args: &[&str]) -> Vec<u8> {
+            let (out, err, result) = in_process_retried(ctx, args);
+            let printed = format!(
+                "{}{}",
+                String::from_utf8_lossy(&out),
+                String::from_utf8_lossy(&err)
+            );
+            match result {
+                Ok(0) => out,
+                Ok(code) => panic!("{args:?} exited {code}: {printed}"),
+                Err(e) => panic!("{args:?} failed: {e:#}\n{printed}"),
+            }
+        }
+
+        /// [`WarmDb::open`] of a database a handle in this process has just
+        /// let go of, which a child of another test can hold locked for a
+        /// moment (see [`crate::retry_while_contended`]).
+        fn open_warm_db(path: &Path) -> anyhow::Result<WarmDb> {
+            crate::retry_while_contended(|| WarmDb::open(path))
         }
 
         pub(crate) fn copy_dir(from: &Path, to: &Path) {
@@ -1624,19 +1653,11 @@ pub(crate) mod tests {
             // Such a step fails opening the database, before it writes
             // anything, so it runs again.
             let run = |args: &[&str]| {
-                let mut output = String::new();
-                let step = crate::retry_while_contended(|| {
-                    let (out, err, result) = in_process_result(args);
-                    output = format!(
-                        "{}{}",
-                        String::from_utf8_lossy(&out),
-                        String::from_utf8_lossy(&err)
-                    );
-                    result
-                });
-                let code = step
-                    .unwrap_or_else(|e| panic!("fixture step {args:?} failed: {e:#}\n{output}"));
-                assert_eq!(code, 0, "fixture step {args:?} failed: {output}");
+                let piped = || ReqCtx {
+                    stdin: Some(Vec::new()),
+                    ..ReqCtx::default()
+                };
+                succeeds(piped, args);
             };
             run(&["init", db_s]);
             // No vector store: no command may need the embedding model.
@@ -2112,7 +2133,7 @@ pub(crate) mod tests {
                 cases.push((true, raw, Need::Vectors));
             }
 
-            let warm = crate::retry_while_contended(|| WarmDb::open(&db_path)).unwrap();
+            let warm = open_warm_db(&db_path).unwrap();
             let decisions = || warm.db().list("decisions").unwrap().len();
             let before = decisions();
             for (_, args, need) in &cases {
@@ -2170,7 +2191,7 @@ pub(crate) mod tests {
             let _ = std::fs::remove_file(&ts);
             let since = ["--db", db, "since", "1h"];
 
-            let warm = crate::retry_while_contended(|| WarmDb::open(&db_path)).unwrap();
+            let warm = open_warm_db(&db_path).unwrap();
             let err = dispatch_warm(&warm, &since).unwrap_err();
             assert_eq!(
                 err.downcast_ref::<WarmLacks>(),
@@ -2196,7 +2217,7 @@ pub(crate) mod tests {
 
             let (out, err, code) = one_shot(&since, None);
             assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
-            let warm = crate::retry_while_contended(|| WarmDb::open(&path)).unwrap();
+            let warm = open_warm_db(&path).unwrap();
             let (warm_out, _, warm_code) = in_process_with(warm_request(&warm, None), &since);
             assert_eq!((warm_out, warm_code), (out, 0), "served once reopened");
         }
@@ -2215,7 +2236,7 @@ pub(crate) mod tests {
             let db_path = proj.join(".axil/memory.axil");
             let boot = ["--db", db_path.to_str().unwrap(), "boot"];
 
-            let warm = crate::retry_while_contended(|| WarmDb::open(&db_path)).unwrap();
+            let warm = open_warm_db(&db_path).unwrap();
             let (out, _, _) = in_process_with(warm_request(&warm, None), &boot);
             assert!(String::from_utf8_lossy(&out).contains("hello plugin ready"));
             let Ok(path) = warm.release(Duration::from_secs(10)) else {
@@ -2226,7 +2247,7 @@ pub(crate) mod tests {
             assert!(String::from_utf8_lossy(&out).contains("hello plugin ready"));
 
             // Dropping the handle, as well as releasing it, closes it.
-            drop(crate::retry_while_contended(|| WarmDb::open(&path)).unwrap());
+            drop(open_warm_db(&path).unwrap());
             WarmDb::open(&path).unwrap();
         }
 
@@ -2276,7 +2297,7 @@ pub(crate) mod tests {
             let proj = build_fixture(tmp.path());
             let db_path = proj.join(".axil/memory.axil");
             let db = db_path.to_str().unwrap();
-            let warm = crate::retry_while_contended(|| WarmDb::open(&db_path)).unwrap();
+            let warm = open_warm_db(&db_path).unwrap();
             let recall = |timeout_ms: &str| {
                 let ctx = ReqCtx {
                     slow_query_log: false,
@@ -2446,23 +2467,26 @@ pub(crate) mod tests {
             if cfg!(feature = "fts") {
                 reads.push(vec!["--db", db, "fts", "cache"]);
             }
+            // Each command opens the fixture's database, which a child of
+            // another test can hold locked a moment after the fixture's last
+            // step let go of it.
+            let piped = |log: bool| {
+                move || ReqCtx {
+                    slow_query_log: log,
+                    stdin: Some(Vec::new()),
+                    ..ReqCtx::default()
+                }
+            };
             let logged = || {
-                let (out, _, code) = in_process(&["--db", db, "slow-queries"], None);
-                assert_eq!(code, 0);
+                let out = succeeds(piped(true), &["--db", db, "slow-queries"]);
                 serde_json::from_slice::<Vec<serde_json::Value>>(&out)
                     .unwrap()
                     .len()
             };
             for (log, expected) in [(false, 0), (true, reads.len())] {
-                in_process(&["--db", db, "slow-queries", "--clear"], None);
+                succeeds(piped(true), &["--db", db, "slow-queries", "--clear"]);
                 for read in &reads {
-                    let ctx = ReqCtx {
-                        slow_query_log: log,
-                        stdin: Some(Vec::new()),
-                        ..ReqCtx::default()
-                    };
-                    let (_, err, code) = in_process_with(ctx, read);
-                    assert_eq!(code, 0, "{read:?}: {}", String::from_utf8_lossy(&err));
+                    succeeds(piped(log), read);
                 }
                 assert_eq!(logged(), expected, "slow_query_log = {log}");
             }
