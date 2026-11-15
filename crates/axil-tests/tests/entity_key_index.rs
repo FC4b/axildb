@@ -210,17 +210,37 @@ fn the_first_auto_link_builds_the_index_and_opening_does_not() {
 }
 
 /// Writes to a store the way an axil binary that predates the key index
-/// does: the `records` and `table_index` tables, whose layout every version
-/// shares, and nothing else. Such a binary is on the same file whenever the
-/// hooks run the `axil` on PATH while an agent runs a newer build.
+/// does: the `records` table and its JSON id lists in `table_index`, and
+/// nothing else. Such a binary is on the same file whenever the hooks run the
+/// `axil` on PATH while an agent runs a newer build.
+///
+/// Those binaries cannot open a file whose table index this build has moved
+/// to the keyed layout, so their writes land only while the file is still in
+/// theirs: [`hand_back`] puts it there, as it stood when a binary that had
+/// the key index but not the keyed layout last closed it.
 mod older_binary {
     use axil_core::{Record, RecordId};
-    use redb::{ReadableTable, TableDefinition};
+    use redb::{ReadableDatabase, ReadableTable, TableDefinition};
     use serde_json::Value;
     use std::path::Path;
 
     const RECORDS: TableDefinition<&str, &[u8]> = TableDefinition::new("records");
     const TABLE_INDEX: TableDefinition<&str, &[u8]> = TableDefinition::new("table_index");
+
+    /// Convert the file back to the legacy table index.
+    pub fn hand_back(path: &Path) {
+        axil_core::Storage::open(path)
+            .unwrap()
+            .downgrade_table_index()
+            .unwrap();
+    }
+
+    /// What an older binary's open does with the table index first.
+    pub fn open(path: &Path) -> Result<(), redb::TableError> {
+        let db = redb::Database::create(path).unwrap();
+        let txn = db.begin_read().unwrap();
+        txn.open_table(TABLE_INDEX).map(|_| ())
+    }
 
     fn listed(idx: &impl ReadableTable<&'static str, &'static [u8]>, table: &str) -> Vec<String> {
         idx.get(table)
@@ -322,6 +342,7 @@ fn an_older_binarys_new_entities_are_found_not_duplicated() {
         store_summary(&db, "We chose `redis_cache` for SessionCache");
         assert!(db.storage().entity_key_index_ready().unwrap(), "built");
     }
+    older_binary::hand_back(&path);
 
     let older_text = "`kafka_broker` carries AuditEvents";
     let mut older_rows = Vec::new();
@@ -372,6 +393,7 @@ fn an_entity_an_older_binary_deleted_is_recreated_not_dangling() {
         rows[0].id.clone()
     };
 
+    older_binary::hand_back(&path);
     older_binary::delete_entity(&path, &deleted);
 
     let db = open_with_graph(&path);
@@ -391,4 +413,43 @@ fn an_entity_an_older_binary_deleted_is_recreated_not_dangling() {
         .collect();
     assert_eq!(linked, vec![rows[0].id.clone()], "the mention is live");
     assert!(db.storage().entity_key_index_ready().unwrap(), "repaired");
+}
+
+/// Once this build has opened a file writable, an older binary cannot open
+/// it, so it never resolves entities against lists that stopped changing
+/// (which would hide this build's rows from it and mint duplicates). Handed
+/// back, the file opens for it again, listing every row this build wrote.
+#[test]
+fn an_older_binary_is_refused_until_the_file_is_handed_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("mixed.axil");
+    {
+        let db = open_with_graph(&path);
+        store_summary(&db, "We chose `redis_cache` for SessionCache");
+    }
+    let err = older_binary::open(&path).unwrap_err();
+    assert!(
+        err.to_string().contains("upgrade axil"),
+        "the refusal says what to do: {err}"
+    );
+
+    let rows = {
+        let db = open_with_graph(&path);
+        db.storage().list("_entities", usize::MAX, 0).unwrap()
+    };
+    assert!(!rows.is_empty());
+    older_binary::hand_back(&path);
+    older_binary::open(&path).expect("legacy again");
+    let broker = older_binary::insert_entity(&path, json!({ "canonical_id": "kafka_broker" }));
+    let db = open_with_graph(&path);
+    let listed: Vec<RecordId> = db
+        .storage()
+        .list("_entities", usize::MAX, 0)
+        .unwrap()
+        .into_iter()
+        .map(|r| r.id)
+        .collect();
+    let mut expected: Vec<RecordId> = rows.into_iter().map(|r| r.id).collect();
+    expected.push(broker);
+    assert_eq!(listed, expected, "list order kept through both conversions");
 }

@@ -128,6 +128,11 @@ pub fn serve_as_daemon(key: &Path) {
     let _ = SERVING.set(key.to_path_buf());
 }
 
+/// Whether this process is a database's daemon ([`serve_as_daemon`]).
+pub fn serving() -> bool {
+    SERVING.get().is_some()
+}
+
 /// Hold the database at `db` for the rest of this process's life, as a
 /// server that keeps it open does before it opens it.
 pub fn hold(db: &Path) {

@@ -977,8 +977,9 @@ enum Command {
     },
 
     // ── Diagnostics (5b) ───────────────────────────────────────────────
-    /// Quick read-only health check — "is anything wrong right now?".
-    /// For a scored report + fix recommendations use `health-report`.
+    /// Quick health check that changes no memories — "is anything wrong
+    /// right now?". For a scored report + fix recommendations use
+    /// `health-report`.
     Doctor,
 
     /// Deep problem scan — the expensive detectors `doctor` skips
@@ -3609,6 +3610,12 @@ enum HookCommand {
     /// a job queued for another database file.
     #[command(hide = true)]
     Drain,
+    /// Print the storage formats this build reads, one per line, so that a
+    /// newer build's `axil doctor` can tell whether the axil a hook runs can
+    /// open a database it wrote. A build from before this command fails it,
+    /// which reads as none.
+    #[command(hide = true)]
+    Formats,
 }
 
 /// Scheduled task operations (12.3).
@@ -4009,6 +4016,9 @@ fn follow_bridges_for_entity(
             }
             continue;
         }
+        // Opened for writing, since the traversal needs the member's
+        // engines: this converts a member's legacy table index, after which
+        // an older axil (that member's own hooks may run one) can't open it.
         let Ok(remote_db) = open_with_all_detected(&remote_path) else {
             if trace_graph {
                 trace.push(json!({
@@ -4486,6 +4496,344 @@ fn resolve_axil_exe_with(
         return "axil".to_string();
     }
     current_exe().unwrap_or_else(|| "axil".to_string())
+}
+
+/// Storage formats this build writes that builds from before them can't
+/// open, as `axil hook formats` prints them.
+const STORAGE_FORMATS: &[&str] = &["table-index-keyed"];
+
+/// Agent config files, relative to a project (or the home directory, for
+/// user-level ones), where `axil install` wires `axil hook run`.
+const HOOK_CONFIG_FILES: &[&str] = &[
+    ".claude/settings.json",
+    ".claude/settings.local.json",
+    ".codex/hooks.json",
+    ".github/hooks/axil.json",
+    ".factory/hooks.json",
+    ".qwen/settings.json",
+    ".agents/axil-plugin/hooks.json",
+];
+
+/// How long doctor waits for a hook's axil to answer `axil hook formats`.
+const HOOK_PROBE_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The executable an `axil hook run` command starts, as the command names it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HookExe {
+    /// Its first word, or a quoted path; for [`HookExe::unquoted_spaces`],
+    /// the whole path.
+    exe: String,
+    /// The command starts with a path that has a space in it, unquoted
+    /// (`C:\Program Files\axil\axil.exe hook run`): the shell runs only
+    /// its first word.
+    unquoted_spaces: bool,
+}
+
+/// The last component of `path`, split at either separator whatever the
+/// platform: a hook config may come from another one.
+fn last_path_component(path: &str) -> &str {
+    path.rsplit(['/', '\\']).next().unwrap_or(path)
+}
+
+/// Whether the file name `name` starts with `axil`, whatever follows
+/// (`axil`, `axil.exe`, `axil.cmd`, `axil-old`).
+fn looks_like_axil(name: &str) -> bool {
+    name.get(..4)
+        .is_some_and(|start| start.eq_ignore_ascii_case("axil"))
+}
+
+/// Add to `exes` the executable each `axil hook run` command in `value`
+/// starts ([`HookExe`]).
+fn hook_run_exes(value: &Value, exes: &mut Vec<HookExe>) {
+    match value {
+        Value::String(cmd) if is_axil_hook_command(cmd) && cmd.contains(" hook run") => {
+            let cmd = cmd.trim_start();
+            let exe = match cmd.strip_prefix('"') {
+                Some(rest) => HookExe {
+                    exe: rest.split('"').next().unwrap_or_default().to_string(),
+                    unquoted_spaces: false,
+                },
+                None => {
+                    let first = cmd.split_whitespace().next().unwrap_or_default();
+                    let head = cmd[..cmd.find(" hook run").unwrap_or(cmd.len())].trim_end();
+                    // `C:\Program Files\axil\axil.exe hook run`: a first word
+                    // that is the start of a path, and a path that ends in
+                    // an axil after it. `/usr/bin/env axil` ends in `env
+                    // axil`, and `/opt/axil --db x` starts with an axil.
+                    let spaced = head != first
+                        && first.contains(['/', '\\'])
+                        && !looks_like_axil(last_path_component(first))
+                        && looks_like_axil(last_path_component(head));
+                    HookExe {
+                        exe: if spaced { head } else { first }.to_string(),
+                        unquoted_spaces: spaced,
+                    }
+                }
+            };
+            if !exe.exe.is_empty() && !exes.contains(&exe) {
+                exes.push(exe);
+            }
+        }
+        Value::Array(items) => items.iter().for_each(|v| hook_run_exes(v, exes)),
+        Value::Object(map) => map.values().for_each(|v| hook_run_exes(v, exes)),
+        _ => {}
+    }
+}
+
+/// What doctor makes of the executable a hook command starts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum HookExeCheck {
+    /// The axil binary doctor runs to ask it what it opens.
+    Run(PathBuf),
+    /// A wrapper (`bash -lc`, `npx`, `wsl`): not the axil it starts, which
+    /// doctor doesn't look for.
+    Wrapper,
+    /// It starts the hook's axil, or looks like it does, but doctor can't
+    /// tell which axil that is, or won't run it: why.
+    Unverifiable(&'static str),
+}
+
+/// What doctor makes of a hook command's executable ([`HookExeCheck`]).
+/// Doctor runs only an executable named `axil` (`axil.exe` on Windows),
+/// either bare (found on the absolute entries of `PATH`, as the hook finds
+/// it) or an absolute path outside `project`, the directory whose config
+/// names it (`None` for a user-level config): `axil install` writes nothing
+/// else. A repository's config must not make doctor run the repository's
+/// code, and a script or another binary named like axil may start any axil,
+/// or none, so neither is run. One that looks like axil but isn't run is
+/// unverifiable, which doctor warns about: the hooks may run an axil too old
+/// for the database. One that doesn't is a wrapper, not checked.
+fn classify_hook_exe(exe: &HookExe, project: Option<&Path>) -> HookExeCheck {
+    use HookExeCheck::{Run, Unverifiable, Wrapper};
+    if exe.unquoted_spaces {
+        return Unverifiable("is a path with a space in it that the command doesn't quote");
+    }
+    let name = last_path_component(&exe.exe);
+    if !looks_like_axil(name) {
+        return Wrapper;
+    }
+    let (stem, extension) = match name.rsplit_once('.') {
+        Some((stem, extension)) if !stem.is_empty() => (stem, Some(extension)),
+        _ => (name, None),
+    };
+    if !stem.eq_ignore_ascii_case("axil") {
+        return Unverifiable("is not named `axil`");
+    }
+    let binary = match extension {
+        None => true,
+        Some(extension) => cfg!(windows) && extension.eq_ignore_ascii_case("exe"),
+    };
+    if !binary {
+        return Unverifiable("is a script or shim, not the axil binary");
+    }
+    let path = Path::new(&exe.exe);
+    if path.components().count() == 1 {
+        let name = format!("{stem}{}", std::env::consts::EXE_SUFFIX);
+        let found = std::env::var_os("PATH").and_then(|dirs| {
+            std::env::split_paths(&dirs)
+                .filter(|dir| dir.is_absolute())
+                .map(|dir| dir.join(&name))
+                .find(|candidate| candidate.is_file())
+        });
+        return found.map_or(Unverifiable("is not on PATH"), Run);
+    }
+    if !path.is_absolute() {
+        return Unverifiable("is a relative path, which doctor doesn't run");
+    }
+    if !path.is_file() {
+        return Unverifiable("does not exist");
+    }
+    if let Some(project) = project {
+        let real = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        let inside = project.canonicalize().is_ok_and(|p| real.starts_with(p));
+        if inside {
+            return Unverifiable("is inside the project, whose code doctor doesn't run");
+        }
+    }
+    Run(path.to_path_buf())
+}
+
+/// Doctor's `hook_binary` checks: whether each axil the agent hooks run can
+/// open a database this build has written, for the hook configs under
+/// `projects` and the user-level ones under `home`. A hook exits 0 whatever
+/// happens, so that it never blocks the agent, and one whose axil can't
+/// open the database fails without a word: no memory injected, nothing
+/// captured. An axil that is this binary (`this_exe`) is not asked; any
+/// other that doctor may run ([`classify_hook_exe`]) is asked `axil hook
+/// formats`, which builds from before the keyed table index don't have, and
+/// killed after [`HOOK_PROBE_WAIT`]. One doctor can't verify is a warning
+/// too, without being run.
+fn hook_binary_checks(
+    projects: &[&Path],
+    home: Option<&Path>,
+    this_exe: Option<&Path>,
+) -> Vec<axil_core::diagnostics::CheckResult> {
+    use axil_core::diagnostics::{CheckResult, Severity};
+    let mut found: Vec<(HookExe, Option<&Path>, PathBuf)> = Vec::new();
+    let roots = projects
+        .iter()
+        .map(|p| (*p, Some(*p)))
+        .chain(home.map(|h| (h, None)));
+    for (dir, project) in roots {
+        for file in HOOK_CONFIG_FILES {
+            let config = dir.join(file);
+            let Ok(text) = std::fs::read_to_string(&config) else {
+                continue;
+            };
+            let Ok(value) = serde_json::from_str::<Value>(&text) else {
+                continue;
+            };
+            let mut exes = Vec::new();
+            hook_run_exes(&value, &mut exes);
+            for exe in exes {
+                if !found.iter().any(|(e, _, _)| *e == exe) {
+                    found.push((exe, project, config.clone()));
+                }
+            }
+        }
+    }
+    let this = this_exe.and_then(|p| p.canonicalize().ok());
+    let mut checks = Vec::new();
+    for (hook_exe, project, config) in found {
+        let exe = hook_exe.exe.as_str();
+        let path = match classify_hook_exe(&hook_exe, project) {
+            HookExeCheck::Run(path) => path,
+            HookExeCheck::Wrapper => {
+                checks.push(CheckResult {
+                    name: "hook_binary".to_string(),
+                    status: Severity::Ok,
+                    detail: format!(
+                        "an agent hook in {} starts `{exe}`, which does not start axil \
+                         directly: not checked",
+                        config.display()
+                    ),
+                    fix: None,
+                });
+                continue;
+            }
+            HookExeCheck::Unverifiable(why) => {
+                checks.push(CheckResult {
+                    name: "hook_binary".to_string(),
+                    status: Severity::Warning,
+                    detail: format!(
+                        "an agent hook in {} starts `{exe}`, which {why}: can't verify which \
+                         axil the hooks run, or whether it opens this database",
+                        config.display()
+                    ),
+                    fix: Some(
+                        "run `axil install` to wire the hooks to an axil doctor can check, or \
+                         check by hand that the hooks' axil lists `table-index-keyed` in `axil \
+                         hook formats`"
+                            .to_string(),
+                    ),
+                });
+                continue;
+            }
+        };
+        let named = if exe == path.display().to_string() {
+            format!("`{exe}`")
+        } else {
+            format!("`{exe}` ({})", path.display())
+        };
+        let is_this = this.is_some() && path.canonicalize().ok() == this;
+        let started = std::time::Instant::now();
+        let formats = if is_this {
+            Some(STORAGE_FORMATS.join("\n"))
+        } else {
+            hook_brain::run_capture_until(
+                std::process::Command::new(&path)
+                    .args(["hook", "formats"])
+                    .current_dir(std::env::temp_dir())
+                    .stdin(std::process::Stdio::null()),
+                started + HOOK_PROBE_WAIT,
+            )
+        };
+        let reads_all = formats.as_deref().is_some_and(|formats| {
+            STORAGE_FORMATS
+                .iter()
+                .all(|f| formats.lines().any(|line| line.trim() == *f))
+        });
+        let fix = Some(
+            "upgrade that axil to this build (from a checkout: `cargo install --path \
+             crates/adapters/axil-cli`)"
+                .to_string(),
+        );
+        checks.push(if reads_all {
+            CheckResult {
+                name: "hook_binary".to_string(),
+                status: Severity::Ok,
+                detail: format!("agent hooks run {named}, which opens this database"),
+                fix: None,
+            }
+        } else if formats.is_none() && started.elapsed() >= HOOK_PROBE_WAIT {
+            CheckResult {
+                name: "hook_binary".to_string(),
+                status: Severity::Warning,
+                detail: format!(
+                    "agent hooks run {named}, which did not answer `axil hook formats` within \
+                     {} s, so whether it opens this database is unknown",
+                    HOOK_PROBE_WAIT.as_secs()
+                ),
+                fix,
+            }
+        } else {
+            CheckResult {
+                name: "hook_binary".to_string(),
+                status: Severity::Warning,
+                detail: format!(
+                    "agent hooks run {named}, a build older than this one that can't open \
+                     this database: every hook fails without a word (no memory injected, \
+                     nothing captured)"
+                ),
+                fix,
+            }
+        });
+    }
+    checks
+}
+
+/// [`hook_binary_checks`] for the database at `db`: the hook configs of its
+/// project (the directory holding `.axil/`), of the working directory, and
+/// the user's own.
+fn hook_binary_checks_for(db: &Path) -> Vec<axil_core::diagnostics::CheckResult> {
+    let cwd = std::env::current_dir().ok();
+    let project = db.parent().and_then(Path::parent).map(Path::to_path_buf);
+    let mut projects: Vec<&Path> = Vec::new();
+    for dir in [project.as_deref(), cwd.as_deref()].into_iter().flatten() {
+        if !projects.contains(&dir) {
+            projects.push(dir);
+        }
+    }
+    let home = axil_core::home_dir();
+    let home = home.as_deref().filter(|h| !projects.contains(h));
+    let this_exe = std::env::current_exe().ok();
+    hook_binary_checks(&projects, home, this_exe.as_deref())
+}
+
+/// Runs after this process converted a database's table index (see
+/// [`axil_core::storage::set_table_index_conversion_observer`]): from now on
+/// an agent hook whose axil is older fails without a word, so say so where
+/// the command that converted it is seen. Hooks never convert one, so this
+/// is a command run by hand, a drainer (into its log) or a daemon, which
+/// writes it to its log: what its open prints would keep it from serving
+/// the database.
+fn warn_after_table_index_conversion(db: &Path) {
+    for check in hook_binary_checks_for(db) {
+        if check.status == axil_core::diagnostics::Severity::Warning {
+            let warning = format!(
+                "axil: warning: converted the table index of {} to the keyed layout, and {}. {}",
+                db.display(),
+                check.detail,
+                check.fix.unwrap_or_default()
+            );
+            #[cfg(unix)]
+            if daemon::lease::serving() {
+                daemon::server::log_uncaptured(&warning);
+                continue;
+            }
+            errln!("{warning}");
+        }
+    }
 }
 
 /// The executable to reference from agent configs. Prefers bare `axil` when a
@@ -7044,7 +7392,9 @@ fn open_with_all_detected(path: &Path) -> Result<Axil> {
 /// Open a database with all detected plugins for a command that only
 /// inspects it (diagnostics, dry runs). Deletes noted while the vector store
 /// was detached are left for a later open rather than applied by this one,
-/// so the command changes nothing.
+/// so the command changes no memories. It is still a writable open, which
+/// repairs a file not closed cleanly and converts a legacy table index (see
+/// the doctor command, which checks the agent hooks before allowing that).
 fn open_for_inspection(path: &Path) -> Result<Axil> {
     let builder = attach_detected_engines(Axil::open(path).defer_vector_delete_notes(true))?;
     builder.build().context("failed to open database")
@@ -7695,6 +8045,13 @@ fn real_main() -> i32 {
     // Every open asks the database's daemon, if one runs, to let go of it.
     #[cfg(unix)]
     daemon::lease::install();
+    // A hook's lookup is killed when the hook's time runs out: converting a
+    // legacy table index, or repairing a file not closed cleanly, can take
+    // longer, so it is left to another process.
+    if hook_brain::defers_table_index_conversion() {
+        axil_core::storage::defer_table_index_conversion();
+    }
+    axil_core::storage::set_table_index_conversion_observer(warn_after_table_index_conversion);
     // The CLI is Axil's Tier-3 argv Adapter; drive it through that type. `main`
     // uses the inherent `dispatch` (which returns the process exit code) rather
     // than `Adapter::run` so exit-code fidelity is preserved.
@@ -8830,7 +9187,49 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
 
         // ── Doctor ───────────────────────────────────────────────────
         Command::Doctor => {
+            use axil_core::diagnostics::{CheckResult, DoctorReport, Severity};
+            use axil_core::TableIndexState;
             let db_path = require_db(&db_opt)?;
+            // Asked before opening: the open below converts a legacy table
+            // index (and repairs a file not closed cleanly, which may be
+            // one), after which an agent hook whose axil is older fails
+            // without a word. Doctor doesn't do that to a database such a
+            // hook uses.
+            let hook_checks = hook_binary_checks_for(&db_path);
+            let hooks_too_old = hook_checks.iter().any(|c| c.status != Severity::Ok);
+            let state = axil_core::Storage::table_index_state(&db_path);
+            if hooks_too_old
+                && matches!(
+                    state,
+                    Ok(TableIndexState::Legacy | TableIndexState::Unclean)
+                )
+            {
+                let mut report = DoctorReport::from_checks(hook_checks);
+                report.add_check(CheckResult {
+                    name: "table_index".to_string(),
+                    status: Severity::Warning,
+                    detail: if matches!(state, Ok(TableIndexState::Legacy)) {
+                        "the database keeps its table index in the legacy layout, and opening \
+                         it for the other checks would convert it, which the agent hooks' axil \
+                         above can't open, or may not: doctor left it as it is and ran no \
+                         other check"
+                    } else {
+                        "the database was not closed cleanly, and opening it for the other \
+                         checks would repair it and convert its table index if it is in the \
+                         legacy layout, which the agent hooks' axil above can't open, or may \
+                         not: doctor left it as it is and ran no other check"
+                    }
+                    .to_string(),
+                    fix: Some(
+                        "have the agent hooks run this build or a newer one (see `hook_binary` \
+                         above), then run `axil doctor` again"
+                            .to_string(),
+                    ),
+                });
+                let exit_code = report.exit_code();
+                out.print(&serde_json::to_value(&report).unwrap());
+                return Ok(exit_code);
+            }
             let db = open_for_inspection(&db_path)?;
             let mut report = db.doctor().context("doctor failed")?;
 
@@ -8993,6 +9392,12 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
                         });
                     }
                 }
+            }
+
+            // The axil the agent hooks run, which fail silently when it is
+            // a build that can't open this database.
+            for check in hook_checks {
+                report.add_check(check);
             }
 
             let exit_code = report.exit_code();
@@ -12141,6 +12546,14 @@ fn dispatch_command(cli: Cli, out: &Output) -> Result<i32> {
         Command::Hook {
             command: HookCommand::Drain,
         } => hook_brain::drain(&require_db(&db_opt)?),
+        Command::Hook {
+            command: HookCommand::Formats,
+        } => {
+            for format in STORAGE_FORMATS {
+                outln!("{format}");
+            }
+            Ok(EXIT_OK)
+        }
 
         // ── Model management ────────────────────────────────────────
         #[cfg(feature = "vector")]
@@ -22934,6 +23347,292 @@ mod recall_summary_tests {
 #[cfg(test)]
 mod installer_tests {
     use super::*;
+
+    /// Each `axil hook run` command names its executable by its first word
+    /// or a quoted path, or by a path with a space in it the command leaves
+    /// unquoted; other hooks are passed over.
+    #[test]
+    fn hook_run_exes_reads_the_executable_of_each_axil_hook() {
+        let settings = json!({
+            "hooks": {
+                "SessionStart": [{ "hooks": [
+                    { "type": "command", "command": "axil hook run --dialect claude" },
+                    { "type": "command", "command": "my-own-hook --flag" },
+                ]}],
+                "Stop": [{ "hooks": [
+                    { "type": "command", "command": "\"/opt/my tools/axil\" hook run --dialect claude" },
+                    { "type": "command", "command": "axil hook run --dialect claude" },
+                    { "type": "command", "command": "/opt/my tools/axil hook run --dialect claude" },
+                    { "type": "command", "command": "/opt/axil --db x hook run --dialect claude" },
+                ]}],
+            }
+        });
+        let mut exes = Vec::new();
+        hook_run_exes(&settings, &mut exes);
+        let exe = |exe: &str, unquoted_spaces| HookExe {
+            exe: exe.to_string(),
+            unquoted_spaces,
+        };
+        assert_eq!(
+            exes,
+            [
+                exe("axil", false),
+                exe("/opt/my tools/axil", false),
+                exe("/opt/my tools/axil", true),
+                exe("/opt/axil", false),
+            ]
+        );
+    }
+
+    /// A stub `axil` (the name doctor runs) under `dir/<name>/`, running
+    /// `body`.
+    #[cfg(unix)]
+    fn stub_axil(dir: &Path, name: &str, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join(name).join("axil");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    /// A project whose Claude hooks run `commands`.
+    #[cfg(unix)]
+    fn hooks_settings(project: &Path, commands: &[String]) {
+        let hooks: Vec<Value> = commands
+            .iter()
+            .map(|c| json!({ "type": "command", "command": c }))
+            .collect();
+        std::fs::create_dir_all(project.join(".claude")).unwrap();
+        std::fs::write(
+            project.join(".claude/settings.json"),
+            json!({ "hooks": { "Stop": [{ "hooks": hooks }] } }).to_string(),
+        )
+        .unwrap();
+    }
+
+    /// A hook binary that has no `hook formats`, as builds from before the
+    /// keyed table index don't, is reported; one that lists every format
+    /// this build writes is not, and this binary itself is not asked.
+    #[cfg(unix)]
+    #[test]
+    fn doctor_reports_a_hook_binary_that_cannot_open_the_database() {
+        use axil_core::diagnostics::Severity;
+        let project = tempfile::tempdir().unwrap();
+        let bin = tempfile::tempdir().unwrap();
+        let older = stub_axil(
+            bin.path(),
+            "older",
+            "echo \"error: unrecognized subcommand\" >&2; exit 2",
+        );
+        let newer = stub_axil(bin.path(), "newer", "echo table-index-keyed");
+        let this = stub_axil(bin.path(), "this", "touch \"$0.ran\"; exit 2");
+        let run = |exe: &Path| format!("{} hook run --dialect claude", exe.display());
+
+        hooks_settings(project.path(), &[run(&older)]);
+        let checks = hook_binary_checks(&[project.path()], None, None);
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].status, Severity::Warning, "{}", checks[0].detail);
+        assert!(checks[0].fix.is_some());
+
+        hooks_settings(project.path(), &[run(&newer)]);
+        let checks = hook_binary_checks(&[project.path()], None, None);
+        assert_eq!(checks[0].status, Severity::Ok, "{}", checks[0].detail);
+
+        hooks_settings(project.path(), &[run(&this)]);
+        let checks = hook_binary_checks(&[project.path()], None, Some(&this));
+        assert_eq!(checks[0].status, Severity::Ok, "{}", checks[0].detail);
+        assert!(
+            !bin.path().join("this/axil.ran").exists(),
+            "this binary is not asked"
+        );
+
+        // User-level hooks count too.
+        std::fs::remove_file(project.path().join(".claude/settings.json")).unwrap();
+        assert!(hook_binary_checks(&[project.path()], None, None).is_empty());
+        let home = tempfile::tempdir().unwrap();
+        hooks_settings(home.path(), &[run(&older)]);
+        let checks = hook_binary_checks(&[project.path()], Some(home.path()), None);
+        assert_eq!(checks[0].status, Severity::Warning, "{}", checks[0].detail);
+    }
+
+    /// Doctor runs only an executable named `axil` that is bare (found on
+    /// PATH) or an absolute path outside the project, so a repository's
+    /// hook config can't make it run the repository's code. One in the
+    /// repository is a warning, since whether it opens the database is
+    /// unknown; a wrapper is not taken for the axil it starts. One that hangs
+    /// is killed.
+    #[cfg(unix)]
+    #[test]
+    fn doctor_runs_no_hook_executable_a_repository_or_a_wrapper_names() {
+        use axil_core::diagnostics::Severity;
+        let project = tempfile::tempdir().unwrap();
+        let inside = stub_axil(
+            project.path(),
+            "tools",
+            "touch \"$(dirname \"$0\")/ran\"; echo table-index-keyed",
+        );
+        hooks_settings(
+            project.path(),
+            &[
+                "./tools/axil hook run --dialect claude".to_string(),
+                format!("{} hook run --dialect claude", inside.display()),
+                "bash -lc \"axil hook run --dialect claude\"".to_string(),
+                "npx axil hook run --dialect claude".to_string(),
+            ],
+        );
+        let checks = hook_binary_checks(&[project.path()], None, None);
+        let statuses: Vec<_> = checks.iter().map(|c| c.status).collect();
+        assert_eq!(
+            statuses,
+            [
+                Severity::Warning,
+                Severity::Warning,
+                Severity::Ok,
+                Severity::Ok
+            ],
+            "{checks:?}"
+        );
+        for check in &checks[..2] {
+            assert!(
+                check
+                    .detail
+                    .contains("can't verify which axil the hooks run"),
+                "{}",
+                check.detail
+            );
+        }
+        for check in &checks[2..] {
+            assert!(check.detail.ends_with("not checked"), "{}", check.detail);
+        }
+        assert!(!project.path().join("tools/ran").exists(), "nothing ran");
+
+        let bin = tempfile::tempdir().unwrap();
+        let hangs = stub_axil(bin.path(), "hangs", "exec sleep 30");
+        hooks_settings(
+            project.path(),
+            &[format!("{} hook run --dialect claude", hangs.display())],
+        );
+        let started = std::time::Instant::now();
+        let checks = hook_binary_checks(&[project.path()], None, None);
+        assert!(started.elapsed() < HOOK_PROBE_WAIT + std::time::Duration::from_secs(5));
+        assert_eq!(checks[0].status, Severity::Warning, "{}", checks[0].detail);
+        assert!(
+            checks[0].detail.contains("did not answer"),
+            "{}",
+            checks[0].detail
+        );
+    }
+
+    /// The executable each hook command starts, and what doctor makes of it,
+    /// for `commands` in a project's hook config.
+    fn classified(project: Option<&Path>, commands: &[&str]) -> Vec<(String, HookExeCheck)> {
+        let value = json!({ "hooks": commands });
+        let mut exes = Vec::new();
+        hook_run_exes(&value, &mut exes);
+        exes.iter()
+            .map(|exe| (exe.exe.clone(), classify_hook_exe(exe, project)))
+            .collect()
+    }
+
+    /// A hook command that looks like it starts axil but doesn't name one
+    /// doctor can run is unverifiable, whatever the reason: doctor warns
+    /// rather than take an `axil-old`, a shim, or a path the shell splits
+    /// at a space for an axil that opens the database.
+    #[test]
+    fn a_hook_axil_doctor_cant_run_is_unverifiable() {
+        let unverifiable = |why: &'static str| HookExeCheck::Unverifiable(why);
+        let checks = classified(
+            None,
+            &[
+                "/opt/older/axil-old hook run --dialect claude",
+                "axil2 hook run --dialect claude",
+                "axil.cmd hook run --dialect claude",
+                "/opt/bin/axil.ps1 hook run --dialect claude",
+                "C:\\Program Files\\axil\\axil.exe hook run --dialect claude",
+                "/opt/my tools/axil hook run --dialect claude",
+                "/no/such/dir/axil hook run --dialect claude",
+                "tools/axil hook run --dialect claude",
+                "/usr/bin/env axil hook run --dialect claude",
+                "npx axil hook run --dialect claude",
+            ],
+        );
+        let shim = unverifiable("is a script or shim, not the axil binary");
+        let spaced = unverifiable("is a path with a space in it that the command doesn't quote");
+        assert_eq!(
+            checks,
+            [
+                (
+                    "/opt/older/axil-old".into(),
+                    unverifiable("is not named `axil`")
+                ),
+                ("axil2".into(), unverifiable("is not named `axil`")),
+                ("axil.cmd".into(), shim.clone()),
+                ("/opt/bin/axil.ps1".into(), shim),
+                ("C:\\Program Files\\axil\\axil.exe".into(), spaced.clone()),
+                ("/opt/my tools/axil".into(), spaced),
+                (
+                    "/no/such/dir/axil".into(),
+                    // Without a drive, not absolute on Windows.
+                    unverifiable(if cfg!(windows) {
+                        "is a relative path, which doctor doesn't run"
+                    } else {
+                        "does not exist"
+                    })
+                ),
+                (
+                    "tools/axil".into(),
+                    unverifiable("is a relative path, which doctor doesn't run")
+                ),
+                ("/usr/bin/env".into(), HookExeCheck::Wrapper),
+                ("npx".into(), HookExeCheck::Wrapper),
+            ]
+        );
+    }
+
+    /// Doctor runs none of the hook axils it can't verify, and warns about
+    /// each.
+    #[cfg(unix)]
+    #[test]
+    fn doctor_warns_about_and_runs_no_unverifiable_hook_axil() {
+        use axil_core::diagnostics::Severity;
+        use std::os::unix::fs::PermissionsExt;
+        let project = tempfile::tempdir().unwrap();
+        let bin = tempfile::tempdir().unwrap();
+        let ran = bin.path().join("ran");
+        let stub = |name: &str| {
+            let path = bin.path().join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(
+                &path,
+                format!(
+                    "#!/bin/sh\ntouch {}\necho table-index-keyed\n",
+                    ran.display()
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            path
+        };
+        let old = stub("older/axil-old");
+        let shim = stub("shims/axil.sh");
+        let spaced = stub("my tools/axil");
+        hooks_settings(
+            project.path(),
+            &[
+                format!("{} hook run --dialect claude", old.display()),
+                format!("{} hook run --dialect claude", shim.display()),
+                format!("{} hook run --dialect claude", spaced.display()),
+            ],
+        );
+        let checks = hook_binary_checks(&[project.path()], None, None);
+        assert_eq!(checks.len(), 3, "{checks:?}");
+        for check in &checks {
+            assert_eq!(check.status, Severity::Warning, "{}", check.detail);
+            assert!(check.fix.is_some());
+        }
+        assert!(!ran.exists(), "nothing ran");
+    }
 
     #[test]
     fn claude_settings_route_the_whole_session_lifecycle() {

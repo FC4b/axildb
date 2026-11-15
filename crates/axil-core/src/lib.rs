@@ -145,6 +145,7 @@ pub use scoring::{
     DedupConfig, QtcConfig, RecallConfig, RecallResult, ScoreExplanation, ScoreWeights,
     SignalValues,
 };
+pub use storage::TableIndexState;
 pub use storage::{EntityKeyIndexRebuild, EntityKeyIndexStatus, EntityKeyLookup, Storage};
 #[cfg(feature = "cdc")]
 pub use storage::{ChangeEntry, SyncMeta};

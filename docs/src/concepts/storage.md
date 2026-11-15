@@ -21,6 +21,64 @@ sessions, entities, etc. Tier-2 Extensions own prefixed tables in the
 core `.axil` file (e.g. `_checkpoint_records`, `_dep_docs`,
 `_idx_code_proxies`).
 
+### Table membership
+
+A table lists its records in the order their ids first joined it: `list`
+returns them in that order (a re-insert keeps an id's place; an id moved in
+from another table joins last), and `list_newest` reads the end of it
+backwards. Record ids do not give that order, since ULIDs made in the same
+millisecond sort at random and an import keeps foreign ids, so the core file
+keeps it explicitly:
+
+- **One entry per listed id.** `_table_members` maps (table, position) to the
+  id and `_table_member_positions` maps (table, id) back to its position;
+  `table_index` holds each table's count and next position. An insert or
+  delete changes a few entries whatever the table's size. Builds before this
+  kept each table's ids as one JSON array, read, deduplicated and rewritten
+  whole on every insert and delete. With the array, the median insert into an
+  85,000-row table took 19.1 ms against 1.4 ms into a 100-row table in the
+  same file, and the median delete 16.1 ms against 1.3 ms
+  (`benchmarks/results/write-cost-vs-table-size-2026-10-15.json`). With the
+  keyed index the same comparison is 3.3 ms against 3.2 ms and 2.9 ms against
+  2.8 ms (`benchmarks/results/write-cost-vs-table-size-2026-10-16-keyed.json`,
+  same machine, both runs while other builds were loading it, the second run
+  more heavily, so compare the two tables within a run rather than across
+  runs).
+- **A small fixed cost.** An insert or delete touches three B-trees where the
+  array was one entry, so into a table of a few dozen rows the keyed index
+  costs a little more than the array did. A CPU-only measurement on tmpfs
+  during review, not a committed benchmark, put that at about 9-12 µs per
+  insert or delete into an empty table, with the keyed index cheaper from
+  about 55 rows; read it as an estimate. Against the 1.3-3.3 ms medians of a
+  whole committed write above, it doesn't show on disk.
+- **Converted on the first writable open.** The first writable open by a build
+  with the keyed index converts the JSON arrays in one write transaction: a
+  crash or an error leaves the file as it was, and the next open tries again.
+  In the run above it converted a file listing about 85,100 ids in 0.70 s,
+  some 120,000 ids a second at a load average of 20, and the next open took
+  10 ms (the `migration` objects in
+  `benchmarks/results/write-cost-vs-table-size-2026-10-16-keyed.json`). A
+  read-only open converts nothing: it reads the arrays as they are.
+- **Not under a hook's time limit.** A hook kills its lookup when the hook's
+  time runs out (2.5 s for a prompt), so that it answers before the harness
+  kills the hook, and a conversion taking longer would be cut off at every
+  prompt. So a hook asks first, through a read-only open that writes nothing.
+  When the table index is still in the legacy layout, or the file was not
+  closed cleanly (a writable open repairs it first, which can take as long),
+  the hook starts its detached writer, which no time limit bounds, to open
+  the file. A session-start or stop hook, which has time to spare, waits for
+  it, until 3 s before its own time runs out, and then looks up as usual. Any
+  other hook, and one whose wait ran out, runs no lookup that time and notes
+  it in the session's problems (`lookups_skipped`). Writes the hook queued
+  run after the conversion as usual. A lookup's own writable open never
+  converts a legacy table index or repairs a file either: it fails instead,
+  which covers a file the read-only check could not read because another
+  process held it, such as a daemon of an older build still running after an
+  upgrade. A daemon of a newer build converts the file when it opens it.
+- **Older builds refuse a converted file**, with an error saying to upgrade,
+  rather than read arrays that no longer change. See
+  [Mixing binary versions](../getting-started/installation.md#builds-from-before-the-keyed-table-index).
+
 ### The `_entities` key index
 
 Auto-linking resolves each entity it extracts from a new memory against the
@@ -47,8 +105,11 @@ transaction.
   `scripts/entity-key-index-measure.sh`).
 - **Older binaries on the same file.** An `axil` built before the index (for
   example the one on PATH that the hooks run, while an agent runs a newer
-  build) writes `_entities` without updating it. The marker holds a
-  fingerprint of the `_entities` id list, so once an older binary adds or
+  build) writes `_entities` without updating it. Such builds also predate the
+  [keyed table index](#table-membership), so they can only write a file a
+  newer build has not yet opened writable. The marker holds a fingerprint of
+  the `_entities` id list, and converting the table index carries it over
+  only when it still matches the list, so once an older binary adds or
   deletes an entity row the index is treated as stale: lookups scan, and the
   next insert that auto-links repairs it. Each row a lookup returns is also
   read back, so a row an older binary rewrote is not trusted either. One

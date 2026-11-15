@@ -9,7 +9,7 @@ documents the maintenance toolkit and when to use each piece.
 
 | Command | What it does | Run when |
 |---------|--------------|----------|
-| `axil doctor` | Read-only health check | Anytime — fast, no writes |
+| `axil doctor` | Health check that changes no memories | Anytime — fast |
 | `axil compact` | Purge expired/superseded records, clean orphans | DB feels bloated, after large deletes |
 | `axil heal [--reindex] [--orphans] [--dry-run]` | Compact + rebuild drifted companions | After crash, schema change, or `doctor` flags issues |
 | `axil maintain [--if-stale] [--dry-run]` | Opportunistic, time-gated snapshot + health-report (additive only) | Auto-fired by the brain hook; never needs cron |
@@ -20,10 +20,15 @@ documents the maintenance toolkit and when to use each piece.
 | `axil session-heal` | End-of-session: replay captured failures, auto-fix | Session-close hook job, after every session |
 | `axil branch create <name>` | Atomic point-in-time copy | Before risky operations |
 
-## `axil doctor` — read-only health check
+## `axil doctor` — health check
 
-Runs a battery of checks and prints a structured report. Doesn't
-modify the DB. Covers:
+Runs a battery of checks and prints a structured report. It changes no
+memories, but it opens the database for writing, as nearly every command
+does: that repairs a file not closed cleanly and converts a table index
+still in the legacy layout. It does neither while the agent hooks run an
+axil that may not open the database afterwards; see
+[Builds from before the keyed table index](../getting-started/installation.md#builds-from-before-the-keyed-table-index).
+Covers:
 
 - Companion file presence + consistency
 - Vector dimension mismatch (embedder vs index)

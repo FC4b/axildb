@@ -1,0 +1,218 @@
+{
+  "benchmark": "write-cost-vs-table-size",
+  "control_table_rows": 100,
+  "results": [
+    {
+      "delete": {
+        "big": {
+          "mean_us": 1104.0,
+          "p50_us": 1051.0,
+          "p95_us": 1413.0
+        },
+        "control": {
+          "mean_us": 1137.0,
+          "p50_us": 1090.0,
+          "p95_us": 1472.0
+        }
+      },
+      "fill_seconds": 0.0,
+      "id_list_bytes_approx": 0,
+      "insert": {
+        "big": {
+          "mean_us": 1394.0,
+          "p50_us": 1139.0,
+          "p95_us": 2651.0
+        },
+        "control": {
+          "mean_us": 1358.0,
+          "p50_us": 1172.0,
+          "p95_us": 2368.0
+        }
+      },
+      "table_rows": 0,
+      "update": {
+        "big": {
+          "mean_us": 1167.0,
+          "p50_us": 1054.0,
+          "p95_us": 1781.0
+        },
+        "control": {
+          "mean_us": 1176.0,
+          "p50_us": 1070.0,
+          "p95_us": 1478.0
+        }
+      }
+    },
+    {
+      "delete": {
+        "big": {
+          "mean_us": 2137.0,
+          "p50_us": 2046.0,
+          "p95_us": 4231.0
+        },
+        "control": {
+          "mean_us": 2054.0,
+          "p50_us": 2025.0,
+          "p95_us": 3386.0
+        }
+      },
+      "fill_seconds": 0.0,
+      "id_list_bytes_approx": 29000,
+      "insert": {
+        "big": {
+          "mean_us": 1591.0,
+          "p50_us": 1258.0,
+          "p95_us": 2614.0
+        },
+        "control": {
+          "mean_us": 1375.0,
+          "p50_us": 1116.0,
+          "p95_us": 2696.0
+        }
+      },
+      "table_rows": 1000,
+      "update": {
+        "big": {
+          "mean_us": 3557.0,
+          "p50_us": 3528.0,
+          "p95_us": 5722.0
+        },
+        "control": {
+          "mean_us": 3456.0,
+          "p50_us": 3422.0,
+          "p95_us": 5892.0
+        }
+      }
+    },
+    {
+      "delete": {
+        "big": {
+          "mean_us": 2489.0,
+          "p50_us": 2422.0,
+          "p95_us": 3217.0
+        },
+        "control": {
+          "mean_us": 1437.0,
+          "p50_us": 1442.0,
+          "p95_us": 2152.0
+        }
+      },
+      "fill_seconds": 0.1,
+      "id_list_bytes_approx": 290000,
+      "insert": {
+        "big": {
+          "mean_us": 3399.0,
+          "p50_us": 3194.0,
+          "p95_us": 4610.0
+        },
+        "control": {
+          "mean_us": 2075.0,
+          "p50_us": 1889.0,
+          "p95_us": 3936.0
+        }
+      },
+      "table_rows": 10000,
+      "update": {
+        "big": {
+          "mean_us": 1556.0,
+          "p50_us": 1519.0,
+          "p95_us": 2247.0
+        },
+        "control": {
+          "mean_us": 1638.0,
+          "p50_us": 1541.0,
+          "p95_us": 2314.0
+        }
+      }
+    },
+    {
+      "delete": {
+        "big": {
+          "mean_us": 5353.0,
+          "p50_us": 5019.0,
+          "p95_us": 8157.0
+        },
+        "control": {
+          "mean_us": 1379.0,
+          "p50_us": 1189.0,
+          "p95_us": 1780.0
+        }
+      },
+      "fill_seconds": 0.3,
+      "id_list_bytes_approx": 870000,
+      "insert": {
+        "big": {
+          "mean_us": 7123.0,
+          "p50_us": 6965.0,
+          "p95_us": 9838.0
+        },
+        "control": {
+          "mean_us": 2240.0,
+          "p50_us": 2115.0,
+          "p95_us": 4033.0
+        }
+      },
+      "table_rows": 30000,
+      "update": {
+        "big": {
+          "mean_us": 1432.0,
+          "p50_us": 1063.0,
+          "p95_us": 3120.0
+        },
+        "control": {
+          "mean_us": 1375.0,
+          "p50_us": 1067.0,
+          "p95_us": 2848.0
+        }
+      }
+    },
+    {
+      "delete": {
+        "big": {
+          "mean_us": 16687.0,
+          "p50_us": 16121.0,
+          "p95_us": 22971.0
+        },
+        "control": {
+          "mean_us": 1385.0,
+          "p50_us": 1330.0,
+          "p95_us": 1738.0
+        }
+      },
+      "fill_seconds": 1.0,
+      "id_list_bytes_approx": 2465000,
+      "insert": {
+        "big": {
+          "mean_us": 21298.0,
+          "p50_us": 19063.0,
+          "p95_us": 34730.0
+        },
+        "control": {
+          "mean_us": 1459.0,
+          "p50_us": 1368.0,
+          "p95_us": 1932.0
+        }
+      },
+      "table_rows": 85000,
+      "update": {
+        "big": {
+          "mean_us": 1076.0,
+          "p50_us": 1050.0,
+          "p95_us": 1248.0
+        },
+        "control": {
+          "mean_us": 1069.0,
+          "p50_us": 1045.0,
+          "p95_us": 1235.0
+        }
+      }
+    }
+  ],
+  "samples_per_kind": 200,
+  "date": "2026-10-15",
+  "commit": "9c84550e1b36614e6779a4d9a65962bcad39c3dd",
+  "command": "cargo run --release -p axil-core --example write_cost -- --sizes 0,1000,10000,30000,85000 --samples 200",
+  "machine": "AMD Ryzen 7 5800X (16 threads), WSL2 20 GiB, Ubuntu 24.04, ext4 on a VHDX",
+  "load_note": "two other agents were compiling (1-minute load about 8-12); big-table and control writes are interleaved, so load affects both sides of each comparison alike",
+  "reading": "insert and delete into the big table grow linearly with its row count (whole id list read, deduped and rewritten per write); update does not touch the list; the control table stays flat"
+}

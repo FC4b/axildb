@@ -242,13 +242,27 @@ pub enum Finish {
 /// One entry in the daemon's log, each of its lines stamped. Unit tests
 /// run daemons in the test process, whose stderr is not a log.
 pub(super) fn log(message: impl std::fmt::Display) {
+    log_lines(message, |line| errln!("{line}"));
+}
+
+/// [`log`], straight to the daemon's log even while what this thread
+/// prints is captured: in the database's open, anything printed is taken
+/// for a warning that keeps the daemon from serving it (see
+/// `exec::open_warm`), and a line for the log is not one.
+pub fn log_uncaptured(message: impl std::fmt::Display) {
+    log_lines(message, |line| {
+        cli_io::write_process_bytes(true, format!("{line}\n").as_bytes());
+    });
+}
+
+fn log_lines(message: impl std::fmt::Display, mut write: impl FnMut(&str)) {
     if cfg!(test) {
         return;
     }
     let stamp = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ");
     let pid = std::process::id();
     for line in message.to_string().lines() {
-        errln!("{stamp} axil daemon[{pid}]: {line}");
+        write(&format!("{stamp} axil daemon[{pid}]: {line}"));
     }
 }
 

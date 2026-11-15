@@ -60,6 +60,8 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use axil_core::TableIndexState;
+
 /// The most record ids a session remembers injecting. Past this the older
 /// half is forgotten, so the state file stays small and a long session can
 /// see an old memory again.
@@ -932,6 +934,18 @@ pub(crate) fn hook_time_left() -> Option<Duration> {
     Some(Duration::from_millis(until.saturating_sub(epoch_ms())))
 }
 
+/// Whether this process runs under a hook's deadline: a hook's lookup,
+/// killed when the hook's time runs out. Such a process never converts a
+/// legacy table index or repairs a file not closed cleanly
+/// ([`axil_core::storage::defer_table_index_conversion`]).
+pub(crate) fn defers_table_index_conversion() -> bool {
+    hook_time_left().is_some()
+}
+
+/// How much of its time a hook that waits for a drainer keeps for its
+/// lookups ([`HookCtx::wait_for_drainer`]).
+const LOOKUP_RESERVE: Duration = Duration::from_secs(3);
+
 fn epoch_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -965,6 +979,9 @@ struct HookCtx {
     db: Option<PathBuf>,
     tmp: PathBuf,
     files: SessionFiles,
+    /// Whether this hook left converting the database's table index to a
+    /// drainer, once asked ([`HookCtx::table_index_left_to_drainer`]).
+    table_index_left: std::sync::OnceLock<bool>,
 }
 
 /// One session's state: `axil-session-<sid>.<suffix>` files in the temp
@@ -1071,6 +1088,7 @@ impl HookCtx {
             db,
             tmp,
             files,
+            table_index_left: std::sync::OnceLock::new(),
         })
     }
 
@@ -1089,6 +1107,11 @@ impl HookCtx {
                 self.forget_injections();
                 self.start_session();
                 self.boot_push();
+                // No boot without lookups: leave it to the session's first
+                // tool call.
+                if self.lookups_left_out() {
+                    let _ = std::fs::remove_file(self.sfile("booted"));
+                }
                 Ok(())
             }
             EventKind::PreModel => self.on_pre_model(),
@@ -1290,7 +1313,11 @@ impl HookCtx {
     /// under the harness's kill timeout. The one exception is the graph's
     /// first read after an older binary wrote edges, which brings its
     /// adjacency tables up to date in commits a kill can't leave half done
-    /// (see `GraphEngine::prepare` in axil-graph).
+    /// (see `GraphEngine::prepare` in axil-graph). Converting a table index
+    /// left in the legacy layout is not one: it is a single commit that
+    /// takes seconds on a large file, so no lookup runs while a file needs
+    /// it ([`HookCtx::table_index_left_to_drainer`]), and a lookup's own
+    /// open refuses to convert one ([`defers_table_index_conversion`]).
     fn axil_cmd(&self) -> Command {
         let mut cmd = Command::new(&self.exe);
         cmd.env("AXIL_SLOW_QUERY_LOG", "0");
@@ -1309,6 +1336,9 @@ impl HookCtx {
         if let Some(answered) = crate::daemon::client::forward_lookup(db, args, self.until) {
             return answered;
         }
+        if self.table_index_left_to_drainer(db) {
+            return None;
+        }
         let deadline_ms = epoch_ms().saturating_add(u64::try_from(left.as_millis()).unwrap_or(0));
         run_capture_until(
             self.axil_cmd()
@@ -1319,6 +1349,74 @@ impl HookCtx {
                 .stdin(Stdio::null()),
             self.until,
         )
+    }
+
+    /// Whether this hook leaves its lookups out, for a drainer to convert
+    /// the database's table index or repair the file first. A lookup's
+    /// writable open would do either, and both take seconds on a large file:
+    /// the hook kills the lookup when its time runs out, and the next hook
+    /// would start over. So the first lookup that finds the table index in
+    /// the legacy layout, or the file not closed cleanly, starts a drainer,
+    /// which no time limit bounds and which opens the file before it runs
+    /// any queued write ([`convert_table_index`]). A hook with time to spare
+    /// (session start, stop) waits for it and then looks up as usual; any
+    /// other runs no lookup this time, and notes that in the session's
+    /// problems. Writes a hook queues are not affected: the drainer runs
+    /// them after the conversion.
+    ///
+    /// Asked once per hook, through a read-only open that writes nothing and
+    /// never asks a daemon to let go. A file that can't be opened that way
+    /// for another reason (held by a writer, missing) is looked up as
+    /// before: the lookup's own open refuses to convert a legacy table index
+    /// or repair the file ([`defers_table_index_conversion`]), so an older
+    /// build's process holding the file costs a lookup, not a conversion or
+    /// a repair under the budget.
+    fn table_index_left_to_drainer(&self, db: &Path) -> bool {
+        *self.table_index_left.get_or_init(|| {
+            match axil_core::Storage::table_index_state(db) {
+                Ok(TableIndexState::Legacy | TableIndexState::Unclean) => {}
+                _ => return false,
+            }
+            spawn_drainer(&self.exe, db, &self.project_dir);
+            if self.wait_for_drainer(db) {
+                return false;
+            }
+            let event = json!({
+                "kind": "lookups_skipped",
+                "reason": "the drainer was converting the table index or repairing the database",
+                "event": claude_event_name(self.event.kind),
+                "at": now_iso(),
+            });
+            self.log_problem(&event.to_string());
+            true
+        })
+    }
+
+    /// For a hook with time to spare, wait until a drainer has left the
+    /// table index keyed, keeping [`LOOKUP_RESERVE`] of the hook's time for
+    /// its lookups. Whether it did.
+    fn wait_for_drainer(&self, db: &Path) -> bool {
+        if !matches!(self.event.kind, EventKind::SessionStart | EventKind::Stop) {
+            return false;
+        }
+        let Some(stop) = self.until.checked_sub(LOOKUP_RESERVE) else {
+            return false;
+        };
+        while Instant::now() < stop {
+            std::thread::sleep(Duration::from_millis(50));
+            if matches!(
+                axil_core::Storage::table_index_state(db),
+                Ok(TableIndexState::Keyed)
+            ) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Whether this hook left its lookups out ([`HookCtx::table_index_left_to_drainer`]).
+    fn lookups_left_out(&self) -> bool {
+        self.table_index_left.get() == Some(&true)
     }
 
     /// Spawn an axil subcommand with ALL stdio detached (null) and don't
@@ -1605,6 +1703,10 @@ impl HookCtx {
         if self.claim("booted") {
             self.start_session();
             self.boot_push();
+            // No boot without lookups: the next tool call tries again.
+            if self.lookups_left_out() {
+                let _ = std::fs::remove_file(self.sfile("booted"));
+            }
             // Fall through: if the session's first tool is a file edit the
             // file-recall context must still be injected below.
         }
@@ -1692,6 +1794,10 @@ impl HookCtx {
             let _ = std::fs::write(&booted, "");
             if let Some(boot) = self.boot_context_text() {
                 chunks.push(boot);
+            }
+            // No boot without lookups: the next model call tries again.
+            if self.lookups_left_out() {
+                let _ = std::fs::remove_file(&booted);
             }
         }
 
@@ -2569,7 +2675,12 @@ pub(crate) fn spawn_drainer(exe: &Path, db: &Path, cwd: &Path) {
         "hook".into(),
         "drain".into(),
     ];
-    spawn_detached(exe, &args, cwd, &queue_dir(db).join("drain.log"));
+    // A drainer started with no job queued (to convert a table index) may
+    // find no queue yet, and the shell can not append its log to a file in a
+    // directory that does not exist.
+    let dir = queue_dir(db);
+    let _ = std::fs::create_dir_all(&dir);
+    spawn_detached(exe, &args, cwd, &dir.join("drain.log"));
 }
 
 /// How long a drainer waits for a daemon that does not serve its process
@@ -2598,6 +2709,7 @@ pub(crate) fn drain(db: &Path) -> Result<i32> {
     };
     #[cfg(not(unix))]
     let handed_over: Option<Instant> = None;
+    convert_table_index(db, &dir);
     let mut runner = SubprocessRunner::new(&exe, db);
     loop {
         let lock = DrainLock::acquire(&dir).or_else(|| {
@@ -2627,6 +2739,75 @@ pub(crate) fn drain(db: &Path) -> Result<i32> {
             return Ok(0);
         }
     }
+}
+
+/// Open the database once before the queue, when its table index is in the
+/// legacy layout or the file was not closed cleanly: the writable open
+/// converts a legacy table index, and repairs such a file first. A hook
+/// leaves both to its drainer rather than run a lookup that would do them
+/// under its time limit ([`HookCtx::table_index_left_to_drainer`]). A file
+/// another process holds is asked again until it lets go, for a moment: a
+/// hook waiting for the conversion reads it meanwhile. One held longer is
+/// left to its holder, and not taken from a daemon: one of this build
+/// converted it on its own open.
+fn convert_table_index(db: &Path, dir: &Path) {
+    convert_table_index_waiting(db, dir, CONVERT_BUSY_WAIT);
+}
+
+/// How long a drainer's conversion waits out the database held by another
+/// process: a hook waiting for the conversion reads the file every 50 ms,
+/// and each read holds it for a moment.
+const CONVERT_BUSY_WAIT: Duration = Duration::from_secs(2);
+
+/// [`convert_table_index`], waiting up to `busy_wait` for a database
+/// another process holds. What the log says comes from the open itself:
+/// drainers started at once each find the file legacy, and only the first
+/// open converts it.
+fn convert_table_index_waiting(db: &Path, dir: &Path, busy_wait: Duration) {
+    let started = Instant::now();
+    let opened = loop {
+        match axil_core::Storage::table_index_state(db) {
+            Ok(TableIndexState::Legacy | TableIndexState::Unclean) => {}
+            Err(e) if e.is_busy() && started.elapsed() < busy_wait => {
+                std::thread::sleep(Duration::from_millis(20));
+                continue;
+            }
+            // Keyed, missing, or held all this time.
+            _ => return,
+        }
+        match axil_core::Storage::open(db) {
+            Err(e) if e.is_busy() && started.elapsed() < busy_wait => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            other => break other,
+        }
+    };
+    let line = match opened {
+        Ok(storage) => {
+            let done = match (
+                storage.repaired_on_open(),
+                storage.converted_table_index_on_open(),
+            ) {
+                (true, true) => {
+                    "repaired the database, not closed cleanly, and converted its table index \
+                     to the keyed layout"
+                }
+                (true, false) => {
+                    "repaired the database, not closed cleanly, and left its table index keyed"
+                }
+                (false, true) => "converted the table index to the keyed layout",
+                // Another process did it after this one asked.
+                (false, false) => return,
+            };
+            drop(storage);
+            format!("{done} in {} ms", started.elapsed().as_millis())
+        }
+        // Another process has it, and converts it if it needs it.
+        Err(e) if e.is_busy() => return,
+        Err(e) => format!("could not open the database to convert its table index: {e}"),
+    };
+    let _ = std::fs::create_dir_all(dir);
+    drain_log(dir, &line);
 }
 
 /// The queue, once a daemon that does not serve this process lets go of it
@@ -4370,7 +4551,7 @@ fn run_capture(cmd: &mut Command) -> Option<String> {
 
 /// [`run_capture`] for a child that must be done by `until`: past it the
 /// child is killed, and nothing is captured.
-fn run_capture_until(cmd: &mut Command, until: Instant) -> Option<String> {
+pub(crate) fn run_capture_until(cmd: &mut Command, until: Instant) -> Option<String> {
     use std::io::Read as _;
     let mut child = cmd
         .stdout(Stdio::piped())
@@ -4510,6 +4691,7 @@ mod tests {
                 tmp: tmp.to_path_buf(),
                 sid,
             },
+            table_index_left: std::sync::OnceLock::new(),
         }
     }
 
@@ -5109,6 +5291,7 @@ mod tests {
                 tmp: dir.to_path_buf(),
                 sid: "s1".into(),
             },
+            table_index_left: std::sync::OnceLock::new(),
         }
     }
 
@@ -5178,6 +5361,234 @@ mod tests {
         assert!(told.abs_diff(until_ms) < 200, "{told} vs {until_ms}");
         assert_eq!(brain.count_recent_narrative(), None);
         assert_eq!(stub_calls(dir.path()).len(), 1);
+    }
+
+    /// `open`, again while it fails busy: another test's thread spawning a
+    /// child gives the child a copy of a database handle this thread just
+    /// closed, which holds the file's lock until the child execs.
+    #[cfg(unix)]
+    fn retry_busy<T>(mut open: impl FnMut() -> axil_core::Result<T>) -> T {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match open() {
+                Err(e) if e.is_busy() && Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                other => return other.unwrap(),
+            }
+        }
+    }
+
+    /// [`axil_core::Storage::table_index_state`], waiting out a busy file.
+    #[cfg(unix)]
+    fn state_of(path: &Path) -> TableIndexState {
+        retry_busy(|| axil_core::Storage::table_index_state(path))
+    }
+
+    /// A database at `path` with one record, its table index in the legacy
+    /// layout a build from before the keyed index writes.
+    #[cfg(unix)]
+    fn legacy_database(path: &Path) {
+        let db = axil_core::Axil::open(path).build().unwrap();
+        db.insert("notes", json!({ "summary": "kept" })).unwrap();
+        drop(db);
+        retry_busy(|| axil_core::Storage::open(path))
+            .downgrade_table_index()
+            .unwrap();
+        assert_eq!(state_of(path), TableIndexState::Legacy);
+    }
+
+    /// The same, as an older build's writer leaves it when it is killed
+    /// after a commit: not closed cleanly.
+    #[cfg(unix)]
+    fn unclean_legacy_database(path: &Path) {
+        let source = path.with_extension("source");
+        legacy_database(&source);
+        let held = retry_busy(|| Ok(redb::Database::create(&source)?));
+        let txn = held.begin_write().unwrap();
+        txn.open_table(redb::TableDefinition::<&str, &str>::new("older_writer"))
+            .unwrap()
+            .insert("wrote", "this")
+            .unwrap();
+        txn.commit().unwrap();
+        std::fs::copy(&source, path).unwrap();
+        drop(held);
+        assert_eq!(state_of(path), TableIndexState::Unclean);
+    }
+
+    /// The calls the stub brain has had, once one has come.
+    #[cfg(unix)]
+    fn stub_calls_after_one(dir: &Path) -> Vec<String> {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while stub_calls(dir).is_empty() {
+            assert!(Instant::now() < deadline, "nothing called the stub");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        // Room for a second call to show up, were one made.
+        std::thread::sleep(Duration::from_millis(300));
+        stub_calls(dir)
+    }
+
+    /// A lookup that finds the table index in the legacy layout, or the
+    /// file not closed cleanly, runs no child, whose writable open would
+    /// convert or repair it under the hook's budget: the hook starts a
+    /// drainer instead, once, goes on without the lookup's output, and notes
+    /// that in the session's problems.
+    #[cfg(unix)]
+    #[test]
+    fn a_lookup_leaves_a_legacy_or_unclean_file_to_a_drainer() {
+        for unclean in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let db = dir.path().join("memory.axil");
+            if unclean {
+                unclean_legacy_database(&db);
+            } else {
+                legacy_database(&db);
+            }
+            let brain = stub_brain(dir.path(), Since::Prints("2"));
+            assert_eq!(brain.axil_db_out(&["since", "1h"]), None);
+            assert_eq!(brain.axil_db_out(&["since", "1h"]), None);
+            assert_eq!(
+                stub_calls_after_one(dir.path()),
+                [format!("--db {} hook drain", db.display())],
+                "unclean: {unclean}"
+            );
+            let problems = std::fs::read_to_string(brain.sfile("problems")).unwrap();
+            assert_eq!(problems.matches("lookups_skipped").count(), 1, "{problems}");
+            assert_ne!(state_of(&db), TableIndexState::Keyed);
+        }
+    }
+
+    /// A session start, with time to spare, waits for the drainer and then
+    /// looks up as usual.
+    #[cfg(unix)]
+    #[test]
+    fn a_session_start_waits_for_the_drainer_and_then_looks_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("memory.axil");
+        legacy_database(&db);
+        let mut brain = stub_brain(dir.path(), Since::Prints("2"));
+        brain.event.kind = EventKind::SessionStart;
+        // The stub drainer converts nothing: this thread does, a moment on,
+        // while the hook asks.
+        let converting = {
+            let db = db.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(300));
+                loop {
+                    match axil_core::Storage::open(&db) {
+                        Err(e) if e.is_busy() => std::thread::sleep(Duration::from_millis(5)),
+                        other => break drop(other.unwrap()),
+                    }
+                }
+            })
+        };
+        assert_eq!(
+            brain
+                .axil_db_out(&["since", "1h"])
+                .as_deref()
+                .map(str::trim),
+            Some("2")
+        );
+        converting.join().unwrap();
+        let calls = stub_calls(dir.path());
+        assert!(calls.iter().any(|c| c.ends_with("hook drain")), "{calls:?}");
+        assert!(calls.iter().any(|c| c.ends_with("since 1h")), "{calls:?}");
+        assert!(!brain.sfile("problems").exists());
+    }
+
+    /// A session's first tool call whose lookups were left out boots
+    /// nothing, so it leaves the boot to the next tool call.
+    #[cfg(unix)]
+    #[test]
+    fn a_first_tool_call_without_lookups_leaves_the_boot_to_the_next() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("memory.axil");
+        legacy_database(&db);
+        let mut brain = stub_brain(dir.path(), Since::Prints("2"));
+        brain.event.kind = EventKind::PreTool;
+        brain.on_pre_tool().unwrap();
+        assert!(brain.lookups_left_out());
+        assert!(!brain.sfile("booted").exists());
+
+        // The stub drainer converts nothing: this does.
+        drop(retry_busy(|| axil_core::Storage::open(&db)));
+        let mut brain = stub_brain(dir.path(), Since::Prints("2"));
+        brain.event.kind = EventKind::PreTool;
+        brain.on_pre_tool().unwrap();
+        assert!(!brain.lookups_left_out());
+        assert!(brain.sfile("booted").exists());
+    }
+
+    /// A drainer converts a legacy table index, and repairs a file not
+    /// closed cleanly, before it looks at its queue, and the next hook's
+    /// lookups run.
+    #[cfg(unix)]
+    #[test]
+    fn a_drainer_converts_a_legacy_or_unclean_file() {
+        for unclean in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let db = dir.path().join("memory.axil");
+            if unclean {
+                unclean_legacy_database(&db);
+            } else {
+                legacy_database(&db);
+            }
+            drain(&db).unwrap();
+            assert_eq!(state_of(&db), TableIndexState::Keyed);
+            let log = std::fs::read_to_string(queue_dir(&db).join("drain.log")).unwrap();
+            let done = if unclean {
+                "repaired the database"
+            } else {
+                "converted the table index"
+            };
+            assert!(log.contains(done), "{log}");
+            let handle = retry_busy(|| axil_core::Axil::open(&db).build());
+            assert_eq!(handle.list("notes").unwrap().len(), 1);
+            drop(handle);
+
+            let brain = stub_brain(dir.path(), Since::Prints("2"));
+            assert_eq!(
+                brain
+                    .axil_db_out(&["since", "1h"])
+                    .as_deref()
+                    .map(str::trim),
+                Some("2")
+            );
+        }
+    }
+
+    /// A drainer that finds the database held says nothing: the holder
+    /// converts it if it needs converting.
+    #[cfg(unix)]
+    #[test]
+    fn a_drainer_logs_nothing_when_another_process_holds_the_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("memory.axil");
+        legacy_database(&db);
+        let held = redb::Database::create(&db).unwrap();
+        convert_table_index_waiting(&db, &queue_dir(&db), Duration::from_millis(50));
+        drop(held);
+        assert!(!queue_dir(&db).join("drain.log").exists());
+    }
+
+    /// Drainers started at once may each find the file legacy, but what
+    /// the log says comes from each one's own open: one conversion.
+    #[cfg(unix)]
+    #[test]
+    fn drainers_started_at_once_log_one_conversion() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("memory.axil");
+        legacy_database(&db);
+        let queue = queue_dir(&db);
+        std::thread::scope(|s| {
+            for _ in 0..4 {
+                s.spawn(|| convert_table_index_waiting(&db, &queue, Duration::from_secs(10)));
+            }
+        });
+        assert_eq!(state_of(&db), TableIndexState::Keyed);
+        let log = std::fs::read_to_string(queue.join("drain.log")).unwrap();
+        assert_eq!(log.matches("converted the table index").count(), 1, "{log}");
     }
 
     #[cfg(unix)]
