@@ -2986,12 +2986,18 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let proj = build_fixture(tmp.path());
         let db = proj.join(".axil/memory.axil");
+        // A store left open stays locked. One the daemon closed can stay
+        // locked a moment longer, by another test's child: redb refuses it
+        // as already open, which `AxilError` calls busy, and that is waited
+        // out.
         let closed_cleanly = || {
             for suffix in ["", ".graph", ".ts", ".vec"] {
                 let path = axil_core::companion_path(&db, suffix);
                 if path.exists() {
-                    redb::ReadOnlyDatabase::open(&path)
-                        .unwrap_or_else(|e| panic!("{} was left open: {e}", path.display()));
+                    crate::retry_while_contended(|| {
+                        redb::ReadOnlyDatabase::open(&path).map_err(axil_core::AxilError::from)
+                    })
+                    .unwrap_or_else(|e| panic!("{} was left open: {e:#}", path.display()));
                 }
             }
         };
@@ -3247,7 +3253,7 @@ mod tests {
 
         let (reply, held) = ask(&server, &server.key, 10_000);
         assert_eq!(reply, LeaseReply::granted());
-        let holder = axil_core::Axil::open(&db).build().unwrap();
+        let holder = crate::retry_while_contended(|| axil_core::Axil::open(&db).build()).unwrap();
         holder
             .insert("decisions", json!({"summary": "written under the lease"}))
             .unwrap();
@@ -3432,7 +3438,7 @@ mod tests {
         let (reply, held) = ask(&server, &server.key, 10_000);
         assert_eq!(reply, LeaseReply::granted());
         // The reopen waits for the holder, which keeps the database open.
-        let holder = axil_core::Axil::open(&db).build().unwrap();
+        let holder = crate::retry_while_contended(|| axil_core::Axil::open(&db).build()).unwrap();
         drop(held);
         wait_for_phase(&server, Phase::Reloading);
         let (reply, other) = ask(&server, &server.key, 0);
