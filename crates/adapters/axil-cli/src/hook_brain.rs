@@ -5260,8 +5260,13 @@ mod tests {
             Since::Hangs => "exec sleep 30\n".to_string(),
         };
         let exe = dir.join("axil-stub");
+        // Written beside it and renamed over it: a drainer an earlier brain
+        // in `dir` started runs in the background, so it can be executing
+        // the old stub now, and a file being executed can't be opened for
+        // writing (ETXTBSY).
+        let written = dir.join("axil-stub.new");
         std::fs::write(
-            &exe,
+            &written,
             format!(
                 "#!/bin/sh\necho \"$@\" >> '{}'\necho \"${HOOK_DEADLINE_ENV}\" > '{}'\n{tail}",
                 calls.display(),
@@ -5269,7 +5274,8 @@ mod tests {
             ),
         )
         .unwrap();
-        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&written, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::rename(&written, &exe).unwrap();
         HookCtx {
             dialect: Dialect::Claude,
             event: HookEvent {
