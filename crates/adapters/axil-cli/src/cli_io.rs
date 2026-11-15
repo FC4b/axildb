@@ -1601,15 +1601,28 @@ pub(crate) mod tests {
 
             let db = proj.join(".axil/memory.axil");
             let db_s = db.to_str().unwrap();
+            // A step can find a lock of the database still held: another
+            // test's thread spawning a child gives the child copies of the
+            // descriptors a step just closed, and the lock stays with them
+            // until the child execs. Such a step fails opening the database,
+            // before it writes anything, so it runs again, for up to 5 s.
             let run = |args: &[&str]| {
-                let (out, err, code) = in_process(args, None);
-                assert_eq!(
-                    code,
-                    0,
-                    "fixture step {args:?} failed: {}{}",
-                    String::from_utf8_lossy(&out),
-                    String::from_utf8_lossy(&err)
-                );
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                loop {
+                    let (out, err, code) = in_process(args, None);
+                    let output = format!(
+                        "{}{}",
+                        String::from_utf8_lossy(&out),
+                        String::from_utf8_lossy(&err)
+                    );
+                    let busy = output.contains("LockBusy") || output.contains("database busy");
+                    if code != 0 && busy && std::time::Instant::now() < deadline {
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                        continue;
+                    }
+                    assert_eq!(code, 0, "fixture step {args:?} failed: {output}");
+                    return;
+                }
             };
             run(&["init", db_s]);
             // No vector store: no command may need the embedding model.
