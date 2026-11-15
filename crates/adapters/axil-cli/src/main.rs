@@ -24428,17 +24428,15 @@ mod rebuild_vector_store_tests {
 
     /// The live store's model and `id`'s vector in it.
     fn live_state(db: &Path, id: &RecordId) -> (Option<String>, Option<Vec<f32>>) {
-        let model = axil_vector::read_stored_model(db).unwrap().unwrap().model;
         // Busy for a moment when another test's thread spawns a child just
-        // after the rebuild let go of the store: the child holds copies of
-        // its descriptors, and so its lock, until it execs.
-        let vector = super::retry_while_busy(super::LIVE_STORE_BUSY_WAIT, || {
-            axil_vector::VectorEngine::open(db, 384)
+        // after this read or the rebuild let go of the store: the child holds
+        // copies of its descriptors, and so their locks, until it execs.
+        super::retry_while_busy(super::LIVE_STORE_BUSY_WAIT, || {
+            let model = axil_vector::read_stored_model(db)?.unwrap().model;
+            let vector = axil_vector::VectorEngine::open(db, 384)?.get_vector(id)?;
+            Ok((model, vector))
         })
         .unwrap()
-        .get_vector(id)
-        .unwrap();
-        (model, vector)
     }
 
     #[test]
