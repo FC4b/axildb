@@ -1455,6 +1455,24 @@ pub(crate) mod tests {
             })
         }
 
+        /// [`in_process`] for a command line that parses, with what the
+        /// command returned in place of its exit code: an error is the one
+        /// `run_cli` would print.
+        fn in_process_result(args: &[&str]) -> (Vec<u8>, Vec<u8>, anyhow::Result<i32>) {
+            let ctx = ReqCtx {
+                stdin: Some(Vec::new()),
+                ..ReqCtx::default()
+            };
+            let args = argv(args);
+            on_cli_stack(move || {
+                capture(ctx, || {
+                    let cli = Cli::try_parse_from(&args).unwrap();
+                    let out = crate::Output::for_cli(&cli);
+                    crate::process_setup(&cli).and_then(|()| crate::dispatch_command(cli, &out))
+                })
+            })
+        }
+
         pub(crate) fn copy_dir(from: &Path, to: &Path) {
             std::fs::create_dir_all(to).unwrap();
             for entry in std::fs::read_dir(from).unwrap() {
@@ -1601,28 +1619,24 @@ pub(crate) mod tests {
 
             let db = proj.join(".axil/memory.axil");
             let db_s = db.to_str().unwrap();
-            // A step can find a lock of the database still held: another
-            // test's thread spawning a child gives the child copies of the
-            // descriptors a step just closed, and the lock stays with them
-            // until the child execs. Such a step fails opening the database,
-            // before it writes anything, so it runs again, for up to 5 s.
+            // A step can find a lock the step before it let go of still held
+            // by another test's child (see `crate::retry_while_contended`).
+            // Such a step fails opening the database, before it writes
+            // anything, so it runs again.
             let run = |args: &[&str]| {
-                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-                loop {
-                    let (out, err, code) = in_process(args, None);
-                    let output = format!(
+                let mut output = String::new();
+                let step = crate::retry_while_contended(|| {
+                    let (out, err, result) = in_process_result(args);
+                    output = format!(
                         "{}{}",
                         String::from_utf8_lossy(&out),
                         String::from_utf8_lossy(&err)
                     );
-                    let busy = output.contains("LockBusy") || output.contains("database busy");
-                    if code != 0 && busy && std::time::Instant::now() < deadline {
-                        std::thread::sleep(std::time::Duration::from_millis(20));
-                        continue;
-                    }
-                    assert_eq!(code, 0, "fixture step {args:?} failed: {output}");
-                    return;
-                }
+                    result
+                });
+                let code = step
+                    .unwrap_or_else(|e| panic!("fixture step {args:?} failed: {e:#}\n{output}"));
+                assert_eq!(code, 0, "fixture step {args:?} failed: {output}");
             };
             run(&["init", db_s]);
             // No vector store: no command may need the embedding model.
@@ -2098,7 +2112,7 @@ pub(crate) mod tests {
                 cases.push((true, raw, Need::Vectors));
             }
 
-            let warm = WarmDb::open(&db_path).unwrap();
+            let warm = crate::retry_while_contended(|| WarmDb::open(&db_path)).unwrap();
             let decisions = || warm.db().list("decisions").unwrap().len();
             let before = decisions();
             for (_, args, need) in &cases {
@@ -2156,7 +2170,7 @@ pub(crate) mod tests {
             let _ = std::fs::remove_file(&ts);
             let since = ["--db", db, "since", "1h"];
 
-            let warm = WarmDb::open(&db_path).unwrap();
+            let warm = crate::retry_while_contended(|| WarmDb::open(&db_path)).unwrap();
             let err = dispatch_warm(&warm, &since).unwrap_err();
             assert_eq!(
                 err.downcast_ref::<WarmLacks>(),
@@ -2182,7 +2196,7 @@ pub(crate) mod tests {
 
             let (out, err, code) = one_shot(&since, None);
             assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
-            let warm = WarmDb::open(&path).unwrap();
+            let warm = crate::retry_while_contended(|| WarmDb::open(&path)).unwrap();
             let (warm_out, _, warm_code) = in_process_with(warm_request(&warm, None), &since);
             assert_eq!((warm_out, warm_code), (out, 0), "served once reopened");
         }
@@ -2201,7 +2215,7 @@ pub(crate) mod tests {
             let db_path = proj.join(".axil/memory.axil");
             let boot = ["--db", db_path.to_str().unwrap(), "boot"];
 
-            let warm = WarmDb::open(&db_path).unwrap();
+            let warm = crate::retry_while_contended(|| WarmDb::open(&db_path)).unwrap();
             let (out, _, _) = in_process_with(warm_request(&warm, None), &boot);
             assert!(String::from_utf8_lossy(&out).contains("hello plugin ready"));
             let Ok(path) = warm.release(Duration::from_secs(10)) else {
@@ -2212,7 +2226,7 @@ pub(crate) mod tests {
             assert!(String::from_utf8_lossy(&out).contains("hello plugin ready"));
 
             // Dropping the handle, as well as releasing it, closes it.
-            drop(WarmDb::open(&path).unwrap());
+            drop(crate::retry_while_contended(|| WarmDb::open(&path)).unwrap());
             WarmDb::open(&path).unwrap();
         }
 
@@ -2262,7 +2276,7 @@ pub(crate) mod tests {
             let proj = build_fixture(tmp.path());
             let db_path = proj.join(".axil/memory.axil");
             let db = db_path.to_str().unwrap();
-            let warm = WarmDb::open(&db_path).unwrap();
+            let warm = crate::retry_while_contended(|| WarmDb::open(&db_path)).unwrap();
             let recall = |timeout_ms: &str| {
                 let ctx = ReqCtx {
                     slow_query_log: false,

@@ -898,6 +898,13 @@ mod tests {
         (r.stdout, r.stderr, r.exit)
     }
 
+    /// [`WarmState::open`] of a database a handle in this process has just
+    /// let go of, which a child of another test can hold locked for a moment
+    /// (see [`crate::retry_while_contended`]).
+    fn open_state(db: &Path) -> anyhow::Result<WarmState> {
+        crate::retry_while_contended(|| WarmState::open(db))
+    }
+
     fn show(run: &Run) -> String {
         format!(
             "exit {}\n--- stdout\n{}\n--- stderr\n{}",
@@ -1041,7 +1048,7 @@ mod tests {
     fn help_version_and_usage_errors_match_one_shot() {
         let tmp = tempfile::tempdir().unwrap();
         let proj = build_fixture(tmp.path());
-        let state = WarmState::open(&proj.join(".axil/memory.axil")).unwrap();
+        let state = open_state(&proj.join(".axil/memory.axil")).unwrap();
         let cwd = proj.canonicalize().unwrap();
         // Making the parser needs a request thread's stack.
         let host_env = std::thread::Builder::new()
@@ -1100,7 +1107,7 @@ mod tests {
     fn a_variable_the_command_reads_is_the_clients() {
         let tmp = tempfile::tempdir().unwrap();
         let proj = build_fixture(tmp.path());
-        let state = WarmState::open(&proj.join(".axil/memory.axil")).unwrap();
+        let state = open_state(&proj.join(".axil/memory.axil")).unwrap();
         let host_tools = std::env::var_os("AXIL_MCP_TOOLS");
         let with_tools = |args: &[&str], tools: Option<&str>| Request {
             env: tools
@@ -1178,7 +1185,7 @@ mod tests {
     fn the_database_is_the_one_the_client_would_find() {
         let tmp = tempfile::tempdir().unwrap();
         let proj = build_fixture(tmp.path());
-        let state = WarmState::open(&proj.join(".axil/memory.axil")).unwrap();
+        let state = open_state(&proj.join(".axil/memory.axil")).unwrap();
         let src = proj.join("src").canonicalize().unwrap();
         let elsewhere = tmp.path().join("elsewhere");
         std::fs::create_dir_all(&elsewhere).unwrap();
@@ -1234,7 +1241,7 @@ mod tests {
             let _ = std::fs::remove_dir_all(companion(suffix));
             let _ = std::fs::remove_file(companion(suffix));
         }
-        let state = WarmState::open(&db_path).unwrap();
+        let state = open_state(&db_path).unwrap();
         let stored = r#"{"summary":"stored through a handle that lacks a store"}"#;
         let mut cases: Vec<(Vec<String>, NotServed)> = vec![
             (
@@ -1293,7 +1300,7 @@ mod tests {
     fn a_store_from_a_terminal_is_not_served() {
         let tmp = tempfile::tempdir().unwrap();
         let proj = build_fixture(tmp.path());
-        let state = WarmState::open(&proj.join(".axil/memory.axil")).unwrap();
+        let state = open_state(&proj.join(".axil/memory.axil")).unwrap();
         let at_terminal = |args: &[&str]| Request {
             stdin: None,
             ..request(args, &proj, None, None)
@@ -1330,7 +1337,7 @@ mod tests {
     fn deps_refresh_is_served_only_with_the_hosts_dependency_paths() {
         let tmp = tempfile::tempdir().unwrap();
         let proj = build_fixture(tmp.path());
-        let state = WarmState::open(&proj.join(".axil/memory.axil")).unwrap();
+        let state = open_state(&proj.join(".axil/memory.axil")).unwrap();
         let with_gopath = |args: &[&str], gopath: Option<&str>| {
             let mut req = request(args, &proj, None, None);
             req.env.retain(|(name, _)| name != "GOPATH");
@@ -1404,7 +1411,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let proj = build_fixture(tmp.path());
         let db = proj.join(".axil/memory.axil");
-        let state = WarmState::open(&db).unwrap();
+        let state = open_state(&db).unwrap();
         let boot = || request(&["boot"], &proj, None, None);
 
         // A reference held elsewhere, as by a recall worker left running
@@ -1458,7 +1465,7 @@ mod tests {
     fn a_reopen_runs_once_and_never_holds_up_requests() {
         let tmp = tempfile::tempdir().unwrap();
         let proj = build_fixture(tmp.path());
-        let state = WarmState::open(&proj.join(".axil/memory.axil")).unwrap();
+        let state = open_state(&proj.join(".axil/memory.axil")).unwrap();
         let boot = || request(&["boot"], &proj, None, None);
         assert_eq!(execute_captured(boot(), &state).unwrap().exit, 0);
 
@@ -1506,7 +1513,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let proj = build_fixture(tmp.path());
         let db = proj.join(".axil/memory.axil");
-        let state = WarmState::open(&db).unwrap();
+        let state = open_state(&db).unwrap();
         std::fs::remove_file(&db).unwrap();
         assert!(matches!(
             state.reopen(Duration::from_secs(5)),
@@ -1536,7 +1543,7 @@ mod tests {
     fn parallel_requests_get_their_own_output() {
         let tmp = tempfile::tempdir().unwrap();
         let proj = build_fixture(tmp.path());
-        let state = WarmState::open(&proj.join(".axil/memory.axil")).unwrap();
+        let state = open_state(&proj.join(".axil/memory.axil")).unwrap();
         let run = |args: &[&str], stdin: Option<&[u8]>| {
             let mut req = request(args, &proj, None, stdin);
             req.slow_query_log = false;
@@ -1668,7 +1675,7 @@ mod tests {
             txn.commit().unwrap();
         }
         for _ in 0..2 {
-            let err = WarmState::open(&db).err().expect("served");
+            let err = open_state(&db).err().expect("served");
             let printed = &err
                 .downcast_ref::<OpenPrinted>()
                 .unwrap_or_else(|| panic!("{err:#}"))
@@ -1710,7 +1717,7 @@ mod tests {
         }
 
         // The open prints the refusal, so it is not served.
-        let err = WarmState::open(&db).err().expect("served");
+        let err = open_state(&db).err().expect("served");
         let printed = &err
             .downcast_ref::<OpenPrinted>()
             .unwrap_or_else(|| panic!("{err:#}"))
@@ -1722,7 +1729,7 @@ mod tests {
         // It is printed once per thread, so a reopen on this one prints
         // nothing. Its handle carries the refusal instead, as a detached
         // engine, which the server refuses to serve (`unservable`).
-        let state = WarmState::open(&db).unwrap();
+        let state = open_state(&db).unwrap();
         let degraded = state.handle().unwrap().db().degraded_engines().to_vec();
         assert!(
             degraded

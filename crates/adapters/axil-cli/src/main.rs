@@ -7429,6 +7429,32 @@ fn is_lock_contention(err: &anyhow::Error) -> bool {
     is_busy_chain(err) || err.chain().any(|c| c.to_string().contains("LockBusy"))
 }
 
+/// How long a test waits for a lock a child of another test may hold. The
+/// unit tests run on many threads of one process, and a thread spawning a
+/// child gives it copies of every descriptor open in the process just then.
+/// The database locks belong to the open file, not the descriptor, so one
+/// another thread closes a moment later stays held until the child execs.
+#[cfg(test)]
+const INHERITED_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Run `open` again while it fails only on a lock ([`is_lock_contention`]),
+/// for up to [`INHERITED_LOCK_WAIT`]. The last result is returned either
+/// way, so a lock that stays held still fails the test.
+#[cfg(test)]
+fn retry_while_contended<T, E: Into<anyhow::Error>>(
+    mut open: impl FnMut() -> std::result::Result<T, E>,
+) -> Result<T> {
+    let deadline = std::time::Instant::now() + INHERITED_LOCK_WAIT;
+    loop {
+        match open().map_err(Into::into) {
+            Err(e) if is_lock_contention(&e) && std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            result => return result,
+        }
+    }
+}
+
 /// Retry a database open that may hit the single-writer lock.
 ///
 /// Runs `open` up to [`BUSY_RETRY_ATTEMPTS`] times, sleeping a short linear
@@ -24429,9 +24455,8 @@ mod rebuild_vector_store_tests {
     /// The live store's model and `id`'s vector in it.
     fn live_state(db: &Path, id: &RecordId) -> (Option<String>, Option<Vec<f32>>) {
         // Busy for a moment when another test's thread spawns a child just
-        // after this read or the rebuild let go of the store: the child holds
-        // copies of its descriptors, and so their locks, until it execs.
-        super::retry_while_busy(super::LIVE_STORE_BUSY_WAIT, || {
+        // as this read or the rebuild lets go of the store.
+        super::retry_while_contended(|| -> axil_core::Result<_> {
             let model = axil_vector::read_stored_model(db)?.unwrap().model;
             let vector = axil_vector::VectorEngine::open(db, 384)?.get_vector(id)?;
             Ok((model, vector))

@@ -5363,26 +5363,11 @@ mod tests {
         assert_eq!(stub_calls(dir.path()).len(), 1);
     }
 
-    /// `open`, again while it fails busy: another test's thread spawning a
-    /// child gives the child a copy of a database handle this thread just
-    /// closed, which holds the file's lock until the child execs.
-    #[cfg(unix)]
-    fn retry_busy<T>(mut open: impl FnMut() -> axil_core::Result<T>) -> T {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            match open() {
-                Err(e) if e.is_busy() && Instant::now() < deadline => {
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-                other => return other.unwrap(),
-            }
-        }
-    }
-
-    /// [`axil_core::Storage::table_index_state`], waiting out a busy file.
+    /// [`axil_core::Storage::table_index_state`], waiting out a busy file
+    /// (see [`crate::retry_while_contended`]).
     #[cfg(unix)]
     fn state_of(path: &Path) -> TableIndexState {
-        retry_busy(|| axil_core::Storage::table_index_state(path))
+        crate::retry_while_contended(|| axil_core::Storage::table_index_state(path)).unwrap()
     }
 
     /// A database at `path` with one record, its table index in the legacy
@@ -5392,7 +5377,8 @@ mod tests {
         let db = axil_core::Axil::open(path).build().unwrap();
         db.insert("notes", json!({ "summary": "kept" })).unwrap();
         drop(db);
-        retry_busy(|| axil_core::Storage::open(path))
+        crate::retry_while_contended(|| axil_core::Storage::open(path))
+            .unwrap()
             .downgrade_table_index()
             .unwrap();
         assert_eq!(state_of(path), TableIndexState::Legacy);
@@ -5404,7 +5390,10 @@ mod tests {
     fn unclean_legacy_database(path: &Path) {
         let source = path.with_extension("source");
         legacy_database(&source);
-        let held = retry_busy(|| Ok(redb::Database::create(&source)?));
+        let held = crate::retry_while_contended(|| {
+            redb::Database::create(&source).map_err(axil_core::AxilError::from)
+        })
+        .unwrap();
         let txn = held.begin_write().unwrap();
         txn.open_table(redb::TableDefinition::<&str, &str>::new("older_writer"))
             .unwrap()
@@ -5512,7 +5501,7 @@ mod tests {
         assert!(!brain.sfile("booted").exists());
 
         // The stub drainer converts nothing: this does.
-        drop(retry_busy(|| axil_core::Storage::open(&db)));
+        drop(crate::retry_while_contended(|| axil_core::Storage::open(&db)).unwrap());
         let mut brain = stub_brain(dir.path(), Since::Prints("2"));
         brain.event.kind = EventKind::PreTool;
         brain.on_pre_tool().unwrap();
@@ -5543,7 +5532,8 @@ mod tests {
                 "converted the table index"
             };
             assert!(log.contains(done), "{log}");
-            let handle = retry_busy(|| axil_core::Axil::open(&db).build());
+            let handle =
+                crate::retry_while_contended(|| axil_core::Axil::open(&db).build()).unwrap();
             assert_eq!(handle.list("notes").unwrap().len(), 1);
             drop(handle);
 
