@@ -428,6 +428,12 @@ mod tests {
         asked.iter().any(|(k, _)| k == key)
     }
 
+    /// Whether what `key` was asked for still stands ([`Asked::stands`]).
+    fn stands(key: &Path) -> bool {
+        let asked = ASKED.lock().unwrap_or_else(PoisonError::into_inner);
+        asked.iter().any(|(k, a)| k == key && a.stands())
+    }
+
     /// With no daemon nothing is kept, so the next open asks again: one may
     /// have started. A lease is asked for once while it holds, and again
     /// once the daemon that granted it is gone.
@@ -443,8 +449,15 @@ mod tests {
         assert_eq!(daemon.asks(), 1);
         assert!(kept(&key));
 
-        // As when the daemon exits, and another starts.
+        // As when the daemon exits, and another starts. The connection ends
+        // once nothing holds the daemon's end of it, which a child another
+        // test spawns can for a moment (see `crate::INHERITED_LOCK_WAIT`).
         daemon.held.lock().unwrap().clear();
+        let deadline = Instant::now() + crate::INHERITED_LOCK_WAIT;
+        while stands(&key) {
+            assert!(Instant::now() < deadline, "the lease outlived its daemon");
+            std::thread::sleep(Duration::from_millis(10));
+        }
         guard(&key);
         assert_eq!(daemon.asks(), 2);
         guard(&key);

@@ -7433,7 +7433,8 @@ fn is_lock_contention(err: &anyhow::Error) -> bool {
 /// unit tests run on many threads of one process, and a thread spawning a
 /// child gives it copies of every descriptor open in the process just then.
 /// The database locks belong to the open file, not the descriptor, so one
-/// another thread closes a moment later stays held until the child execs.
+/// another thread closes a moment later stays held until the child execs,
+/// as a socket it closes stays connected.
 #[cfg(test)]
 const INHERITED_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 
@@ -8116,9 +8117,7 @@ impl CliAdapter {
 /// Run a parsed command line and return its exit code, printing a failure
 /// as [`format_cli_error`]'s line on stderr.
 fn run_cli(cli: Cli) -> i32 {
-    let out = Output::for_cli(&cli);
-
-    match process_setup(&cli).and_then(|()| dispatch_command(cli, &out)) {
+    match run_command(cli) {
         Ok(code) => code,
         Err(e) => {
             errln!("{}", format_cli_error(&e));
