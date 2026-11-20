@@ -146,7 +146,7 @@ Every Engine ships with:
 - **Criterion benchmark** in `crates/axil-myengine/benches/` covering the hot path (add, query, delete).
 - **Integration test** in `crates/axil-tests/` that exercises insert → engine update → query end-to-end through `Axil::open(…).with_my_engine()`.
 
-The benchmark must run as part of `scripts/bench-check.sh` so regressions >5% break CI.
+The benchmark must run as part of `scripts/bench-check.sh`, so the nightly latency watch flags a regression above 5% (as a warning: Criterion on shared CI runners is too noisy to block on).
 
 ## Reference implementations
 

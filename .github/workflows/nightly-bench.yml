@@ -20,12 +20,16 @@ jobs:
   criterion:
     name: criterion latency watch (informational)
     runs-on: ubuntu-latest
+    # The suites took 44 and 60 minutes on two manual runs in November 2026; a
+    # run that takes twice the longer of those has a benchmark gone wrong, and
+    # should fail well before GitHub's 6-hour limit.
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # Persist the Criterion "main" baseline across nightly runs so --compare
-      # has something to diff against. restore-keys picks up the most recent
+      # Persist the Criterion "main" baseline across nightly runs so there is
+      # something to compare against. restore-keys picks up the most recent
       # prior baseline; the run-id-suffixed key writes a fresh one each night.
       - name: restore criterion baseline
         uses: actions/cache@v4
@@ -33,14 +37,12 @@ jobs:
           path: target/criterion
           key: criterion-baseline-${{ github.run_id }}
           restore-keys: criterion-baseline-
-      # Compare against the restored baseline (if any). Non-blocking: a
-      # regression here is a heads-up, not a build failure.
-      - name: compare vs previous baseline (warn-only)
-        continue-on-error: true
-        run: scripts/bench-check.sh --compare
-      # Refresh the baseline so tomorrow compares against today.
-      - name: save fresh baseline
-        run: scripts/bench-check.sh --save
+      # One run compares against the restored baseline (if any) and saves
+      # tonight's results for tomorrow. A regression is a warning annotation,
+      # a heads-up rather than a failure; a suite that fails to build or run
+      # fails the step.
+      - name: compare vs previous baseline and save (warn-only)
+        run: scripts/bench-check.sh --watch
 
   vector-oracle:
     name: HNSW recall oracle (large N)
