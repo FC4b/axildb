@@ -18,8 +18,9 @@ jobs:
   criterion:
     name: criterion latency watch (informational)
     runs-on: ubuntu-latest
-    # The suites take well under an hour; a run that takes twice that has a
-    # benchmark gone wrong, and should fail before GitHub's 6-hour limit.
+    # The suites took 44 and 60 minutes on two manual runs in November 2026; a
+    # run that takes twice the longer of those has a benchmark gone wrong, and
+    # should fail well before GitHub's 6-hour limit.
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
