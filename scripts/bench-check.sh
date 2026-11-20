@@ -68,28 +68,36 @@ run_and_report() {
     shift
     local regressions=0
     local failures=0
+    local log found
+    log=$(mktemp)
+    # shellcheck disable=SC2064 # expand now: $log is local to this function
+    trap "rm -f '$log'" EXIT
 
     for bench in "${!BENCH_PKGS[@]}"; do
         pkg="${BENCH_PKGS[$bench]}"
         echo "--- $bench ($pkg) ---"
 
-        if ! output=$(cargo bench -p "$pkg" --bench "$bench" -- "$@" 2>&1); then
-            echo "$output" | tail -20
-            echo "ERROR: $bench failed to build or run"
-            failures=$((failures + 1))
-            continue
-        fi
-        echo "$output" | tail -20
+        # Streamed as it runs, so a run stopped by a timeout shows the
+        # benchmark it stopped in; kept in $log for the regression count,
+        # which covers the benchmarks a failed suite got through.
+        local suite_ok=1
+        cargo bench -p "$pkg" --bench "$bench" -- "$@" 2>&1 | tee "$log" || suite_ok=0
+        found=$(regressions_in < "$log")
 
-        while IFS= read -r found; do
-            [ -n "$found" ] || continue
+        while IFS= read -r line; do
+            [ -n "$line" ] || continue
             regressions=$((regressions + 1))
             if [ "$mode" = warn ]; then
-                echo "::warning::$bench: $found (above ${THRESHOLD}%)"
+                echo "::warning::$bench: $line (above ${THRESHOLD}%)"
             else
-                echo "REGRESSION: $found"
+                echo "REGRESSION: $line"
             fi
-        done <<< "$(regressions_in <<< "$output")"
+        done <<< "$found"
+
+        if [ "$suite_ok" = 0 ]; then
+            echo "ERROR: $bench failed to build or run"
+            failures=$((failures + 1))
+        fi
     done
 
     if [ "$failures" -gt 0 ]; then
@@ -117,7 +125,9 @@ run_and_report() {
 
 compare_baseline() {
     echo "Comparing against baseline (threshold: ${THRESHOLD}%)..."
-    run_and_report fail --baseline main
+    # Lenient: a benchmark the baseline doesn't have yet is measured without a
+    # comparison instead of aborting its whole suite.
+    run_and_report fail --baseline-lenient main
 }
 
 # One run that does both: `--save-baseline main` compares each benchmark with
