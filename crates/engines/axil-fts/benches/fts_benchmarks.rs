@@ -42,7 +42,13 @@ fn populated_fts(n: usize) -> (FtsEngine, TempDir) {
 
 fn bench_index_text(c: &mut Criterion) {
     let mut group = c.benchmark_group("fts_index_text");
-    for size in [100, 1_000, 10_000] {
+    // `index_text` commits on every call, so an iteration costs one commit per
+    // document. With Criterion's default 100 samples, the 1,000- and
+    // 10,000-document sizes kept the nightly job running past GitHub's 6-hour
+    // limit; ten samples of 10 and 100 documents measure the same
+    // per-document cost.
+    group.sample_size(10);
+    for size in [10, 100] {
         group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, &n| {
             b.iter(|| {
                 let (plugin, _dir) = open_fts();
